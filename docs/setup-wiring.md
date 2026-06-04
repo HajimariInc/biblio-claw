@@ -1,69 +1,69 @@
-# Setup Wiring — Status & Remaining Work
+# セットアップ配線 — 状況と残作業
 
-Last updated: 2026-04-09
+最終更新:2026-04-09
 
-## What's Done
+## 完了済み
 
-### Two-DB Split (session DB write isolation)
-- Session DB split into `inbound.db` (host-owned) and `outbound.db` (container-owned)
-- Each file has exactly one writer — eliminates SQLite write contention across host-container mount
-- Host uses even seq numbers, container uses odd (collision-free)
-- Container heartbeat via file touch (`/workspace/.heartbeat`) instead of DB UPDATE
-- Scheduling MCP tools emit system actions via messages_out; host applies them to inbound.db in `delivery.ts:handleSystemAction()`
-- Host sweep reads `processing_ack` table + heartbeat file mtime for stale detection
-- Container clears stale `processing_ack` entries on startup (crash recovery)
-- Files: `src/db/schema.ts` (INBOUND_SCHEMA + OUTBOUND_SCHEMA), `src/session-manager.ts`, `src/delivery.ts`, `src/host-sweep.ts`, `container/agent-runner/src/db/connection.ts`, `messages-in.ts`, `messages-out.ts`, `poll-loop.ts`, `mcp-tools/scheduling.ts`, `mcp-tools/interactive.ts`
-- Container image rebuilt with tsconfig (`container/agent-runner/tsconfig.json`)
-- E2E verified: host → Docker container → Claude responds → "E2E works!" ✓
+### Two-DB 分割(セッション DB の書き込み分離)
+- セッション DB を `inbound.db`(host 所有)と `outbound.db`(コンテナ所有)に分割
+- 各ファイルにつき writer は厳密に 1 つ — host-コンテナマウント間の SQLite 書き込み競合を排除
+- host は偶数 seq、コンテナは奇数 seq(衝突なし)
+- コンテナの heartbeat はファイルタッチ(`/workspace/.heartbeat`)、DB UPDATE ではない
+- スケジューリングの MCP ツールは messages_out 経由でシステムアクションを emit する;host が `delivery.ts:handleSystemAction()` で inbound.db に適用する
+- host の sweep は `processing_ack` テーブル + heartbeat ファイルの mtime を読んで stale 検出する
+- コンテナは起動時に古い `processing_ack` エントリをクリアする(クラッシュリカバリ)
+- ファイル:`src/db/schema.ts`(INBOUND_SCHEMA + OUTBOUND_SCHEMA)、`src/session-manager.ts`、`src/delivery.ts`、`src/host-sweep.ts`、`container/agent-runner/src/db/connection.ts`、`messages-in.ts`、`messages-out.ts`、`poll-loop.ts`、`mcp-tools/scheduling.ts`、`mcp-tools/interactive.ts`
+- コンテナイメージを tsconfig(`container/agent-runner/tsconfig.json`)付きで再ビルド
+- E2E 検証:host → Docker コンテナ → Claude が応答 → "E2E works!" ✓
 
-### OneCLI Integration
-- `ensureAgent()` call added before `applyContainerConfig()` in `src/container-runner.ts`
-- Without `ensureAgent`, OneCLI rejects unknown agent identifiers and returns false, leaving container with no credentials
-- E2E verified with OneCLI credential injection ✓
+### OneCLI 統合
+- `src/container-runner.ts` で `applyContainerConfig()` の前に `ensureAgent()` 呼び出しを追加
+- `ensureAgent` がないと、OneCLI は未知の agent identifier を拒否して false を返し、コンテナがクレデンシャル無しで残ってしまう
+- OneCLI クレデンシャル注入で E2E 検証 ✓
 
-### Channel Barrel
-- `src/index.ts` imports `./channels/index.js` (the barrel)
-- Trunk ships the barrel + Chat SDK bridge only; `/add-<channel>` skills drop adapter files in and register them via the barrel slot
-- No channel adapters ship in trunk
+### Channel barrel
+- `src/index.ts` が `./channels/index.js`(barrel)を import する
+- trunk は barrel + Chat SDK ブリッジのみを出荷;`/add-<channel>` skill が adapter ファイルを置いて、barrel スロット経由で登録する
+- trunk に channel adapter は同梱されない
 
-### Setup Registration (partially)
-- `setup/register.ts` creates entities (`agent_groups`, `messaging_groups`, `messaging_group_agents`) in `data/v2.db`
-- Accepts `--platform-id` flag
-- `getMessagingGroupAgentByPair()` prevents duplicate wiring
-- `setup/verify.ts` checks the central DB (counts agent groups with wiring)
+### セットアップ登録(部分的)
+- `setup/register.ts` が `data/v2.db` にエンティティ(`agent_groups`、`messaging_groups`、`messaging_group_agents`)を作成する
+- `--platform-id` フラグを受け付ける
+- `getMessagingGroupAgentByPair()` が重複配線を防ぐ
+- `setup/verify.ts` が central DB をチェックする(配線済 agent group の数を数える)
 
-### Router Logging
-- `src/router.ts` logs `MESSAGE DROPPED` at WARN level when no agents wired, with actionable guidance
-
----
-
-## Previously Open — Now Resolved
-
-### 1. ~~Channel Skills Don't Register Groups~~ ✅
-
-Channel skills now point to `/manage-channels` in their "Next Steps" section. Registration is handled by the `/manage-channels` skill, which reads each channel's `## Channel Info` section for platform-specific guidance. Channel skills stay lean (credentials only).
-
-### 2. ~~Setup SKILL.md Missing Group Registration Step~~ ✅
-
-Added step 5a "Wire Channels to Agent Groups" between channel installation (step 5) and mount allowlist (step 6). This step invokes `/manage-channels` which handles agent group creation, isolation level decisions, and wiring.
-
-### 3. ~~Channel Skills Should Know Channel Type~~ ✅
-
-Each channel skill has a `## Channel Info` structured section with: type, terminology, how-to-find-id, supports-threads, typical-use, default-isolation. The `/manage-channels` skill reads this for contextual recommendations.
-
-### 4. ~~Verify Step Channel Auth Check~~ ✅
-
-`setup/verify.ts` checks all channel tokens: DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN+SLACK_APP_TOKEN, GITHUB_TOKEN, LINEAR_API_KEY, GCHAT_CREDENTIALS, TEAMS_APP_ID+TEAMS_APP_PASSWORD, WEBEX_BOT_TOKEN, MATRIX_ACCESS_TOKEN, RESEND_API_KEY, WHATSAPP_ACCESS_TOKEN, IMESSAGE_ENABLED, plus WhatsApp Baileys auth dir.
-
-### 5. Agent-Shared Session Mode ✅
-
-Added `session_mode: 'agent-shared'` for cross-channel shared sessions (e.g. GitHub + Slack in one conversation). Session resolution looks up by agent_group_id instead of messaging_group_id when this mode is set.
+### ルータログ
+- `src/router.ts` が agent が配線されていない場合、`MESSAGE DROPPED` を WARN レベルでログし、行動可能なガイダンスを出す
 
 ---
 
-## Architecture Reference
+## 既にオープンだったもの — 現在は解決済
 
-### Entity Model
+### 1. ~~Channel skill が group を登録しない~~ ✅
+
+Channel skill は "Next Steps" セクションで `/manage-channels` を指すようになった。登録は `/manage-channels` skill が処理し、各 channel の `## Channel Info` セクションをプラットフォーム固有のガイダンスとして読む。Channel skill は痩せたまま(クレデンシャルのみ)になる。
+
+### 2. ~~Setup SKILL.md に group 登録ステップが無い~~ ✅
+
+channel インストール(ステップ 5)とマウント allowlist(ステップ 6)の間に、ステップ 5a「Wire Channels to Agent Groups」を追加した。このステップは `/manage-channels` を呼び出し、agent group の作成、分離レベルの判断、配線を行う。
+
+### 3. ~~Channel skill が channel タイプを知るべき~~ ✅
+
+各 channel skill には `## Channel Info` という構造化セクションがあり、type、用語、id の探し方、threads サポート、典型的用途、デフォルト分離が含まれる。`/manage-channels` skill はこれを読んで文脈に応じた推奨を出す。
+
+### 4. ~~Verify ステップの channel 認証チェック~~ ✅
+
+`setup/verify.ts` がすべての channel トークンをチェックする:DISCORD_BOT_TOKEN、TELEGRAM_BOT_TOKEN、SLACK_BOT_TOKEN+SLACK_APP_TOKEN、GITHUB_TOKEN、LINEAR_API_KEY、GCHAT_CREDENTIALS、TEAMS_APP_ID+TEAMS_APP_PASSWORD、WEBEX_BOT_TOKEN、MATRIX_ACCESS_TOKEN、RESEND_API_KEY、WHATSAPP_ACCESS_TOKEN、IMESSAGE_ENABLED、加えて WhatsApp Baileys auth ディレクトリ。
+
+### 5. Agent-shared セッションモード ✅
+
+クロスチャネルの共有セッション(例:GitHub + Slack を 1 つの会話に)向けに `session_mode: 'agent-shared'` を追加した。このモードが設定されているとき、セッション解決は messaging_group_id ではなく agent_group_id でルックアップする。
+
+---
+
+## アーキテクチャリファレンス
+
+### エンティティモデル
 ```
 agent_groups (id, name, folder, agent_provider, container_config)
     ↕ many-to-many
@@ -71,31 +71,31 @@ messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_
     via
 messaging_group_agents (messaging_group_id, agent_group_id, trigger_rules, session_mode, priority)
 
-users (id, kind, display_name)          -- namespaced as "<channel>:<handle>"
-user_roles (user_id, role, agent_group_id)    -- owner / admin (global or scoped)
-agent_group_members (user_id, agent_group_id) -- unprivileged access gate
-user_dms (user_id, channel_type, messaging_group_id)  -- cold-DM cache
+users (id, kind, display_name)          -- "<channel>:<handle>" として名前空間化
+user_roles (user_id, role, agent_group_id)    -- owner / admin (グローバル or スコープ付き)
+agent_group_members (user_id, agent_group_id) -- 非特権ユーザのアクセスゲート
+user_dms (user_id, channel_type, messaging_group_id)  -- cold-DM のキャッシュ
 ```
 
-Privilege is a user-level concept — there is no "main" agent group or "admin" messaging group. `user_roles` carries `owner` (global only, first pairing sets it) and `admin` (global or scoped to an `agent_group_id`). Unknown-sender gating is per-messaging-group via `messaging_groups.unknown_sender_policy` (`strict | request_approval | public`).
+権限はユーザレベルの概念である — 「main」agent group や「admin」messaging group は存在しない。`user_roles` は `owner`(グローバルのみ、最初のペアリングが設定)と `admin`(グローバル or `agent_group_id` スコープ付き)を運ぶ。未知 sender のゲーティングは messaging group ごとに `messaging_groups.unknown_sender_policy`(`strict | request_approval | public`)で行う。
 
-### Message Flow
+### メッセージフロー
 ```
-Channel adapter → routeInbound() → resolve messaging_group → resolve agent via messaging_group_agents
-→ resolve/create session → write to inbound.db → wake container → agent-runner polls inbound.db
-→ agent responds → writes to outbound.db → host delivery poll reads outbound.db → deliver via adapter
+channel adapter → routeInbound() → messaging_group を解決 → messaging_group_agents 経由で agent を解決
+→ セッションを解決 / 作成 → inbound.db に書き込み → コンテナを起こす → agent-runner が inbound.db を poll
+→ agent が応答 → outbound.db に書き込み → host の delivery poll が outbound.db を読む → adapter 経由で配信
 ```
 
-### Key Files
-| File | Purpose |
+### 主要ファイル
+| ファイル | 役割 |
 |------|---------|
-| `src/index.ts` | Entry point, imports channel barrel |
-| `src/channels/index.ts` | Channel barrel — registry/Chat SDK bridge only in trunk; skills drop adapters in |
-| `src/router.ts` | Inbound routing, auto-creates messaging groups |
-| `src/session-manager.ts` | Creates inbound.db + outbound.db per session |
-| `src/delivery.ts` | Polls outbound.db, delivers, handles system actions |
-| `src/host-sweep.ts` | Syncs processing_ack, stale detection, recurrence |
-| `src/container-runner.ts` | Spawns containers, OneCLI ensureAgent + applyContainerConfig |
-| `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
-| `setup/verify.ts` | Checks central DB for registered groups |
-| `container/agent-runner/src/db/connection.ts` | Two-DB connection layer (inbound read-only, outbound read-write) |
+| `src/index.ts` | エントリーポイント、channel barrel を import |
+| `src/channels/index.ts` | Channel barrel — trunk ではレジストリ / Chat SDK ブリッジのみ;skill が adapter を置く |
+| `src/router.ts` | 受信ルーティング、messaging group を自動作成 |
+| `src/session-manager.ts` | セッションごとに inbound.db + outbound.db を作成 |
+| `src/delivery.ts` | outbound.db を poll、配信、システムアクション処理 |
+| `src/host-sweep.ts` | processing_ack の同期、stale 検出、再帰スケジュール |
+| `src/container-runner.ts` | コンテナを起動、OneCLI ensureAgent + applyContainerConfig |
+| `setup/register.ts` | エンティティを作成(agent_group、messaging_group、配線) |
+| `setup/verify.ts` | central DB を確認(登録済 group) |
+| `container/agent-runner/src/db/connection.ts` | Two-DB 接続レイヤ(inbound は read-only、outbound は read-write) |

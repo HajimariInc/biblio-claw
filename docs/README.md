@@ -1,14 +1,14 @@
-# NanoClaw Documentation
+# NanoClaw ドキュメント
 
-The official documentation is at **[docs.nanoclaw.dev](https://docs.nanoclaw.dev)**.
+公式ドキュメントは **[docs.nanoclaw.dev](https://docs.nanoclaw.dev)** にある。
 
-The files in this directory are original design documents and developer references. For the most current and accurate information, use the documentation site.
+このディレクトリのファイルは元の設計ドキュメントと開発者向けリファレンスである。最新かつ正確な情報を得たい場合はドキュメントサイトを参照すること。
 
-| This directory | Documentation site |
+| 本ディレクトリ | ドキュメントサイト |
 |---|---|
-| [SPEC.md](SPEC.md) | [Architecture](https://docs.nanoclaw.dev/concepts/architecture) |
-| [SECURITY.md](SECURITY.md) | [Security model](https://docs.nanoclaw.dev/concepts/security) |
-| [REQUIREMENTS.md](REQUIREMENTS.md) | [Introduction](https://docs.nanoclaw.dev/introduction) |
-| [skills-as-branches.md](skills-as-branches.md) | [Skills system](https://docs.nanoclaw.dev/integrations/skills-system) |
+| [SPEC.md](SPEC.md) | [アーキテクチャ](https://docs.nanoclaw.dev/concepts/architecture) |
+| [SECURITY.md](SECURITY.md) | [セキュリティモデル](https://docs.nanoclaw.dev/concepts/security) |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | [はじめに](https://docs.nanoclaw.dev/introduction) |
+| [skills-as-branches.md](skills-as-branches.md) | [Skill システム](https://docs.nanoclaw.dev/integrations/skills-system) |
 | [docker-sandboxes.md](docker-sandboxes.md) | [Docker Sandboxes](https://docs.nanoclaw.dev/advanced/docker-sandboxes) |
-| [APPLE-CONTAINER-NETWORKING.md](APPLE-CONTAINER-NETWORKING.md) | [Container runtime](https://docs.nanoclaw.dev/advanced/container-runtime) |
+| [APPLE-CONTAINER-NETWORKING.md](APPLE-CONTAINER-NETWORKING.md) | [コンテナランタイム](https://docs.nanoclaw.dev/advanced/container-runtime) |

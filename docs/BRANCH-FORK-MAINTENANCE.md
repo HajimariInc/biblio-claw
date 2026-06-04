@@ -1,81 +1,81 @@
-# Branch & Fork Maintenance Guidelines
+# Branch と Fork の維持ガイドライン
 
-## Structure
+## 構造
 
-**`nanocoai/nanoclaw`** (upstream) — core engine with skill definitions (`.claude/skills/`). No channel code on `main`.
+**`nanocoai/nanoclaw`**(upstream) — skill 定義(`.claude/skills/`)を持つコアエンジン。`main` には channel コードは無い。
 
-**Channel forks** (`nanoclaw-whatsapp`, `nanoclaw-telegram`, `nanoclaw-slack`, etc.) — each fork = upstream + one channel's code applied. Users clone upstream, then merge a fork into their clone to add a channel.
+**Channel fork**(`nanoclaw-whatsapp`、`nanoclaw-telegram`、`nanoclaw-slack` 等) — 各 fork = upstream + 1 つの channel のコードを適用したもの。ユーザは upstream を clone した後、fork を自分の clone に merge して channel を追加する。
 
-**`skill/*` and `feat/*` branches on upstream** — add features unrelated to channels (e.g. `skill/compact`, `skill/apple-container`). Users merge these into their clone to add capabilities. Channel-specific skill branches that duplicate the forks (e.g. `skill/whatsapp`, `skill/telegram`) are legacy.
+**upstream 上の `skill/*` と `feat/*` ブランチ** — channel に無関係な機能を追加する(例:`skill/compact`、`skill/apple-container`)。ユーザはこれらを自分の clone に merge して機能を追加する。fork と重複する channel 固有の skill ブランチ(例:`skill/whatsapp`、`skill/telegram`)はレガシー。
 
-## How users add capabilities
-
-```
-user clones upstream main
-  ├── merges nanoclaw-whatsapp fork  → adds WhatsApp
-  ├── merges skill/compact branch    → adds /compact command
-  └── merges skill/apple-container   → switches to Apple Container
-```
-
-## Merge directions
+## ユーザはどう機能を追加するか
 
 ```
-upstream main ──→ channel forks     (forward merge to keep forks caught up)
-upstream main ──→ skill branches    (forward merge to keep branches caught up)
+ユーザは upstream main を clone する
+  ├── nanoclaw-whatsapp fork を merge  → WhatsApp 追加
+  ├── skill/compact ブランチを merge    → /compact コマンド追加
+  └── skill/apple-container を merge   → Apple Container に切替
 ```
 
-Forks and skill branches carry applied code changes. Users merge them into their own clones/forks to add capabilities. They are never merged back into upstream `main`.
+## merge の方向
 
-## Forward merge procedure
+```
+upstream main ──→ channel fork    (forward merge で fork を追従させる)
+upstream main ──→ skill ブランチ   (forward merge でブランチを追従させる)
+```
+
+Fork と skill ブランチは、適用したコード変更を保持する。ユーザはそれらを自分の clone / fork に merge して機能を追加する。それらが upstream `main` に逆向きに merge されることはない。
+
+## Forward merge の手順
 
 ```bash
-# In your local nanoclaw checkout
+# ローカルの nanoclaw チェックアウト内で
 git checkout main && git pull
 
-# For a fork:
+# fork の場合:
 git fetch nanoclaw-whatsapp
 git checkout -B whatsapp-merge nanoclaw-whatsapp/main
 git merge main
-# Resolve conflicts (see below)
-# Remove upstream-only workflows (re-added by every merge since main has them):
+# 衝突を解決する(下記参照)
+# upstream 専用の workflow を削除する(main に存在するため毎回 merge で再追加される):
 git rm .github/workflows/bump-version.yml .github/workflows/update-tokens.yml 2>/dev/null
 git push nanoclaw-whatsapp HEAD:main
 git checkout main && git branch -D whatsapp-merge
 
-# For a skill branch:
+# skill ブランチの場合:
 git checkout -B skill/compact origin/skill/compact
 git merge main
-# Resolve conflicts (see below)
+# 衝突を解決する(下記参照)
 git push origin skill/compact
 git checkout main && git branch -D skill/compact
 ```
 
-## Conflict resolution
+## 衝突の解決
 
-The same files conflict every time:
+毎回同じファイルが衝突する:
 
-| File | Resolution |
+| ファイル | 解決法 |
 |------|------------|
-| `package.json` | Take main's version + keep fork/branch-specific deps |
+| `package.json` | main のバージョンを取りつつ、fork / ブランチ固有の依存は残す |
 | `pnpm-lock.yaml` | `git checkout main -- pnpm-lock.yaml && pnpm install` |
-| `.env.example` | Combine: main's entries + fork/branch-specific entries |
-| `repo-tokens/badge.svg` | Take main's version (auto-generated) |
+| `.env.example` | main のエントリ + fork / ブランチ固有のエントリを統合 |
+| `repo-tokens/badge.svg` | main のバージョンを取る(自動生成) |
 
-Source code changes (e.g. `src/types.ts`, `src/index.ts`) usually auto-merge cleanly, but can conflict if both sides modify the same lines. **Always build and test after every forward merge** — auto-merged code can be silently wrong (e.g. referencing a renamed function or using a removed parameter) even when git reports no conflicts.
+ソースコードの変更(例:`src/types.ts`、`src/index.ts`)は通常クリーンに自動 merge されるが、両側が同じ行を変更すると衝突しうる。**forward merge のたびに必ずビルドとテストを行う** — 自動 merge されたコードは、git が衝突を報告しなくても silent に間違っている可能性がある(例:リネームされた関数を参照する、削除されたパラメータを使う等)。
 
-## When to merge forward
+## いつ forward merge するか
 
-After any main change that touches shared files (`package.json`, `src/index.ts`, `CLAUDE.md`, etc.). Small frequent merges = trivial conflicts. Large infrequent merges = painful.
+共有ファイル(`package.json`、`src/index.ts`、`CLAUDE.md` 等)に触る main の変更があった後。小さな頻繁な merge = trivial な衝突。大きな低頻度の merge = 痛い。
 
-## Fork setup
+## Fork のセットアップ
 
-When creating a new channel fork:
+新しい channel fork を作るとき:
 
-1. Fork `nanoclaw` to `nanoclaw-{channel}`
-2. Remove upstream-only workflows: `bump-version.yml`, `update-tokens.yml`
-3. Add channel code, deps, env vars
-4. Forward-merge main immediately to establish a clean baseline
+1. `nanoclaw` を `nanoclaw-{channel}` に fork する
+2. upstream 専用 workflow を削除する:`bump-version.yml`、`update-tokens.yml`
+3. channel コード、依存、env var を追加する
+4. クリーンなベースラインを確立するため、すぐに main を forward merge する
 
-## Dependencies
+## 依存
 
-Forks and branches add their own deps on top of upstream's. When upstream adds or removes a dependency, verify that forks/branches still build after the next forward merge — transitive dependency changes can break downstream code.
+Fork とブランチは upstream の依存に加えて、自分の依存を持つ。upstream が依存を追加 / 削除したら、次の forward merge 後も fork / ブランチがビルドできるか確認すること — 推移的な依存の変更が downstream のコードを壊しうる。

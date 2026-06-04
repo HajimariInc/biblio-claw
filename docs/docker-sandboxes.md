@@ -1,51 +1,51 @@
-# Running NanoClaw in Docker Sandboxes (Manual Setup)
+# Docker Sandbox 内で NanoClaw を動かす (手動セットアップ)
 
-This guide walks through setting up NanoClaw inside a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) from scratch — no install script, no pre-built fork. You'll clone the upstream repo, apply the necessary patches, and have agents running in full hypervisor-level isolation.
+このガイドは、[Docker Sandbox](https://docs.docker.com/ai/sandboxes/) 内で NanoClaw をゼロからセットアップする手順 — install スクリプトなし、ビルド済 fork なし。Upstream の repo を clone し、必要な patch を当て、agent をフルなハイパーバイザレベルの分離で動かす。
 
-## Architecture
+## アーキテクチャ
 
 ```
 Host (macOS / Windows WSL)
-└── Docker Sandbox (micro VM with isolated kernel)
-    ├── NanoClaw process (Node.js)
-    │   ├── Channel adapters (WhatsApp, Telegram, etc.)
-    │   └── Container spawner → nested Docker daemon
+└── Docker Sandbox (隔離されたカーネルを持つマイクロ VM)
+    ├── NanoClaw プロセス (Node.js)
+    │   ├── Channel adapter (WhatsApp, Telegram 等)
+    │   └── Container spawner → ネストされた Docker デーモン
     └── Docker-in-Docker
-        └── nanoclaw-agent containers
+        └── nanoclaw-agent コンテナ
             └── Claude Agent SDK
 ```
 
-Each agent runs in its own container, inside a micro VM that is fully isolated from your host. Two layers of isolation: per-agent containers + the VM boundary.
+各 agent は host から完全に分離されたマイクロ VM の中の独自のコンテナで動く。分離は 2 層:agent ごとのコンテナ + VM 境界。
 
-The sandbox provides a MITM proxy at `host.docker.internal:3128` that handles network access and injects your Anthropic API key automatically.
+サンドボックスは `host.docker.internal:3128` に MITM proxy を提供し、ネットワークアクセスを扱って Anthropic API キーを自動注入する。
 
-> **Note:** This guide is based on a validated setup running on macOS (Apple Silicon) with WhatsApp. Other channels (Telegram, Slack, etc.) and environments (Windows WSL) may require additional proxy patches for their specific HTTP/WebSocket clients. The core patches (container runner, credential proxy, Dockerfile) apply universally — channel-specific proxy configuration varies.
+> **Note:** このガイドは macOS(Apple Silicon)+ WhatsApp で検証されたセットアップに基づく。他の channel(Telegram、Slack 等)や環境(Windows WSL)は、それぞれの HTTP / WebSocket クライアントに対する追加 proxy patch が必要かもしれない。コアの patch(container runner、credential proxy、Dockerfile)は普遍的に適用される — channel 固有の proxy 設定は variable する。
 
-## Prerequisites
+## 前提条件
 
-- **Docker Desktop v4.40+** with Sandbox support
-- **Anthropic API key** (the sandbox proxy manages injection)
-- For **Telegram**: a bot token from [@BotFather](https://t.me/BotFather) and your chat ID
-- For **WhatsApp**: a phone with WhatsApp installed
+- **Docker Desktop v4.40+** Sandbox サポート付き
+- **Anthropic API キー**(サンドボックスの proxy が注入を管理する)
+- **Telegram** の場合:[@BotFather](https://t.me/BotFather) からの bot トークンと chat ID
+- **WhatsApp** の場合:WhatsApp がインストールされた phone
 
-Verify sandbox support:
+サンドボックスサポートを確認:
 ```bash
 docker sandbox version
 ```
 
-## Step 1: Create the Sandbox
+## ステップ 1: サンドボックスを作る
 
-On your host machine:
+Host マシンで:
 
 ```bash
-# Create a workspace directory
+# workspace ディレクトリを作成
 mkdir -p ~/nanoclaw-workspace
 
-# Create a shell sandbox with the workspace mounted
+# workspace をマウントした shell サンドボックスを作る
 docker sandbox create shell ~/nanoclaw-workspace
 ```
 
-If you're using WhatsApp, configure proxy bypass so WhatsApp's Noise protocol isn't MITM-inspected:
+WhatsApp を使うなら、WhatsApp の Noise プロトコルが MITM 検査されないよう proxy bypass を設定する:
 
 ```bash
 docker sandbox network proxy shell-nanoclaw-workspace \
@@ -54,55 +54,55 @@ docker sandbox network proxy shell-nanoclaw-workspace \
   --bypass-host "*.whatsapp.net"
 ```
 
-Telegram does not need proxy bypass.
+Telegram は proxy bypass は不要。
 
-Enter the sandbox:
+サンドボックスに入る:
 ```bash
 docker sandbox run shell-nanoclaw-workspace
 ```
 
-## Step 2: Install Prerequisites
+## ステップ 2: 前提条件をインストール
 
-Inside the sandbox:
+サンドボックス内で:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y build-essential python3
 npm config set strict-ssl false
 ```
 
-## Step 3: Clone and Install NanoClaw
+## ステップ 3: NanoClaw を clone してインストール
 
-NanoClaw must live inside the workspace directory — Docker-in-Docker can only bind-mount from the shared workspace path.
+NanoClaw は workspace ディレクトリ内に住まなければならない — Docker-in-Docker は共有 workspace パスからしか bind-mount できない。
 
 ```bash
-# Clone to home first (virtiofs can corrupt git pack files during clone)
+# まず home に clone する (virtiofs は clone 中に git pack ファイルを破損しうる)
 cd ~
 git clone https://github.com/nanocoai/nanoclaw.git
 
-# Replace with YOUR workspace path (the host path you passed to `docker sandbox create`)
+# あなたの workspace パスに置き換える (`docker sandbox create` に渡した host パス)
 WORKSPACE=/Users/you/nanoclaw-workspace
 
-# Move into workspace so DinD mounts work
+# DinD のマウントが効くよう workspace に移動
 mv nanoclaw "$WORKSPACE/nanoclaw"
 cd "$WORKSPACE/nanoclaw"
 
-# Install dependencies
+# 依存をインストール
 pnpm install
 pnpm install https-proxy-agent
 ```
 
-## Step 4: Apply Proxy and Sandbox Patches
+## ステップ 4: Proxy とサンドボックスの patch を当てる
 
-NanoClaw needs several patches to work inside a Docker Sandbox. These handle proxy routing, CA certificates, and Docker-in-Docker mount restrictions.
+NanoClaw は Docker Sandbox 内で動くためにいくつかの patch を必要とする。これらは proxy ルーティング、CA 証明書、Docker-in-Docker マウント制限を扱う。
 
-### 4a. Dockerfile — proxy args for container image build
+### 4a. Dockerfile — コンテナイメージビルド用の proxy 引数
 
-`pnpm install` inside `docker build` fails with `SELF_SIGNED_CERT_IN_CHAIN` because the sandbox's MITM proxy presents its own certificate. Add proxy build args to `container/Dockerfile`:
+`docker build` 内の `pnpm install` は、サンドボックスの MITM proxy が独自の証明書を提示するため `SELF_SIGNED_CERT_IN_CHAIN` で失敗する。`container/Dockerfile` に proxy ビルド引数を追加する:
 
-Add these lines after the `FROM` line:
+`FROM` 行の後に次の行を追加:
 
 ```dockerfile
-# Accept proxy build args
+# proxy ビルド引数を受け付ける
 ARG http_proxy
 ARG https_proxy
 ARG no_proxy
@@ -111,17 +111,17 @@ ARG npm_config_strict_ssl=true
 RUN npm config set strict-ssl ${npm_config_strict_ssl}
 ```
 
-And after the `RUN pnpm install` line:
+そして `RUN pnpm install` 行の後に:
 
 ```dockerfile
 RUN npm config set strict-ssl true
 ```
 
-### 4b. Build script — forward proxy args
+### 4b. Build スクリプト — proxy 引数を forward する
 
-Patch `container/build.sh` to pass proxy env vars to `docker build`:
+`container/build.sh` を patch して proxy env var を `docker build` に渡す:
 
-Add these `--build-arg` flags to the `docker build` command:
+`docker build` コマンドに次の `--build-arg` フラグを追加:
 
 ```bash
 --build-arg http_proxy="${http_proxy:-$HTTP_PROXY}" \
@@ -130,22 +130,22 @@ Add these `--build-arg` flags to the `docker build` command:
 --build-arg npm_config_strict_ssl=false \
 ```
 
-### 4c. Container runner — proxy forwarding, CA cert mount, /dev/null fix
+### 4c. Container runner — proxy forward、CA 証明書マウント、/dev/null 修正
 
-Three changes to `src/container-runner.ts`:
+`src/container-runner.ts` への 3 つの変更:
 
-**Replace `/dev/null` shadow mount.** The sandbox rejects `/dev/null` bind mounts. Find where `.env` is shadow-mounted to `/dev/null` and replace it with an empty file:
+**`/dev/null` のシャドウマウントを置き換える。** サンドボックスは `/dev/null` の bind マウントを拒否する。`.env` が `/dev/null` にシャドウマウントされている箇所を見つけ、空ファイルで置き換える:
 
 ```typescript
-// Create an empty file to shadow .env (Docker Sandbox rejects /dev/null mounts)
+// .env をシャドウマウントする空ファイルを作る (Docker Sandbox は /dev/null マウントを拒否する)
 const emptyEnvPath = path.join(DATA_DIR, 'empty-env');
 if (!fs.existsSync(emptyEnvPath)) fs.writeFileSync(emptyEnvPath, '');
-// Use emptyEnvPath instead of '/dev/null' in the mount
+// マウントで '/dev/null' の代わりに emptyEnvPath を使う
 ```
 
-**Forward proxy env vars** to spawned agent containers. Add `-e` flags for `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lowercase variants.
+**Proxy env var を forward する**、spawn される agent コンテナへ。`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` とその小文字版に対して `-e` フラグを追加する。
 
-**Mount CA certificate.** If `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE` is set, copy the cert into the project directory and mount it into agent containers:
+**CA 証明書をマウント。** `NODE_EXTRA_CA_CERTS` または `SSL_CERT_FILE` が設定されていれば、証明書をプロジェクトディレクトリにコピーして agent コンテナにマウントする:
 
 ```typescript
 const caCertSrc = process.env.NODE_EXTRA_CA_CERTS || process.env.SSL_CERT_FILE;
@@ -153,54 +153,54 @@ if (caCertSrc) {
   const certDir = path.join(DATA_DIR, 'ca-cert');
   fs.mkdirSync(certDir, { recursive: true });
   fs.copyFileSync(caCertSrc, path.join(certDir, 'proxy-ca.crt'));
-  // Mount: certDir -> /workspace/ca-cert (read-only)
-  // Set NODE_EXTRA_CA_CERTS=/workspace/ca-cert/proxy-ca.crt in the container
+  // マウント: certDir -> /workspace/ca-cert (read-only)
+  // コンテナで NODE_EXTRA_CA_CERTS=/workspace/ca-cert/proxy-ca.crt を設定
 }
 ```
 
-### 4d. Container runtime — prevent self-termination
+### 4d. Container runtime — 自己終了を防ぐ
 
-In `src/container-runtime.ts`, the `cleanupOrphans()` function matches containers by the `nanoclaw-` prefix. Inside a sandbox, the sandbox container itself may match (e.g., `nanoclaw-docker-sandbox`). Filter out the current hostname:
+`src/container-runtime.ts` で、`cleanupOrphans()` 関数は `nanoclaw-` プレフィックスでコンテナをマッチする。サンドボックスの中では、サンドボックスコンテナ自身がマッチしうる(例:`nanoclaw-docker-sandbox`)。停止対象のコンテナリストから現在の hostname を除外する:
 
 ```typescript
-// In cleanupOrphans(), filter out os.hostname() from the list of containers to stop
+// cleanupOrphans() で、停止すべきコンテナリストから os.hostname() を除外する
 ```
 
-### 4e. Credential proxy — route through MITM proxy
+### 4e. Credential proxy — MITM proxy 経由でルーティング
 
-In `src/credential-proxy.ts`, upstream API requests need to go through the sandbox proxy. Add `HttpsProxyAgent` to outbound requests:
+`src/credential-proxy.ts` で、upstream API リクエストはサンドボックス proxy 経由で行く必要がある。Outbound リクエストに `HttpsProxyAgent` を追加:
 
 ```typescript
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy;
 const upstreamAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : undefined;
-// Pass upstreamAgent to https.request() options
+// upstreamAgent を https.request() の options に渡す
 ```
 
-### 4f. Setup script — proxy build args
+### 4f. Setup スクリプト — proxy ビルド引数
 
-Patch `setup/container.ts` to pass the same proxy `--build-arg` flags as `build.sh` (Step 4b).
+`setup/container.ts` を patch して、`build.sh`(ステップ 4b)と同じ proxy `--build-arg` フラグを渡す。
 
-## Step 5: Build
+## ステップ 5: ビルド
 
 ```bash
 pnpm run build
 bash container/build.sh
 ```
 
-## Step 6: Add a Channel
+## ステップ 6: Channel を追加
 
 ### Telegram
 
 ```bash
-# Apply the Telegram skill
+# Telegram skill を適用
 pnpm exec tsx scripts/apply-skill.ts .claude/skills/add-telegram
 
-# Rebuild after applying the skill
+# skill 適用後に再ビルド
 pnpm run build
 
-# Configure .env
+# .env を設定
 cat > .env << EOF
 TELEGRAM_BOT_TOKEN=<your-token-from-botfather>
 ASSISTANT_NAME=nanoclaw
@@ -208,7 +208,7 @@ ANTHROPIC_API_KEY=proxy-managed
 EOF
 mkdir -p data/env && cp .env data/env/env
 
-# Register your chat
+# chat を登録
 pnpm exec tsx setup/index.ts --step register \
   --jid "tg:<your-chat-id>" \
   --name "My Chat" \
@@ -220,42 +220,42 @@ pnpm exec tsx setup/index.ts --step register \
   --no-trigger-required
 ```
 
-**To find your chat ID:** Send any message to your bot, then:
+**chat ID の調べ方:** 自分の bot に何かメッセージを送り、次を実行:
 ```bash
 curl -s --proxy $HTTPS_PROXY "https://api.telegram.org/bot<TOKEN>/getUpdates" | python3 -m json.tool
 ```
 
-**Telegram in groups:** Disable Group Privacy in @BotFather (`/mybots` > Bot Settings > Group Privacy > Turn off), then remove and re-add the bot.
+**Telegram の group 利用:** @BotFather で Group Privacy を無効化(`/mybots` > Bot Settings > Group Privacy > Turn off)し、bot を一度削除して再追加する。
 
-**Important:** If the Telegram skill creates `src/channels/telegram.ts`, you'll need to patch it for proxy support. Add an `HttpsProxyAgent` and pass it to grammy's `Bot` constructor via `baseFetchConfig.agent`. Then rebuild.
+**重要:** Telegram skill が `src/channels/telegram.ts` を作る場合、proxy サポート用に patch が必要。`HttpsProxyAgent` を追加し、`baseFetchConfig.agent` 経由で grammy の `Bot` コンストラクタに渡す。その後再ビルド。
 
 ### WhatsApp
 
-Make sure you configured proxy bypass in [Step 1](#step-1-create-the-sandbox) first.
+最初に [ステップ 1](#ステップ-1-サンドボックスを作る) で proxy bypass を設定したことを確認する。
 
 ```bash
-# Apply the WhatsApp skill
+# WhatsApp skill を適用
 pnpm exec tsx scripts/apply-skill.ts .claude/skills/add-whatsapp
 
-# Rebuild
+# 再ビルド
 pnpm run build
 
-# Configure .env
+# .env を設定
 cat > .env << EOF
 ASSISTANT_NAME=nanoclaw
 ANTHROPIC_API_KEY=proxy-managed
 EOF
 mkdir -p data/env && cp .env data/env/env
 
-# Authenticate (choose one):
+# 認証 (どちらかを選ぶ):
 
-# QR code — scan with WhatsApp camera:
+# QR コード — WhatsApp カメラでスキャン:
 pnpm exec tsx src/whatsapp-auth.ts
 
-# OR pairing code — enter code in WhatsApp > Linked Devices > Link with phone number:
+# または ペアリングコード — WhatsApp > Linked Devices > Link with phone number にコードを入力:
 pnpm exec tsx src/whatsapp-auth.ts --pairing-code --phone <phone-number-no-plus>
 
-# Register your chat (JID = your phone number + @s.whatsapp.net)
+# chat を登録 (JID = 電話番号 + @s.whatsapp.net)
 pnpm exec tsx setup/index.ts --step register \
   --jid "<phone>@s.whatsapp.net" \
   --name "My Chat" \
@@ -267,51 +267,51 @@ pnpm exec tsx setup/index.ts --step register \
   --no-trigger-required
 ```
 
-**Important:** The WhatsApp skill files (`src/channels/whatsapp.ts` and `src/whatsapp-auth.ts`) also need proxy patches — add `HttpsProxyAgent` for WebSocket connections and a proxy-aware version fetch. Then rebuild.
+**重要:** WhatsApp skill ファイル(`src/channels/whatsapp.ts` と `src/whatsapp-auth.ts`)も proxy patch が必要 — WebSocket 接続用の `HttpsProxyAgent` と proxy 対応の version fetch を追加する。その後再ビルド。
 
-### Both Channels
+### 両方の channel
 
-Apply both skills, patch both for proxy support, combine the `.env` variables, and register each chat separately.
+両方の skill を適用し、両方を proxy サポート用に patch し、`.env` 変数を統合し、各 chat を個別に登録する。
 
-## Step 7: Run
+## ステップ 7: 起動
 
 ```bash
 pnpm start
 ```
 
-You don't need to set `ANTHROPIC_API_KEY` manually. The sandbox proxy intercepts requests and replaces `proxy-managed` with your real key automatically.
+`ANTHROPIC_API_KEY` を手動設定する必要はない。サンドボックスの proxy がリクエストをインターセプトし、`proxy-managed` を実キーで自動的に置き換える。
 
-## Networking Details
+## ネットワーキングの詳細
 
-### How the proxy works
+### Proxy の仕組み
 
-All traffic from the sandbox routes through the host proxy at `host.docker.internal:3128`:
+サンドボックスからのすべてのトラフィックは host の proxy(`host.docker.internal:3128`)経由でルーティングされる:
 
 ```
-Agent container → DinD bridge → Sandbox VM → host.docker.internal:3128 → Host proxy → api.anthropic.com
+Agent コンテナ → DinD bridge → Sandbox VM → host.docker.internal:3128 → Host proxy → api.anthropic.com
 ```
 
-**"Bypass" does not mean traffic skips the proxy.** It means the proxy passes traffic through without MITM inspection. Node.js doesn't automatically use `HTTP_PROXY` env vars — you need explicit `HttpsProxyAgent` configuration in every HTTP/WebSocket client.
+**「Bypass」はトラフィックが proxy を skip するという意味ではない。** Proxy が MITM 検査なしにトラフィックを通すという意味である。Node.js は `HTTP_PROXY` env var を自動使用しない — 各 HTTP / WebSocket クライアントで明示的な `HttpsProxyAgent` 設定が必要。
 
-### Shared paths for DinD mounts
+### DinD マウントの共有パス
 
-Only the workspace directory is available for Docker-in-Docker bind mounts. Paths outside the workspace fail with "path not shared":
-- `/dev/null` → replace with an empty file in the project dir
-- `/usr/local/share/ca-certificates/` → copy cert to project dir
-- `/home/agent/` → clone to workspace instead
+Workspace ディレクトリだけが Docker-in-Docker の bind マウントに使える。Workspace の外のパスは「path not shared」で失敗する:
+- `/dev/null` → プロジェクトディレクトリ内の空ファイルで置換
+- `/usr/local/share/ca-certificates/` → プロジェクトディレクトリに証明書をコピー
+- `/home/agent/` → 代わりに workspace に clone
 
-### Git clone and virtiofs
+### Git clone と virtiofs
 
-The workspace is mounted via virtiofs. Git's pack file handling can corrupt over virtiofs during clone. Workaround: clone to `/home/agent` first, then `mv` into the workspace.
+Workspace は virtiofs 経由でマウントされる。Git の pack ファイル処理は clone 中に virtiofs 越しで破損しうる。回避策:まず `/home/agent` に clone してから workspace に `mv` する。
 
-## Troubleshooting
+## トラブルシューティング
 
-### pnpm install fails with SELF_SIGNED_CERT_IN_CHAIN
+### pnpm install が SELF_SIGNED_CERT_IN_CHAIN で失敗
 ```bash
 npm config set strict-ssl false
 ```
 
-### Container build fails with proxy errors
+### Container build が proxy エラーで失敗
 ```bash
 docker build \
   --build-arg http_proxy=$http_proxy \
@@ -319,20 +319,20 @@ docker build \
   -t nanoclaw-agent:latest container/
 ```
 
-### Agent containers fail with "path not shared"
-All bind-mounted paths must be under the workspace directory. Check:
-- Is NanoClaw cloned into the workspace? (not `/home/agent/`)
-- Is the CA cert copied to the project root?
-- Has the empty `.env` shadow file been created?
+### Agent コンテナが「path not shared」で失敗
+すべての bind マウントパスは workspace ディレクトリ配下にあるべき。確認:
+- NanoClaw は workspace に clone されているか?(`/home/agent/` ではない)
+- CA 証明書はプロジェクトルートにコピーされているか?
+- 空の `.env` シャドウファイルは作られているか?
 
-### Agent containers can't reach Anthropic API
-Verify proxy env vars are forwarded to agent containers. Check container logs for `HTTP_PROXY=http://host.docker.internal:3128`.
+### Agent コンテナが Anthropic API に到達できない
+Proxy env var が agent コンテナに forward されているか確認。コンテナログで `HTTP_PROXY=http://host.docker.internal:3128` を確認する。
 
-### WhatsApp error 405
-The version fetch is returning a stale version. Make sure the proxy-aware `fetchWaVersionViaProxy` patch is applied — it fetches `sw.js` through `HttpsProxyAgent` and parses `client_revision`.
+### WhatsApp エラー 405
+Version fetch が古いバージョンを返している。Proxy 対応 `fetchWaVersionViaProxy` patch が当たっていることを確認する — `HttpsProxyAgent` 経由で `sw.js` を fetch し `client_revision` をパースする。
 
-### WhatsApp "Connection failed" immediately
-Proxy bypass not configured. From the **host**, run:
+### WhatsApp が即「Connection failed」
+Proxy bypass が設定されていない。**host** で実行する:
 ```bash
 docker sandbox network proxy <sandbox-name> \
   --bypass-host web.whatsapp.com \
@@ -340,20 +340,20 @@ docker sandbox network proxy <sandbox-name> \
   --bypass-host "*.whatsapp.net"
 ```
 
-### Telegram bot doesn't receive messages
-1. Check the grammy proxy patch is applied (look for `HttpsProxyAgent` in `src/channels/telegram.ts`)
-2. Check Group Privacy is disabled in @BotFather if using in groups
+### Telegram bot がメッセージを受け取らない
+1. Grammy の proxy patch が当たっているか確認(`src/channels/telegram.ts` 内の `HttpsProxyAgent` を探す)
+2. Group で使うなら @BotFather で Group Privacy が無効化されているか確認
 
-### Git clone fails with "inflate: data stream error"
-Clone to a non-workspace path first, then move:
+### Git clone が「inflate: data stream error」で失敗
+まず非 workspace パスに clone してから移動する:
 ```bash
 cd ~ && git clone https://github.com/nanocoai/nanoclaw.git && mv nanoclaw /path/to/workspace/nanoclaw
 ```
 
-### WhatsApp QR code doesn't display
-Run the auth command interactively inside the sandbox (not piped through `docker sandbox exec`):
+### WhatsApp QR コードが表示されない
+サンドボックスの中で auth コマンドを対話的に実行する(`docker sandbox exec` 経由でパイプしない):
 ```bash
 docker sandbox run shell-nanoclaw-workspace
-# Then inside:
+# その中で:
 pnpm exec tsx src/whatsapp-auth.ts
 ```

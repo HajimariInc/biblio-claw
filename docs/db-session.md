@@ -1,66 +1,66 @@
-# NanoClaw — Per-Session DB Schema
+# NanoClaw — セッションごとの DB スキーマ
 
-Reference for the two SQLite files each session owns: `inbound.db` (host writes, container reads) and `outbound.db` (container writes, host reads). Start with [db.md](db.md) for the three-DB overview, the single-writer rule, and the cross-mount visibility constraints.
+各セッションが所有する 2 つの SQLite ファイル:`inbound.db`(host が書き、コンテナが読む)と `outbound.db`(コンテナが書き、host が読む)のリファレンス。3-DB 概要、single-writer ルール、クロスマウント可視性の制約については [db.md](db.md) から始めること。
 
-Schemas live in `src/db/schema.ts` as the `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA` constants. Both files are created by `ensureSchema()` in `src/session-manager.ts` when a new session folder is provisioned.
+スキーマは `src/db/schema.ts` の `INBOUND_SCHEMA` と `OUTBOUND_SCHEMA` 定数として置かれている。両ファイルは新しいセッションフォルダがプロビジョニングされるとき、`src/session-manager.ts` の `ensureSchema()` によって作られる。
 
 ---
 
-## 1. Session folder layout
+## 1. セッションフォルダの配置
 
 ```
 data/v2-sessions/<agent_group_id>/<session_id>/
-  inbound.db              ← host writes, container reads (read-only mount)
-  outbound.db             ← container writes, host reads (read-only open)
-  .heartbeat              ← mtime touched by container (not a DB write)
-  inbox/<message_id>/     ← user attachments, decoded from inbound message content
-  outbox/<message_id>/    ← attachments the agent produced
+  inbound.db              ← host が書き、コンテナが読む (read-only mount)
+  outbound.db             ← コンテナが書き、host が読む (read-only open)
+  .heartbeat              ← コンテナが mtime をタッチ (DB 書き込みではない)
+  inbox/<message_id>/     ← ユーザ添付、inbound メッセージコンテンツからデコード
+  outbox/<message_id>/    ← agent が生成した添付
 ```
 
-One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group state (`.claude-shared/`, `agent-runner-src/`) that is shared across every session of that agent group.
+1 セッション = 1 フォルダ = 1 ペアの DB。`agent_group_id` の親ディレクトリは、その agent group の全セッションで共有される group ごとの状態(`.claude-shared/`、`agent-runner-src/`)も保持する。
 
-Path helpers in `src/session-manager.ts`: `sessionDir()`, `inboundDbPath()`, `outboundDbPath()`, `heartbeatPath()`.
+`src/session-manager.ts` のパスヘルパー:`sessionDir()`、`inboundDbPath()`、`outboundDbPath()`、`heartbeatPath()`。
 
 ---
 
 ## 2. Inbound DB (`inbound.db`)
 
-Host-owned, container-read-only. Schema constant: `INBOUND_SCHEMA` in `src/db/schema.ts`.
+Host 所有、コンテナは read-only。スキーマ定数:`src/db/schema.ts` の `INBOUND_SCHEMA`。
 
 ### 2.1 `messages_in`
 
-Every message landing in the session: user chat, scheduled task, recurring task, question response, internal system message.
+セッションに到達するあらゆるメッセージ:user chat、スケジュール済タスク、再帰タスク、質問応答、内部システムメッセージ。
 
 ```sql
 CREATE TABLE messages_in (
   id             TEXT PRIMARY KEY,
-  seq            INTEGER UNIQUE,           -- EVEN only (host assigns) — see §3
+  seq            INTEGER UNIQUE,           -- 偶数のみ (host が割り当てる) — §3 を参照
   kind           TEXT NOT NULL,
   timestamp      TEXT NOT NULL,
   status         TEXT DEFAULT 'pending',   -- pending|completed|failed|paused
   process_after  TEXT,
-  recurrence     TEXT,                     -- cron expr for recurring
-  series_id      TEXT,                     -- groups occurrences of a recurring task
+  recurrence     TEXT,                     -- 再帰用 cron 表現
+  series_id      TEXT,                     -- 再帰タスクの発生回をグループ化
   tries          INTEGER DEFAULT 0,
-  trigger        INTEGER NOT NULL DEFAULT 1, -- 0 = context only (don't wake), 1 = wake agent
+  trigger        INTEGER NOT NULL DEFAULT 1, -- 0 = コンテキストのみ (起こさない)、1 = agent を起こす
   platform_id    TEXT,
   channel_type   TEXT,
   thread_id      TEXT,
-  content        TEXT NOT NULL,            -- JSON; shape depends on kind
-  source_session_id TEXT,                  -- agent-to-agent return path
-  on_wake        INTEGER NOT NULL DEFAULT 0 -- 1 = only deliver on container's first poll
+  content        TEXT NOT NULL,            -- JSON; 形は kind に依存
+  source_session_id TEXT,                  -- agent-to-agent の戻りパス
+  on_wake        INTEGER NOT NULL DEFAULT 0 -- 1 = コンテナの最初の poll でのみ配信
 );
 CREATE INDEX idx_messages_in_series ON messages_in(series_id);
 ```
 
-Content shapes: see [api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details).
+コンテンツ形:[api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details) を参照。
 
-**Writers (host):** `insertMessage()`, `insertTask()`, `insertRecurrence()` — all in `src/db/session-db.ts`. Each calls `nextEvenSeq()`.
-**Reader (container):** `container/agent-runner/src/db/messages-in.ts` — polls `status='pending' AND (process_after IS NULL OR process_after <= now)`.
+**Writer (host):** `src/db/session-db.ts` の `insertMessage()`、`insertTask()`、`insertRecurrence()`。すべて `nextEvenSeq()` を呼ぶ。
+**Reader (コンテナ):** `container/agent-runner/src/db/messages-in.ts` — `status='pending' AND (process_after IS NULL OR process_after <= now)` を poll する。
 
 ### 2.2 `delivered`
 
-Host writes here after handing a `messages_out` row to the channel adapter. Container reads `platform_message_id` to target edits and reactions.
+Host は `messages_out` 行を channel adapter に渡した後にここに書く。コンテナは edit と reaction のターゲット解決のために `platform_message_id` を読む。
 
 ```sql
 CREATE TABLE delivered (
@@ -71,28 +71,28 @@ CREATE TABLE delivered (
 );
 ```
 
-Writer: `markDelivered()` / `markDeliveryFailed()` in `src/db/session-db.ts`. Older session DBs are brought up to schema lazily by `migrateDeliveredTable()`.
+Writer:`src/db/session-db.ts` の `markDelivered()` / `markDeliveryFailed()`。古いセッション DB は `migrateDeliveredTable()` によって遅延でスキーマに引き上げられる。
 
 ### 2.3 `destinations`
 
-Projection of the central `agent_destinations` table (see [db-central.md §1.10](db-central.md#110-agent_destinations)) for this session's agent. The container resolves `to="name"` against this table; if the row is absent, the send is rejected as `unknown destination`.
+このセッションの agent 用の、central `agent_destinations` テーブル([db-central.md §1.10](db-central.md#110-agent_destinations) を参照)の投影。コンテナは `to="name"` をこのテーブルに対して解決する;行が無ければ送信は `unknown destination` として拒否される。
 
 ```sql
 CREATE TABLE destinations (
   name           TEXT PRIMARY KEY,
   display_name   TEXT,
   type           TEXT NOT NULL,   -- 'channel' | 'agent'
-  channel_type   TEXT,            -- for type='channel'
-  platform_id    TEXT,            -- for type='channel'
-  agent_group_id TEXT             -- for type='agent'
+  channel_type   TEXT,            -- type='channel' 用
+  platform_id    TEXT,            -- type='channel' 用
+  agent_group_id TEXT             -- type='agent' 用
 );
 ```
 
-Rewritten wholesale (DELETE + INSERT in a transaction) by `writeDestinations()` on every container wake and on demand when wiring changes mid-session. The comment on the table in `src/db/schema.ts` is the canonical statement of the refresh semantics.
+コンテナのウェイクごと、およびセッション中に配線が変わった時のオンデマンドで、`writeDestinations()` によって丸ごと書き直される(トランザクション内で DELETE + INSERT)。`src/db/schema.ts` のテーブルへのコメントが、リフレッシュセマンティクスの正本的な記述である。
 
 ### 2.4 `session_routing`
 
-Single-row (`id=1`) default routing: where outbound messages go when the agent doesn't specify a destination.
+単一行(`id=1`)のデフォルトルーティング:agent が destination を指定しない場合の outbound メッセージの行き先。
 
 ```sql
 CREATE TABLE session_routing (
@@ -103,35 +103,35 @@ CREATE TABLE session_routing (
 );
 ```
 
-Written by `writeSessionRouting()` on every container wake, derived from `sessions.messaging_group_id` + `sessions.thread_id`.
+コンテナのウェイクごとに `writeSessionRouting()` が書き、`sessions.messaging_group_id` + `sessions.thread_id` から導出する。
 
 ---
 
-## 3. Sequence numbering invariant
+## 3. シーケンス番号の不変条件
 
-Every message (in or out) gets a monotonic integer `seq`, unique *within the session* across both tables.
+すべてのメッセージ(in でも out でも)は単調増加の整数 `seq` を持ち、*セッション内* で両テーブルを跨いで unique である。
 
-- **Host writes even seq** (2, 4, 6, …) to `messages_in` — `nextEvenSeq()` at `src/db/session-db.ts:75`.
-- **Container writes odd seq** (1, 3, 5, …) to `messages_out` — logic at `container/agent-runner/src/db/messages-out.ts:54` (`max % 2 === 0 ? max + 1 : max + 2`), reading `MAX(seq)` across *both* tables to preserve global ordering.
+- **Host は偶数 seq を書く**(2、4、6、…)— `messages_in` へ — `src/db/session-db.ts:75` の `nextEvenSeq()`。
+- **コンテナは奇数 seq を書く**(1、3、5、…)— `messages_out` へ — `container/agent-runner/src/db/messages-out.ts:54` のロジック(`max % 2 === 0 ? max + 1 : max + 2`)、グローバル順序を保つために *両方* のテーブルにわたって `MAX(seq)` を読む。
 
-Why disjoint? `seq` is the agent-facing message ID. When the agent calls `edit_message(seq=5)` or `add_reaction(seq=6)`, `getMessageIdBySeq()` uses the parity to route the lookup: odd → `messages_out`, even → `messages_in`. The parity alone disambiguates without a join. Collisions would break editing.
+なぜ disjoint なのか? `seq` は agent から見たメッセージ ID である。Agent が `edit_message(seq=5)` または `add_reaction(seq=6)` を呼ぶと、`getMessageIdBySeq()` は偶奇でルックアップをルーティングする:奇数 → `messages_out`、偶数 → `messages_in`。偶奇だけで JOIN 無しに曖昧性を解消できる。衝突すると edit が壊れる。
 
-If you add a code path that writes to either table, preserve parity — the invariant isn't enforced by a constraint, only by the two helper functions.
+どちらかのテーブルに書き込むコードパスを追加するなら、偶奇を保つこと — 不変条件は制約で強制されておらず、2 つのヘルパー関数だけで強制されている。
 
 ---
 
 ## 4. Outbound DB (`outbound.db`)
 
-Container-owned, host reads only. Schema constant: `OUTBOUND_SCHEMA` in `src/db/schema.ts`.
+コンテナ所有、host は読みのみ。スキーマ定数:`src/db/schema.ts` の `OUTBOUND_SCHEMA`。
 
 ### 4.1 `messages_out`
 
-Everything the agent produces: chat replies, edits, reactions, cards, question sends, agent-to-agent messages, system actions.
+Agent が生成するすべて:chat 返信、edit、reaction、カード、質問送信、agent-to-agent メッセージ、システムアクション。
 
 ```sql
 CREATE TABLE messages_out (
   id            TEXT PRIMARY KEY,
-  seq           INTEGER UNIQUE,   -- ODD only (container assigns) — see §3
+  seq           INTEGER UNIQUE,   -- 奇数のみ (コンテナが割り当てる) — §3 を参照
   in_reply_to   TEXT,
   timestamp     TEXT NOT NULL,
   deliver_after TEXT,
@@ -140,18 +140,18 @@ CREATE TABLE messages_out (
   platform_id   TEXT,
   channel_type  TEXT,
   thread_id     TEXT,
-  content       TEXT NOT NULL     -- JSON; operation lives inside (edit/reaction/card/…)
+  content       TEXT NOT NULL     -- JSON; 操作は内部にある (edit/reaction/card/…)
 );
 ```
 
-Content shapes: see [api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details).
+コンテンツ形:[api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details) を参照。
 
-**Writer (container):** `writeMessageOut()` in `container/agent-runner/src/db/messages-out.ts`.
-**Readers (host):** `src/delivery.ts` (polling delivery), `getMessageIdBySeq()` / `getRoutingBySeq()` for edit/reaction targeting.
+**Writer (コンテナ):** `container/agent-runner/src/db/messages-out.ts` の `writeMessageOut()`。
+**Reader (host):** `src/delivery.ts`(ポーリング配信)、edit / reaction ターゲット解決のための `getMessageIdBySeq()` / `getRoutingBySeq()`。
 
 ### 4.2 `processing_ack`
 
-Container-side status for each `messages_in.id` it has touched. The host polls this and syncs status back into `messages_in` — this avoids the container ever writing to `inbound.db`.
+コンテナが触れた各 `messages_in.id` に対するコンテナ側の状態。Host はこれを poll して状態を `messages_in` に同期する — これによりコンテナが `inbound.db` に書く必要を排除する。
 
 ```sql
 CREATE TABLE processing_ack (
@@ -161,11 +161,11 @@ CREATE TABLE processing_ack (
 );
 ```
 
-Crash recovery: on container startup, stale `processing` entries get cleared. Host-side sync: `syncProcessingAcks()` in `src/host-sweep.ts`.
+クラッシュリカバリ:コンテナ起動時に古い `processing` エントリがクリアされる。Host 側同期:`src/host-sweep.ts` の `syncProcessingAcks()`。
 
 ### 4.3 `session_state`
 
-Persistent container-owned KV store. Main consumer is the Chat SDK session ID — storing it here lets the agent's conversation resume across container restarts. Cleared by `/clear`.
+永続的なコンテナ所有 KV ストア。主要なコンシューマは Chat SDK セッション ID — ここに保存することで agent の会話がコンテナ再起動を跨いで再開できる。`/clear` でクリアされる。
 
 ```sql
 CREATE TABLE session_state (
@@ -175,12 +175,12 @@ CREATE TABLE session_state (
 );
 ```
 
-Access: `container/agent-runner/src/db/session-state.ts`.
+アクセス:`container/agent-runner/src/db/session-state.ts`。
 
 ---
 
-## 5. Schema evolution
+## 5. スキーマ進化
 
-Unlike the central DB, session DBs do **not** go through numbered migrations. Both `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA` use `CREATE TABLE IF NOT EXISTS`, so a fresh session always gets the current shape. For session folders created under older builds, column-level gaps are patched lazily on open — e.g. `migrateDeliveredTable()` in `src/db/session-db.ts` adds `platform_message_id` and `status` to the `delivered` table if missing.
+Central DB と違い、セッション DB は番号付きマイグレーションを **行わない**。`INBOUND_SCHEMA` と `OUTBOUND_SCHEMA` は両方とも `CREATE TABLE IF NOT EXISTS` を使うので、フレッシュなセッションは常に現在の形を得る。古いビルドの下で作られたセッションフォルダのカラムレベルのギャップは、open 時に遅延でパッチされる — 例:`src/db/session-db.ts` の `migrateDeliveredTable()` は、欠落していれば `delivered` テーブルに `platform_message_id` と `status` を追加する。
 
-If you add a column to either schema, add a matching lazy migration for existing session folders, and prefer nullable columns or defaulted values so no data backfill is required.
+どちらかのスキーマにカラムを追加するなら、既存セッションフォルダ用に対応する遅延マイグレーションを追加し、データ backfill が要らないように nullable カラム or デフォルト値付きを優先すること。

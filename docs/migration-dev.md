@@ -1,65 +1,65 @@
-# v1 → v2 Migration — Development Guide
+# v1 → v2 マイグレーション — 開発ガイド
 
-How to test, develop, and debug the migration flow.
+マイグレーションフローのテスト、開発、デバッグの方法。
 
-## Quick start
+## クイックスタート
 
 ```bash
-# Full cycle: reset → migrate → Claude finishes
+# フルサイクル:リセット → マイグレーション → Claude が仕上げ
 bash migrate-v2-reset.sh && bash migrate-v2.sh
 ```
 
-## Architecture
+## アーキテクチャ
 
-Two-part migration:
+2 部構成のマイグレーション:
 
-1. **`migrate-v2.sh`** — deterministic bash script. Handles prerequisites, DB seeding, file copies, channel install, container build, service switchover. Writes `logs/setup-migration/handoff.json` then `exec`s into Claude.
+1. **`migrate-v2.sh`** — 決定的な bash スクリプト。前提条件、DB seed、ファイルコピー、channel インストール、コンテナビルド、サービス切替を扱う。`logs/setup-migration/handoff.json` を書いてから Claude に `exec` する。
 
-2. **`/migrate-from-v1` skill** — Claude-driven. Reads the handoff, seeds owner/roles, cleans up CLAUDE.local.md, validates container configs, ports fork customizations.
+2. **`/migrate-from-v1` skill** — Claude 駆動。ハンドオフを読み、owner / role を seed し、CLAUDE.local.md をクリーンアップし、コンテナ設定を検証し、fork のカスタマイズを移植する。
 
-## File layout
+## ファイル配置
 
 ```
-migrate-v2.sh                        # Entry point
-migrate-v2-reset.sh                  # Wipe v2 state for re-testing
+migrate-v2.sh                        # エントリーポイント
+migrate-v2-reset.sh                  # 再テスト用に v2 状態を消去
 setup/migrate-v2/
-  env.ts                             # Phase 1a: merge .env
-  db.ts                              # Phase 1b: seed v2 DB
-  groups.ts                          # Phase 1c: copy group folders + container.json
-  sessions.ts                        # Phase 1d: copy sessions + set continuation
-  tasks.ts                           # Phase 1e: port scheduled tasks
-  channel-auth.ts                    # Phase 2b: copy channel auth state
+  env.ts                             # Phase 1a: .env をマージ
+  db.ts                              # Phase 1b: v2 DB を seed
+  groups.ts                          # Phase 1c: group フォルダ + container.json をコピー
+  sessions.ts                        # Phase 1d: セッションをコピー + 継続を設定
+  tasks.ts                           # Phase 1e: スケジュール済タスクを移植
+  channel-auth.ts                    # Phase 2b: channel 認証状態をコピー
   select-channels.ts                 # Phase 2a: clack multiselect
-  switchover-prompt.ts               # Service switch prompts
-setup/migrate-v2/shared.ts           # Shared helpers (JID parsing, trigger mapping, etc.)
-.claude/skills/migrate-from-v1/      # The Claude skill
-logs/setup-migration/handoff.json    # Written by migrate-v2.sh, read by skill
-logs/migrate-steps/*.log             # Per-step raw output
+  switchover-prompt.ts               # サービス切替プロンプト
+setup/migrate-v2/shared.ts           # 共有ヘルパー(JID パース、トリガーマッピング等)
+.claude/skills/migrate-from-v1/      # Claude skill
+logs/setup-migration/handoff.json    # migrate-v2.sh が書き、skill が読む
+logs/migrate-steps/*.log             # ステップごとの生出力
 ```
 
-## Development loop
+## 開発ループ
 
 ```bash
-# Reset v2 to clean state (keeps node_modules)
+# v2 をクリーンな状態にリセット (node_modules は残す)
 bash migrate-v2-reset.sh
 
-# Run migration with non-interactive channel selection
+# 非対話的な channel 選択でマイグレーションを実行
 NANOCLAW_CHANNELS="telegram" bash migrate-v2.sh
 
-# Or run interactively (clack multiselect)
+# または対話的に実行 (clack multiselect)
 bash migrate-v2.sh
 ```
 
-`migrate-v2-reset.sh` wipes: `data/`, `logs/`, `.env`, `groups/` (restores git-tracked), `container/skills/` (restores git-tracked), `src/channels/` (restores git-tracked).
+`migrate-v2-reset.sh` が消去するもの:`data/`、`logs/`、`.env`、`groups/`(git 追跡のものを復元)、`container/skills/`(git 追跡のものを復元)、`src/channels/`(git 追跡のものを復元)。
 
-It does NOT wipe `node_modules/` (expensive to reinstall).
+`node_modules/` は消去しない(再インストールがコスト高のため)。
 
-## Testing individual steps
+## 個別ステップのテスト
 
-Each step is a standalone TypeScript file:
+各ステップは単体の TypeScript ファイルである:
 
 ```bash
-# Run a single step (after pnpm install)
+# 単一ステップを実行 (pnpm install 後)
 pnpm exec tsx setup/migrate-v2/env.ts /path/to/v1
 pnpm exec tsx setup/migrate-v2/db.ts /path/to/v1
 pnpm exec tsx setup/migrate-v2/groups.ts /path/to/v1
@@ -68,72 +68,72 @@ pnpm exec tsx setup/migrate-v2/tasks.ts /path/to/v1
 pnpm exec tsx setup/migrate-v2/channel-auth.ts /path/to/v1 telegram discord
 ```
 
-Each prints `OK:<details>`, `SKIPPED:<reason>`, or errors to stdout. Exit 0 on success/skip, non-zero on failure.
+各ステップは `OK:<details>`、`SKIPPED:<reason>`、またはエラーを stdout に出力する。成功 / skip で exit 0、失敗で 非ゼロ。
 
-## Debugging
+## デバッグ
 
-### Check what was migrated
+### 何がマイグレートされたか確認
 
 ```bash
 # Agent groups
 sqlite3 data/v2.db "SELECT * FROM agent_groups"
 
-# Messaging groups + wiring
+# Messaging groups + 配線
 sqlite3 data/v2.db "SELECT mg.id, mg.channel_type, mg.platform_id, mg.unknown_sender_policy, mga.engage_mode, mga.engage_pattern FROM messaging_groups mg JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id"
 
 # Sessions
 sqlite3 data/v2.db "SELECT * FROM sessions"
 
-# Users and roles
+# Users と roles
 sqlite3 data/v2.db "SELECT * FROM users"
 sqlite3 data/v2.db "SELECT * FROM user_roles"
 
-# Session continuation (which Claude Code session will be resumed)
+# セッション継続 (どの Claude Code セッションが再開されるか)
 AG_ID=$(sqlite3 data/v2.db "SELECT id FROM agent_groups LIMIT 1")
 SESS_ID=$(sqlite3 data/v2.db "SELECT id FROM sessions LIMIT 1")
 sqlite3 data/v2-sessions/$AG_ID/$SESS_ID/outbound.db "SELECT * FROM session_state"
 
-# Scheduled tasks
+# スケジュール済タスク
 sqlite3 data/v2-sessions/$AG_ID/$SESS_ID/inbound.db "SELECT id, kind, recurrence, status FROM messages_in WHERE kind='task'"
 ```
 
-### Check handoff
+### ハンドオフを確認
 
 ```bash
 python3 -m json.tool logs/setup-migration/handoff.json
 ```
 
-### Common issues
+### 一般的な問題
 
-**Bot doesn't respond after switchover:**
-1. Check both services aren't running: `systemctl --user list-units 'nanoclaw*'`
-2. Check error log: `tail logs/nanoclaw.error.log`
-3. Check sender policy: `sqlite3 data/v2.db "SELECT unknown_sender_policy FROM messaging_groups"` — must be `public` before owner is seeded
-4. Check engage pattern: `sqlite3 data/v2.db "SELECT engage_mode, engage_pattern FROM messaging_group_agents"` — should be `pattern` / `.` for respond-to-everything
+**切替後に bot が応答しない:**
+1. 両方のサービスが走っていないか確認:`systemctl --user list-units 'nanoclaw*'`
+2. エラーログを確認:`tail logs/nanoclaw.error.log`
+3. sender ポリシーを確認:`sqlite3 data/v2.db "SELECT unknown_sender_policy FROM messaging_groups"` — owner が seed される前は `public` でなければならない
+4. engage パターンを確認:`sqlite3 data/v2.db "SELECT engage_mode, engage_pattern FROM messaging_group_agents"` — すべてに応答するには `pattern` / `.` であるべき
 
-**Session not continuing from v1:**
-1. Check continuation is set: see "Session continuation" query above
-2. Check JSONL exists at the right path: `ls data/v2-sessions/<ag_id>/.claude-shared/projects/-workspace-agent/`
-3. The v1 session JSONL should be copied from `-workspace-group/` to `-workspace-agent/` (v2 container CWD is `/workspace/agent`)
+**v1 からセッションが継続しない:**
+1. 継続が設定されているか確認:上記「セッション継続」クエリを参照
+2. 正しいパスに JSONL が存在するか確認:`ls data/v2-sessions/<ag_id>/.claude-shared/projects/-workspace-agent/`
+3. v1 のセッション JSONL は `-workspace-group/` から `-workspace-agent/` にコピーされるべきである(v2 コンテナの CWD は `/workspace/agent`)
 
-**Service switchover revert didn't work:**
-1. The v2 service name is `nanoclaw-v2-<hash>` — find it: `systemctl --user list-units 'nanoclaw*'`
-2. Manually stop: `systemctl --user stop <unit> && systemctl --user disable <unit>`
-3. Restart v1: `systemctl --user start nanoclaw`
+**サービス切替の revert が効かない:**
+1. v2 サービス名は `nanoclaw-v2-<hash>` — 探す:`systemctl --user list-units 'nanoclaw*'`
+2. 手動で停止:`systemctl --user stop <unit> && systemctl --user disable <unit>`
+3. v1 を再起動:`systemctl --user start nanoclaw`
 
-### Step logs
+### ステップログ
 
-Each step writes raw output to `logs/migrate-steps/<step>.log`. Read these when a step fails:
+各ステップは生出力を `logs/migrate-steps/<step>.log` に書く。ステップが失敗したらこれを読む:
 
 ```bash
 cat logs/migrate-steps/1b-db.log
 cat logs/migrate-steps/1d-sessions.log
 ```
 
-## Key decisions
+## 主要な決定事項
 
-- `unknown_sender_policy` is set to `public` during migration so the bot responds immediately. The `/migrate-from-v1` skill tightens it after seeding the owner.
-- `requires_trigger=0` in v1 takes priority over a non-empty `trigger_pattern` — it means "respond to everything."
-- v1 `container_config.additionalMounts` is written directly to v2 `container.json` (same shape).
-- v1 Claude Code sessions are copied from `-workspace-group/` to `-workspace-agent/` and the session ID is written to `outbound.db` as `continuation:claude` so the agent-runner resumes the same conversation.
-- `exec claude "/migrate-from-v1"` at the end replaces the bash process — `write_handoff` is called explicitly before `exec` since EXIT traps don't fire on `exec`.
+- `unknown_sender_policy` はマイグレーション中 `public` に設定され、bot が即時応答する。`/migrate-from-v1` skill が owner を seed した後で締める。
+- v1 で `requires_trigger=0` は空でない `trigger_pattern` より優先される — 意味は「すべてに応答する」。
+- v1 の `container_config.additionalMounts` は v2 の `container.json` に直接書き込まれる(同じ形)。
+- v1 の Claude Code セッションは `-workspace-group/` から `-workspace-agent/` にコピーされ、セッション ID は `outbound.db` に `continuation:claude` として書かれるので、agent-runner が同じ会話を再開する。
+- 末尾の `exec claude "/migrate-from-v1"` が bash プロセスを置き換える — EXIT トラップは `exec` で発火しないため、`exec` の前に `write_handoff` を明示的に呼ぶ。

@@ -1,14 +1,14 @@
-# Running Agents on Local Ollama
+# ローカル Ollama で agent を動かす
 
-NanoClaw agents can be routed to a local [Ollama](https://ollama.com) instance instead of the Anthropic API. This cuts API costs to zero and keeps all inference on your hardware.
+NanoClaw の agent は Anthropic API の代わりに、ローカルの [Ollama](https://ollama.com) インスタンスへルーティングできる。これにより API コストはゼロになり、推論はすべて自分のハードウェア上に留まる。
 
-## How It Works
+## 仕組み
 
-Ollama exposes an Anthropic-compatible `/v1/messages` endpoint. The Claude Code CLI (which runs inside agent containers) uses the Anthropic SDK, which reads `ANTHROPIC_BASE_URL` to find the API host. Pointing that variable at Ollama is all that's needed — no new provider code, no changes to the agent runtime.
+Ollama は Anthropic 互換の `/v1/messages` エンドポイントを公開している。Claude Code CLI(agent コンテナ内で動く)は Anthropic SDK を使い、それは `ANTHROPIC_BASE_URL` を読んで API ホストを見つける。この変数を Ollama に向けるだけで済む — 新しい provider コードは不要、agent ランタイムへの変更も不要。
 
 ```
 ┌─────────────────────────────┐
-│  Agent container            │
+│  Agent コンテナ              │
 │                             │
 │  Claude Code CLI            │
 │    ↓ ANTHROPIC_BASE_URL     │
@@ -18,71 +18,71 @@ Ollama exposes an Anthropic-compatible `/v1/messages` endpoint. The Claude Code 
 └─────────────────────────────┘      └──────────────────┘
 ```
 
-`host.docker.internal` is Docker's magic hostname that resolves to the host machine from inside a container — so Ollama running on your Mac or Linux box is reachable at that address.
+`host.docker.internal` は Docker のマジックホスト名で、コンテナ内からホストマシンに解決される — そのため、Mac や Linux マシン上で動いている Ollama にこのアドレスで到達できる。
 
-## The OneCLI Complication
+## OneCLI まわりの厄介事
 
-NanoClaw normally runs API calls through an OneCLI HTTPS proxy that injects real credentials in place of a placeholder key. When redirecting to Ollama you need to bypass that proxy so requests go direct. Two env vars handle this:
+NanoClaw は通常、API 呼び出しを OneCLI の HTTPS proxy 経由で流し、placeholder キーの代わりに実クレデンシャルを注入する。Ollama にリダイレクトするときはこの proxy をバイパスし、リクエストが直接届くようにする必要がある。env var 2 つで対応する:
 
-- `NO_PROXY=host.docker.internal` — tells the Anthropic SDK's HTTP client to skip the proxy for that hostname
-- `no_proxy=host.docker.internal` — lowercase variant for tools that check the lowercase form
+- `NO_PROXY=host.docker.internal` — Anthropic SDK の HTTP クライアントに、そのホスト名では proxy をスキップするよう伝える
+- `no_proxy=host.docker.internal` — 小文字形式をチェックするツール向けの小文字バリアント
 
-Both are set in the agent group's `container.json` alongside `ANTHROPIC_BASE_URL`.
+両方とも agent group の `container.json` に `ANTHROPIC_BASE_URL` と並べて設定する。
 
-## Network Isolation
+## ネットワーク分離
 
-Setting `ANTHROPIC_BASE_URL` redirects requests but doesn't prevent a misconfigured agent from accidentally reaching `api.anthropic.com` directly. The `blockedHosts` field in `container.json` adds a Docker `--add-host` flag that resolves the domain to `0.0.0.0`, making it physically unreachable from inside the container:
+`ANTHROPIC_BASE_URL` を設定するとリクエストはリダイレクトされるが、設定が乱れた agent が `api.anthropic.com` に直接到達するのを防がない。`container.json` の `blockedHosts` フィールドが Docker の `--add-host` フラグを追加して、ドメインを `0.0.0.0` に解決させる(コンテナ内から物理的に到達不能にする):
 
 ```json
 "blockedHosts": ["api.anthropic.com"]
 ```
 
-With this in place, even if the model setting drifts back to a Claude model name, the API call will fail immediately rather than silently billing your account.
+これを置いておけば、モデル設定が Claude のモデル名に戻ってしまっても、API 呼び出しはすぐに失敗する — アカウントに silent に課金されない。
 
-## Model Selection
+## モデル選択
 
-The Claude Code CLI reads its model from `~/.claude/settings.json` inside the container, which NanoClaw bind-mounts from `data/v2-sessions/<agent-group-id>/.claude-shared/settings.json`. Set `"model": "gemma4:latest"` (or whatever Ollama model you've pulled) there. Use the exact name from `ollama list`.
+Claude Code CLI はコンテナ内の `~/.claude/settings.json` からモデルを読み、NanoClaw はそれを `data/v2-sessions/<agent-group-id>/.claude-shared/settings.json` から bind-mount する。そこに `"model": "gemma4:latest"`(または pull した任意の Ollama モデル)を設定する。`ollama list` で出る正確な名前を使う。
 
-Model selection considerations for Apple Silicon:
+Apple Silicon でのモデル選択の参考:
 
-| Model | Size | Quality | Speed (M4 Pro) |
+| モデル | サイズ | 品質 | 速度 (M4 Pro) |
 |-------|------|---------|----------------|
-| `gemma4:latest` | 12B | Good general-purpose | Fast |
-| `qwen3-coder:latest` | 32B | Excellent for coding tasks | Moderate |
-| `llama3.2:latest` | 3B | Basic | Very fast |
+| `gemma4:latest` | 12B | 汎用に良い | 速い |
+| `qwen3-coder:latest` | 32B | コーディングタスクに優れる | 中程度 |
+| `llama3.2:latest` | 3B | 基本 | 非常に速い |
 
-The agent uses tool calls extensively (read/write files, shell commands). Models that support tool use reliably work best. Gemma 4 and Qwen 3 Coder both handle structured tool calls well.
+Agent はツール呼び出し(ファイル read/write、shell コマンド)を多用する。ツール使用を信頼性高くサポートするモデルが最も適する。Gemma 4 と Qwen 3 Coder は、構造化されたツール呼び出しを両方ともうまく処理する。
 
-## What Changes at the Code Level
+## コードレベルで何が変わるか
 
-Three files need to support this feature. See `/add-ollama-provider` for the exact changes.
+この機能をサポートするには 3 つのファイルが変更される。正確な変更は `/add-ollama-provider` を参照。
 
-**`src/container-config.ts`** — `ContainerConfig` interface needs `env` and `blockedHosts` fields so the per-group JSON can carry them.
+**`src/container-config.ts`** — `ContainerConfig` インターフェースに `env` と `blockedHosts` フィールドが必要(group ごとの JSON がそれらを運ぶため)。
 
-**`src/container-runner.ts`** — At container spawn time, `env` entries become `-e KEY=VAL` Docker flags (applied after OneCLI's injected vars so they win), and `blockedHosts` entries become `--add-host HOST:0.0.0.0` flags.
+**`src/container-runner.ts`** — コンテナ spawn 時に、`env` エントリは `-e KEY=VAL` の Docker フラグになり(OneCLI が注入する var の後に適用されるので勝つ)、`blockedHosts` エントリは `--add-host HOST:0.0.0.0` フラグになる。
 
-**`container/Dockerfile`** — The container runs as the host user's uid (e.g. 501 on macOS), not as the `node` user (uid 1000). The home directory must be `chmod 777` so any uid can write `~/.claude.json` and `~/.claude/settings.json`.
+**`container/Dockerfile`** — コンテナは host ユーザの uid(例:macOS では 501)で動き、`node` ユーザ(uid 1000)では動かない。任意の uid が `~/.claude.json` と `~/.claude/settings.json` に書き込めるよう、home ディレクトリを `chmod 777` する必要がある。
 
-## Tradeoffs
+## トレードオフ
 
-| | Ollama (local) | Anthropic API |
+| | Ollama(ローカル) | Anthropic API |
 |---|---|---|
-| Cost | Free | Pay-per-token |
-| Privacy | Fully local | Data sent to Anthropic |
-| Model quality | Good (open-weight) | Excellent (Claude) |
-| Cold start | 5–30s (model load) | ~1s |
-| Context window | Varies by model | 200k tokens (Sonnet) |
-| Tool use reliability | Good (large models) | Excellent |
-| Hardware req. | 16GB+ RAM | None |
+| コスト | 無料 | トークン課金 |
+| プライバシー | 完全にローカル | Anthropic にデータ送信 |
+| モデル品質 | 良い(open-weight) | 優秀(Claude) |
+| コールドスタート | 5–30 秒(モデルロード) | 約 1 秒 |
+| コンテキストウィンドウ | モデルによる | 200k トークン(Sonnet) |
+| ツール使用の信頼性 | 良い(大モデル) | 優秀 |
+| ハードウェア要件 | 16GB+ RAM | なし |
 
-For personal automation on capable hardware, the tradeoff favors local. For complex multi-step tasks requiring large context or high reliability, Claude is still ahead.
+性能のあるハードウェアでの個人自動化なら、トレードオフはローカル有利。大きなコンテキストや高い信頼性を要する複雑なマルチステップタスクなら、Claude が依然優位。
 
-## Reverting to Claude
+## Claude に戻す
 
-Remove the `env` and `blockedHosts` keys from `groups/<folder>/container.json`, remove `"model"` from the shared settings file, and restart the service. No rebuild needed.
+`groups/<folder>/container.json` から `env` と `blockedHosts` キーを削除し、共有 settings ファイルから `"model"` を削除して、サービスを再起動する。再ビルドは不要。
 
-## See Also
+## 参考
 
-- `/add-ollama-provider` — step-by-step skill to configure any agent group for Ollama
-- [Ollama Anthropic compatibility docs](https://ollama.com/blog/openai-compatibility) — upstream docs on the API bridge
-- `docs/architecture.md` — how the container spawn and env injection pipeline works
+- `/add-ollama-provider` — 任意の agent group を Ollama 用に設定するステップ別 skill
+- [Ollama Anthropic 互換ドキュメント](https://ollama.com/blog/openai-compatibility) — API ブリッジに関する上流ドキュメント
+- `docs/architecture.md` — コンテナの spawn と env 注入パイプラインの仕組み

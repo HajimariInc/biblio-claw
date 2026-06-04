@@ -1,187 +1,187 @@
-# NanoClaw Requirements
+# NanoClaw 要件
 
-Original requirements and design decisions from the project creator.
-
----
-
-## Why This Exists
-
-This is a lightweight, secure alternative to OpenClaw (formerly ClawBot). That project became a monstrosity - 4-5 different processes running different gateways, endless configuration files, endless integrations. It's a security nightmare where agents don't run in isolated processes; there's all kinds of leaky workarounds trying to prevent them from accessing parts of the system they shouldn't. It's impossible for anyone to realistically understand the whole codebase. When you run it you're kind of just yoloing it.
-
-NanoClaw gives you the core functionality without that mess.
+プロジェクト作成者による原初の要件と設計判断。
 
 ---
 
-## Philosophy
+## なぜ存在するか
 
-### Small Enough to Understand
+これは OpenClaw(旧 ClawBot)に対する軽量で安全な代替である。あのプロジェクトはモンスター化した — 異なる gateway を走らせる 4〜5 個のプロセス、終わらない設定ファイル、終わらない統合。Agent が分離されたプロセスで動かず、システムの触ってはいけない部分にアクセスしないよう、leaky な workaround だらけのセキュリティ悪夢。コードベース全体を現実的に理解するのは不可能。動かすときは事実上 yolo するだけ。
 
-The entire codebase should be something you can read and understand. One Node.js process. A handful of source files. No microservices, no message queues, no abstraction layers.
+NanoClaw は、そうした混乱なしにコア機能を提供する。
 
-### Security Through True Isolation
+---
 
-Instead of application-level permission systems trying to prevent agents from accessing things, agents run in actual Linux containers. The isolation is at the OS level. Agents can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your Mac.
+## 設計哲学
 
-### Built for the Individual User
+### 理解できるほど小さく
 
-This isn't a framework or a platform. It's software that fits each user's exact needs. You fork the repo, add the channels you want (WhatsApp, Telegram, Discord, Slack, Gmail), and end up with clean code that does exactly what you need.
+コードベース全体は、自分で読んで理解できるものであるべきだ。1 つの Node.js プロセス。わずかなソースファイル。マイクロサービスなし、メッセージキューなし、抽象化レイヤなし。
 
-### Customization = Code Changes
+### True な分離によるセキュリティ
 
-No configuration sprawl. If you want different behavior, modify the code. The codebase is small enough that this is safe and practical. Very minimal things like the trigger word are in config. Everything else - just change the code to do what you want.
+Agent が何かにアクセスするのを防ごうとするアプリケーションレベルの permission システムではなく、agent は実際の Linux コンテナで動く。分離は OS レベルである。Agent は明示的にマウントされたものしか見られない。コマンドは Mac ではなくコンテナの中で動くので、bash アクセスを許しても安全である。
 
-### AI-Native Development
+### 個人ユーザのために作る
 
-I don't need an installation wizard - Claude Code guides the setup. I don't need a monitoring dashboard - I ask Claude Code what's happening. I don't need elaborate logging UIs - I ask Claude to read the logs. I don't need debugging tools - I describe the problem and Claude fixes it.
+これはフレームワークでもプラットフォームでもない。各ユーザの正確なニーズに合わせるソフトウェアである。repo を fork し、欲しい channel(WhatsApp、Telegram、Discord、Slack、Gmail)を追加すると、ちょうどやりたいことをするクリーンなコードが手に入る。
 
-The codebase assumes you have an AI collaborator. It doesn't need to be excessively self-documenting or self-debugging because Claude is always there.
+### カスタマイズ = コード変更
 
-### Skills Over Features
+設定の肥大化はなし。振る舞いを変えたいなら、コードを書き換える。コードベースは、それが安全で実用的なほど小さい。トリガーワードのような最小限のものは config にある。それ以外はすべて — やりたいことに合わせてコードを書き換えるだけ。
 
-When people contribute, they shouldn't add "Telegram support alongside WhatsApp." They should contribute a skill like `/add-telegram` that transforms the codebase. Users fork the repo, run skills to customize, and end up with clean code that does exactly what they need - not a bloated system trying to support everyone's use case simultaneously.
+### AI ネイティブ開発
+
+インストールウィザードは要らない — Claude Code がセットアップを案内する。監視ダッシュボードは要らない — Claude Code に何が起きているか聞く。手の込んだログ UI は要らない — Claude にログを読んでもらう。デバッグツールは要らない — 問題を説明すれば Claude が直す。
+
+コードベースは AI コラボレータの存在を前提にしている。Claude が常にいるので、過度に自己ドキュメント化や自己デバッグ化される必要はない。
+
+### 機能ではなくスキル
+
+人々が貢献するとき、「WhatsApp と並んで Telegram サポート」を追加すべきではない。コードベースを変形させる `/add-telegram` のような skill を貢献すべきである。ユーザは repo を fork し、skill を実行してカスタマイズし、ちょうどやりたいことをするクリーンなコードを手にする — 全員のユースケースを同時にサポートしようとする肥大化したシステムではなく。
 
 ---
 
 ## RFS (Request for Skills)
 
-Skills we'd like to see contributed:
+貢献してほしい skill のリスト:
 
-### Communication Channels
-- `/add-signal` - Add Signal as a channel
-- `/add-matrix` - Add Matrix integration
+### 通信チャネル
+- `/add-signal` - Signal を channel として追加
+- `/add-matrix` - Matrix 統合を追加
 
-> **Note:** Telegram, Slack, Discord, Gmail, and Apple Container skills already exist. See the [skills documentation](https://docs.nanoclaw.dev/integrations/skills-system) for the full list.
-
----
-
-## Vision
-
-A personal Claude assistant accessible via messaging, with minimal custom code.
-
-**Core components:**
-- **Claude Agent SDK** as the core agent
-- **Containers** for isolated agent execution (Linux VMs)
-- **Multi-channel messaging** (WhatsApp, Telegram, Discord, Slack, Gmail) — add exactly the channels you need
-- **Persistent memory** per conversation and globally
-- **Scheduled tasks** that run Claude and can message back
-- **Web access** for search and browsing
-- **Browser automation** via agent-browser
-
-**Implementation approach:**
-- Use existing tools (channel libraries, Claude Agent SDK, MCP servers)
-- Minimal glue code
-- File-based systems where possible (CLAUDE.md for memory, folders for groups)
+> **Note:** Telegram、Slack、Discord、Gmail、Apple Container の skill は既に存在する。全リストは [skills ドキュメント](https://docs.nanoclaw.dev/integrations/skills-system) を参照。
 
 ---
 
-## Architecture Decisions
+## ビジョン
 
-### Message Routing
-- A router listens to connected channels and routes messages based on configuration
-- Only messages from registered groups are processed
-- Trigger: `@Andy` prefix (case insensitive), configurable via `ASSISTANT_NAME` env var
-- Unregistered groups are ignored completely
+メッセージング経由でアクセス可能なパーソナル Claude アシスタント、最小限のカスタムコードで実現する。
 
-### Memory System
-- **Per-group memory**: Each group has a folder with its own `CLAUDE.md`
-- **Global memory**: Root `CLAUDE.md` is read by all groups, but only writable from "main" (self-chat)
-- **Files**: Groups can create/read files in their folder and reference them
-- Agent runs in the group's folder, automatically inherits both CLAUDE.md files
+**コアコンポーネント:**
+- **Claude Agent SDK** をコア agent として
+- **コンテナ** で分離された agent 実行(Linux VM)
+- **マルチチャネルメッセージング**(WhatsApp、Telegram、Discord、Slack、Gmail) — 必要な channel だけを追加
+- **永続メモリ** 会話ごと + グローバル
+- **スケジュール済タスク** Claude を走らせて結果をメッセージで返せる
+- **Web アクセス** 検索 + ブラウジング
+- **ブラウザ自動化** agent-browser 経由
 
-### Session Management
-- Each group maintains a conversation session (via Claude Agent SDK)
-- Sessions auto-compact when context gets too long, preserving critical information
-
-### Container Isolation
-- All agents run inside containers (lightweight Linux VMs)
-- Each agent invocation spawns a container with mounted directories
-- Containers provide filesystem isolation - agents can only see mounted paths
-- Bash access is safe because commands run inside the container, not on the host
-- Browser automation via agent-browser with Chromium in the container
-
-### Scheduled Tasks
-- Users can ask Claude to schedule recurring or one-time tasks from any group
-- Tasks run as full agents in the context of the group that created them
-- Tasks have access to all tools including Bash (safe in container)
-- Tasks can optionally send messages to their group via `send_message` tool, or complete silently
-- Task runs are logged to the database with duration and result
-- Schedule types: cron expressions, intervals (ms), or one-time (ISO timestamp)
-- From main: can schedule tasks for any group, view/manage all tasks
-- From other groups: can only manage that group's tasks
-
-### Group Management
-- New groups are added explicitly via the main channel
-- Groups are registered in SQLite (via the main channel or IPC `register_group` command)
-- Each group gets a dedicated folder under `groups/`
-- Groups can have additional directories mounted via `containerConfig`
-
-### Main Channel Privileges
-- Main channel is the admin/control group (typically self-chat)
-- Can write to global memory (`groups/CLAUDE.md`)
-- Can schedule tasks for any group
-- Can view and manage tasks from all groups
-- Can configure additional directory mounts for any group
+**実装アプローチ:**
+- 既存ツール(channel ライブラリ、Claude Agent SDK、MCP server)を使う
+- 最小限のグルーコード
+- 可能ならファイルベースのシステム(メモリは CLAUDE.md、group はフォルダ)
 
 ---
 
-## Integration Points
+## アーキテクチャ判断
 
-### Channels
-- WhatsApp (baileys), Telegram (grammy), Discord (discord.js), Slack (@slack/bolt), Gmail (googleapis)
-- Each channel lives in a separate fork repo and is added via skills (e.g., `/add-whatsapp`, `/add-telegram`)
-- Messages stored in SQLite, polled by router
-- Channels self-register at startup — unconfigured channels are skipped with a warning
+### メッセージルーティング
+- router が接続された channel を listen し、設定に基づきメッセージをルーティングする
+- 登録済 group からのメッセージのみ処理する
+- トリガー:`@Andy` プレフィックス(大小文字区別なし)、`ASSISTANT_NAME` env var で設定可能
+- 未登録 group は完全に無視する
+
+### メモリシステム
+- **Group ごとのメモリ:** 各 group は自身の `CLAUDE.md` を持つフォルダを持つ
+- **グローバルメモリ:** ルートの `CLAUDE.md` は全 group から読まれるが、「main」(self-chat)からのみ書き込める
+- **ファイル:** Group は自身のフォルダ内でファイルを作成 / 読み取り、参照できる
+- Agent は group のフォルダで動き、両方の CLAUDE.md を自動的に継承する
+
+### セッション管理
+- 各 group は会話セッションを保持する(Claude Agent SDK 経由)
+- セッションはコンテキストが長くなりすぎたら重要情報を保ちつつ自動コンパクションする
+
+### コンテナ分離
+- すべての agent はコンテナ(軽量 Linux VM)の中で動く
+- 各 agent 呼び出しはマウントされたディレクトリを伴うコンテナを spawn する
+- コンテナはファイルシステム分離を提供する — agent はマウントされたパスしか見られない
+- コマンドは host ではなくコンテナの中で動くので、bash アクセスを許しても安全
+- agent-browser によるブラウザ自動化、コンテナ内に Chromium
+
+### スケジュール済タスク
+- ユーザは任意の group から Claude に繰り返しまたは 1 回限りのタスクをスケジュール依頼できる
+- タスクは作成元 group のコンテキストで完全な agent として実行される
+- タスクはコンテナ内で安全な Bash を含む全ツールにアクセスできる
+- タスクは `send_message` ツール経由で自身の group にメッセージを送るか、silent に完了するかをオプションで選べる
+- タスク実行は duration と結果と共にデータベースにログされる
+- スケジュール種別:cron 式、間隔(ms)、または 1 回限り(ISO timestamp)
+- main から:任意の group にタスクをスケジュール、全タスクを表示 / 管理可能
+- 他の group から:その group のタスクのみ管理可能
+
+### Group 管理
+- 新しい group は main channel 経由で明示的に追加される
+- Group は SQLite に登録される(main channel または IPC `register_group` コマンド経由)
+- 各 group は `groups/` 配下に専用フォルダを持つ
+- Group は `containerConfig` 経由で追加ディレクトリをマウントできる
+
+### Main channel の特権
+- Main channel は admin / control group(典型的には self-chat)
+- グローバルメモリ(`groups/CLAUDE.md`)に書き込める
+- 任意の group にタスクをスケジュールできる
+- 全 group のタスクを表示 / 管理できる
+- 任意の group に対して追加ディレクトリマウントを設定できる
+
+---
+
+## 統合ポイント
+
+### Channel
+- WhatsApp(baileys)、Telegram(grammy)、Discord(discord.js)、Slack(@slack/bolt)、Gmail(googleapis)
+- 各 channel は別の fork repo に住み、skill 経由で追加される(例:`/add-whatsapp`、`/add-telegram`)
+- メッセージは SQLite に保存され、router が poll する
+- Channel は起動時に self-register する — 未設定の channel は警告と共にスキップされる
 
 ### Scheduler
-- Built-in scheduler runs on the host, spawns containers for task execution
-- Custom `nanoclaw` MCP server (inside container) provides scheduling tools
-- Tools: `schedule_task`, `list_tasks`, `pause_task`, `resume_task`, `cancel_task`, `send_message`
-- Tasks stored in SQLite with run history
-- Scheduler loop checks for due tasks every minute
-- Tasks execute Claude Agent SDK in containerized group context
+- 組み込みの scheduler が host 上で走り、タスク実行のためコンテナを spawn する
+- カスタム `nanoclaw` MCP server(コンテナ内)がスケジューリングツールを提供する
+- ツール:`schedule_task`、`list_tasks`、`pause_task`、`resume_task`、`cancel_task`、`send_message`
+- タスクは SQLite に実行履歴と共に保存される
+- Scheduler ループは 1 分ごとに due タスクをチェックする
+- タスクはコンテナ化された group コンテキスト内で Claude Agent SDK を実行する
 
-### Web Access
-- Built-in WebSearch and WebFetch tools
-- Standard Claude Agent SDK capabilities
+### Web アクセス
+- 組み込みの WebSearch と WebFetch ツール
+- 標準の Claude Agent SDK 機能
 
-### Browser Automation
-- agent-browser CLI with Chromium in container
-- Snapshot-based interaction with element references (@e1, @e2, etc.)
-- Screenshots, PDFs, video recording
-- Authentication state persistence
-
----
-
-## Setup & Customization
-
-### Philosophy
-- Minimal configuration files
-- Setup and customization done via Claude Code
-- Users clone the repo and run Claude Code to configure
-- Each user gets a custom setup matching their exact needs
-
-### Skills
-- `/setup` - Install dependencies, configure channels, start services
-- `/customize` - General-purpose skill for adding capabilities
-- `/update-nanoclaw` - Pull upstream changes, merge with customizations
-
-### Deployment
-- Runs on macOS (launchd), Linux (systemd), or Windows (WSL2)
-- Single Node.js process handles everything
+### ブラウザ自動化
+- agent-browser CLI、コンテナ内に Chromium
+- snapshot ベースの操作、要素参照(@e1、@e2 等)付き
+- スクリーンショット、PDF、動画記録
+- 認証状態の永続化
 
 ---
 
-## Personal Configuration (Reference)
+## セットアップとカスタマイズ
 
-These are the creator's settings, stored here for reference:
+### 哲学
+- 最小限の設定ファイル
+- セットアップとカスタマイズは Claude Code 経由で行う
+- ユーザは repo を clone し、Claude Code を実行して設定する
+- 各ユーザは自分の正確なニーズに合うカスタムセットアップを得る
 
-- **Trigger**: `@Andy` (case insensitive)
-- **Response prefix**: `Andy:`
-- **Persona**: Default Claude (no custom personality)
-- **Main channel**: Self-chat (messaging yourself in WhatsApp)
+### Skill
+- `/setup` - 依存をインストール、channel を設定、サービスを起動
+- `/customize` - 機能追加のための汎用 skill
+- `/update-nanoclaw` - upstream の変更を pull、カスタマイズと merge
+
+### デプロイ
+- macOS(launchd)、Linux(systemd)、Windows(WSL2)で動く
+- 単一の Node.js プロセスがすべてを扱う
 
 ---
 
-## Project Name
+## 個人設定(参考)
 
-**NanoClaw** - A reference to Clawdbot (now OpenClaw).
+これは作成者の設定で、参考のためここに保存されている:
+
+- **トリガー:** `@Andy`(大小文字区別なし)
+- **応答プレフィックス:** `Andy:`
+- **ペルソナ:** デフォルトの Claude(カスタムパーソナリティなし)
+- **Main channel:** Self-chat(WhatsApp で自分自身にメッセージ)
+
+---
+
+## プロジェクト名
+
+**NanoClaw** - Clawdbot(現 OpenClaw)への参照。

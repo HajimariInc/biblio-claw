@@ -1,17 +1,17 @@
-# NanoClaw API Details
+# NanoClaw API 詳細
 
-Implementation-level details for the architecture. See [architecture.md](architecture.md) for the high-level design.
+アーキテクチャの実装レベル詳細。高レベル設計は [architecture.md](architecture.md) を参照。
 
-## Channel Adapter Interface
+## Channel Adapter インターフェース
 
-### NanoClaw Channel Interface
+### NanoClaw Channel インターフェース
 
 ```typescript
 interface ChannelSetup {
-  // Conversation configs from central DB — passed at setup, not queried by adapter
+  // central DB からの会話設定 — セットアップ時に渡され、adapter はクエリしない
   conversations: ConversationConfig[];
 
-  // Host callbacks
+  // host コールバック
   onInbound(platformId: string, threadId: string | null, message: InboundMessage): void;
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 }
@@ -19,7 +19,7 @@ interface ChannelSetup {
 interface ConversationConfig {
   platformId: string;
   agentGroupId: string;
-  triggerPattern?: string;       // regex string (for native channels)
+  triggerPattern?: string;       // regex 文字列 (ネイティブ channel 用)
   requiresTrigger: boolean;
   sessionMode: 'shared' | 'per-thread';
 }
@@ -28,38 +28,38 @@ interface ChannelAdapter {
   name: string;
   channelType: string;
 
-  // Lifecycle
+  // ライフサイクル
   setup(config: ChannelSetup): Promise<void>;
   teardown(): Promise<void>;
   isConnected(): boolean;
 
-  // Outbound delivery
+  // outbound 配信
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<void>;
 
-  // Optional
+  // オプション
   setTyping?(platformId: string, threadId: string | null): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   updateConversations?(conversations: ConversationConfig[]): void;
 }
 
-// Inbound message from adapter to host
+// adapter から host への inbound メッセージ
 interface InboundMessage {
   id: string;
   kind: 'chat' | 'chat-sdk';
-  content: unknown;       // JSON blob — NanoClaw chat format or Chat SDK SerializedMessage
+  content: unknown;       // JSON blob — NanoClaw chat フォーマットまたは Chat SDK SerializedMessage
   timestamp: string;
 }
 
-// Outbound message from host to adapter
+// host から adapter への outbound メッセージ
 interface OutboundMessage {
   kind: 'chat' | 'chat-sdk';
-  content: unknown;       // JSON blob — matches the kind
+  content: unknown;       // JSON blob — kind に合わせる
 }
 ```
 
-### Chat SDK Bridge
+### Chat SDK ブリッジ
 
-Wraps a Chat SDK adapter + Chat instance to conform to the NanoClaw ChannelAdapter interface. Trunk ships the bridge and the channel registry only — platform-specific Chat SDK adapters (Discord, Slack, Telegram, etc.) and native adapters (WhatsApp/Baileys) are installed by the `/add-<channel>` skills from the `channels` branch.
+Chat SDK の adapter + Chat インスタンスをラップして、NanoClaw の ChannelAdapter インターフェースに準拠させる。Trunk が出荷するのはブリッジと channel レジストリのみ — プラットフォーム固有の Chat SDK adapter(Discord、Slack、Telegram 等)とネイティブ adapter(WhatsApp/Baileys)は、`channels` ブランチから `/add-<channel>` skill によってインストールされる。
 
 ```typescript
 function createChatSdkBridge(
@@ -82,14 +82,14 @@ function createChatSdkBridge(
         concurrency: chatConfig.concurrency ?? 'concurrent',
       });
 
-      // Subscribe registered conversations
+      // 登録された会話を subscribe
       for (const conv of config.conversations) {
         if (conv.agentGroupId) {
           await chat.state.subscribe(conv.platformId);
         }
       }
 
-      // Subscribed threads → forward all messages
+      // subscribe 済 thread → 全メッセージを forward
       chat.onSubscribedMessage(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
         config.onInbound(channelId, thread.id, {
@@ -100,7 +100,7 @@ function createChatSdkBridge(
         });
       });
 
-      // @mention in unsubscribed thread → discovery
+      // 未 subscribe thread 内の @mention → 発見
       chat.onNewMention(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
         config.onInbound(channelId, thread.id, {
@@ -109,11 +109,11 @@ function createChatSdkBridge(
           content: message.toJSON(),
           timestamp: message.metadata.dateSent.toISOString(),
         });
-        // Subscribe so future messages in this thread are received
+        // 今後の thread 内メッセージを受け取るために subscribe
         await thread.subscribe();
       });
 
-      // DMs → always forward
+      // DM → 常に forward
       chat.onDirectMessage(async (thread, message) => {
         config.onInbound(thread.id, null, {
           id: message.id,
@@ -157,7 +157,7 @@ function createChatSdkBridge(
     isConnected() { return true; },
 
     updateConversations(conversations) {
-      // Subscribe new conversations, could unsubscribe removed ones
+      // 新しい会話を subscribe、削除されたものを unsubscribe できる
       for (const conv of conversations) {
         if (conv.agentGroupId) {
           chat.state.subscribe(conv.platformId);
@@ -168,9 +168,9 @@ function createChatSdkBridge(
 }
 ```
 
-### Native NanoClaw Channel (no Chat SDK)
+### ネイティブな NanoClaw Channel (Chat SDK なし)
 
-Native channels implement the ChannelAdapter interface directly. The WhatsApp/Baileys adapter is the canonical example — it ships via the `/add-whatsapp` skill, not in trunk:
+ネイティブ channel は ChannelAdapter インターフェースを直接実装する。WhatsApp/Baileys adapter が代表例 — trunk ではなく `/add-whatsapp` skill 経由で出荷される:
 
 ```typescript
 function createWhatsAppChannel(): ChannelAdapter {
@@ -190,10 +190,10 @@ function createWhatsAppChannel(): ChannelAdapter {
           const jid = msg.key.remoteJid;
           const conv = config.conversations.find(c => c.platformId === jid);
 
-          // Trigger check (native — adapter does this, not host)
+          // トリガーチェック (ネイティブ — adapter が行う、host ではない)
           if (conv?.requiresTrigger && conv.triggerPattern) {
             if (!new RegExp(conv.triggerPattern).test(msg.message?.conversation || '')) {
-              return; // Doesn't match trigger
+              return; // トリガーにマッチしない
             }
           }
 
@@ -231,11 +231,11 @@ function createWhatsAppChannel(): ChannelAdapter {
 }
 ```
 
-## Session DB Schema Details
+## セッション DB スキーマの詳細
 
-### messages_in content examples
+### messages_in コンテンツ例
 
-**`chat`** — simple NanoClaw format:
+**`chat`** — シンプルな NanoClaw フォーマット:
 ```json
 {
   "sender": "John",
@@ -246,7 +246,7 @@ function createWhatsAppChannel(): ChannelAdapter {
 }
 ```
 
-**`chat-sdk`** — full Chat SDK `SerializedMessage`:
+**`chat-sdk`** — フルな Chat SDK の `SerializedMessage`:
 ```json
 {
   "_type": "chat:Message",
@@ -262,7 +262,7 @@ function createWhatsAppChannel(): ChannelAdapter {
 }
 ```
 
-**Question response** (from user clicking an interactive card):
+**質問応答**(対話カードをクリックしたユーザから):
 ```json
 {
   "sender": "John",
@@ -274,9 +274,9 @@ function createWhatsAppChannel(): ChannelAdapter {
 }
 ```
 
-### messages_out content examples
+### messages_out コンテンツ例
 
-**Normal chat message:**
+**通常の chat メッセージ:**
 ```json
 { "text": "LGTM, merging now" }
 ```
@@ -319,7 +319,7 @@ function createWhatsAppChannel(): ChannelAdapter {
 }
 ```
 
-**Edit message:**
+**Edit メッセージ:**
 ```json
 { "operation": "edit", "messageId": "3", "text": "Updated: LGTM with minor comments on line 42" }
 ```
@@ -329,32 +329,32 @@ function createWhatsAppChannel(): ChannelAdapter {
 { "operation": "reaction", "messageId": "5", "emoji": "thumbs_up" }
 ```
 
-**System action:**
+**システムアクション:**
 ```json
 { "action": "reset_session", "payload": { "session_id": "sess-123", "reason": "Skills updated" } }
 ```
 
-## Host Delivery Logic
+## Host 配信ロジック
 
-The host reads messages_out and dispatches based on `kind` and `operation`:
+Host は messages_out を読み、`kind` と `operation` でディスパッチする:
 
 ```typescript
 async function deliverMessage(row: MessagesOutRow, adapter: ChannelAdapter) {
   const content = JSON.parse(row.content);
 
-  // System actions — host handles internally
+  // システムアクション — host が内部で扱う
   if (row.kind === 'system') {
     await handleSystemAction(content);
     return;
   }
 
-  // Agent-to-agent — write to target session DB
+  // agent-to-agent — ターゲットセッション DB に書く
   if (isAgentDestination(row)) {
     await writeToAgentSession(row);
     return;
   }
 
-  // Channel delivery — delegate to adapter
+  // channel 配信 — adapter に委譲
   await adapter.deliver(row.platform_id, row.thread_id, {
     kind: row.kind,
     content,
@@ -362,4 +362,4 @@ async function deliverMessage(row: MessagesOutRow, adapter: ChannelAdapter) {
 }
 ```
 
-The adapter's `deliver()` method handles operation dispatch internally (post vs edit vs reaction).
+Adapter の `deliver()` メソッドが内部で operation ディスパッチ(post vs edit vs reaction)を扱う。

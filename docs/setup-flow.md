@@ -1,57 +1,58 @@
-# Setup flow
+# セットアップフロー
 
-This document is the contract for NanoClaw's end-to-end scripted setup
-(`bash nanoclaw.sh` → `pnpm run setup:auto`). Read it before adding a new
-step, fixing a regression, or changing how output is rendered.
+本ドキュメントは NanoClaw の end-to-end スクリプトセットアップ
+(`bash nanoclaw.sh` → `pnpm run setup:auto`)の契約である。新しい
+ステップを追加する前、リグレッションを修正する前、出力レンダリングを
+変える前に読むこと。
 
-## The three output levels
+## 3 つの出力レベル
 
-Every setup step produces output at **three distinct levels**. They have
-different audiences, go to different places, and are formatted differently.
-Don't conflate them.
+すべてのセットアップステップは **3 つの異なるレベル** で出力を生成する。
+それぞれ別の読み手を持ち、別の場所に行き、別の形でフォーマットされる。
+混同しないこと。
 
-| Level | Audience | Destination | Format |
+| レベル | 読み手 | 出力先 | 形式 |
 |---|---|---|---|
-| 1. User-facing | The operator running setup | Terminal (via clack) | Branded, concise, informational — "product content" |
-| 2. Progression | Future debuggers, AI agents reviewing a failed run, release support | `logs/setup.log` (one file, append-only) | Structured per-step blocks, linear chronology, human + machine readable |
-| 3. Raw | Whoever is deep-debugging a specific step | `logs/setup-steps/NN-step-name.log` (one file per step) | Full raw child stdout + stderr, verbatim |
+| 1. ユーザ向け | セットアップを実行するオペレータ | ターミナル (clack 経由) | ブランド付き、簡潔、情報的 — 「製品コンテンツ」 |
+| 2. 進行ログ | 将来のデバッガ、失敗実行をレビューする AI agent、リリースサポート | `logs/setup.log`(1 ファイル、追記のみ) | ステップごとの構造化ブロック、線形時系列、人間 + マシン可読 |
+| 3. Raw | 特定ステップを深掘りする者 | `logs/setup-steps/NN-step-name.log`(ステップごとに 1 ファイル) | 子プロセスの raw stdout + stderr、逐語 |
 
-Think of it as: the user sees a **summary**, the progression log is an
-**index with key facts**, the raw logs are the **evidence**.
+考え方:ユーザは **サマリ** を見る、進行ログは **キーファクト付きの index**、
+raw ログは **証拠**。
 
-### Level 1: user-facing (clack)
+### Level 1: ユーザ向け (clack)
 
-Rendered by `setup/auto.ts` via `@clack/prompts`. This is our *product
-surface* for setup — every line should read as if we designed it for a
-stranger on day one.
+`setup/auto.ts` が `@clack/prompts` 経由でレンダリングする。これはセット
+アップの *プロダクト面* — どの行も、初日に来た見ず知らずの人にも届くよう
+にデザインされているように読めるべき。
 
-- Clack spinners for in-progress work. Show elapsed time.
-- `p.log.success` / `p.log.step` / `p.log.warn` for permanent status
-  markers.
-- `p.note` for multi-line information (pairing code, next steps).
-- `p.text` / `p.select` / `p.password` for prompts.
-- Brand palette: `brand()` / `brandBold()` / `brandChip()` helpers in
-  `setup/auto.ts`. Truecolor when the terminal supports it, 16-color
-  cyan fallback otherwise, plain text when piped / `NO_COLOR`.
+- 進行中作業には clack スピナーを使う。経過時間を表示する。
+- 永続的な状態マーカーには `p.log.success` / `p.log.step` / `p.log.warn`
+  を使う。
+- 複数行の情報(ペアリングコード、次のステップ)には `p.note` を使う。
+- プロンプトには `p.text` / `p.select` / `p.password` を使う。
+- ブランドパレット:`setup/auto.ts` の `brand()` / `brandBold()` /
+  `brandChip()` ヘルパー。ターミナルがサポートしていれば truecolor、
+  それ以外は 16 色 cyan フォールバック、パイプ時 / `NO_COLOR` のときは
+  プレーンテキスト。
 
-Rules:
-- **No discontinuity.** Every sub-step belongs to the same visual flow.
-  The only exception is Anthropic credential registration (see below).
-- **No raw child output.** Never `stdio: 'inherit'` a child whose output
-  wasn't written by us. Capture it and show it on failure only.
-- **No debug-style prefixes** (`[add-telegram] …`, `INFO …`, timestamps).
-  Those belong in levels 2 and 3.
-- **No emoji** unless the clack glyph requires it.
+ルール:
+- **不連続を作らない。** すべてのサブステップは同じ視覚フローに属する。
+  唯一の例外は Anthropic クレデンシャル登録(下記)。
+- **Raw な子出力なし。** 自分たちが書いていない子の出力を決して
+  `stdio: 'inherit'` しない。キャプチャして失敗時のみ表示する。
+- **デバッグ風プレフィックスなし**(`[add-telegram] …`、`INFO …`、
+  タイムスタンプ)。これらはレベル 2 と 3 に属する。
+- **絵文字なし**、clack のグリフが要求する場合を除く。
 
-### Level 2: progression log
+### Level 2: 進行ログ
 
-`logs/setup.log` — one file per setup run, append-only, cumulative across
-a multi-run install (if a run fails midway and is re-attempted, the new
-entries append). It's the thing you'd ask an operator to paste when they
-report a setup bug, and the thing an AI agent would read to understand
-what happened.
+`logs/setup.log` — セットアップ実行ごとに 1 ファイル、追記のみ、複数回実行
+の install で累積する(実行が途中で失敗して再試行されると、新エントリが
+追記される)。セットアップバグを報告するときオペレータに貼り付けを依頼
+するもの、そして AI agent が何が起きたか理解するために読むもの。
 
-Entry format:
+エントリ形式:
 
 ```
 === [2026-04-22T22:14:12Z] bootstrap [45.1s] → success ===
@@ -74,18 +75,17 @@ Entry format:
   raw: logs/setup-steps/03-container.log
 ```
 
-Design constraints:
-- Start-time timestamp (UTC, ISO-8601) on the opening line so a `grep`
-  gives you the sequence.
-- Duration in seconds with one decimal — fast steps read as "0.5s", not
-  "0ms".
-- Status is one of: `success`, `skipped`, `failed`, `aborted`.
-- Fields are step-specific but **must** be short scalar values. No JSON,
-  no multi-line. If a value is long, put it in the raw log and reference
-  it.
-- Always emit a `raw:` pointer, even on success — makes debugging the
-  second failure easier.
-- **User choices** are their own entries, not nested inside a step:
+設計制約:
+- 開始時刻のタイムスタンプ(UTC、ISO-8601)を開きの行に置き、`grep` で
+  シーケンスが得られるようにする。
+- 1 桁小数の秒で duration を出す — 速いステップは "0ms" ではなく
+  "0.5s" と読める。
+- ステータスは次のいずれか:`success`、`skipped`、`failed`、`aborted`。
+- フィールドはステップ固有だが **必ず** 短いスカラ値であること。JSON
+  禁止、複数行禁止。値が長い場合は raw ログに置いて参照する。
+- 成功時でも常に `raw:` ポインタを emit する — 2 回目の失敗のデバッグ
+  を楽にする。
+- **ユーザ選択** はステップにネストせず、独自のエントリとする:
 
   ```
   === [2026-04-22T22:17:44Z] user-input → display_name ===
@@ -95,10 +95,9 @@ Design constraints:
     value: telegram
   ```
 
-  These matter because the path through the setup flow depends on them.
+  セットアップフローのパスがこれらに依存するため重要。
 
-The log opens with a header block identifying the run, and closes with
-a completion block:
+ログは実行を identifyするヘッダブロックで開き、完了ブロックで閉じる:
 
 ```
 ## 2026-04-22T22:14:12Z · setup:auto started
@@ -107,37 +106,37 @@ a completion block:
   branch: branded-setup
   commit: 6e0d742
 
-… (step entries) …
+… (ステップエントリ) …
 
 ## 2026-04-22T22:18:54Z · completed (total 4m42s)
 ```
 
-On failure the completion block names the failing step and its error:
+失敗時には、完了ブロックが失敗ステップとそのエラーを記す:
 
 ```
 ## 2026-04-22T22:16:40Z · aborted at container (err=cache_miss)
 ```
 
-### Level 3: raw per-step logs
+### Level 3: ステップごとの raw ログ
 
-`logs/setup-steps/NN-step-name.log` — one file per step, numbered in
-execution order (zero-padded 2-digit prefix for natural sorting). Full
-verbatim stdout + stderr from the child process. Truncated and rewritten
-on each run (not appended).
+`logs/setup-steps/NN-step-name.log` — ステップごとに 1 ファイル、実行
+順に番号付け(自然ソート用にゼロパディングされた 2 桁プレフィックス)。
+子プロセスからの逐語的な stdout + stderr 完全版。実行ごとに truncate
+されて書き直される(追記しない)。
 
-Contents are whatever the step emits: apt output, docker build layers,
-pnpm install spam, `curl` bodies, etc. This is the evidence plane —
-"what did the shell actually see?" Nothing is filtered.
+内容はステップが emit するすべて:apt の出力、docker build のレイヤ、
+pnpm install のスパム、`curl` のボディ等。これは証拠プレーン —
+「シェルが実際に何を見たか?」 何もフィルタしない。
 
-## Contract for a new step
+## 新しいステップの契約
 
-When you add a step (either a TS step in `setup/<name>.ts` or a bash
-installer invoked from `auto.ts`), it must:
+ステップを追加するとき(`setup/<name>.ts` の TS ステップでも、`auto.ts`
+から呼ばれる bash インストーラでも)、それは次を満たすべき:
 
-1. **Receive a raw-log path** from the caller. Write all stdout + stderr
-   there. Don't write to the terminal directly.
-2. **Emit a single terminal status block** at the end, containing
-   `STATUS: success|skipped|failed` and any step-specific fields:
+1. 呼び出し元から **raw ログパスを受け取る**。すべての stdout + stderr
+   をそこに書く。ターミナルに直接書かない。
+2. 末尾に **単一のターミナルステータスブロックを emit** する:
+   `STATUS: success|skipped|failed` とステップ固有のフィールドを含む:
 
    ```
    === NANOCLAW SETUP: STEP_NAME ===
@@ -147,80 +146,81 @@ installer invoked from `auto.ts`), it must:
    === END ===
    ```
 
-   Field names are `UPPER_SNAKE_CASE`. Values are short scalars.
+   フィールド名は `UPPER_SNAKE_CASE`。値は短いスカラ。
 
-3. If it's a long-running step, optionally emit **sub-status blocks**
-   mid-stream. `auto.ts` parses them live and can render intermediate
-   UI (as `pair-telegram` does with `PAIR_TELEGRAM_CODE` /
-   `PAIR_TELEGRAM_ATTEMPT`).
+3. 長く走るステップなら、オプションでストリーム途中に **サブステータス
+   ブロック** を emit する。`auto.ts` がそれをライブでパースし、中間 UI
+   をレンダリングできる(`pair-telegram` が `PAIR_TELEGRAM_CODE` /
+   `PAIR_TELEGRAM_ATTEMPT` でやっているように)。
 
-4. **Exit non-zero** on hard failure so `auto.ts` can distinguish
-   "step ran to completion and reported failed" from "step crashed".
+4. ハード失敗時には **非ゼロ exit** すること。これにより `auto.ts` は
+   「ステップは完走して failed を報告した」と「ステップがクラッシュ
+   した」を区別できる。
 
-The driver handles the rest: spinner in level 1, structured append to
-level 2, raw capture to level 3.
+ドライバが残りを扱う:レベル 1 のスピナー、レベル 2 への構造化追記、
+レベル 3 への raw キャプチャ。
 
-## The Anthropic exception
+## Anthropic 例外
 
-Anthropic credential registration (`setup/register-claude-token.sh`) is
-the **one** permitted break in the visual flow. Why:
+Anthropic クレデンシャル登録(`setup/register-claude-token.sh`)は、
+ビジュアルフロー上で許される **唯一** の break である。理由:
 
-- `claude setup-token` opens a browser, runs its own OAuth prompt, and
-  prints the token. It owns the TTY via `script(1)`.
-- We don't want to re-implement the OAuth device flow ourselves.
-- We don't want to intercept / mirror the token (it appears in the
-  user's terminal already — mirroring it adds attack surface).
+- `claude setup-token` はブラウザを開き、独自の OAuth プロンプトを実行
+  し、トークンを表示する。`script(1)` 経由で TTY を所有する。
+- OAuth デバイスフローを自分たちで再実装したくない。
+- トークンをインターセプト / ミラーしたくない(すでにユーザの
+  ターミナルに表示されている — ミラーすると攻撃面が増える)。
 
-So during this step:
-- The clack flow explicitly pauses (a `p.log.step` marker says "this
-  part is interactive, you're handing off to Anthropic").
-- The child inherits stdio fully.
-- When control returns, clack resumes on the next line with a success
-  marker.
+そのため、このステップ中:
+- clack フローは明示的に一時停止する(「ここからは対話的で、Anthropic
+  に引き渡している」と `p.log.step` マーカーが言う)。
+- 子は stdio を完全に継承する。
+- 制御が戻ったら、clack は次の行で success マーカーと共に再開する。
 
-The level-2 log still gets an entry (`auth [interactive] → success`
-with the method — subscription / oauth-token / api-key). Level-3 captures
-are optional here; mirroring `script -q` output is tricky and the risk of
-leaking the token to disk outweighs the debugging value.
+レベル 2 ログには依然エントリが入る(`auth [interactive] → success` と
+使った method — subscription / oauth-token / api-key)。レベル 3 の
+キャプチャはここではオプション;`script -q` の出力をミラーするのは
+トリッキーで、トークンがディスクに漏れるリスクが、デバッグ価値を
+上回る。
 
-## File reference
+## ファイルリファレンス
 
-| File | Role |
+| ファイル | 役割 |
 |---|---|
-| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. |
-| `setup.sh` | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
-| `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
-| `setup/logs.ts` | The logging primitives (`logStep`, `logUserInput`, `logComplete`, `stepRawLog`, `initSetupLog`). Single source of truth for level 2/3 formatting and file paths. |
-| `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
-| `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
-| `setup/add-telegram.sh` | Non-interactive adapter installer. Reads `TELEGRAM_BOT_TOKEN` from env; never prompts. User-facing bits live in `auto.ts`. |
-| `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |
+| `nanoclaw.sh` | トップレベルラッパー。Phase 1 (bootstrap) と phase 2 (setup:auto) のオーケストレーション。bootstrap の raw ログ + 進行エントリを書く。 |
+| `setup.sh` | Phase 1 bootstrap:Node、pnpm、ネイティブモジュール検証。自身の `BOOTSTRAP` ステータスブロックを emit する(歴史的には stdout に出力していたが、現在は bootstrap raw ログへ)。 |
+| `setup/auto.ts` | Phase 2 ドライバ。clack UI、ステップ実行、ユーザプロンプトをオーケストレートし、spawn する各ステップの全 3 ログレベルへ書く。 |
+| `setup/logs.ts` | ログプリミティブ(`logStep`、`logUserInput`、`logComplete`、`stepRawLog`、`initSetupLog`)。レベル 2/3 のフォーマットとファイルパスの唯一の正本。 |
+| `setup/<step>.ts` | 個別ステップ実装。単一のターミナルステータスブロックを emit する必要があり、ターミナルに直接書いてはならない。 |
+| `setup/register-claude-token.sh` | Anthropic 例外。stdio を継承し、自身の UI を出し、ドライバにステータスを返す。 |
+| `setup/add-telegram.sh` | 非対話的な adapter インストーラ。env から `TELEGRAM_BOT_TOKEN` を読む;プロンプトしない。ユーザ向けの部分は `auto.ts` に住む。 |
+| `setup/pair-telegram.ts` | `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` ステータスブロックを emit。UI を決してプリントしない。ドライバが clack note 経由でレンダリングする。 |
 
-## Common pitfalls
+## よくある落とし穴
 
-- **Printing debug output from inside a step.** Tempting during
-  development; forbidden in checked-in code. All runtime messaging goes
-  through status blocks (level 2) or raw log writes (level 3).
-- **Adding a `console.log` that "just this once" goes to the terminal.**
-  It breaks the clack flow — the spinner line gets torn. Use
-  `log.info` / `log.error` from `src/log.ts` (writes to the raw log)
-  instead.
-- **`stdio: 'inherit'` for a non-exception child.** See Anthropic above.
-  Anything else needs `pipe` + explicit capture.
-- **Tee-ing to stderr.** Clack's spinner owns the terminal during a step.
-  Even stderr writes tear the frame. Pipe everything, then choose what
-  to surface.
-- **UTF-8 in bash `$VAR…` positions.** Bash's lexer can pull the first
-  byte of a multi-byte character into the variable name and trip
-  `set -u`. Always brace: `${VAR}…`.
+- **ステップ内部からデバッグ出力をプリントする。** 開発中は誘惑される
+  が、checkin されたコードでは禁止。すべてのランタイムメッセージは
+  ステータスブロック(レベル 2)または raw ログ書き込み(レベル 3)を
+  経由する。
+- **「ほんの 1 度だけ」とターミナルに行く `console.log` を追加する。**
+  clack フローを壊す — スピナー行が破ける。代わりに `src/log.ts` の
+  `log.info` / `log.error`(raw ログに書く)を使う。
+- **例外でない子に対する `stdio: 'inherit'`。** 上の Anthropic を参照。
+  それ以外は `pipe` + 明示キャプチャが必要。
+- **stderr への tee。** Clack のスピナーはステップ中ターミナルを所有
+  する。stderr 書き込みでもフレームが破ける。すべてパイプし、何を
+  surface するかを選ぶ。
+- **bash の `$VAR…` 位置での UTF-8。** Bash のレキサはマルチバイト文字
+  の最初のバイトを変数名に取り込んで `set -u` を引っ掛けることがある。
+  常に brace で:`${VAR}…`。
 
-## Future work (not yet implemented)
+## 将来作業 (未実装)
 
-- **Progression log rotation.** Today's implementation truncates on each
-  run. Future: roll prior runs to `logs/setup.log.1`, `.2`, etc.
-- **Raw log rotation for multi-run installs.** Currently each run
-  overwrites. Fine for now; revisit if support needs to compare
-  successive attempts.
-- **Structured output from `register-claude-token.sh`.** The interactive
-  step emits no machine-readable status today. Future could add a
-  post-interaction status block with the method used.
+- **進行ログのローテーション。** 今日の実装は実行ごとに truncate する。
+  将来:過去の実行を `logs/setup.log.1`、`.2` 等に回す。
+- **複数回実行 install のための raw ログローテーション。** 現状は各
+  実行が上書き。今は問題ないが、サポートが連続試行を比較する必要が
+  出てきたら見直す。
+- **`register-claude-token.sh` からの構造化出力。** 対話ステップは
+  現在マシン可読なステータスを emit しない。将来は使われた method 付き
+  の post-interaction ステータスブロックを追加できる。

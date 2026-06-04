@@ -1,16 +1,16 @@
-# NanoClaw — Central DB Schema
+# NanoClaw — Central DB スキーマ
 
-Complete reference for `data/v2.db`, the host-owned admin-plane database. Start with [db.md](db.md) for the three-DB overview, the map, and the cross-mount rules.
+`data/v2.db`(host 所有の admin プレーンデータベース)の完全リファレンス。3-DB 概要、マップ、クロスマウントルールについては [db.md](db.md) から始めること。
 
-Access layer: `src/db/`. Authoritative schema reference: `src/db/schema.ts` (comments only — actual creation runs via migrations in `src/db/migrations/`).
+アクセスレイヤ:`src/db/`。スキーマリファレンスの正本:`src/db/schema.ts`(コメントのみ — 実際の作成は `src/db/migrations/` のマイグレーション経由)。
 
 ---
 
-## 1. Tables
+## 1. テーブル
 
 ### 1.1 `agent_groups`
 
-Agent workspaces. Each maps 1:1 to a `groups/<folder>/` directory containing `CLAUDE.md` and skills. Container config lives in `container_configs` (see §1.x below); a `container.json` file is materialized at spawn time for the container runner to read.
+Agent の workspace。各行は `groups/<folder>/` ディレクトリと 1:1 でマップされ、そこに `CLAUDE.md` と skill が含まれる。コンテナ設定は `container_configs` に住む(下記 §1.x を参照);spawn 時に `container.json` ファイルがマテリアライズされ、container runner がそれを読む。
 
 ```sql
 CREATE TABLE agent_groups (
@@ -22,12 +22,12 @@ CREATE TABLE agent_groups (
 );
 ```
 
-- **Readers:** `src/session-manager.ts`, `src/delivery.ts`, `src/router.ts`
-- **Writers:** `src/db/agent-groups.ts`
+- **Reader:** `src/session-manager.ts`、`src/delivery.ts`、`src/router.ts`
+- **Writer:** `src/db/agent-groups.ts`
 
 ### 1.2 `messaging_groups`
 
-One row per platform chat (one WhatsApp group, one Slack channel, one 1:1 DM, etc.).
+プラットフォームの chat 1 つにつき 1 行(1 つの WhatsApp group、1 つの Slack channel、1 つの 1:1 DM 等)。
 
 ```sql
 CREATE TABLE messaging_groups (
@@ -42,13 +42,13 @@ CREATE TABLE messaging_groups (
 );
 ```
 
-- `unknown_sender_policy`: `strict` (drop), `request_approval` (ask admin), `public` (allow).
-- **Readers:** `src/router.ts`, `src/delivery.ts`, `src/session-manager.ts`
-- **Writers:** `src/db/messaging-groups.ts`, channel setup flows
+- `unknown_sender_policy`:`strict`(drop)、`request_approval`(admin に尋ねる)、`public`(許可)。
+- **Reader:** `src/router.ts`、`src/delivery.ts`、`src/session-manager.ts`
+- **Writer:** `src/db/messaging-groups.ts`、channel セットアップフロー
 
 ### 1.3 `messaging_group_agents`
 
-Wiring: which agent group handles which messaging group. Many-to-many — the same channel can route to multiple agents (see [isolation-model.md](isolation-model.md)).
+配線:どの agent group がどの messaging group を扱うか。Many-to-many — 同じ channel が複数 agent にルーティングできる([isolation-model.md](isolation-model.md) を参照)。
 
 ```sql
 CREATE TABLE messaging_group_agents (
@@ -64,13 +64,13 @@ CREATE TABLE messaging_group_agents (
 );
 ```
 
-- `session_mode`: `shared` (one session per channel), `per-thread` (one per thread), `agent-shared` (one per agent group across all channels).
-- `trigger_rules`: JSON; e.g. regex for native channels.
-- **Side effect:** creating a wiring must also populate `agent_destinations` — don't mutate one without the other (see §1.10).
+- `session_mode`:`shared`(channel ごとに 1 セッション)、`per-thread`(thread ごとに 1)、`agent-shared`(agent group ごとに、全 channel をまたいで 1)。
+- `trigger_rules`:JSON;例えばネイティブ channel の regex。
+- **副作用:** 配線を作るときには `agent_destinations` の populate も必須 — 片方だけを変更しないこと(§1.10 を参照)。
 
 ### 1.4 `users`
 
-Platform user identities. ID is namespaced: `tg:123456`, `discord:abc`, `phone:+1555...`, `email:a@x.com`. One human may own several rows — no cross-channel linking yet.
+プラットフォームユーザの identity。ID は名前空間化される:`tg:123456`、`discord:abc`、`phone:+1555...`、`email:a@x.com`。1 人の人間が複数行を所有しうる — チャネル間のリンクはまだない。
 
 ```sql
 CREATE TABLE users (
@@ -81,11 +81,11 @@ CREATE TABLE users (
 );
 ```
 
-- **Writers/readers:** `src/db/users.ts`; channel auth flows
+- **Writer / Reader:** `src/db/users.ts`;channel 認証フロー
 
 ### 1.5 `user_roles`
 
-Permissions. **Privilege is user-level, never agent-group-level.**
+権限。**Privilege はユーザレベルで、agent-group レベルではない。**
 
 ```sql
 CREATE TABLE user_roles (
@@ -99,16 +99,16 @@ CREATE TABLE user_roles (
 CREATE INDEX idx_user_roles_scope ON user_roles(agent_group_id, role);
 ```
 
-Invariants:
-- `role = 'owner'` → must be global (`agent_group_id IS NULL`). Enforced in `grantRole()`.
-- `role = 'admin'` → global (NULL) or scoped to one agent group.
-- Admin @ A implies membership in A — no `agent_group_members` row required.
+不変条件:
+- `role = 'owner'` → グローバルでなければならない(`agent_group_id IS NULL`)。`grantRole()` で強制。
+- `role = 'admin'` → グローバル(NULL)、または 1 つの agent group にスコープ付き。
+- A 上の admin は A のメンバーシップを含意する — `agent_group_members` 行は不要。
 
-Access layer: `src/db/user-roles.ts`, `src/access.ts`.
+アクセスレイヤ:`src/db/user-roles.ts`、`src/access.ts`。
 
 ### 1.6 `agent_group_members`
 
-Explicit membership for non-privileged users. Owner and admins don't need rows here — they're implicit members.
+非特権ユーザの明示的メンバーシップ。Owner と admin はここに行が要らない — 暗黙のメンバーである。
 
 ```sql
 CREATE TABLE agent_group_members (
@@ -122,7 +122,7 @@ CREATE TABLE agent_group_members (
 
 ### 1.7 `user_dms`
 
-Cache of DM channel discovery. Lets the host send a cold DM (approval card, pairing code) without hitting the platform's `openConversation` API every time.
+DM channel 発見のキャッシュ。プラットフォームの `openConversation` API を毎回叩かずに、host が cold DM(承認カード、ペアリングコード)を送れるようにする。
 
 ```sql
 CREATE TABLE user_dms (
@@ -134,11 +134,11 @@ CREATE TABLE user_dms (
 );
 ```
 
-Populated lazily by `ensureUserDm()` in `src/user-dm.ts`.
+`src/user-dm.ts` の `ensureUserDm()` で遅延 populate される。
 
 ### 1.8 `sessions`
 
-Session registry. One row per (agent group, messaging group, thread) tuple subject to `session_mode`. Stores lifecycle metadata only — no messages.
+セッションレジストリ。`session_mode` に従って(agent group、messaging group、thread)のタプルごとに 1 行。ライフサイクルメタデータのみを保持し、メッセージは保持しない。
 
 ```sql
 CREATE TABLE sessions (
@@ -156,12 +156,12 @@ CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup     ON sessions(messaging_group_id, thread_id);
 ```
 
-- **Resolved by:** `resolveSession()` in `src/session-manager.ts`.
-- Creating a session also provisions the session folder and both session DBs via `initSessionFolder()` — see [db-session.md](db-session.md).
+- **解決元:** `src/session-manager.ts` の `resolveSession()`。
+- セッション作成は `initSessionFolder()` 経由でセッションフォルダと両方のセッション DB をプロビジョンもする — [db-session.md](db-session.md) を参照。
 
 ### 1.9 `pending_questions`
 
-The `ask_user_question` MCP tool parks an interactive question here, and the container matches incoming `system` messages back to it by `questionId`.
+`ask_user_question` MCP ツールが対話的な質問をここに駐車し、コンテナは受信した `system` メッセージを `questionId` でこれにマッチさせる。
 
 ```sql
 CREATE TABLE pending_questions (
@@ -179,7 +179,7 @@ CREATE TABLE pending_questions (
 
 ### 1.10 `agent_destinations`
 
-Permission ACL *and* name-resolution map for outbound sending. An agent asking to `send_message(to="dev-channel")` must have a row here with `local_name = 'dev-channel'`, or the send is rejected as `unknown destination`.
+Outbound 送信のための権限 ACL *かつ* 名前解決マップ。Agent が `send_message(to="dev-channel")` を呼ぶには、ここに `local_name = 'dev-channel'` の行が必要 — 無ければ送信は `unknown destination` として拒否される。
 
 ```sql
 CREATE TABLE agent_destinations (
@@ -193,16 +193,16 @@ CREATE TABLE agent_destinations (
 CREATE INDEX idx_agent_dest_target ON agent_destinations(target_type, target_id);
 ```
 
-**Projection invariant (load-bearing).** The central table is the source of truth, but each running container reads from a projection in its own `inbound.db` (see [db-session.md §2.3](db-session.md#23-destinations)). Any code that mutates `agent_destinations` while a container is running must also call `writeDestinations()` (`src/session-manager.ts`) or the container will reject sends with stale data. Known call sites: `createMessagingGroupAgent()` in `src/db/messaging-groups.ts`, the `create_agent` system action in `src/delivery.ts`.
+**投影の不変条件(load-bearing)。** Central テーブルが source of truth だが、走っている各コンテナは自身の `inbound.db` の投影から読む([db-session.md §2.3](db-session.md#23-destinations) を参照)。コンテナが走っている最中に `agent_destinations` を mutate するコードは、`writeDestinations()`(`src/session-manager.ts`)も呼ぶ必要がある — でないとコンテナは stale データで送信を拒否する。既知の呼び出し箇所:`src/db/messaging-groups.ts` の `createMessagingGroupAgent()`、`src/delivery.ts` の `create_agent` システムアクション。
 
-Access layer: `src/db/agent-destinations.ts`.
+アクセスレイヤ:`src/db/agent-destinations.ts`。
 
 ### 1.11 `pending_approvals`
 
-Two workflows share this table:
+2 つのワークフローがこのテーブルを共有する:
 
-- **Session-bound MCP approvals** — `install_packages`, `add_mcp_server`. `session_id` is set.
-- **OneCLI credential approvals** — `session_id` may be NULL; `agent_group_id` + `channel_type` + `platform_id` route the admin card.
+- **セッション結合 MCP 承認** — `install_packages`、`add_mcp_server`。`session_id` が設定される。
+- **OneCLI クレデンシャル承認** — `session_id` は NULL の可能性;`agent_group_id` + `channel_type` + `platform_id` が admin カードをルーティングする。
 
 ```sql
 CREATE TABLE pending_approvals (
@@ -224,13 +224,13 @@ CREATE TABLE pending_approvals (
 CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, status);
 ```
 
-- `status`: `pending` | `approved` | `rejected` | `expired`.
-- `platform_message_id` lets the host edit the admin card in place after a decision.
-- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/onecli-approvals.ts`.
+- `status`:`pending` | `approved` | `rejected` | `expired`。
+- `platform_message_id` により、判断後に host が admin カードを場所そのままで編集できる。
+- アクセスレイヤ:`src/db/sessions.ts`;sweep + 配信:`src/onecli-approvals.ts`。
 
 ### 1.12 `unregistered_senders`
 
-Audit trail: every time a message gets dropped (unknown sender, strict policy), we increment a counter here so admins can see who's been trying to knock.
+監査トレイル:メッセージが drop されるたび(未知 sender、strict ポリシー)、ここでカウンタをインクリメントするので、admin は誰が叩こうとしていたかを見られる。
 
 ```sql
 CREATE TABLE unregistered_senders (
@@ -249,17 +249,17 @@ CREATE TABLE unregistered_senders (
 CREATE INDEX idx_unregistered_senders_last_seen ON unregistered_senders(last_seen);
 ```
 
-Writer: `recordDroppedMessage()` in `src/db/dropped-messages.ts`. On conflict, bumps `message_count` + `last_seen`.
+Writer:`src/db/dropped-messages.ts` の `recordDroppedMessage()`。コンフリクト時には `message_count` と `last_seen` を bump する。
 
-### 1.13 Chat SDK bridge tables
+### 1.13 Chat SDK ブリッジテーブル
 
-State backing the `SqliteStateAdapter` used by the Chat SDK bridge (see [api-details.md](api-details.md)). NanoClaw code rarely touches these directly — they're owned by `src/state-sqlite.ts`.
+Chat SDK ブリッジが使う `SqliteStateAdapter` の状態を裏付ける([api-details.md](api-details.md) を参照)。NanoClaw コードはこれらに直接触れることは少ない — `src/state-sqlite.ts` が所有する。
 
 ```sql
 CREATE TABLE chat_sdk_kv (
   key        TEXT PRIMARY KEY,
   value      TEXT NOT NULL,
-  expires_at INTEGER                    -- unix ts, nullable
+  expires_at INTEGER                    -- unix ts、nullable
 );
 
 CREATE TABLE chat_sdk_subscriptions (
@@ -284,7 +284,7 @@ CREATE TABLE chat_sdk_lists (
 
 ### 1.14 `schema_version`
 
-Migration ledger, written by the migration runner (§2).
+マイグレーション元帳、マイグレーションランナー(§2)が書く。
 
 ```sql
 CREATE TABLE schema_version (
@@ -296,7 +296,7 @@ CREATE TABLE schema_version (
 
 ### 1.15 `container_configs`
 
-Per-agent-group container runtime config. Source of truth for provider, model, packages, MCP servers, mounts, CLI scope, etc. Materialized to `groups/<folder>/container.json` at spawn time.
+Agent group ごとのコンテナランタイム設定。provider、model、packages、MCP servers、mounts、CLI scope 等の source of truth。Spawn 時に `groups/<folder>/container.json` にマテリアライズされる。
 
 ```sql
 CREATE TABLE container_configs (
@@ -317,31 +317,31 @@ CREATE TABLE container_configs (
 );
 ```
 
-- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
-- **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
+- **Reader:** `src/container-config.ts`、`src/container-runner.ts`、`src/cli/dispatch.ts`(scope 強制)、`src/claude-md-compose.ts`
+- **Writer:** `src/db/container-configs.ts`、`src/modules/self-mod/apply.ts`、`src/backfill-container-configs.ts`
 
 ---
 
-## 2. Migration system
+## 2. マイグレーションシステム
 
-Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMigrations()` in `src/db/migrations/index.ts`. It:
+マイグレーションは `src/db/migrations/` に住み、マイグレーションごとに 1 ファイル。ランナー:`src/db/migrations/index.ts` の `runMigrations()`。次を行う:
 
-1. Creates `schema_version` if absent.
-2. Reads `MAX(version)` — call it `current`.
-3. For each migration with `version > current`, executes `up(db)` inside a transaction and appends a `schema_version` row.
+1. `schema_version` がなければ作成する。
+2. `MAX(version)` を読む — これを `current` と呼ぶ。
+3. `version > current` の各マイグレーションについて、トランザクション内で `up(db)` を実行し、`schema_version` 行を追記する。
 
-| # | File | Introduces |
+| # | ファイル | 導入するもの |
 |---|------|------------|
-| 001 | `001-initial.ts` | Core tables: `agent_groups`, `messaging_groups`, `messaging_group_agents`, `users`, `user_roles`, `agent_group_members`, `user_dms`, `sessions`, `pending_questions` |
-| 002 | `002-chat-sdk-state.ts` | `chat_sdk_kv`, `chat_sdk_subscriptions`, `chat_sdk_locks`, `chat_sdk_lists` |
-| 003 | `003-pending-approvals.ts` | `pending_approvals` (session-bound + OneCLI fields) |
-| 004 | `004-agent-destinations.ts` | `agent_destinations` + backfill from existing `messaging_group_agents` wirings |
-| 007 | `007-pending-approvals-title-options.ts` | `ALTER TABLE pending_approvals` add `title`, `options_json` (retrofits DBs created between 003 and 007) |
+| 001 | `001-initial.ts` | コアテーブル:`agent_groups`、`messaging_groups`、`messaging_group_agents`、`users`、`user_roles`、`agent_group_members`、`user_dms`、`sessions`、`pending_questions` |
+| 002 | `002-chat-sdk-state.ts` | `chat_sdk_kv`、`chat_sdk_subscriptions`、`chat_sdk_locks`、`chat_sdk_lists` |
+| 003 | `003-pending-approvals.ts` | `pending_approvals`(セッション結合 + OneCLI フィールド) |
+| 004 | `004-agent-destinations.ts` | `agent_destinations` + 既存の `messaging_group_agents` 配線からの backfill |
+| 007 | `007-pending-approvals-title-options.ts` | `ALTER TABLE pending_approvals` で `title`、`options_json` を追加(003 と 007 の間に作られた DB を retrofit) |
 | 008 | `008-dropped-messages.ts` | `unregistered_senders` |
-| 009 | `009-drop-pending-credentials.ts` | Drop the defunct `pending_credentials` table |
-| 014 | `014-container-configs.ts` | `container_configs` — per-agent-group container runtime config |
+| 009 | `009-drop-pending-credentials.ts` | 廃止された `pending_credentials` テーブルを drop |
+| 014 | `014-container-configs.ts` | `container_configs` — agent group ごとのコンテナランタイム設定 |
 | 015 | `015-cli-scope.ts` | `ALTER TABLE container_configs ADD COLUMN cli_scope` |
 
-Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
+005 と 006 は意図的に欠番 — 初期開発中にマイグレーションが番号付け直された。
 
-Session DB schemas (`INBOUND_SCHEMA`, `OUTBOUND_SCHEMA`) are **not** versioned here. They're `CREATE TABLE IF NOT EXISTS` so new columns land via the session-DB lazy migration helpers (`migrateDeliveredTable()` etc.) when a session file from an older build is reopened. See [db-session.md](db-session.md).
+セッション DB スキーマ(`INBOUND_SCHEMA`、`OUTBOUND_SCHEMA`)はここでは **バージョン管理されない**。`CREATE TABLE IF NOT EXISTS` なので、新しいカラムは古いビルドのセッションファイルが再 open されたとき、セッション DB の遅延マイグレーションヘルパー(`migrateDeliveredTable()` 等)経由で着地する。[db-session.md](db-session.md) を参照。

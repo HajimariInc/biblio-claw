@@ -1,10 +1,10 @@
-# NanoClaw Architecture Diagram
+# NanoClaw アーキテクチャ図
 
-## System Overview
+## システム概要
 
 ```mermaid
 flowchart TB
-  subgraph Platforms["Messaging Platforms"]
+  subgraph Platforms["メッセージングプラットフォーム"]
     P1[Discord]
     P2[Telegram]
     P3[Slack]
@@ -12,14 +12,14 @@ flowchart TB
     P5[WhatsApp / iMessage / Teams / GChat / Matrix / Webex / Email]
   end
 
-  subgraph Host["Host Process (Node)"]
+  subgraph Host["Host プロセス (Node)"]
     direction TB
     Bridge["Chat SDK Bridge<br/>(src/channels/chat-sdk-bridge.ts)"]
     Router["Router<br/>(src/router.ts)<br/>platformId + threadId -> messaging_group -> agent_group -> session"]
-    SessMgr["Session Manager<br/>(src/session-manager.ts)<br/>creates inbound.db + outbound.db"]
+    SessMgr["Session Manager<br/>(src/session-manager.ts)<br/>inbound.db + outbound.db を作る"]
     Runner["Container Runner<br/>(src/container-runner.ts)<br/>OneCLI ensureAgent + spawn"]
-    Delivery["Delivery Poller<br/>(src/delivery.ts)<br/>1s active / 60s sweep"]
-    Sweep["Host Sweep<br/>(src/host-sweep.ts)<br/>heartbeat, retry, recurrence"]
+    Delivery["Delivery Poller<br/>(src/delivery.ts)<br/>1s アクティブ / 60s sweep"]
+    Sweep["Host Sweep<br/>(src/host-sweep.ts)<br/>heartbeat, retry, 再帰"]
     Central[("Central DB<br/>data/v2.db<br/>agent_groups<br/>messaging_groups<br/>messaging_group_agents<br/>sessions<br/>pending_approvals")]
   end
 
@@ -28,18 +28,18 @@ flowchart TB
     Approvals["configureManualApproval<br/>-> pending_approvals"]
   end
 
-  subgraph Session["Per-Session Container (Docker / Apple Container)"]
+  subgraph Session["セッションごとのコンテナ (Docker / Apple Container)"]
     direction TB
     PollLoop["Poll Loop<br/>(container/agent-runner)"]
-    Provider["Agent providers<br/>(claude, opencode, mock; todo: codex)"]
-    MCP["MCP Tools<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>schedule_task, create_agent,<br/>install_packages, add_mcp_server"]
-    Skills["Container Skills<br/>(container/skills/)"]
-    InDB[("inbound.db<br/>host writes<br/>even seq<br/>messages_in<br/>destinations<br/>processing_ack")]
-    OutDB[("outbound.db<br/>container writes<br/>odd seq<br/>messages_out<br/>heartbeat file")]
+    Provider["Agent provider<br/>(claude, opencode, mock; todo: codex)"]
+    MCP["MCP ツール<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>schedule_task, create_agent,<br/>install_packages, add_mcp_server"]
+    Skills["コンテナ skill<br/>(container/skills/)"]
+    InDB[("inbound.db<br/>host が書く<br/>偶数 seq<br/>messages_in<br/>destinations<br/>processing_ack")]
+    OutDB[("outbound.db<br/>コンテナが書く<br/>奇数 seq<br/>messages_out<br/>heartbeat ファイル")]
   end
 
-  subgraph Groups["Agent Group Filesystem (groups/*)"]
-    Folder["CLAUDE.md<br/>memory<br/>per-group skills<br/>container_config"]
+  subgraph Groups["Agent group ファイルシステム (groups/*)"]
+    Folder["CLAUDE.md<br/>memory<br/>group ごとの skill<br/>container_config"]
   end
 
   P1 & P2 & P3 & P4 & P5 --> Bridge
@@ -68,63 +68,63 @@ flowchart TB
   Provider -.API calls.-> Vault
 ```
 
-## Message Flow (inbound -> agent -> outbound)
+## メッセージフロー (inbound -> agent -> outbound)
 
 ```mermaid
 sequenceDiagram
-  participant P as Platform (e.g. Telegram)
+  participant P as プラットフォーム (例: Telegram)
   participant B as Chat SDK Bridge
   participant R as Router
   participant SM as Session Manager
   participant IDB as inbound.db
-  participant C as Container (agent-runner)
+  participant C as コンテナ (agent-runner)
   participant ODB as outbound.db
   participant D as Delivery Poller
 
-  P->>B: new message
+  P->>B: 新しいメッセージ
   B->>R: routeInbound(platformId, threadId, msg)
-  R->>R: resolve messaging_group -> agent_group -> session<br/>(agent-shared | shared | per-thread)
-  R->>SM: ensure session + DBs exist
-  R->>IDB: INSERT messages_in (even seq)
-  R->>C: wake container (docker run / already running)
-  C->>IDB: poll messages_in
-  C->>C: format xml, stream to selected provider
-  C->>ODB: INSERT messages_out (odd seq)<br/>parse <message to="name"> blocks
-  D->>ODB: 1s poll (active) / 60s (sweep)
-  D->>D: hasDestination() re-validate
-  D->>B: deliver via adapter
-  B->>P: send message / edit / react / file / card
+  R->>R: messaging_group -> agent_group -> session を解決<br/>(agent-shared | shared | per-thread)
+  R->>SM: セッション + DB の存在を保証
+  R->>IDB: INSERT messages_in (偶数 seq)
+  R->>C: コンテナを起こす (docker run / 既に走っている)
+  C->>IDB: messages_in を poll
+  C->>C: xml をフォーマット、選択された provider にストリーム
+  C->>ODB: INSERT messages_out (奇数 seq)<br/><message to="name"> ブロックをパース
+  D->>ODB: 1s poll (アクティブ) / 60s (sweep)
+  D->>D: hasDestination() で再検証
+  D->>B: adapter 経由で配信
+  B->>P: メッセージ送信 / edit / react / file / card
 ```
 
-## Named Destinations + Agent-to-Agent
+## Named destination と agent-to-agent
 
 ```mermaid
 flowchart LR
-  subgraph AgentA["Agent Group A (main)"]
+  subgraph AgentA["Agent group A (main)"]
     A_out["output:<br/>&lt;message to='slack'&gt;...&lt;/message&gt;<br/>&lt;message to='browser-agent'&gt;...&lt;/message&gt;<br/>&lt;internal&gt;scratchpad&lt;/internal&gt;"]
   end
 
-  subgraph Dests["inbound.db.destinations (per agent)"]
+  subgraph Dests["inbound.db.destinations (agent ごと)"]
     D1["slack -> messaging_group 42"]
-    D2["browser-agent -> agent_group 7<br/>(bidirectional row)"]
+    D2["browser-agent -> agent_group 7<br/>(双方向行)"]
     D3["github -> messaging_group 13"]
   end
 
-  subgraph AgentB["Agent Group B (browser sub-agent)"]
-    B_session["own inbound.db / outbound.db<br/>inherited destination back to A"]
+  subgraph AgentB["Agent group B (browser sub-agent)"]
+    B_session["自身の inbound.db / outbound.db<br/>A への戻り destination を継承"]
   end
 
   Slack[Slack channel]
-  GitHub[GitHub PR thread]
+  GitHub[GitHub PR スレッド]
 
-  A_out -->|parse + lookup| Dests
-  D1 -->|deliver| Slack
-  D2 -->|write to B's inbound.db| B_session
-  D3 -->|deliver| GitHub
-  B_session -.reply via 'parent'.-> Dests
+  A_out -->|パース + ルックアップ| Dests
+  D1 -->|配信| Slack
+  D2 -->|B の inbound.db に書く| B_session
+  D3 -->|配信| GitHub
+  B_session -.'parent' 経由で返信.-> Dests
 ```
 
-## Entity Model + Isolation Levels
+## エンティティモデル + 分離レベル
 
 ```mermaid
 erDiagram
@@ -185,31 +185,31 @@ erDiagram
   }
 ```
 
-### Isolation Level Cheatsheet
+### 分離レベル早見表
 
-| Level | `session_mode` | What's shared | Example |
+| レベル | `session_mode` | 何が共有されるか | 例 |
 |---|---|---|---|
-| 1. Shared session | `agent-shared` | Workspace + memory + conversation | Slack + GitHub webhooks in one thread |
-| 2. Same agent, separate sessions | `shared` / `per-thread` | Workspace + memory only | One agent across 3 Telegram chats |
-| 3. Separate agent groups | (different `agent_group_id`) | Nothing | Personal vs work channels |
+| 1. 共有セッション | `agent-shared` | Workspace + memory + 会話 | Slack + GitHub webhook を 1 スレッドで |
+| 2. 同じ agent、別セッション | `shared` / `per-thread` | Workspace + memory のみ | 1 agent を 3 つの Telegram chat 越しに |
+| 3. 別 agent group | (異なる `agent_group_id`) | 何も共有しない | 個人 channel vs 仕事 channel |
 
-## Two-DB Split (why)
+## Two-DB 分割 (理由)
 
 ```mermaid
 flowchart LR
-  subgraph Mount["/workspace (volume mounted into container)"]
+  subgraph Mount["/workspace (コンテナにマウントされたボリューム)"]
     In[("inbound.db")]
     Out[("outbound.db")]
-    HB["/.heartbeat (file touch)"]
+    HB["/.heartbeat (ファイルタッチ)"]
   end
 
-  Host[Host process] -->|"writes only<br/>(even seq)"| In
-  Host -->|reads| Out
-  Container[agent-runner] -->|reads| In
-  Container -->|"writes only<br/>(odd seq)"| Out
-  Container -->|touch every poll| HB
-  HostSweep[Host sweep] -->|stat mtime| HB
-  HostSweep -->|reads processing_ack| In
+  Host[Host プロセス] -->|"書き込みのみ<br/>(偶数 seq)"| In
+  Host -->|読み込み| Out
+  Container[agent-runner] -->|読み込み| In
+  Container -->|"書き込みのみ<br/>(奇数 seq)"| Out
+  Container -->|poll ごとに touch| HB
+  HostSweep[Host sweep] -->|mtime を stat| HB
+  HostSweep -->|processing_ack を読む| In
 
-  note1["Each file has exactly ONE writer.<br/>Eliminates SQLite cross-process write contention.<br/>Collision-free seq numbering."]
+  note1["各ファイルに writer は厳密に 1 つ。<br/>SQLite のクロスプロセス書き込み競合を排除。<br/>衝突なしの seq 番号付け。"]
 ```

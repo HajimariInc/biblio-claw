@@ -1,254 +1,254 @@
-# NanoClaw Architecture (Draft)
+# NanoClaw アーキテクチャ (Draft)
 
-## Core Idea
+## 中核アイデア
 
-Each agent session has a mounted SQLite DB. The DB is the one and only IO mechanism between host and container. No IPC files, no stdin piping. Two tables: messages_in (host → agent-runner) and messages_out (agent-runner → host). Everything is a message.
+各 agent セッションはマウントされた SQLite DB を持つ。DB が host とコンテナの間の唯一の IO 機構である。IPC ファイル無し、stdin パイプ無し。2 つのテーブル:messages_in(host → agent-runner)と messages_out(agent-runner → host)。すべてはメッセージである。
 
-## Two-Level DB
+## 2 レベル DB
 
-**Central DB (host process):**
-- Agent groups, conversations, routing tables
-- Maps platform IDs → agent groups → sessions
-- Channel adapters don't touch this directly — the host does the lookup
+**Central DB(host プロセス):**
+- Agent groups、会話、ルーティングテーブル
+- プラットフォーム ID → agent groups → セッションをマップ
+- Channel adapter は直接触らない — host がルックアップする
 
-**Per-session DB (mounted into container):**
-- messages_in (written by host, read by agent-runner)
-- messages_out (written by agent-runner, read by host)
-- Everything is a message: chat, tasks, webhooks, system actions, agent-to-agent — all use these two tables
-- One DB per session, not per agent group
+**セッションごとの DB(コンテナにマウント):**
+- messages_in(host が書き、agent-runner が読む)
+- messages_out(agent-runner が書き、host が読む)
+- すべてはメッセージ:chat、tasks、webhook、システムアクション、agent-to-agent — すべてこの 2 テーブルを使う
+- セッションごとに 1 つの DB、agent group ごとではない
 
-## Agent Groups vs Sessions
+## Agent groups vs セッション
 
-An agent group has its own filesystem — folder, CLAUDE.md, skills, container config. Multiple sessions can share the same agent group (same filesystem, same skills) but each session gets its own DB mounted at a known path. Each session = a separate container with the same agent group's filesystem but a different session DB.
+Agent group は独自のファイルシステムを持つ — フォルダ、CLAUDE.md、skill、コンテナ設定。複数セッションが同じ agent group を共有できる(同じファイルシステム、同じ skill)が、各セッションは既知のパスに自身の DB をマウントされて持つ。各セッション = 同じ agent group のファイルシステムを持つが異なるセッション DB を持つ別コンテナ。
 
-## Message Flow
+## メッセージフロー
 
 ```
-Platform event
-  → Channel adapter (trigger check, ID extraction)
-  → Returns: { platformChannelId, platformThreadId, triggered }
-  → Host maps platformChannelId + platformThreadId → agent group + session
-  → Host writes message to session's DB
-  → Host calls wakeUpAgent(session)
-  → Container spins up (or is already running)
-  → Agent-runner polls its session DB, finds new messages
-  → Agent-runner processes with Claude
-  → Agent-runner writes response to session DB
-  → Host polls active session DBs for responses
-  → Host reads response, looks up conversation, delivers through channel adapter
+プラットフォームイベント
+  → Channel adapter (トリガーチェック、ID 抽出)
+  → 返す: { platformChannelId, platformThreadId, triggered }
+  → Host が platformChannelId + platformThreadId → agent group + session をマップ
+  → Host がセッション DB にメッセージを書く
+  → Host が wakeUpAgent(session) を呼ぶ
+  → コンテナが立ち上がる (またはすでに走っている)
+  → Agent-runner が自身のセッション DB を poll、新メッセージを見つける
+  → Agent-runner が Claude で処理
+  → Agent-runner がセッション DB にレスポンスを書く
+  → Host がアクティブセッション DB をレスポンスのため poll
+  → Host がレスポンスを読み、会話をルックアップ、channel adapter 経由で配信
 ```
 
-## Channel Adapters
+## Channel Adapter
 
-Channel adapters are responsible for:
-1. Receiving platform events (webhooks, polling, websockets — platform-specific)
-2. **Filtering**: deciding which messages to forward to the host for processing. This can be stateless (regex trigger match) or stateful (e.g., "was the bot mentioned in this thread at some point? If so, forward all subsequent messages"). The adapter receives a stream of unfiltered platform messages and decides which ones to pass on. How it decides is an implementation detail — NanoClaw doesn't know or care.
-3. Extracting and standardizing two IDs:
-   - **Platform channel ID** — identifies the conversation (WhatsApp group, Slack channel, email thread)
-   - **Platform thread ID** — optional sub-context (Slack thread, GitHub PR comment thread)
-4. Outbound delivery — sending responses back to the platform
+Channel adapter は次に責任を持つ:
+1. プラットフォームイベントを受信(webhook、polling、websocket — プラットフォーム固有)
+2. **フィルタリング**: 処理のため host にどのメッセージを forward するかを決定する。これはステートレス(regex トリガーマッチ)またはステートフル(例:「ある時点で bot がこのスレッドで @mention されたか? その場合、以降の全メッセージを forward」)。Adapter はフィルタされていないプラットフォームメッセージのストリームを受け、どれを通すか決める。どう決めるかは実装詳細 — NanoClaw は知らないし気にしない。
+3. 2 つの ID を抽出・標準化:
+   - **プラットフォーム channel ID** — 会話を識別する(WhatsApp group、Slack channel、email thread)
+   - **プラットフォーム thread ID** — オプションのサブコンテキスト(Slack thread、GitHub PR コメント thread)
+4. Outbound 配信 — レスポンスをプラットフォームに送り返す
 
-The channel adapter does NOT know about agent group IDs or session IDs. It returns platform-level identifiers. The host maps those to the entity model.
+Channel adapter は agent group ID やセッション ID を知らない。プラットフォームレベルの identifier を返す。Host がそれをエンティティモデルにマップする。
 
-The two-level ID scheme (channel ID + thread ID) gives flexibility:
-- Want every Slack thread to be a separate session? Return unique thread IDs.
-- Want all messages in a Slack channel to share a session? Return the same thread ID (or null).
-- This is configured per-channel, not globally.
+2 レベルの ID スキーム(channel ID + thread ID)は柔軟性を与える:
+- 各 Slack thread を別セッションにしたい? ユニークな thread ID を返す。
+- Slack channel の全メッセージにセッションを共有させたい? 同じ thread ID(または null)を返す。
+- これは channel ごとに設定、グローバルではない。
 
-### Channel Adapter Configuration
+### Channel Adapter 設定
 
-Adapters are stateless — they receive config from the host at setup time, not from the DB directly.
+Adapter はステートレス — DB から直接ではなく、セットアップ時に host から設定を受ける。
 
-**What lives in code (per channel type, doesn't change at runtime):**
-- Auto-registration behavior (enabled/disabled, how it works)
-- Sender allowlist rules
-- Whether allowlisted senders can auto-register groups
-- Platform-specific connection and message handling
+**コードに住むもの(channel タイプごと、ランタイムで変わらない):**
+- 自動登録挙動(有効 / 無効、動作方法)
+- 送信者 allowlist ルール
+- Allowlist された送信者が group を自動登録できるか
+- プラットフォーム固有の接続とメッセージ処理
 
-These are decisions made when setting up the channel adapter. Change them = change the code.
+これらは channel adapter をセットアップするとき行う判断。変更 = コード変更。
 
-**What lives in the DB (per group, varies group to group):**
-- Which agent group handles it
-- Trigger / filter rules (regex, @mention-only, exclude certain senders, etc.)
-- Response scope (respond to all messages vs only triggered/allowlisted)
-- Session mode (shared vs per-thread)
+**DB に住むもの(group ごと、group 間で変わる):**
+- どの agent group が扱うか
+- トリガー / フィルタルール(regex、@mention のみ、特定送信者除外 等)
+- レスポンススコープ(全メッセージに応答 vs トリガー / allowlist のみ)
+- セッションモード(shared vs per-thread)
 
-The host reads per-group config from the DB and passes it to the adapter at setup. If config changes at runtime (admin agent registers a new group, changes a trigger), the host calls the adapter's update method.
+Host が DB から group ごとの設定を読み、セットアップ時に adapter に渡す。ランタイムで設定が変わったら(admin agent が新 group を登録、トリガーを変更)、host が adapter の update メソッドを呼ぶ。
 
-### Auto-Registration
+### 自動登録
 
-When the adapter forwards a message from an unknown group, the host needs to decide whether to create the group and a session for it.
+Adapter が未知 group からのメッセージを forward するとき、host はその group とセッションを作るか決める必要がある。
 
-**The adapter controls whether to forward unknown messages** — based on its code-level auto-registration rules (sender allowlist, group-add detection, etc.). If the adapter forwards it, the host creates the group + session.
+**Adapter が未知メッセージを forward するか制御する** — コードレベルの自動登録ルール(送信者 allowlist、group-add 検知 等)に基づく。Adapter が forward すれば、host が group + session を作る。
 
-**Session creation for known groups:**
-- Shared session mode: host finds the existing session or creates one if it's the first message
-- Per-thread session mode: host looks up by threadId. If no session exists for this thread, auto-creates one with the same agent group
+**既知 group 用のセッション作成:**
+- Shared セッションモード:host が既存セッションを見つけるか、最初のメッセージなら作る
+- Per-thread セッションモード:host が threadId でルックアップ。このスレッド用セッションが無ければ、同じ agent group で自動作成
 
-**The code-level rules are channel-specific:**
-- WhatsApp: if an allowlisted number adds the bot to a group → auto-register. If an unknown number DMs → depends on the adapter's configuration.
-- Email: if the sender is known → auto-register the thread. If unknown → drop.
-- Slack: if someone @mentions the bot in a new channel → adapter decides whether to forward based on its rules.
+**コードレベルのルールは channel 固有:**
+- WhatsApp:allowlist の番号が bot を group に追加 → 自動登録。未知の番号が DM → adapter の設定による。
+- Email:送信者が既知 → スレッドを自動登録。未知 → drop。
+- Slack:誰かが新 channel で bot を @mention → adapter がルールに基づいて forward するか決める。
 
-No `channel_configs` table — channel-type-level behavior is baked into the adapter code.
+`channel_configs` テーブル無し — channel タイプレベルの挙動は adapter コードに焼き込まれる。
 
-### Chat SDK Integration
+### Chat SDK 統合
 
-Chat SDK adapters are wrapped per-channel:
-- Each Chat SDK adapter gets its own Chat instance
-- Concurrency mode is configured per-channel (concurrent for chat, queue for tasks, debounce for webhooks)
-- A bridge wraps the Chat instance + adapter to conform to NanoClaw's standard channel interface
-- Chat SDK handles: webhook parsing, dedup, message history, platform API calls, rich content delivery
-- NanoClaw handles: routing, agent lifecycle, session management
+Chat SDK adapter は channel ごとにラップされる:
+- 各 Chat SDK adapter は独自の Chat インスタンスを持つ
+- 並行モードは channel ごとに設定(chat には concurrent、tasks には queue、webhook には debounce)
+- ブリッジが Chat インスタンス + adapter をラップして NanoClaw の標準 channel インターフェースに準拠させる
+- Chat SDK が扱う:webhook パース、dedup、メッセージ履歴、プラットフォーム API 呼び出し、リッチコンテンツ配信
+- NanoClaw が扱う:ルーティング、agent ライフサイクル、セッション管理
 
-**Chat SDK's subscription model:**
+**Chat SDK のサブスクリプションモデル:**
 
-Chat SDK has its own thread-level subscription concept (distinct from NanoClaw's channel-level registration):
-- `onNewMention` / `onNewMessage(regex)` — fires on first contact (e.g., @mention in a Slack thread)
-- `thread.subscribe()` — opts into all future messages in that thread
-- `onSubscribedMessage` — fires for all messages in subscribed threads
+Chat SDK は独自のスレッドレベルサブスクリプション概念を持つ(NanoClaw の channel レベル登録と区別される):
+- `onNewMention` / `onNewMessage(regex)` — 最初の接触時に発火(例:Slack thread での @mention)
+- `thread.subscribe()` — その thread の今後のメッセージすべてに opt-in
+- `onSubscribedMessage` — subscribe された thread の全メッセージで発火
 
-This is sub-channel granularity. NanoClaw registers at the channel level ("listen to this Discord channel"). Chat SDK subscribes at the thread level ("track this specific Slack thread"). The bridge lets Chat SDK manage its own subscriptions internally — NanoClaw doesn't interfere with or replicate this.
+これはサブ channel 粒度。NanoClaw は channel レベルで登録する(「この Discord channel を listen」)。Chat SDK は thread レベルで subscribe する(「この特定の Slack thread を追跡」)。ブリッジは Chat SDK が内部で自身の subscription を管理させる — NanoClaw はこれを干渉も複製もしない。
 
-**Platform capability differences:**
+**プラットフォーム機能差:**
 
-Capabilities vary significantly across adapters (see [Chat SDK adapter docs](https://chat-sdk.dev/docs/adapters)):
-- **Slack**: Full rich content (Block Kit cards, modals, streaming, reactions, ephemeral messages)
-- **Discord**: Embeds, buttons, streaming via post+edit
-- **WhatsApp (Cloud API)**: DMs only, interactive reply buttons, no streaming, no reactions
-- **GitHub/Linear**: Markdown comments, no interactive elements
-- **Telegram**: Inline keyboard buttons, streaming via post+edit
+機能は adapter 間で大きく異なる([Chat SDK adapter ドキュメント](https://chat-sdk.dev/docs/adapters) 参照):
+- **Slack**: フルリッチコンテンツ(Block Kit カード、modal、ストリーミング、リアクション、ephemeral メッセージ)
+- **Discord**: Embed、ボタン、post+edit によるストリーミング
+- **WhatsApp (Cloud API)**: DM のみ、対話的返信ボタン、ストリーミング無し、リアクション無し
+- **GitHub/Linear**: Markdown コメント、対話的要素無し
+- **Telegram**: インラインキーボードボタン、post+edit によるストリーミング
 
-The host/bridge handles graceful degradation — if an agent posts a card on a platform that doesn't support cards, it falls back to text.
+Host / ブリッジが gracefully に degradation を扱う — エージェントがカードをサポートしないプラットフォームにカードを post すると、テキストにフォールバックする。
 
-Non-Chat-SDK channels (WhatsApp via Baileys, Gmail, custom integrations) implement the NanoClaw channel interface directly — no bridge, no Chat SDK types.
+非 Chat-SDK channel(Baileys 経由の WhatsApp、Gmail、カスタム統合)は NanoClaw channel インターフェースを直接実装する — ブリッジ無し、Chat SDK 型無し。
 
-## Container Lifecycle
+## コンテナライフサイクル
 
-The host is an orchestrator:
-1. **Spawn** — when wakeUpAgent is called and no container exists for the session
-2. **Idle kill** — when a container has no unprocessed messages for some timeout period
-3. **Limits** — MAX_CONCURRENT_CONTAINERS caps active containers
+Host はオーケストレータ:
+1. **Spawn** — wakeUpAgent が呼ばれてセッション用コンテナが無いとき
+2. **Idle kill** — コンテナがある期間未処理メッセージを持たないとき
+3. **Limits** — MAX_CONCURRENT_CONTAINERS がアクティブコンテナを cap する
 
-When a container spins up, the agent-runner immediately starts polling its session DB. Messages are already there waiting.
+コンテナが立ち上がると、agent-runner はすぐに自身のセッション DB を polling し始める。メッセージは既にそこで待っている。
 
-## Media Handling
+## メディア処理
 
 ### Inbound
 
-Media is not downloaded by the host. Instead:
-- Messages include download URLs (signed URLs where possible)
-- Agent-runner downloads and processes media inside the container
-- For channels where signed URLs don't work (e.g., WhatsApp with buffered streams), the channel adapter downloads the media and serves it via a local URL/server that the container can access
+メディアは host がダウンロードしない。代わりに:
+- メッセージはダウンロード URL を含む(可能なら signed URL)
+- Agent-runner がコンテナ内でメディアをダウンロード・処理
+- Signed URL が動かない channel(例:バッファストリームの WhatsApp)では、channel adapter がメディアをダウンロードして、コンテナがアクセスできるローカル URL / server 経由で提供
 
-**Native content blocks (provider-dependent):**
+**ネイティブコンテンツブロック(provider 依存):**
 
-The agent-runner detects file types and passes supported types as native content blocks where the provider supports it:
+Agent-runner はファイルタイプを検知し、provider がサポートしていればサポートタイプをネイティブコンテンツブロックとして渡す:
 
-| Type | Claude | Codex | OpenCode |
+| タイプ | Claude | Codex | OpenCode |
 |------|--------|-------|----------|
-| Images (JPEG, PNG, GIF, WebP) | Native image content block | Save to disk, reference in prompt | Save to disk, reference in prompt |
-| PDFs | Native document content block | Save to disk | Save to disk |
-| Audio | Native audio content block | Save to disk | Save to disk |
-| Other files (code, data, video, archives) | Save to disk | Save to disk | Save to disk |
+| 画像(JPEG、PNG、GIF、WebP) | ネイティブ画像コンテンツブロック | ディスク保存、プロンプトで参照 | ディスク保存、プロンプトで参照 |
+| PDF | ネイティブドキュメントコンテンツブロック | ディスク保存 | ディスク保存 |
+| 音声 | ネイティブ音声コンテンツブロック | ディスク保存 | ディスク保存 |
+| その他のファイル(コード、データ、動画、アーカイブ) | ディスク保存 | ディスク保存 | ディスク保存 |
 
-"Save to disk" means downloaded to `/workspace/downloads/{messageId}/` and referenced in the prompt text as an available file path. The agent can use tools (Read, Bash) to access it.
+「ディスク保存」 = `/workspace/downloads/{messageId}/` にダウンロードし、利用可能なファイルパスとしてプロンプトテキストで参照される。エージェントはツール(Read、Bash)を使ってアクセスできる。
 
-The agent-runner builds the prompt differently per provider. For Claude, it constructs multi-part `MessageParam` content with image/document blocks. For Codex/OpenCode, everything is text with file path references.
+Agent-runner は provider ごとにプロンプトを違う方法で構築する。Claude では、image/document ブロック付きの複数パート `MessageParam` コンテンツを構築する。Codex/OpenCode では、すべてファイルパス参照付きのテキスト。
 
 ### Outbound
 
-Outbound file delivery is tool-based. The agent calls a tool (e.g., `send_file`) with a file path. The agent-runner moves the file to the outbox and writes the messages_out row.
+Outbound ファイル配信はツールベース。エージェントがファイルパス付きでツール(例:`send_file`)を呼ぶ。Agent-runner がファイルを outbox に移し、messages_out 行を書く。
 
 ```
 /workspace/
   outbox/
-    {message_id}/        ← one dir per messages_out row
+    {message_id}/        ← messages_out 行ごとに 1 ディレクトリ
       chart.png
       report.pdf
 ```
 
-messages_out content references filenames only:
+messages_out のコンテンツはファイル名のみ参照する:
 
 ```json
 { "text": "Here's the chart", "files": ["chart.png", "report.pdf"] }
 ```
 
-No paths in the DB — the convention is the contract. The host reads files from `outbox/{message_id}/` in the mounted session folder and delivers them via the adapter (Chat SDK `FileUpload` with buffer data, or platform-specific upload for native channels). Host cleans up the outbox directory after successful delivery.
+DB にはパス無し — 慣習が契約。Host はマウントされたセッションフォルダの `outbox/{message_id}/` からファイルを読み、adapter 経由で配信する(Chat SDK の `FileUpload` にバッファデータ、またはネイティブ channel 用のプラットフォーム固有アップロード)。Host は配信成功後に outbox ディレクトリをクリーンアップする。
 
-Outbound files use a dedicated `send_file` MCP tool (separate from `send_message`). See [agent-runner-details.md](agent-runner-details.md) for the tool interface.
+Outbound ファイルは専用の `send_file` MCP ツールを使う(`send_message` とは別)。ツールインターフェースは [agent-runner-details.md](agent-runner-details.md) を参照。
 
-### Message Deduplication
+### メッセージ重複排除
 
-Dedup is the channel adapter's responsibility. Chat SDK handles this internally. Native adapters track platform message IDs as needed. The host does not deduplicate — if the adapter forwards it, the host writes it.
+Dedup は channel adapter の責任。Chat SDK は内部で扱う。ネイティブ adapter は必要に応じてプラットフォームメッセージ ID を追跡する。Host は重複排除しない — adapter が forward すれば host は書く。
 
-## Session DB Schema
+## セッション DB スキーマ
 
-Two tables. JSON blobs for content — schema-free, format varies by `kind`.
+2 テーブル。Content には JSON blob — スキーマフリー、フォーマットは `kind` による。
 
 ```sql
--- Host writes, agent-runner reads
+-- Host が書き、agent-runner が読む
 CREATE TABLE messages_in (
   id             TEXT PRIMARY KEY,
   kind           TEXT NOT NULL,      -- 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system'
   timestamp      TEXT NOT NULL,
   status         TEXT DEFAULT 'pending',  -- 'pending' | 'processing' | 'completed' | 'failed'
-  status_changed TEXT,               -- ISO timestamp of last status change
-  process_after  TEXT,               -- ISO timestamp. NULL = process immediately.
-  recurrence     TEXT,               -- cron expression. NULL = one-shot.
-  tries          INTEGER DEFAULT 0,  -- number of processing attempts
+  status_changed TEXT,               -- 最後の status 変更の ISO タイムスタンプ
+  process_after  TEXT,               -- ISO タイムスタンプ。NULL = 即時処理。
+  recurrence     TEXT,               -- cron 表現。NULL = one-shot。
+  tries          INTEGER DEFAULT 0,  -- 処理試行回数
 
-  -- routing (agent-runner copies to messages_out; agent never sees these)
+  -- ルーティング (agent-runner が messages_out にコピー;エージェントは決して見ない)
   platform_id    TEXT,
   channel_type   TEXT,
   thread_id      TEXT,
 
-  -- payload (structure depends on kind)
+  -- ペイロード (構造は kind に依存)
   content        TEXT NOT NULL        -- JSON blob
 );
 
--- Agent-runner writes, host reads
+-- Agent-runner が書き、host が読む
 CREATE TABLE messages_out (
   id             TEXT PRIMARY KEY,
-  in_reply_to    TEXT,               -- references messages_in.id (optional)
+  in_reply_to    TEXT,               -- messages_in.id を参照(オプション)
   timestamp      TEXT NOT NULL,
   delivered      INTEGER DEFAULT 0,
-  deliver_after  TEXT,               -- ISO timestamp. NULL = deliver immediately.
-  recurrence     TEXT,               -- cron expression. NULL = one-shot.
+  deliver_after  TEXT,               -- ISO タイムスタンプ。NULL = 即時配信。
+  recurrence     TEXT,               -- cron 表現。NULL = one-shot。
 
-  -- routing (default: copied from messages_in by agent-runner)
+  -- ルーティング (デフォルト: agent-runner が messages_in からコピー)
   kind           TEXT NOT NULL,      -- 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system'
   platform_id    TEXT,
   channel_type   TEXT,
   thread_id      TEXT,
 
-  -- payload (format matches kind)
+  -- ペイロード (フォーマットは kind に合う)
   content        TEXT NOT NULL        -- JSON blob
 );
 
 ```
 
-### Scheduling
+### スケジューリング
 
-One-shot and recurring tasks use the same tables — no separate scheduler.
+ワンショットと再帰タスクは同じテーブルを使う — 別の scheduler 無し。
 
-**One-shot:** `process_after` (inbound) or `deliver_after` (outbound) with `recurrence = NULL`.
+**ワンショット:** `process_after`(inbound)または `deliver_after`(outbound)を `recurrence = NULL` 付きで。
 
-**Recurring:** Same, plus a `recurrence` cron expression. After the host marks a row as handled/delivered, if `recurrence` is set, it inserts a new row with `process_after`/`deliver_after` advanced to the next cron occurrence. Next time is computed from the scheduled time (not wall clock) to prevent drift.
+**再帰:** 同じ、加えて `recurrence` cron 表現。Host が行を handled / delivered とマークした後、`recurrence` が設定されていれば、次の cron 発生時に `process_after` / `deliver_after` を進めた新しい行を insert する。次の時刻はスケジュール時刻から計算される(wall clock ではない)— ドリフトを防ぐため。
 
-**Host sweep** (every ~60s across all session DBs):
-- `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())` → wake agent
-- `messages_in WHERE status = 'processing' AND status_changed < (now - stale_threshold)` → stale detection, increment tries, reset to pending with backoff
-- `messages_out WHERE delivered = 0 AND (deliver_after IS NULL OR deliver_after <= now())` → deliver
-- After completing/delivering a row with `recurrence`, insert next occurrence
+**Host sweep**(全セッション DB に対して 60s ごと):
+- `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())` → エージェントを起こす
+- `messages_in WHERE status = 'processing' AND status_changed < (now - stale_threshold)` → stale 検知、tries インクリメント、バックオフ付きで pending にリセット
+- `messages_out WHERE delivered = 0 AND (deliver_after IS NULL OR deliver_after <= now())` → 配信
+- `recurrence` 付きの行を完了 / 配信した後、次の発生を insert
 
-**Active container poll** (~1s) checks the same conditions but only for sessions with running containers.
+**アクティブコンテナ poll**(~1s)は同じ条件をチェックするが、走っているコンテナを持つセッションのみ。
 
-**Agent-runner creates schedules** by writing messages_in (to itself) or messages_out (reminders/notifications) with `process_after` and optionally `recurrence`.
+**Agent-runner は schedule を作る** — messages_in(自身に)または messages_out(リマインダー / 通知)を `process_after` とオプションで `recurrence` 付きで書くことで。
 
-### messages_in content by kind
+### kind ごとの messages_in コンテンツ
 
-**`chat`** — simple NanoClaw format. Any channel can produce this.
+**`chat`** — シンプルな NanoClaw フォーマット。任意の channel が生成できる。
 ```json
 {
   "sender": "John",
@@ -259,33 +259,33 @@ One-shot and recurring tasks use the same tables — no separate scheduler.
 }
 ```
 
-**`chat-sdk`** — full Chat SDK `SerializedMessage`, passed through from bridge adapter. Includes `author`, `text`, `formatted` (mdast AST), `attachments`, `isMention`, `links`, `metadata`.
+**`chat-sdk`** — フル Chat SDK `SerializedMessage`、ブリッジ adapter から passthrough。`author`、`text`、`formatted`(mdast AST)、`attachments`、`isMention`、`links`、`metadata` を含む。
 
-**`task`** — scheduled task firing.
+**`task`** — スケジュール済タスクが発火。
 ```json
 { "prompt": "Review open PRs", "script": "scripts/review.sh" }
 ```
 
-**`webhook`** — raw webhook payload.
+**`webhook`** — 生の webhook ペイロード。
 ```json
 { "source": "github", "event": "pull_request", "payload": { ... } }
 ```
 
-**`system`** — host action result (response to a system action the agent requested).
+**`system`** — host アクション結果(エージェントが要求したシステムアクションへのレスポンス)。
 ```json
 { "action": "register_group", "status": "success", "result": { "agent_group_id": "ag-456" } }
 ```
 
-### messages_out content by kind
+### kind ごとの messages_out コンテンツ
 
-Output `kind` determines the format and delivery adapter. Default: agent-runner copies `kind` and routing fields from the messages_in row it's responding to.
+出力 `kind` がフォーマットと配信 adapter を決める。デフォルト:agent-runner が応答する messages_in 行から `kind` とルーティングフィールドをコピー。
 
-**`chat`** — simple NanoClaw format. NanoClaw channel delivers via `sendMessage(text)`.
+**`chat`** — シンプルな NanoClaw フォーマット。NanoClaw channel が `sendMessage(text)` で配信。
 ```json
 { "text": "LGTM, merging now" }
 ```
 
-**`chat-sdk`** — Chat SDK `AdapterPostableMessage`. Bridge adapter delivers via `thread.post()`. Can be markdown, card, or raw — adapter handles platform conversion.
+**`chat-sdk`** — Chat SDK `AdapterPostableMessage`。ブリッジ adapter が `thread.post()` で配信。markdown、カード、または raw — adapter がプラットフォーム変換を扱う。
 ```json
 { "markdown": "## Review\n**LGTM**", "attachments": [...] }
 ```
@@ -293,244 +293,244 @@ Output `kind` determines the format and delivery adapter. Default: agent-runner 
 { "card": { "type": "card", "title": "Review", "children": [...] }, "fallbackText": "..." }
 ```
 
-**`task`** — task result. Host logs and optionally notifies.
+**`task`** — タスク結果。Host がログ、オプションで通知。
 ```json
 { "result": "3 PRs reviewed", "status": "success" }
 ```
 
-**`webhook`** — webhook response. Host sends HTTP response or notifies.
+**`webhook`** — webhook レスポンス。Host が HTTP レスポンスを送る、または通知。
 ```json
 { "response": { "status": 200, "body": { ... } } }
 ```
 
-**`system`** — host action request (register group, reset session, etc.). Host reads, validates permissions, executes, writes result back as a `system` messages_in row.
+**`system`** — host アクションリクエスト(group 登録、セッションリセット 等)。Host が読み、権限を検証し、実行し、結果を `system` messages_in 行として書き戻す。
 ```json
 { "action": "reset_session", "payload": { "session_id": "sess-123" } }
 ```
 
-### Interactive Operations (Cards, Reactions, Edits)
+### 対話的操作(カード、リアクション、編集)
 
-All interactive operations flow through messages_in/out — the DB is the only IO boundary for the container. The agent uses MCP tools; the agent-runner translates tool calls into structured messages_out rows; the host delivers through the appropriate adapter method.
+すべての対話的操作は messages_in/out を通る — DB がコンテナの唯一の IO 境界。エージェントは MCP ツールを使い、agent-runner がツール呼び出しを構造化された messages_out 行に翻訳し、host が適切な adapter メソッドで配信する。
 
-**Cards with user interaction (e.g., "Ask User Question"):**
+**ユーザ対話付きカード(例:「Ask User Question」):**
 
-1. Agent calls `ask_user_question` tool with question + options
-2. Agent-runner writes messages_out with the question card
-3. Host delivers as interactive card through adapter (e.g., Slack Block Kit buttons)
-4. User clicks an option
-5. Platform sends event back to adapter → host writes messages_in with the response
-6. Agent-runner reads messages_in, matches to pending tool call, returns selection to agent as tool result
+1. エージェントが `ask_user_question` ツールを質問 + オプション付きで呼ぶ
+2. Agent-runner が質問カード付きの messages_out を書く
+3. Host が adapter 経由で対話的カードとして配信(例:Slack Block Kit ボタン)
+4. ユーザがオプションをクリック
+5. プラットフォームがイベントを adapter に送り返す → host がレスポンス付きの messages_in を書く
+6. Agent-runner が messages_in を読み、保留中ツール呼び出しにマッチし、選択をツール結果としてエージェントに返す
 
-The agent-runner holds the tool call open while waiting for the user's response in messages_in. The round-trip goes: agent → messages_out → host → platform → user clicks → platform → host → messages_in → agent-runner → agent.
+Agent-runner は messages_in でのユーザレスポンスを待つ間、ツール呼び出しを開いて保持する。Round-trip は:エージェント → messages_out → host → プラットフォーム → ユーザクリック → プラットフォーム → host → messages_in → agent-runner → エージェント。
 
-**Approvals:**
+**承認:**
 
-Two patterns, both handled at the host level:
-- **Implicit**: Agent calls a tool that requires approval. Host intercepts, sends approval card to admin, waits for response, then executes or rejects. The agent doesn't know about the approval step.
-- **Explicit**: Agent explicitly requests approval via a tool. Agent-runner writes the approval request to messages_out. Same flow as "ask user question" — response comes back through messages_in.
+2 つのパターン、両方とも host レベルで扱う:
+- **暗黙的**: エージェントが承認が必要なツールを呼ぶ。Host がインターセプトし、admin に承認カードを送り、レスポンスを待ち、実行または拒否する。エージェントは承認ステップを知らない。
+- **明示的**: エージェントが明示的にツール経由で承認を要求する。Agent-runner が承認リクエストを messages_out に書く。「ask user question」と同じフロー — レスポンスは messages_in 経由で戻る。
 
-In both cases, the approval and action execution happen on the host side, not the agent side.
+両ケースとも、承認とアクション実行は host 側で起こる、エージェント側ではない。
 
-**Approval routing:** Privilege is a user-level concept. `user_roles` records `owner` (global only — first user to pair becomes owner) and `admin` (global or scoped to a specific `agent_group_id`). When an action requires approval, `pickApprover(agentGroupId)` returns candidates in order: scoped admins for that agent group → global admins → owners (deduplicated). `pickApprovalDelivery` then takes the first candidate reachable via `ensureUserDm` (with a same-channel-kind tie-break so a Discord approval request prefers a Discord-using approver). The approval card lands in the approver's DM messaging group, not the origin chat. Delivery is resolved through the Chat SDK's `openDM` for resolution-required channels (Discord/Slack/…) or the user's handle directly for direct-addressable channels (Telegram/WhatsApp/…), and the mapping is cached in `user_dms` for subsequent requests. See `src/access.ts`, `src/user-dm.ts`.
+**承認ルーティング:** Privilege はユーザレベルの概念。`user_roles` は `owner`(グローバルのみ — 最初にペアリングしたユーザが owner になる)と `admin`(グローバル、または特定 `agent_group_id` にスコープ)を記録する。アクションが承認を要するとき、`pickApprover(agentGroupId)` は候補を順に返す:その agent group の scoped admin → グローバル admin → owner(重複排除)。`pickApprovalDelivery` が次に `ensureUserDm` 経由で最初の到達可能候補を取る(same-channel-kind タイブレーク付き、なので Discord 承認リクエストは Discord 使用 approver を優先する)。承認カードは approver の DM messaging group に届く、起点 chat ではない。配信は解決必要 channel(Discord/Slack/…)では Chat SDK の `openDM` 経由、または直接アドレス可能 channel(Telegram/WhatsApp/…)ではユーザのハンドル直接で解決され、マッピングは `user_dms` にキャッシュされる(以降のリクエスト用)。`src/access.ts`、`src/user-dm.ts` を参照。
 
-**Editing a sent message:**
+**送信済メッセージの編集:**
 
-Agent calls an `edit_message` tool with the message ID and new content. Agent-runner writes messages_out with an edit operation. Host calls `adapter.editMessage()`. Messages in the agent's context include integer IDs so the agent can reference them.
+エージェントが `edit_message` ツールをメッセージ ID と新コンテンツ付きで呼ぶ。Agent-runner が edit 操作付きの messages_out を書く。Host が `adapter.editMessage()` を呼ぶ。エージェントのコンテキスト内のメッセージは整数 ID を含むので、エージェントはそれらを参照できる。
 
-**Reactions:**
+**リアクション:**
 
-Agent calls `add_reaction` tool with message ID and emoji. Agent-runner writes messages_out with a reaction operation. Host calls `adapter.addReaction()`.
+エージェントが `add_reaction` ツールをメッセージ ID と絵文字付きで呼ぶ。Agent-runner が reaction 操作付きの messages_out を書く。Host が `adapter.addReaction()` を呼ぶ。
 
-**Operations in messages_out content:**
+**messages_out コンテンツ内の操作:**
 
 ```json
-// Normal message (default)
+// 通常のメッセージ (デフォルト)
 { "text": "LGTM" }
 
-// Interactive card
+// 対話的カード
 { "operation": "ask_question", "title": "Deploy", "question": "Approve deployment?", "options": ["Yes", "No", "Defer"] }
 
-// Edit existing message
+// 既存メッセージを編集
 { "operation": "edit", "messageId": "3", "text": "Updated: LGTM with minor comments" }
 
-// Reaction
+// リアクション
 { "operation": "reaction", "messageId": "5", "emoji": "thumbs_up" }
 ```
 
-The host reads the `operation` field (if present) and calls the right adapter method. No operation field = normal message delivery. Platform capabilities vary — the host/bridge handles graceful degradation (e.g., reaction on a platform that doesn't support it → skip or send as text).
+Host は `operation` フィールド(あれば)を読み、適切な adapter メソッドを呼ぶ。Operation フィールド無し = 通常のメッセージ配信。プラットフォーム機能は異なる — host / ブリッジが gracefully に degradation を扱う(例:リアクションをサポートしないプラットフォームでのリアクション → skip またはテキストとして送る)。
 
-### Agent-to-Agent Communication
+### Agent-to-Agent コミュニケーション
 
-Sending a message to another agent uses the same routing fields as channel delivery. The agent-runner sets `channel_type: 'agent'` and `platform_id` to the target agent group ID. Optionally, `thread_id` can target a specific session (null = find or create the default session).
+別のエージェントへのメッセージ送信は、channel 配信と同じルーティングフィールドを使う。Agent-runner が `channel_type: 'agent'` と `platform_id` をターゲット agent group ID に設定する。オプションで `thread_id` は特定セッションをターゲットにできる(null = デフォルトセッションを見つけるか作る)。
 
-From the sending agent's perspective, it's the same mechanism as sending to Slack or WhatsApp — just a messages_out row with different routing. The host reads it, checks that this agent group has permission to message the target, resolves the target session, and writes a messages_in row to that session's DB.
+送信エージェント視点から見ると、Slack や WhatsApp に送るのと同じ仕組み — 異なるルーティングを持つ messages_out 行を書くだけ。Host が読み、この agent group がターゲットにメッセージできる権限があるか確認し、ターゲットセッションを解決し、そのセッションの DB に messages_in 行を書く。
 
 ```json
-// messages_out routing fields
+// messages_out ルーティングフィールド
 { "kind": "chat", "channel_type": "agent", "platform_id": "pr-worker", "thread_id": null }
-// messages_out content
+// messages_out コンテンツ
 { "text": "Reset your session and re-review", "sender": "Supervisor", "senderId": "agent:pr-admin" }
 ```
 
-The receiving agent gets a normal chat message. It doesn't need to know the source is another agent unless that's relevant context.
+受信エージェントは通常の chat メッセージを得る。ソースが別エージェントだと知る必要はない(関連コンテキストとしてでなければ)。
 
-### Routing
+### ルーティング
 
-**Default behavior:** Agent-runner copies routing fields (`kind`, `platform_id`, `channel_type`, `thread_id`) from the messages_in row to messages_out. Response goes back where it came from.
+**デフォルト挙動:** Agent-runner がルーティングフィールド(`kind`、`platform_id`、`channel_type`、`thread_id`)を messages_in 行から messages_out にコピーする。レスポンスは来た所に戻る。
 
-**Host validation:** Before delivering, the host checks that this agent group is permitted to send to the destination. The agent-runner copies routing; the host validates.
+**Host 検証:** 配信前、host はこの agent group が destination に送る権限があるかチェック。Agent-runner がルーティングをコピーし、host が検証する。
 
-**Multi-destination pattern (customization):** An agent may need to send to a different channel than the origin (e.g., a webhook triggers a Slack notification). This is supported via custom code, not built into the core:
+**マルチデスティネーションパターン(カスタマイズ):** エージェントは起点と異なる channel に送る必要があるかも(例:webhook が Slack 通知をトリガー)。これはカスタムコード経由でサポート、コアに組み込まない:
 
-1. Add a `destinations` table to the session DB mapping logical names to routing fields
-2. Populate it from the host when setting up the session
-3. Modify the agent's prompt to list available destinations
-4. Agent chooses a destination by name; agent-runner resolves to routing fields
-5. Host validates as usual
+1. セッション DB に論理名をルーティングフィールドにマップする `destinations` テーブルを追加
+2. セッションセットアップ時に host から populate
+3. 利用可能 destination を list するようエージェントのプロンプトを修正
+4. エージェントが名前で destination を選ぶ;agent-runner がルーティングフィールドに解決
+5. Host は通常通り検証
 
-This is documented as a pattern, not a built-in feature.
+これはパターンとしてドキュメント化される、組み込み機能ではない。
 
-## Core Properties
-- Container isolation via filesystem mounts
-- Credential proxy (OneCLI)
-- Per-agent-group workspace (folder, CLAUDE.md, skills)
-- Polling-based (not event-driven)
-- Per-agent-group agent-runner recompilation on container startup (agent can modify its own source, request rebuild/restart, changes persist across teardowns)
-- Host ↔ container IO through mounted session DBs (`messages_in` / `messages_out`) — no stdin piping, no IPC files
-- Agent commands are `messages_out` rows with `kind: 'system'`
-- Agent-to-agent supported via target-agent routing on `messages_out`
-- Scheduling uses `process_after` / `deliver_after` + `recurrence` on the same message tables
-- Media via signed URLs, downloaded in the container
-- Channel adapters use the Chat SDK bridge + a standard interface (trunk ships only the bridge/registry; platform adapters install via `/add-<channel>` skills)
-- Routing: channel adapter extracts IDs, host maps to entities
-- Concurrency: Chat SDK per-channel + container limits
-- Session scoping: per-session DB, multiple sessions per agent group
+## コア性質
+- ファイルシステムマウントによるコンテナ分離
+- クレデンシャル proxy(OneCLI)
+- Agent group ごとの workspace(フォルダ、CLAUDE.md、skill)
+- ポーリングベース(イベント駆動ではない)
+- コンテナ起動時の agent group ごとの agent-runner 再コンパイル(エージェントは自身のソースを修正でき、再ビルド / 再起動を要求でき、変更は teardown を跨いで永続)
+- Host ↔ コンテナ IO は マウント済セッション DB(`messages_in` / `messages_out`)経由 — stdin パイプ無し、IPC ファイル無し
+- エージェントコマンドは `kind: 'system'` 付きの `messages_out` 行
+- Agent-to-agent は `messages_out` のターゲットエージェントルーティング経由でサポート
+- スケジューリングは同じメッセージテーブルの `process_after` / `deliver_after` + `recurrence` を使う
+- メディアは signed URL 経由、コンテナでダウンロード
+- Channel adapter は Chat SDK ブリッジ + 標準インターフェースを使う(trunk はブリッジ / レジストリのみ;プラットフォーム adapter は `/add-<channel>` skill 経由でインストール)
+- ルーティング:channel adapter が ID を抽出、host がエンティティにマップ
+- 並行性:Chat SDK の channel ごと + コンテナ制限
+- セッションスコープ:セッションごとの DB、agent group ごとに複数セッション
 
-## Design Decisions
+## 設計判断
 
-**Session DB location:** Not in the agent group folder. Separate directory (e.g., `sessions/{session_id}/`). Each session gets its own folder containing `session.db` and the Claude SDK's `.claude/` directory. The session identity IS the folder — no need to track Claude SDK session IDs.
+**セッション DB の場所:** Agent group フォルダではない。別ディレクトリ(例:`sessions/{session_id}/`)。各セッションは `session.db` と Claude SDK の `.claude/` ディレクトリを含む独自フォルダを持つ。セッション identity = フォルダ — Claude SDK セッション ID を追跡する必要なし。
 
-**Container mount structure:**
+**コンテナマウント構造:**
 
 ```
-/workspace/                 ← mount: session folder (read-write)
-  .claude/                  ← Claude SDK session data (auto-created)
-  session.db                ← session SQLite DB
-  outbox/                   ← agent-runner writes outbound files here
-  agent/                    ← mount: agent group folder (nested, read-write)
-    CLAUDE.md               ← agent instructions
-    skills/                 ← agent skills
-    ... working files
+/workspace/                 ← マウント: セッションフォルダ (read-write)
+  .claude/                  ← Claude SDK セッションデータ (自動作成)
+  session.db                ← セッション SQLite DB
+  outbox/                   ← agent-runner が outbound ファイルをここに書く
+  agent/                    ← マウント: agent group フォルダ (nested, read-write)
+    CLAUDE.md               ← エージェント命令
+    skills/                 ← エージェント skill
+    ... 作業ファイル
 ```
 
-Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`. The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace). The session DB is at `/workspace/session.db`.
+2 つのディレクトリマウント:セッションフォルダは `/workspace` に、agent group フォルダは `/workspace/agent/` に。Agent-runner は `/workspace/agent/` に CD してエージェントを実行する。Claude SDK は `.claude/` を `/workspace/.claude/`(workspace のルート)に書く。セッション DB は `/workspace/session.db` にある。
 
-This works on both Docker (nested bind mounts) and Apple Container (directory mounts only — no file-level mounts, but nested directory mounts are supported).
+これは Docker(nested bind mount)と Apple Container(ディレクトリマウントのみ — ファイルレベルマウント無しだが、nested ディレクトリマウントはサポート)の両方で動く。
 
-**Session DB concurrent access:** The host writes messages_in, the agent-runner writes messages_out. Both access the same SQLite file simultaneously. WAL mode handles this — SQLite allows concurrent readers, and the two sides write to different tables so writer contention is minimal. The host enables WAL mode when creating the session DB.
+**セッション DB の並行アクセス:** Host が messages_in を書き、agent-runner が messages_out を書く。両方が同じ SQLite ファイルに同時にアクセスする。WAL モードがこれを扱う — SQLite は並行 reader を許し、2 つの側が異なるテーブルに書くので writer 競合は最小。Host がセッション DB を作るとき WAL モードを有効化する。
 
-**Session management:** Host-managed. The host creates session folders and mounts them. The container only sees its own session folder.
+**セッション管理:** Host 管理。Host がセッションフォルダを作りマウントする。コンテナは自身のセッションフォルダのみ見る。
 
-**Session creation (no race condition):**
+**セッション作成(レースコンディション無し):**
 
-1. Message arrives, host checks central DB for a session matching this group + thread
-2. No session exists → host atomically creates session row in central DB, creates the session folder, creates the session DB, writes the message
-3. More messages arrive before container starts → host finds the existing session, writes to the same session DB
-4. Container starts, mounts the folder, agent-runner finds messages waiting
+1. メッセージが届く、host が central DB でこの group + thread にマッチするセッションをチェック
+2. セッション無し → host が atomic に central DB にセッション行を作り、セッションフォルダを作り、セッション DB を作り、メッセージを書く
+3. コンテナ起動前にさらにメッセージが来る → host が既存セッションを見つけ、同じセッション DB に書く
+4. コンテナが起動し、フォルダをマウント、agent-runner が待っているメッセージを見つける
 
-The central DB session row creation is the serialization point. No Claude SDK session ID to coordinate — the SDK discovers its own session data in `.claude/` when the agent runs.
+Central DB セッション行作成がシリアライゼーションポイント。協調する Claude SDK セッション ID 無し — SDK はエージェントが走るとき `.claude/` 内に自身のセッションデータを発見する。
 
-**System actions:** The agent uses MCP tools (register group, reset session, schedule task, etc.). The agent-runner handles these tool calls and writes a structured, deterministic messages_out row with `kind: 'system'`. This is not natural language — it's a programmatic, structured payload that the host processes deterministically. Host validates permissions, executes, and writes the result back as a `system` messages_in row.
+**システムアクション:** エージェントが MCP ツールを使う(group 登録、セッションリセット、タスクスケジュール 等)。Agent-runner がこれらのツール呼び出しを扱い、`kind: 'system'` 付きの構造化された決定的な messages_out 行を書く。これは自然言語ではない — host が決定的に処理するプログラマティックな構造化ペイロード。Host が権限を検証し、実行し、結果を `system` messages_in 行として書き戻す。
 
-**Container lifecycle:** No warm pool. Containers are spawned on demand (wakeUpAgent) and torn down from the outside by the host when idle. Existing idle detection + teardown mechanism carries over.
+**コンテナライフサイクル:** ウォームプール無し。コンテナはオンデマンド(wakeUpAgent)で spawn され、idle 時に host が外から teardown する。既存の idle 検知 + teardown 仕組みが引き継がれる。
 
-## Operational Behavior
+## 運用挙動
 
-### Output Delivery
+### 出力配信
 
-NanoClaw does not stream tokens to users. The Claude Agent SDK's `query()` yields complete results. The agent-runner writes one complete message to messages_out per result. The host delivers complete messages to channels.
+NanoClaw はトークンをユーザにストリームしない。Claude Agent SDK の `query()` は完全な結果を yield する。Agent-runner は結果ごとに 1 つの完全なメッセージを messages_out に書く。Host が完全なメッセージを channel に配信する。
 
-Message editing is supported as an explicit operation (agent calls an `edit_message` tool), not as a streaming mechanism.
+メッセージ編集は明示的操作として(エージェントが `edit_message` ツールを呼ぶ)サポートされる、ストリーミング機構としてではない。
 
-Typing indicators: host sets typing when a container is active for a session, clears when the container exits or a response appears in messages_out.
+タイピングインジケータ:host はセッションでコンテナがアクティブなときタイピングを設定、コンテナが exit するか messages_out にレスポンスが現れたら clear する。
 
-### Message Batching
+### メッセージバッチング
 
-When multiple messages arrive while the container is down, they accumulate as `handled = 0` rows in messages_in. When the container wakes up, the agent-runner queries all unhandled messages and processes them as a batch — multiple messages are formatted into a single `<messages>` XML block.
+コンテナがダウン中に複数メッセージが届くと、messages_in の `handled = 0` 行として累積する。コンテナがウェイクすると、agent-runner はすべての未処理メッセージをクエリし、バッチとして処理する — 複数メッセージは単一の `<messages>` XML ブロックにフォーマットされる。
 
-### Message Lifecycle
+### メッセージライフサイクル
 
 ```
 pending → processing → completed
-                    → failed (after max retries)
+                    → failed (max リトライ後)
 ```
 
-- **pending**: Written by host. Ready to be picked up (if `process_after` is null or past).
-- **processing**: Agent-runner sets this when it picks up the message. `status_changed` is set to now. Prevents other polls from re-picking the same message.
-- **completed**: Agent-runner sets this after successful processing.
-- **failed**: Set after max retries exhausted.
+- **pending**: Host が書く。pickup 準備完了(`process_after` が null か過去なら)。
+- **processing**: Agent-runner がメッセージを pickup したときに設定する。`status_changed` は now に設定。他の poll が同じメッセージを再 pickup するのを防ぐ。
+- **completed**: 処理成功後に agent-runner が設定。
+- **failed**: max リトライを使い切った後に設定。
 
-**Stale detection**: If a message is `processing` but `status_changed` is too old (e.g., >10 minutes), the host assumes the container crashed. It resets the message to `pending`, increments `tries`, and sets `process_after` with exponential backoff.
+**Stale 検知**: メッセージが `processing` だが `status_changed` が古すぎる(例:>10 分)場合、host はコンテナがクラッシュしたと仮定する。メッセージを `pending` にリセットし、`tries` をインクリメントし、`process_after` を exponential backoff で設定する。
 
-### Error Handling and Retries
+### エラーハンドリングとリトライ
 
-Retries use `process_after` with exponential backoff. Each retry increments `tries` and pushes `process_after` further out:
+リトライは exponential backoff 付きの `process_after` を使う。各リトライは `tries` をインクリメントし、`process_after` をさらに進める:
 
-- Try 1: immediate
+- Try 1: 即時
 - Try 2: +5s
 - Try 3: +10s
 - Try 4: +20s
 - Try 5: +40s
-- After max retries: status set to `failed`
+- Max リトライ後: status は `failed` に設定
 
-The host computes this — not the agent-runner. When the host detects a stale `processing` message or the container exits with an error, it increments `tries`, computes the next `process_after`, and resets status to `pending`.
+Host がこれを計算する — agent-runner ではない。Host が stale な `processing` メッセージを検知するか、コンテナがエラーで exit すると、`tries` をインクリメントし、次の `process_after` を計算し、status を `pending` にリセットする。
 
-**Output-sent protection**: If messages_out already has delivered rows for a batch, don't retry (prevents duplicate messages to user).
+**Output-sent 保護**: バッチに対してすでに messages_out に delivered 行があれば、リトライしない(ユーザへの重複メッセージを防ぐ)。
 
-### Host Polling
+### Host ポーリング
 
-Two tiers:
-- **Active containers (~1s)**: Poll session DBs for new messages_out rows to deliver
-- **All sessions (~60s)**: Sweep all session DBs for due `process_after` / `deliver_after` timestamps, handle recurrence
+2 段:
+- **アクティブコンテナ(~1s)**: 新 messages_out 行のためセッション DB を poll
+- **全セッション(~60s)**: 全セッション DB を due な `process_after` / `deliver_after` タイムスタンプのため sweep、recurrence を扱う
 
-## Flexibility Model
+## 柔軟性モデル
 
-The architecture is **flexible for code changes, not configurable for everything**. Advanced setups (like the PR Factory below) use custom routing logic and host-side hooks — not database config columns.
+アーキテクチャは **コード変更に対して柔軟、すべてを設定可能にはしない**。高度なセットアップ(下記の PR Factory のような)はカスタムルーティングロジックと host 側 hook を使う — データベース設定カラムではない。
 
-### Code Structure for Skill Customization
+### Skill カスタマイズのためのコード構造
 
-NanoClaw is customized via skills — branches that get merged into the user's installation. Different skills add different capabilities (channels, integrations, behaviors). The code must be structured so that:
+NanoClaw は skill 経由でカスタマイズされる — ユーザのインストールに merge されるブランチ。異なる skill が異なる機能を追加する(channel、統合、挙動)。コードは次のように構造化されるべき:
 
-1. **Different customizations don't conflict.** Adding Slack and adding Telegram should not produce merge conflicts. Adding a new MCP tool should not conflict with adding a channel. Each type of customization should touch its own file(s).
+1. **異なるカスタマイズが衝突しない。** Slack と Telegram の追加は merge 衝突を生まないべき。新 MCP ツールの追加は channel の追加と衝突しないべき。各カスタマイズタイプは自身のファイルに触れるべき。
 
-2. **Core blocks of functionality are in separate files.** Channel registration, message formatting, MCP tools, routing logic, container management — each in its own file. A skill that changes how messages are formatted doesn't touch the file that handles container spawning.
+2. **コア機能ブロックは別ファイルにある。** Channel 登録、メッセージフォーマット、MCP ツール、ルーティングロジック、コンテナ管理 — 各々独自ファイルに。メッセージフォーマットを変える skill は、コンテナ spawning を扱うファイルに触れない。
 
-3. **The index file is thin.** It wires things together (init DB, start adapters, start poll loops) but contains no business logic. All logic lives in purpose-specific modules that skills can modify independently.
+3. **Index ファイルは薄い。** 物事を配線する(DB init、adapter 起動、poll ループ起動)が、ビジネスロジックは含まない。すべてのロジックは skill が独立して修正できる目的別モジュールに住む。
 
-4. **Don't over-split.** A simple change (e.g., adding a new message kind) shouldn't require edits across 5 files. Group related logic together. The goal is that each skill touches 1-2 files for its core change.
+4. **過剰分割しない。** 単純な変更(例:新メッセージ kind の追加)は 5 ファイルを跨ぐ編集を要するべきではない。関連ロジックをまとめる。目標は各 skill がコア変更で 1-2 ファイルに触れること。
 
-5. **Registration patterns over switch statements.** Channels, MCP tools, and providers should use registration/plugin patterns. A skill adds a channel by adding a file and a registration call — not by editing a central switch statement alongside every other channel.
+5. **switch 文より登録パターン。** Channel、MCP ツール、provider は登録 / プラグインパターンを使うべき。Skill は channel を追加するときファイルと登録呼び出しを追加する — すべての他 channel と並んで中央 switch 文を編集しない。
 
-**Practical example:** Adding a new channel via skill should require:
-- One new file (the channel adapter or Chat SDK config)
-- One line in the barrel file (`channels/index.ts`) to import the self-registering module
-- Zero changes to routing, formatting, delivery, or container code
+**実践例:** Skill 経由で新 channel を追加するには:
+- 新ファイル 1 つ(channel adapter または Chat SDK 設定)
+- Barrel ファイル(`channels/index.ts`)に self-registering モジュールを import する 1 行
+- ルーティング、フォーマット、配信、コンテナコードへの変更ゼロ
 
-### Conflict Hotspots and Solutions
+### 衝突ホットスポットと解決策
 
-Analysis of 33 skill branches shows these files cause the most merge conflicts:
+33 の skill ブランチの分析は、これらのファイルが最も merge 衝突を引き起こすことを示す:
 
-| Hotspot | Why it conflicts | Solution |
+| ホットスポット | なぜ衝突するか | 解決策 |
 |-----------|-----------------|-------------|
-| `src/index.ts` (2000 LOC) | Every skill patches the main loop, imports, init logic | Thin index that wires modules. Logic lives in purpose-specific files (router, delivery, session-manager, host-sweep). |
-| `src/config.ts` | Every skill adds env vars to a central file | Config declared where it's used. Each module reads its own env vars. No central config registry that every skill edits. |
-| `src/container-runner.ts` | Channel skills add mounts, env vars, credential setup | Declarative mount registration. Channels declare their mounts in their own file. Container runner reads from a registry, not a hardcoded list. |
-| `src/db.ts` (750 LOC) | Schema, migrations, and all CRUD in one file | Split by entity. Numbered migrations. Skills add a migration file + edit one entity file. |
-| `container/agent-runner/src/index.ts` | Agent protocol, IPC handling, formatting all in one file | Split into poll-loop, formatter, providers/, mcp-tools/. Session DB replaces IPC. |
-| `src/ipc.ts` | Every MCP tool addition patches one file | `mcp-tools/` directory with barrel. Skills add a tool file + barrel line. |
-| `src/channels/index.ts` | Every channel adds an import line at the same location | Barrel file with comment slots per channel (current pattern works, keep it). |
+| `src/index.ts`(2000 LOC) | すべての skill がメインループ、import、init ロジックにパッチ | モジュールを配線する薄い index。ロジックは目的別ファイル(router、delivery、session-manager、host-sweep)に住む。 |
+| `src/config.ts` | すべての skill が中央ファイルに env var を追加 | 設定は使われる場所で宣言。各モジュールが自身の env var を読む。すべての skill が編集する中央設定レジストリ無し。 |
+| `src/container-runner.ts` | Channel skill がマウント、env var、クレデンシャルセットアップを追加 | 宣言的マウント登録。Channel が自身のファイルにマウントを宣言。Container runner がハードコードリストではなくレジストリから読む。 |
+| `src/db.ts`(750 LOC) | スキーマ、マイグレーション、全 CRUD が 1 ファイル | エンティティで分割。番号付きマイグレーション。Skill がマイグレーションファイル + エンティティファイル 1 つを編集。 |
+| `container/agent-runner/src/index.ts` | エージェントプロトコル、IPC ハンドリング、フォーマットが 1 ファイル | poll-loop、formatter、providers/、mcp-tools/ に分割。セッション DB が IPC を置換。 |
+| `src/ipc.ts` | すべての MCP ツール追加が 1 ファイルにパッチ | barrel 付き `mcp-tools/` ディレクトリ。Skill がツールファイル + barrel 行を追加。 |
+| `src/channels/index.ts` | すべての channel が同じ場所に import 行を追加 | Channel ごとにコメントスロット付きの barrel ファイル(現パターンが動く、保つ)。 |
 
-**Mount registration pattern:** Instead of every channel skill editing `buildVolumeMounts()`, channels declare mounts that the container runner collects:
+**マウント登録パターン:** すべての channel skill が `buildVolumeMounts()` を編集する代わりに、channel はマウントを宣言し、container runner が集める:
 
 ```typescript
 // channels/gmail.ts
@@ -543,9 +543,9 @@ registerChannel('gmail', {
 });
 ```
 
-The container runner reads registered mounts from the channel registry — no need to edit `container-runner.ts`.
+Container runner は channel レジストリから登録済マウントを読む — `container-runner.ts` を編集する必要なし。
 
-**Config pattern:** Skills don't patch `config.ts` or `.env.example`. Skill-specific env vars are documented in the skill's SKILL.md — the setup process reads those instructions. Each module reads its own env vars directly:
+**Config パターン:** Skill は `config.ts` や `.env.example` にパッチしない。Skill 固有 env var は skill の SKILL.md にドキュメント化される — セットアッププロセスがその指示を読む。各モジュールが自身の env var を直接読む:
 
 ```typescript
 // channels/discord.ts
@@ -555,13 +555,13 @@ const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GMAIL_CREDS = process.env.GMAIL_CREDENTIALS_PATH;
 ```
 
-Shared config (DATA_DIR, TIMEZONE, MAX_CONCURRENT_CONTAINERS) stays in `config.ts`. Channel/skill-specific config stays in the module that uses it.
+共有 config(DATA_DIR、TIMEZONE、MAX_CONCURRENT_CONTAINERS)は `config.ts` に残る。Channel/skill 固有 config は使うモジュールに残る。
 
-### Code Style
+### コードスタイル
 
-**Line width: 120 characters.** Most statements fit on one line without sacrificing readability.
+**行幅:120 文字。** ほとんどのステートメントが可読性を犠牲にせず 1 行に収まる。
 
-**Concise logging.** A thin wrapper keeps every log call on one line:
+**簡潔なロギング。** 薄いラッパーがすべてのログ呼び出しを 1 行に保つ:
 
 ```typescript
 log.info('IPC message sent', { chatJid, sourceGroup });
@@ -569,109 +569,109 @@ log.warn('Unauthorized IPC attempt', { chatJid });
 log.error('Error processing', { file, err });
 ```
 
-### DB File Structure
+### DB ファイル構造
 
-The DB layer is split by entity rather than kept in one monolithic file:
+DB レイヤは、1 つのモノリシックファイルに保つのではなく、エンティティで分割される:
 
 ```
 src/db/
-  connection.ts              ← singleton, init, WAL mode
-  schema.ts                  ← CREATE TABLE statements (current state, for reference)
+  connection.ts              ← シングルトン、init、WAL モード
+  schema.ts                  ← CREATE TABLE ステートメント (現状、参考用)
   migrations/
-    index.ts                 ← runner: checks version, applies pending
-    001-initial.ts           ← initial schema
-    002-pending-questions.ts ← example: adds pending_questions table
-    ...                      ← skills append new numbered files
-  agent-groups.ts            ← CRUD for agent_groups
-  messaging-groups.ts        ← CRUD for messaging_groups + messaging_group_agents
-  sessions.ts                ← CRUD for sessions + pending_questions
-  index.ts                   ← barrel: re-exports everything
+    index.ts                 ← ランナー: バージョンをチェック、保留分を適用
+    001-initial.ts           ← 初期スキーマ
+    002-pending-questions.ts ← 例: pending_questions テーブルを追加
+    ...                      ← skill が新しい番号付きファイルを追記
+  agent-groups.ts            ← agent_groups の CRUD
+  messaging-groups.ts        ← messaging_groups + messaging_group_agents の CRUD
+  sessions.ts                ← sessions + pending_questions の CRUD
+  index.ts                   ← barrel: すべて re-export
 ```
 
-**Principles:**
-- **Split by entity, not by layer.** Each entity file has its own CRUD functions (~50-100 lines). A skill that adds a column to messaging_groups edits `messaging-groups.ts` — doesn't touch sessions or agent groups.
-- **Schema as current state + migrations as history.** `schema.ts` documents what the DB looks like now (read this to understand the schema). Migrations are append-only numbered files that describe how we got here.
-- **No inline ALTER TABLE.** A migration runner with a `schema_version` table replaces `try { ALTER TABLE } catch { /* exists */ }` blocks. On startup, it checks the current version and applies pending migrations in order. Each migration is a function: `(db: Database) => void`.
-- **Skills add migrations.** A skill that needs a new column adds a new numbered migration file. No conflicts with other skills' migrations as long as numbers don't collide (use timestamps or high-enough numbers for skill branches).
+**原則:**
+- **エンティティで分割、レイヤではない。** 各エンティティファイルが独自 CRUD 関数(~50-100 行)を持つ。Messaging_groups にカラムを追加する skill は `messaging-groups.ts` を編集 — sessions や agent groups に触れない。
+- **スキーマは現状 + マイグレーションは履歴。** `schema.ts` は DB が今どう見えるかをドキュメント化(スキーマを理解するためにこれを読む)。マイグレーションはどう辿り着いたかを記述する追記専用の番号付きファイル。
+- **インライン ALTER TABLE 無し。** `schema_version` テーブル付きのマイグレーションランナーが `try { ALTER TABLE } catch { /* exists */ }` ブロックを置換。起動時、現在バージョンをチェックし、保留マイグレーションを順に適用。各マイグレーションは関数:`(db: Database) => void`。
+- **Skill はマイグレーションを追加。** 新カラムが必要な skill は新しい番号付きマイグレーションファイルを追加する。番号が衝突しなければ、他 skill のマイグレーションと衝突無し(skill ブランチ向けにタイムスタンプか十分大きい番号を使う)。
 
-**Agent-runner session DB** uses the same pattern but lighter — no migrations needed since session DBs are created fresh by the host:
+**Agent-runner セッション DB** は同じパターンを使うがより軽量 — セッション DB は host がフレッシュに作るのでマイグレーション不要:
 
 ```
 container/agent-runner/src/db/
-  connection.ts          ← open session.db at fixed path, WAL mode
-  messages-in.ts         ← read pending, update status
-  messages-out.ts        ← write results, outbox queries
+  connection.ts          ← 固定パスで session.db を開く、WAL モード
+  messages-in.ts         ← pending を読む、status を更新
+  messages-out.ts        ← 結果を書く、outbox クエリ
   index.ts               ← barrel
 ```
 
-### What the base architecture must support primitively
+### ベースアーキテクチャがプリミティブにサポートすべきもの
 
-These are the building blocks. None require special abstractions — they fall out of per-session DBs, host-managed routing, and messages_out with `kind: 'system'`:
+これらは構築ブロック。特別な抽象を必要としない — セッションごとの DB、host 管理ルーティング、`kind: 'system'` 付き messages_out から自然に出る:
 
-1. **Multiple agent groups on the same channel with content-based routing.** Different messages in the same thread can route to different agent groups based on content (e.g., @mention routes to supervisor, normal messages route to worker). The channel adapter's routing logic — custom code — decides.
+1. **同一 channel 上の複数 agent group とコンテンツベースルーティング。** 同じ thread 内の異なるメッセージが、コンテンツに基づき異なる agent group にルーティングできる(例:@mention は supervisor、通常メッセージは worker)。Channel adapter のルーティングロジック — カスタムコード — が決める。
 
-2. **Per-thread sessions from a shared agent group.** Multiple sessions share the same agent group (filesystem, skills, CLAUDE.md) but each gets its own session DB. Standard for worker pools.
+2. **共有 agent group からのスレッドごとセッション。** 複数セッションが同じ agent group(ファイルシステム、skill、CLAUDE.md)を共有するが、各々が独自セッション DB を得る。ワーカープールの標準。
 
-3. **Session reset and replay.** Create a new session for the same thread. Mark old messages as unhandled so the poll picks them up again. Old output stays visible in the platform (e.g., Discord thread) for comparison. This is an action an agent can request — not automatic.
+3. **セッションリセットとリプレイ。** 同じ thread に新セッションを作る。古いメッセージを未処理マークし、poll が再 pickup するように。古い出力はプラットフォーム(例:Discord thread)で比較のため可視のまま。これはエージェントが要求できるアクション — 自動ではない。
 
-4. **Cross-session read access.** Some agents can query other sessions' data. Different access levels: manager sees messages_in/messages_out (review content). Supervisor sees full internals (agent logs, tool calls, debug traces). This is just filesystem/DB access — mount or query the right paths.
+4. **クロスセッション読み取りアクセス。** 一部エージェントは他セッションのデータをクエリできる。異なるアクセスレベル:マネージャは messages_in/messages_out を見る(コンテンツレビュー)。Supervisor は完全な内部(エージェントログ、ツール呼び出し、デバッグトレース)を見る。これは単なるファイルシステム / DB アクセス — 正しいパスをマウントまたはクエリする。
 
-5. **Context duplication into new sessions.** When a supervisor is invoked in a worker's thread, a new session is created with relevant messages copied in. Custom host-side code handles this.
+5. **新セッションへのコンテキスト複製。** Supervisor が worker の thread で呼ばれるとき、関連メッセージがコピーされた新セッションが作られる。カスタム host 側コードが扱う。
 
-6. **Agent-initiated host actions.** The agent uses MCP tools (reset session, update skills, etc.). The agent-runner handles the tool call and writes a structured `system` messages_out row. The host reads and executes with permission checks. The agent can request, but the host decides.
+6. **エージェント開始の host アクション。** エージェントが MCP ツール(セッションリセット、skill 更新 等)を使う。Agent-runner がツール呼び出しを扱い、構造化された `system` messages_out 行を書く。Host が読み、権限チェックで実行する。エージェントは要求できるが、host が決める。
 
-### Example: PR Factory
+### 例:PR Factory
 
-Three agent groups, one Discord channel (PR Factory), plus an admin channel:
+3 つの agent group、1 つの Discord channel(PR Factory)、加えて admin channel:
 
-| Role | Agent Group | Where | Session model |
+| 役割 | Agent Group | どこ | セッションモデル |
 |------|-------------|-------|---------------|
-| **Worker** | pr-worker | PR Factory threads | One session per thread (per PR) |
-| **Manager** | pr-manager | PR Factory channel | Single session, queries across worker sessions |
-| **Supervisor** | pr-admin | Admin channel + PR Factory (when @tagged) | Main session in admin channel; per-thread session when invoked in worker threads |
+| **Worker** | pr-worker | PR Factory thread | thread ごとに 1 セッション(PR ごと) |
+| **Manager** | pr-manager | PR Factory channel | 単一セッション、worker セッションを横断クエリ |
+| **Supervisor** | pr-admin | Admin channel + PR Factory(@tag されたとき) | admin channel のメインセッション;worker thread で呼ばれたとき thread ごとセッション |
 
-**Worker flow:** GitHub PR → Discord thread → worker agent reviews (triage, review, test plan). Each thread gets a session from the shared pr-worker group.
+**Worker フロー:** GitHub PR → Discord thread → worker エージェントがレビュー(triage、review、test plan)。各 thread が共有 pr-worker group からセッションを得る。
 
-**Feedback flow:** User @tags supervisor in worker threads → custom routing sends to supervisor with a new session containing the thread's messages (duplicated). Supervisor collects feedback to filesystem. Worker doesn't see supervisor messages.
+**Feedback フロー:** ユーザが worker thread で supervisor を @tag → カスタムルーティングが thread のメッセージ(複製)を含む新セッションで supervisor に送る。Supervisor がフィードバックをファイルシステムに集める。Worker は supervisor メッセージを見ない。
 
-**Iteration flow:** User discusses feedback with supervisor in admin channel → supervisor suggests skill changes (shown as rich card with diff) → user approves → supervisor applies changes via host action → supervisor requests session reset + replay → workers re-review same PRs with updated skills in same threads but fresh sessions → user compares reviews side by side.
+**Iteration フロー:** ユーザが admin channel で supervisor とフィードバックを議論 → supervisor が skill 変更を提案(diff 付きリッチカードで表示) → ユーザが承認 → supervisor が host アクション経由で変更を適用 → supervisor がセッションリセット + リプレイを要求 → worker が同じ thread の同じ PR を更新済 skill で再レビュー、新セッションで → ユーザがレビューを並んで比較。
 
-**Manager flow:** User talks to manager in PR Factory main channel (not in threads). Manager can search across all worker session DBs (messages_in/messages_out) to answer questions like "how many PRs today?" or "what topics are trending?" Can request actions (close PR, re-open).
+**Manager フロー:** ユーザが PR Factory メイン channel で manager と話す(thread ではない)。Manager は全 worker セッション DB(messages_in/messages_out)を横断検索し、「今日何 PR?」や「トレンドのトピックは?」のような質問に答えられる。アクションを要求できる(PR をクローズ、再オープン)。
 
-**What's custom code vs. base architecture:**
+**カスタムコード vs ベースアーキテクチャ:**
 
-| Capability | Base architecture | Custom code (PR Factory) |
+| 機能 | ベースアーキテクチャ | カスタムコード(PR Factory) |
 |-----------|-------------------|-------------------------|
-| Per-thread sessions | ✓ platformThreadId → session | |
-| Shared agent group across sessions | ✓ Multiple sessions, one group | |
-| Writing messages to session DB | ✓ Standard flow | |
-| @mention routing to different agent | | ✓ Channel adapter routing logic |
-| Context duplication into supervisor session | | ✓ Host-side hook on supervisor invocation |
-| Session reset + replay | ✓ Primitives (new session, mark unhandled) | ✓ Supervisor action triggers it |
-| Skill updates | ✓ Filesystem writes | ✓ Supervisor action applies changes |
-| Cross-session queries | ✓ DB/filesystem access | ✓ Manager's tools know where to look |
-| Rich card output | ✓ Structured output in messages_out | |
+| Thread ごとセッション | ✓ platformThreadId → session | |
+| セッション越しの共有 agent group | ✓ 複数セッション、1 group | |
+| セッション DB へのメッセージ書き込み | ✓ 標準フロー | |
+| @mention の異なるエージェントへのルーティング | | ✓ Channel adapter ルーティングロジック |
+| Supervisor セッションへのコンテキスト複製 | | ✓ Supervisor 呼び出し時の host 側 hook |
+| セッションリセット + リプレイ | ✓ プリミティブ(新セッション、未処理マーク) | ✓ Supervisor アクションがトリガー |
+| Skill 更新 | ✓ ファイルシステム書き込み | ✓ Supervisor アクションが変更を適用 |
+| クロスセッションクエリ | ✓ DB / ファイルシステムアクセス | ✓ Manager のツールがどこを見るか知る |
+| リッチカード出力 | ✓ messages_out の構造化出力 | |
 
-## Central DB Schema
+## Central DB スキーマ
 
-The central DB handles routing and entity management. All content and execution state lives in per-session DBs.
+Central DB はルーティングとエンティティ管理を扱う。すべてのコンテンツと実行状態はセッションごとの DB に住む。
 
 ```sql
--- Agent workspaces: folder, skills, CLAUDE.md, container config
+-- Agent workspace: フォルダ、skill、CLAUDE.md、コンテナ設定
 CREATE TABLE agent_groups (
   id               TEXT PRIMARY KEY,
   name             TEXT NOT NULL,
   folder           TEXT NOT NULL UNIQUE,
-  agent_provider   TEXT,              -- default for sessions (null = system default)
+  agent_provider   TEXT,              -- セッション用デフォルト (null = システムデフォルト)
   container_config TEXT,              -- JSON: { additionalMounts, timeout }
   created_at       TEXT NOT NULL
 );
 
--- Platform groups/channels (WhatsApp group, Slack channel, Discord channel, email thread, etc.)
+-- プラットフォーム groups/channels (WhatsApp group, Slack channel, Discord channel, email thread 等)
 CREATE TABLE messaging_groups (
   id                     TEXT PRIMARY KEY,
   channel_type           TEXT NOT NULL,     -- 'whatsapp', 'slack', 'discord', 'telegram', 'email'
-  platform_id            TEXT NOT NULL,     -- platform-specific ID (JID, channel ID, etc.)
+  platform_id            TEXT NOT NULL,     -- プラットフォーム固有 ID (JID, channel ID 等)
   name                   TEXT,
   is_group               INTEGER DEFAULT 0,
   unknown_sender_policy  TEXT NOT NULL DEFAULT 'strict',  -- 'strict' | 'request_approval' | 'public'
@@ -679,26 +679,26 @@ CREATE TABLE messaging_groups (
   UNIQUE(channel_type, platform_id)
 );
 
--- Users (messaging platform identities, namespaced "<channel_type>:<handle>")
+-- ユーザ (メッセージングプラットフォーム identity、"<channel_type>:<handle>" で名前空間化)
 CREATE TABLE users (
-  id           TEXT PRIMARY KEY,   -- e.g. 'telegram:123456', 'discord:1470...'
-  kind         TEXT NOT NULL,      -- mirrors the channel_type prefix
+  id           TEXT PRIMARY KEY,   -- 例 'telegram:123456', 'discord:1470...'
+  kind         TEXT NOT NULL,      -- channel_type プレフィックスをミラー
   display_name TEXT,
   created_at   TEXT NOT NULL
 );
 
--- Roles (owner is global only; admin can be global or scoped to an agent_group)
+-- ロール (owner はグローバルのみ;admin はグローバル または agent_group にスコープ)
 CREATE TABLE user_roles (
   user_id         TEXT NOT NULL REFERENCES users(id),
   role            TEXT NOT NULL,   -- 'owner' | 'admin'
-  agent_group_id  TEXT REFERENCES agent_groups(id),  -- NULL for global
+  agent_group_id  TEXT REFERENCES agent_groups(id),  -- グローバル用 NULL
   granted_by      TEXT,
   granted_at      TEXT NOT NULL,
   PRIMARY KEY (user_id, role, agent_group_id)
 );
--- owner rows must have agent_group_id = NULL (enforced in db/user-roles.ts)
+-- owner 行は agent_group_id = NULL でなければならない (db/user-roles.ts で強制)
 
--- Membership (explicit non-privileged access; admin/owner imply membership)
+-- メンバーシップ (明示的非特権アクセス;admin/owner はメンバーシップを暗黙的に持つ)
 CREATE TABLE agent_group_members (
   user_id         TEXT NOT NULL REFERENCES users(id),
   agent_group_id  TEXT NOT NULL REFERENCES agent_groups(id),
@@ -707,7 +707,7 @@ CREATE TABLE agent_group_members (
   PRIMARY KEY (user_id, agent_group_id)
 );
 
--- DM resolution cache (so cold DMs aren't re-resolved every time)
+-- DM 解決キャッシュ (cold DM が毎回再解決されないように)
 CREATE TABLE user_dms (
   user_id            TEXT NOT NULL REFERENCES users(id),
   channel_type       TEXT NOT NULL,
@@ -716,7 +716,7 @@ CREATE TABLE user_dms (
   PRIMARY KEY (user_id, channel_type)
 );
 
--- Which agent groups handle which messaging groups, with what rules
+-- どの agent group がどの messaging group を、どんなルールで扱うか
 CREATE TABLE messaging_group_agents (
   id                 TEXT PRIMARY KEY,
   messaging_group_id TEXT NOT NULL REFERENCES messaging_groups(id),
@@ -724,188 +724,188 @@ CREATE TABLE messaging_group_agents (
   trigger_rules      TEXT,              -- JSON: { pattern, mentionOnly, excludeSenders, includeSenders }
   response_scope     TEXT DEFAULT 'all',    -- 'all' | 'triggered' | 'allowlisted'
   session_mode       TEXT DEFAULT 'shared', -- 'shared' | 'per-thread'
-  priority           INTEGER DEFAULT 0,     -- higher = checked first when multiple agents match
+  priority           INTEGER DEFAULT 0,     -- 高い = 複数エージェントがマッチするとき先にチェック
   created_at         TEXT NOT NULL,
   UNIQUE(messaging_group_id, agent_group_id)
 );
 
--- Sessions: one folder = one session = one container when running
--- Folder path is derived: sessions/{agent_group_id}/{session_id}/
+-- セッション: 1 フォルダ = 1 セッション = 走っているとき 1 コンテナ
+-- フォルダパスは派生: sessions/{agent_group_id}/{session_id}/
 CREATE TABLE sessions (
   id                 TEXT PRIMARY KEY,
   agent_group_id     TEXT NOT NULL REFERENCES agent_groups(id),
-  messaging_group_id TEXT REFERENCES messaging_groups(id),  -- null for internal/spawned sessions
-  thread_id          TEXT,              -- platform thread ID (null for shared session mode)
-  agent_provider     TEXT,              -- override per session (null = inherit from agent_group)
+  messaging_group_id TEXT REFERENCES messaging_groups(id),  -- 内部/spawn セッションで null
+  thread_id          TEXT,              -- プラットフォーム thread ID (shared セッションモードで null)
+  agent_provider     TEXT,              -- セッションごとに override (null = agent_group から継承)
   status             TEXT DEFAULT 'active',    -- 'active' | 'closed'
   container_status   TEXT DEFAULT 'stopped',   -- 'running' | 'idle' | 'stopped'
-  last_active        TEXT,              -- last message activity timestamp
+  last_active        TEXT,              -- 最終メッセージ活動タイムスタンプ
   created_at         TEXT NOT NULL
 );
 CREATE INDEX idx_sessions_agent_group ON sessions(agent_group_id);
 CREATE INDEX idx_sessions_lookup ON sessions(messaging_group_id, thread_id);
 
--- Pending interactive questions (cards waiting for user response)
--- Host writes when delivering a question card, deletes when response received
+-- 保留中の対話的質問 (ユーザレスポンス待ちカード)
+-- Host が質問カードを配信時に書き、レスポンス受信時に削除
 CREATE TABLE pending_questions (
   question_id    TEXT PRIMARY KEY,
   session_id     TEXT NOT NULL REFERENCES sessions(id),
-  message_out_id TEXT NOT NULL,     -- the messages_out row that sent the card
-  platform_id    TEXT,              -- where the card was delivered
+  message_out_id TEXT NOT NULL,     -- カードを送った messages_out 行
+  platform_id    TEXT,              -- カードが配信された場所
   channel_type   TEXT,
   thread_id      TEXT,
   created_at     TEXT NOT NULL
 );
 ```
 
-### Pending Question Flow
+### 保留質問フロー
 
-When the host delivers a messages_out row with `operation: 'ask_question'`:
-1. Host delivers the card via the channel adapter
-2. Host writes a `pending_questions` row mapping `question_id` → `session_id`
+Host が `operation: 'ask_question'` 付きの messages_out 行を配信するとき:
+1. Host が channel adapter 経由でカードを配信
+2. Host が `question_id` → `session_id` をマップする `pending_questions` 行を書く
 
-When a Chat SDK `ActionEvent` (button click) arrives:
-1. Bridge extracts `actionId` from the event
-2. Host looks up `pending_questions` by `question_id` (derived from actionId — the bridge maintains the mapping)
-3. Host finds the target session, writes a messages_in row with `questionId` + `selectedOption`
-4. Host deletes the `pending_questions` row
-5. Agent-runner picks up the messages_in row, matches to the pending tool call, returns the selection
+Chat SDK `ActionEvent`(ボタンクリック)が届いたとき:
+1. ブリッジがイベントから `actionId` を抽出
+2. Host が `pending_questions` を `question_id` でルックアップ(actionId から派生 — ブリッジがマッピングを保持)
+3. Host がターゲットセッションを見つけ、`questionId` + `selectedOption` 付きの messages_in 行を書く
+4. Host が `pending_questions` 行を削除
+5. Agent-runner が messages_in 行を pickup し、保留中ツール呼び出しにマッチし、選択を返す
 
-This avoids scanning session DBs. The central DB is the routing lookup — same pattern as message routing.
+これはセッション DB のスキャンを避ける。Central DB がルーティングルックアップ — メッセージルーティングと同じパターン。
 
-Also used for host-generated approval cards: when the host sends an approval request to the admin's DM, it writes a `pending_questions` row. The admin's response is routed back to the originating session.
+Host が生成した承認カードにも使われる:host が admin の DM に承認リクエストを送るとき、`pending_questions` 行を書く。Admin のレスポンスは起点セッションに戻される。
 
-### Container lifecycle states
+### コンテナライフサイクル状態
 
 ```
 stopped → running → idle → stopped
                   ↗
-            idle → running (new message while warm)
+            idle → running (warm 中の新メッセージ)
 ```
 
-- **stopped**: No container. Swept at 60s for due scheduled messages.
-- **running**: Actively processing. Polled at 1s for messages_out.
-- **idle**: Done processing, container still warm (up to 30 min timeout). Polled at 1s so new messages are picked up quickly.
-- After idle timeout → host kills container → stopped.
+- **stopped**: コンテナ無し。Due なスケジュール済メッセージのため 60s で sweep。
+- **running**: 積極的に処理中。Messages_out のため 1s で poll。
+- **idle**: 処理完了、コンテナはまだ warm(最大 30 分タイムアウト)。新メッセージがすぐ pickup されるよう 1s で poll。
+- Idle タイムアウト後 → host がコンテナを kill → stopped。
 
-## Agent-Runner Architecture
+## Agent-Runner アーキテクチャ
 
-The agent-runner is the process inside the container. It mediates between the session DB and the Claude SDK — polling for work, formatting messages for the agent, translating tool calls into DB rows, and managing the agent lifecycle.
+Agent-runner はコンテナ内のプロセス。セッション DB と Claude SDK の間を仲介する — 作業を poll、エージェント用にメッセージをフォーマット、ツール呼び出しを DB 行に翻訳、エージェントライフサイクルを管理。
 
-### IO Model
+### IO モデル
 
-All IO goes through the session DB. No stdin, no stdout markers, no IPC files.
+すべての IO はセッション DB を通る。Stdin 無し、stdout マーカー無し、IPC ファイル無し。
 
-- Initial input and follow-ups: poll `messages_in`
-- Output: write `messages_out` rows
-- MCP tools: write DB rows (no IPC files)
-- Shutdown: host kills the container on idle timeout, or the agent-runner exits when there's no pending work
+- 初期入力とフォローアップ:`messages_in` を poll
+- 出力:`messages_out` 行を書く
+- MCP ツール:DB 行を書く(IPC ファイル無し)
+- シャットダウン:idle タイムアウトで host がコンテナを kill、または pending 作業が無いとき agent-runner が exit
 
-### Poll Loop
+### Poll ループ
 
-1. Query `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())`
-2. If rows found: set `status = 'processing'`, `status_changed = now()` on each
-3. Batch messages into a single prompt (strip routing fields, format by kind)
-4. Push into Claude SDK's MessageStream
-5. Process agent output → write `messages_out` rows
-6. Set processed messages to `status = 'completed'`
-7. Back to step 1. If no messages found, sleep briefly and re-poll (container stays warm for idle timeout)
+1. `messages_in WHERE status = 'pending' AND (process_after IS NULL OR process_after <= now())` をクエリ
+2. 行が見つかれば:各々に `status = 'processing'`、`status_changed = now()` を設定
+3. メッセージを単一プロンプトにバッチ化(ルーティングフィールドを strip、kind でフォーマット)
+4. Claude SDK の MessageStream にプッシュ
+5. エージェント出力を処理 → `messages_out` 行を書く
+6. 処理済メッセージを `status = 'completed'` に設定
+7. step 1 に戻る。メッセージ無しなら短く sleep して再 poll(コンテナは idle タイムアウトまで warm)
 
-### Message Formatting by Kind
+### Kind ごとのメッセージフォーマット
 
-Agent-runner strips routing fields (`platform_id`, `channel_type`, `thread_id`) before formatting. The agent never sees routing info — it only sees content.
+Agent-runner はフォーマット前にルーティングフィールド(`platform_id`、`channel_type`、`thread_id`)を strip する。エージェントはルーティング情報を決して見ない — コンテンツのみ見る。
 
-- **`chat`** — format into `<messages>` XML block
-- **`chat-sdk`** — extract text, author, attachments from serialized message; format into `<messages>` XML
-- **`task`** — format as `[SCHEDULED TASK]` prefix + prompt. Run pre-script if present.
-- **`webhook`** — format as `[WEBHOOK: source/event]` + JSON payload
-- **`system`** — host action results (e.g., "register_group succeeded"). Format as system context, not chat.
+- **`chat`** — `<messages>` XML ブロックにフォーマット
+- **`chat-sdk`** — シリアライズメッセージからテキスト、author、添付を抽出;`<messages>` XML にフォーマット
+- **`task`** — `[SCHEDULED TASK]` プレフィックス + プロンプトとしてフォーマット。Pre-script があれば実行。
+- **`webhook`** — `[WEBHOOK: source/event]` + JSON ペイロードとしてフォーマット
+- **`system`** — host アクション結果(例:「register_group succeeded」)。Chat ではなく system context としてフォーマット。
 
-Mixed batches (e.g., a chat message + a system result both pending) are combined into one prompt with clear delimiters.
+混合バッチ(例:chat メッセージ + system 結果が両方 pending)は明確な区切りで 1 つのプロンプトに統合される。
 
-### MCP Tools
+### MCP ツール
 
-MCP tools write directly to the session DB.
+MCP ツールはセッション DB に直接書く。
 
-**Core tools:**
+**コアツール:**
 
-| Tool | What it does |
+| ツール | 何をするか |
 |------|-------------|
-| `send_message` | Write `messages_out` row, `kind: 'chat'` |
-| `send_file` | Move file to `outbox/{msg_id}/`, write `messages_out` with filenames |
-| `schedule_task` | Write `messages_in` row (to self) with `process_after` + `recurrence`. Or `messages_out` with `deliver_after` for outbound reminders. |
-| `list_tasks` | Query `messages_in WHERE recurrence IS NOT NULL` |
-| `pause_task` / `resume_task` / `cancel_task` | Modify `messages_in` rows (update status, clear/set recurrence) |
-| `register_agent_group` | Write `messages_out`, `kind: 'system'`, `action: 'register_agent_group'` |
+| `send_message` | `messages_out` 行、`kind: 'chat'` を書く |
+| `send_file` | ファイルを `outbox/{msg_id}/` に移動、ファイル名付き `messages_out` を書く |
+| `schedule_task` | `messages_in` 行(自身に)を `process_after` + `recurrence` 付きで書く。または outbound リマインダー用に `deliver_after` 付き `messages_out`。 |
+| `list_tasks` | `messages_in WHERE recurrence IS NOT NULL` をクエリ |
+| `pause_task` / `resume_task` / `cancel_task` | `messages_in` 行を修正(status を更新、recurrence をクリア / 設定) |
+| `register_agent_group` | `messages_out`、`kind: 'system'`、`action: 'register_agent_group'` を書く |
 
-**New tools:**
+**新ツール:**
 
-| Tool | What it does |
+| ツール | 何をするか |
 |------|-------------|
-| `ask_user_question` | Write `messages_out` with question card. Hold tool call open, poll `messages_in` for response matching `questionId`. Return selection as tool result. |
-| `edit_message` | Write `messages_out` with `operation: 'edit'` |
-| `add_reaction` | Write `messages_out` with `operation: 'reaction'` |
-| `send_to_agent` | Write `messages_out` with `channel_type: 'agent'`, `platform_id: '{target}'` |
-| `send_card` | Write `messages_out` with card structure |
+| `ask_user_question` | 質問カード付きの `messages_out` を書く。ツール呼び出しを保持、`questionId` にマッチするレスポンスのため `messages_in` を poll。選択をツール結果として返す。 |
+| `edit_message` | `operation: 'edit'` 付きの `messages_out` を書く |
+| `add_reaction` | `operation: 'reaction'` 付きの `messages_out` を書く |
+| `send_to_agent` | `channel_type: 'agent'`、`platform_id: '{target}'` 付きの `messages_out` を書く |
+| `send_card` | カード構造付きの `messages_out` を書く |
 
-See [agent-runner-details.md](agent-runner-details.md) for full MCP tool parameter definitions.
+全 MCP ツールパラメータ定義は [agent-runner-details.md](agent-runner-details.md) を参照。
 
-### Cards
+### カード
 
-**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` (interactive card with options) or `send_card` (structured card). Agent-runner writes the card structure to messages_out. Host/adapter handles platform-specific rendering (Slack Block Kit, Discord embeds, Telegram inline keyboard, text fallback).
+**エージェント開始(outbound):** ツールベース。エージェントが `ask_user_question`(オプション付き対話的カード)または `send_card`(構造化カード)を呼ぶ。Agent-runner がカード構造を messages_out に書く。Host / adapter がプラットフォーム固有のレンダリング(Slack Block Kit、Discord embed、Telegram インラインキーボード、テキストフォールバック)を扱う。
 
-**Host-initiated (approval cards):** When an action requires approval, the host generates a standardized approval card and sends it to the admin's DM. These are not agent-initiated — the agent doesn't know about the approval step. The card format is fixed (action description + approve/deny buttons).
+**Host 開始(承認カード):** アクションが承認を要するとき、host が標準化された承認カードを生成し、admin の DM に送る。これらはエージェント開始ではない — エージェントは承認ステップを知らない。カードフォーマットは固定(アクション説明 + 承認 / 拒否ボタン)。
 
-**Inbound (card responses):** Not a card — it's a messages_in row with `questionId` + `selectedOption` in the content. Agent-runner matches to the pending `ask_user_question` tool call and returns the selection as the tool result.
+**Inbound(カードレスポンス):** カードではない — content に `questionId` + `selectedOption` を持つ messages_in 行。Agent-runner が保留中 `ask_user_question` ツール呼び出しにマッチし、選択をツール結果として返す。
 
-### Commands
+### コマンド
 
-Messages starting with `/` are checked against three lists:
+`/` で始まるメッセージは 3 つのリストとチェックされる:
 
-**Whitelisted commands (pass-through to agent):**
-- Standard slash commands that the agent provider handles natively (e.g., Claude's built-in commands)
-- Passed raw, no `<messages>` XML wrapping
+**Whitelisted コマンド(エージェントに pass-through):**
+- エージェント provider がネイティブに扱う標準 slash コマンド(例:Claude の組み込みコマンド)
+- raw で渡す、`<messages>` XML ラッピング無し
 
-**Admin-only commands (require admin sender):**
-- `/remote-control` — remote control session
-- `/clear` — clear session context
-- `/compact` — force context compaction
-- If sent by a non-admin user, the command is rejected with an error message. Not forwarded to the agent.
+**Admin 専用コマンド(admin 送信者必須):**
+- `/remote-control` — リモートコントロールセッション
+- `/clear` — セッションコンテキストをクリア
+- `/compact` — コンテキスト compaction を強制
+- 非 admin ユーザが送ると、コマンドはエラーメッセージで拒否される。エージェントに forward されない。
 
-**Filtered commands (dropped entirely):**
-- Commands that don't make sense in the NanoClaw context or could cause issues
-- Silently dropped — no error, no forwarding
+**フィルタコマンド(完全に drop):**
+- NanoClaw コンテキストで意味をなさない、または問題を起こすコマンド
+- silent に drop — エラー無し、forward 無し
 
-The command lists are hardcoded in the agent-runner. Admin verification happens host-side before the message ever reaches the container: `src/command-gate.ts` queries `user_roles` (owner / global admin / scoped-admin-of-this-agent-group) and either passes the message through, drops it, or routes it elsewhere. The container has no notion of admin identity — no env var, no DB query, no per-message check.
+コマンドリストは agent-runner にハードコードされる。Admin 検証はメッセージがコンテナに到達する前に host 側で起こる:`src/command-gate.ts` が `user_roles`(owner / グローバル admin / この agent group のスコープ admin)をクエリし、メッセージを通すか drop するか別所にルーティングするかする。コンテナは admin identity の概念を持たない — env var 無し、DB クエリ無し、メッセージごとのチェック無し。
 
-### Recurring Tasks
+### 再帰タスク
 
-The agent-runner processes recurring task messages like any other messages_in row. After the agent-runner marks a recurring message as `completed`, the **host** handles inserting the next occurrence (new messages_in row with `process_after` advanced to next cron time). The agent-runner doesn't manage recurrence — it just processes what it finds.
+Agent-runner は再帰タスクメッセージを他の messages_in 行と同じく処理する。Agent-runner が再帰メッセージを `completed` とマークした後、**host** が次の発生の insert を扱う(次の cron 時刻に `process_after` を進めた新 messages_in 行)。Agent-runner は recurrence を管理しない — 見つけたものを処理するだけ。
 
-Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent = false`, mark completed without invoking Claude.
+Pre-script:タスクメッセージに `script` フィールドがあれば、まず実行する。`wakeAgent = false` なら、Claude を呼ばずに completed とマーク。
 
-### Agent-to-Agent Messaging
+### Agent-to-Agent メッセージング
 
-**Outbound:** Agent calls `send_to_agent` tool → agent-runner writes messages_out with `channel_type: 'agent'`, `platform_id` = target agent group ID. Host validates permissions and writes to target session's messages_in.
+**Outbound:** エージェントが `send_to_agent` ツールを呼ぶ → agent-runner が `channel_type: 'agent'`、`platform_id` = ターゲット agent group ID 付きの messages_out を書く。Host が権限を検証し、ターゲットセッションの messages_in に書く。
 
-**Inbound:** Messages from other agents arrive as normal `chat` messages_in rows. The content includes `sender` and `senderId` (e.g., `"senderId": "agent:pr-admin"`). No special formatting — the agent sees it as a chat message.
+**Inbound:** 他エージェントからのメッセージは通常の `chat` messages_in 行として届く。Content は `sender` と `senderId` を含む(例:`"senderId": "agent:pr-admin"`)。特別なフォーマット無し — エージェントは chat メッセージとして見る。
 
-### Agent-Runner Properties
+### Agent-Runner の性質
 
-- AgentProvider interface wraps SDK-specific query logic (trunk ships the `claude` provider; additional providers like OpenCode install via `/add-<provider>` skills)
-- Session resume via provider-specific mechanisms
-- System prompt loading from CLAUDE.md files
-- PreCompact hook for transcript archiving (Claude provider)
-- Script execution for task-kind messages
+- AgentProvider インターフェースが SDK 固有 query ロジックをラップ(trunk は `claude` provider を出荷;OpenCode のような追加 provider は `/add-<provider>` skill 経由でインストール)
+- Provider 固有メカニズム経由のセッション再開
+- CLAUDE.md ファイルからの system prompt ロード
+- トランスクリプトアーカイブ用の PreCompact hook(Claude provider)
+- task-kind メッセージ用のスクリプト実行
 
-## Open Questions
+## 未解決の質問
 
-- **Approval routing** — how does the host find the admin's DM conversation? What if no DM channel exists? Is the approval list configurable per agent group or global?
-- **MCP server lifecycle** — does the MCP server process persist across multiple queries in the same container, or restart each time?
-- **Container startup config** — what config (if any) is passed to the container at launch beyond env vars? The session DB is at a fixed mount path. System prompt comes from CLAUDE.md. Provider name comes from env. What else?
-- **Idle detection with pending questions** — when `ask_user_question` is waiting for a response, the container should not be considered idle. Also need to detect when the agent is still working (active tool calls, subagents) and avoid killing the container even if no messages_out have been written recently.
+- **承認ルーティング** — host はどう admin の DM 会話を見つけるか? DM channel が存在しない場合は? 承認リスト は agent group ごとに設定可能、それともグローバル?
+- **MCP server ライフサイクル** — MCP server プロセスは同じコンテナ内の複数クエリ越しに永続化するか、毎回再起動するか?
+- **コンテナ起動 config** — env var を超えて、起動時にコンテナに何の config(あれば)が渡されるか? セッション DB は固定マウントパス。System prompt は CLAUDE.md から。Provider 名は env から。他は?
+- **Pending question 付き idle 検知** — `ask_user_question` がレスポンス待ちのとき、コンテナは idle と見なされるべきではない。また、エージェントがまだ作業中(アクティブなツール呼び出し、subagent)を検知し、最近 messages_out が書かれていなくてもコンテナを kill するのを避ける必要。
 
-## Related Documents
+## 関連ドキュメント
 
-- **[api-details.md](api-details.md)** — Channel adapter interface (NanoClaw + Chat SDK bridge), message content examples, host delivery logic
-- **[agent-runner-details.md](agent-runner-details.md)** — AgentProvider interface, MCP tools, message formatting, media handling, provider implementations
+- **[api-details.md](api-details.md)** — Channel adapter インターフェース(NanoClaw + Chat SDK ブリッジ)、メッセージコンテンツ例、host 配信ロジック
+- **[agent-runner-details.md](agent-runner-details.md)** — AgentProvider インターフェース、MCP ツール、メッセージフォーマット、メディア処理、provider 実装

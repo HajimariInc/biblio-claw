@@ -1,76 +1,76 @@
-# Skills as Branches
+# ブランチとしての Skill
 
-## Overview
+## 概要
 
-This document covers **feature skills** — skills that add capabilities via git branch merges. This is the most complex skill type and the primary way NanoClaw is extended.
+本ドキュメントは **feature skill** をカバーする — git ブランチの merge 経由で機能を追加する skill。これは最も複雑な skill タイプであり、NanoClaw を拡張する主要な方法である。
 
-NanoClaw has four types of skills overall. See [CONTRIBUTING.md](../CONTRIBUTING.md) for the full taxonomy:
+NanoClaw には全体として 4 種類の skill がある。完全な分類は [CONTRIBUTING.md](../CONTRIBUTING.md) を参照:
 
-| Type | Location | How it works |
+| 種類 | 配置 | 動作 |
 |------|----------|-------------|
-| **Feature** (this doc) | `.claude/skills/` + `skill/*` branch | SKILL.md has instructions; code lives on a branch, applied via `git merge` |
-| **Utility** | `.claude/skills/<name>/` with code files | Self-contained tools; code in skill directory, copied into place on install |
-| **Operational** | `.claude/skills/` on `main` | Instruction-only workflows (setup, debug, update) |
-| **Container** | `container/skills/` | Loaded inside agent containers at runtime |
+| **Feature**(本ドキュメント) | `.claude/skills/` + `skill/*` ブランチ | SKILL.md は命令文を持ち、コードはブランチに住み、`git merge` で適用される |
+| **Utility** | `.claude/skills/<name>/` にコードファイルを同梱 | 自己完結ツール、skill ディレクトリ内のコードがインストール時に所定位置にコピーされる |
+| **オペレーショナル** | `main` 上の `.claude/skills/` | 命令文のみのワークフロー(setup、debug、update) |
+| **コンテナ** | `container/skills/` | ランタイムで agent コンテナ内にロードされる |
 
 ---
 
-Feature skills are distributed as git branches on the upstream repository. Applying a skill is a `git merge`. Updating core is a `git merge`. Everything is standard git.
+Feature skill は upstream リポジトリ上の git ブランチとして配布される。Skill の適用は `git merge`。コアの更新も `git merge`。すべて標準的な git である。
 
-This replaces the previous `skills-engine/` system (three-way file merging, `.nanoclaw/` state, manifest files, replay, backup/restore) with plain git operations and Claude for conflict resolution.
+これは以前の `skills-engine/` システム(3-way ファイル merge、`.nanoclaw/` 状態、manifest ファイル、replay、backup/restore)を、プレーンな git 操作と Claude による衝突解決に置き換えるものである。
 
-## How It Works
+## 動作
 
-### Repository structure
+### リポジトリ構造
 
-The upstream repo (`nanocoai/nanoclaw`) maintains:
+upstream リポジトリ(`nanocoai/nanoclaw`)は次を保持する:
 
-- `main` — core NanoClaw (no skill code)
-- `skill/discord` — main + Discord integration
-- `skill/telegram` — main + Telegram integration
-- `skill/slack` — main + Slack integration
-- `skill/gmail` — main + Gmail integration
+- `main` — コア NanoClaw(skill コード無し)
+- `skill/discord` — main + Discord 統合
+- `skill/telegram` — main + Telegram 統合
+- `skill/slack` — main + Slack 統合
+- `skill/gmail` — main + Gmail 統合
 - etc.
 
-Each skill branch contains all the code changes for that skill: new files, modified source files, updated `package.json` dependencies, `.env.example` additions — everything. No manifest, no structured operations, no separate `add/` and `modify/` directories.
+各 skill ブランチはその skill のすべてのコード変更を含む:新規ファイル、変更されたソースファイル、更新された `package.json` 依存、`.env.example` 追加 — すべて。Manifest なし、構造化された操作なし、別の `add/` と `modify/` ディレクトリなし。
 
-### Skill discovery and installation
+### Skill の発見とインストール
 
-Skills are split into two categories:
+Skill は 2 カテゴリに分かれる:
 
-**Operational skills** (on `main`, always available):
-- `/setup`, `/debug`, `/update-nanoclaw`, `/customize`, `/update-skills`
-- These are instruction-only SKILL.md files — no code changes, just workflows
-- Live in `.claude/skills/` on `main`, immediately available to every user
+**オペレーショナル skill**(`main` 上、常に利用可能):
+- `/setup`、`/debug`、`/update-nanoclaw`、`/customize`、`/update-skills`
+- これらは命令文のみの SKILL.md ファイル — コード変更なし、ワークフローのみ
+- `main` 上の `.claude/skills/` に住み、全ユーザがすぐに使える
 
-**Feature skills** (in marketplace, installed on demand):
-- `/add-discord`, `/add-telegram`, `/add-slack`, `/add-gmail`, etc.
-- Each has a SKILL.md with setup instructions and a corresponding `skill/*` branch with code
-- Live in the marketplace repo (`nanocoai/nanoclaw-skills`)
+**Feature skill**(marketplace 内、オンデマンドでインストール):
+- `/add-discord`、`/add-telegram`、`/add-slack`、`/add-gmail` 等
+- 各々セットアップ命令を持つ SKILL.md と、コードを持つ対応する `skill/*` ブランチを持つ
+- marketplace repo(`nanocoai/nanoclaw-skills`)に住む
 
-Users never interact with the marketplace directly. The operational skills `/setup` and `/customize` handle plugin installation transparently:
+ユーザは marketplace と直接やりとりしない。オペレーショナル skill の `/setup` と `/customize` がプラグインインストールを透過的に扱う:
 
 ```bash
-# Claude runs this behind the scenes — users don't see it
+# Claude が裏で実行する — ユーザは見ない
 claude plugin install nanoclaw-skills@nanoclaw-skills --scope project
 ```
 
-Skills are hot-loaded after `claude plugin install` — no restart needed. This means `/setup` can install the marketplace plugin, then immediately run any feature skill, all in one session.
+`claude plugin install` の後、skill はホットロードされる — 再起動不要。これは `/setup` が marketplace plugin をインストールし、その後すぐに任意の feature skill を実行できることを意味する、すべて 1 セッション内で。
 
-### Selective skill installation
+### 選択的な skill インストール
 
-`/setup` asks users what channels they want, then only offers relevant skills:
+`/setup` はユーザに使いたい channel を尋ね、関連する skill のみを提示する:
 
-1. "Which messaging channels do you want to use?" → Discord, Telegram, Slack, WhatsApp
-2. User picks Telegram → Claude installs the plugin and runs `/add-telegram`
-3. After Telegram is set up: "Want to add Agent Swarm support for Telegram?" → offers `/add-telegram-swarm`
-4. "Want to enable community skills?" → installs community marketplace plugins
+1. 「どのメッセージング channel を使いたいですか?」 → Discord、Telegram、Slack、WhatsApp
+2. ユーザが Telegram を選ぶ → Claude がプラグインをインストールして `/add-telegram` を実行
+3. Telegram セットアップ後:「Telegram 用の Agent Swarm サポートを追加しますか?」 → `/add-telegram-swarm` を提示
+4. 「コミュニティ skill を有効にしますか?」 → コミュニティ marketplace plugin をインストール
 
-Dependent skills (e.g., `telegram-swarm` depends on `telegram`) are only offered after their parent is installed. `/customize` follows the same pattern for post-setup additions.
+依存する skill(例:`telegram-swarm` は `telegram` に依存)は、親がインストールされた後にのみ提示される。`/customize` も setup 後の追加で同じパターンに従う。
 
-### Marketplace configuration
+### Marketplace 設定
 
-NanoClaw's `.claude/settings.json` registers the official marketplace:
+NanoClaw の `.claude/settings.json` が公式 marketplace を登録する:
 
 ```json
 {
@@ -85,19 +85,19 @@ NanoClaw's `.claude/settings.json` registers the official marketplace:
 }
 ```
 
-The marketplace repo uses Claude Code's plugin structure:
+Marketplace repo は Claude Code のプラグイン構造を使う:
 
 ```
 nanocoai/nanoclaw-skills/
   .claude-plugin/
-    marketplace.json              # Plugin catalog
+    marketplace.json              # プラグインカタログ
   plugins/
-    nanoclaw-skills/              # Single plugin bundling all official skills
+    nanoclaw-skills/              # すべての公式 skill をまとめた単一プラグイン
       .claude-plugin/
-        plugin.json               # Plugin manifest
+        plugin.json               # プラグインマニフェスト
       skills/
         add-discord/
-          SKILL.md                # Setup instructions; step 1 is "merge the branch"
+          SKILL.md                # セットアップ命令、step 1 は「ブランチを merge する」
         add-telegram/
           SKILL.md
         add-slack/
@@ -105,195 +105,195 @@ nanocoai/nanoclaw-skills/
         ...
 ```
 
-Multiple skills are bundled in one plugin — installing `nanoclaw-skills` makes all feature skills available at once. Individual skills don't need separate installation.
+複数の skill が 1 つのプラグインにまとめられる — `nanoclaw-skills` をインストールするとすべての feature skill が一度に利用可能になる。個別の skill ごとのインストールは不要。
 
-Each SKILL.md tells Claude to merge the corresponding skill branch as step 1, then walks through interactive setup (env vars, bot creation, etc.).
+各 SKILL.md は step 1 として対応する skill ブランチを merge するよう Claude に指示し、その後対話的なセットアップ(env var、bot 作成等)を進める。
 
-### Applying a skill
+### Skill の適用
 
-User runs `/add-discord` (discovered via marketplace). Claude follows the SKILL.md:
+ユーザが `/add-discord` を実行する(marketplace 経由で発見)。Claude が SKILL.md に従う:
 
 1. `git fetch upstream skill/discord`
 2. `git merge upstream/skill/discord`
-3. Interactive setup (create bot, get token, configure env vars, etc.)
+3. 対話的セットアップ(bot 作成、token 取得、env var 設定 等)
 
-Or manually:
+または手動で:
 
 ```bash
 git fetch upstream skill/discord
 git merge upstream/skill/discord
 ```
 
-### Applying multiple skills
+### 複数 skill の適用
 
 ```bash
 git merge upstream/skill/discord
 git merge upstream/skill/telegram
 ```
 
-Git handles the composition. If both skills modify the same lines, it's a real conflict and Claude resolves it.
+Git が合成を扱う。両方の skill が同じ行を変更すると本当の衝突であり、Claude が解決する。
 
-### Updating core
+### コアの更新
 
 ```bash
 git fetch upstream main
 git merge upstream/main
 ```
 
-Since skill branches are kept merged-forward with main (see CI section), the user's merged-in skill changes and upstream changes have proper common ancestors.
+Skill ブランチは main と merge-forward 状態に保たれているので(下記 CI セクション参照)、ユーザが merge した skill の変更と upstream の変更には適切な共通祖先がある。
 
-### Checking for skill updates
+### Skill 更新の確認
 
-Users who previously merged a skill branch can check for updates. For each `upstream/skill/*` branch, check whether the branch has commits that aren't in the user's HEAD:
+以前 skill ブランチを merge したユーザは更新を確認できる。各 `upstream/skill/*` ブランチに対し、そのブランチにユーザの HEAD にないコミットがあるか確認する:
 
 ```bash
 git fetch upstream
 for branch in $(git branch -r | grep 'upstream/skill/'); do
-  # Check if user has merged this skill at some point
+  # ユーザがどこかでこの skill を merge したか確認
   merge_base=$(git merge-base HEAD "$branch" 2>/dev/null) || continue
-  # Check if the skill branch has new commits beyond what the user has
+  # skill ブランチに、ユーザが持つもの以上の新コミットがあるか確認
   if ! git merge-base --is-ancestor "$branch" HEAD 2>/dev/null; then
     echo "$branch has updates available"
   fi
 done
 ```
 
-This requires no state — it uses git history to determine which skills were previously merged and whether they have new commits.
+これは状態を必要としない — git 履歴を使って、以前どの skill が merge されたか、新しいコミットがあるかを判定する。
 
-This logic is available in two ways:
-- Built into `/update-nanoclaw` — after merging main, optionally check for skill updates
-- Standalone `/update-skills` — check and merge skill updates independently
+このロジックは 2 つの方法で利用可能:
+- `/update-nanoclaw` に組み込み — main を merge した後、オプションで skill 更新を確認
+- スタンドアロンの `/update-skills` — skill の更新を独立して確認・merge
 
-### Conflict resolution
+### 衝突解決
 
-At any merge step, conflicts may arise. Claude resolves them — reading the conflicted files, understanding the intent of both sides, and producing the correct result. This is what makes the branch approach viable at scale: conflict resolution that previously required human judgment is now automated.
+任意の merge ステップで衝突が起こりうる。Claude が解決する — 衝突したファイルを読み、両側の意図を理解し、正しい結果を作る。これがブランチアプローチをスケールで実現可能にしているもの:以前は人間の判断を要した衝突解決が、今や自動化されている。
 
-### Skill dependencies
+### Skill の依存
 
-Some skills depend on other skills. E.g., `skill/telegram-swarm` requires `skill/telegram`. Dependent skill branches are branched from their parent skill branch, not from `main`.
+一部の skill は他の skill に依存する。例:`skill/telegram-swarm` は `skill/telegram` を必要とする。依存する skill ブランチは `main` ではなく、親 skill ブランチから派生する。
 
-This means `skill/telegram-swarm` includes all of telegram's changes plus its own additions. When a user merges `skill/telegram-swarm`, they get both — no need to merge telegram separately.
+つまり `skill/telegram-swarm` は telegram のすべての変更に自身の追加を加えたものを含む。ユーザが `skill/telegram-swarm` を merge すると、両方を得る — telegram を別に merge する必要はない。
 
-Dependencies are implicit in git history — `git merge-base --is-ancestor` determines whether one skill branch is an ancestor of another. No separate dependency file is needed.
+依存は git 履歴に暗黙的にある — `git merge-base --is-ancestor` がある skill ブランチが他のブランチの祖先かを判定する。別の依存ファイルは不要。
 
-### Uninstalling a skill
+### Skill のアンインストール
 
 ```bash
-# Find the merge commit
+# merge コミットを探す
 git log --merges --oneline | grep discord
 
-# Revert it
+# 取り消す
 git revert -m 1 <merge-commit>
 ```
 
-This creates a new commit that undoes the skill's changes. Claude can handle the whole flow.
+これは skill の変更を取り消す新しいコミットを作る。Claude がフローすべてを扱える。
 
-If the user has modified the skill's code since merging (custom changes on top), the revert might conflict — Claude resolves it.
+ユーザが merge 以降に skill のコードを変更している(独自変更を上に積んでいる)場合、revert は衝突するかもしれない — Claude が解決する。
 
-If the user later wants to re-apply the skill, they need to revert the revert first (git treats reverted changes as "already applied and undone"). Claude handles this too.
+ユーザが後で skill を再適用したくなったら、まず revert を revert する必要がある(git は revert された変更を「既に適用されて取り消された」として扱う)。Claude はこれも扱う。
 
-## CI: Keeping Skill Branches Current
+## CI:Skill ブランチを最新に保つ
 
-A GitHub Action runs on every push to `main`:
+GitHub Action が `main` へのプッシュごとに走る:
 
-1. List all `skill/*` branches
-2. For each skill branch, merge `main` into it (merge-forward, not rebase)
-3. Run build and tests on the merged result
-4. If tests pass, push the updated skill branch
-5. If a skill fails (conflict, build error, test failure), open a GitHub issue for manual resolution
+1. すべての `skill/*` ブランチを列挙
+2. 各 skill ブランチに `main` を merge する(merge-forward、rebase ではない)
+3. Merge 結果でビルドとテストを実行
+4. テストが通れば、更新された skill ブランチを push
+5. Skill が失敗したら(衝突、ビルドエラー、テスト失敗)、手動解決のため GitHub issue をオープン
 
-**Why merge-forward instead of rebase:**
-- No force-push — preserves history for users who already merged the skill
-- Users can re-merge a skill branch to pick up skill updates (bug fixes, improvements)
-- Git has proper common ancestors throughout the merge graph
+**なぜ rebase でなく merge-forward か:**
+- Force push なし — 既に skill を merge したユーザの履歴を保つ
+- ユーザは skill ブランチを再 merge して skill の更新(バグ修正、改善)を取り込める
+- Git は merge グラフ全体で適切な共通祖先を持つ
 
-**Why this scales:** With a few hundred skills and a few commits to main per day, the CI cost is trivial. Haiku is fast and cheap. The approach that wouldn't have been feasible a year or two ago is now practical because Claude can resolve conflicts at scale.
+**なぜこれがスケールするか:** 数百の skill と 1 日数コミットの main で、CI コストはわずか。Haiku は速くて安い。1〜2 年前なら現実的でなかったアプローチが、Claude がスケールで衝突を解決できる今は実用的である。
 
-## Installation Flow
+## インストールフロー
 
-### New users (recommended)
+### 新規ユーザ(推奨)
 
-1. Fork `nanocoai/nanoclaw` on GitHub (click the Fork button)
-2. Clone your fork:
+1. GitHub で `nanocoai/nanoclaw` を fork する(Fork ボタンをクリック)
+2. fork を clone する:
    ```bash
    git clone https://github.com/<you>/nanoclaw.git
    cd nanoclaw
    ```
-3. Run Claude Code:
+3. Claude Code を実行:
    ```bash
    claude
    ```
-4. Run `/setup` — Claude handles dependencies, authentication, container setup, service configuration, and adds `upstream` remote if not present
+4. `/setup` を実行 — Claude が依存、認証、コンテナセットアップ、サービス設定を扱い、無ければ `upstream` remote を追加する
 
-Forking is recommended because it gives users a remote to push their customizations to. Clone-only works for trying things out but provides no remote backup.
+Fork が推奨される理由は、ユーザにカスタマイズを push する remote を与えるため。Clone のみは試すには良いが、remote バックアップを提供しない。
 
-### Existing users migrating from clone
+### Clone から移行する既存ユーザ
 
-Users who previously ran `git clone https://github.com/nanocoai/nanoclaw.git` and have local customizations:
+以前 `git clone https://github.com/nanocoai/nanoclaw.git` で clone してローカルカスタマイズを持つユーザ:
 
-1. Fork `nanocoai/nanoclaw` on GitHub
-2. Reroute remotes:
+1. GitHub で `nanocoai/nanoclaw` を fork する
+2. Remote を再ルーティング:
    ```bash
    git remote rename origin upstream
    git remote add origin https://github.com/<you>/nanoclaw.git
    git push --force origin main
    ```
-   The `--force` is needed because the fresh fork's main is at upstream's latest, but the user wants their (possibly behind) version. The fork was just created so there's nothing to lose.
-3. From this point, `origin` = their fork, `upstream` = nanocoai/nanoclaw
+   `--force` が必要なのは、フレッシュな fork の main は upstream の最新だが、ユーザは自分の(おそらく遅れた)バージョンを欲しいから。Fork は今作ったばかりで失うものはない。
+3. この時点から、`origin` = 自分の fork、`upstream` = nanocoai/nanoclaw
 
-### Existing users migrating from the old skills engine
+### 旧 skills engine から移行する既存ユーザ
 
-Users who previously applied skills via the `skills-engine/` system have skill code in their tree but no merge commits linking to skill branches. Git doesn't know these changes came from a skill, so merging a skill branch on top would conflict or duplicate.
+以前 `skills-engine/` システム経由で skill を適用したユーザは、ツリーに skill コードがあるが、skill ブランチへリンクする merge コミットは無い。Git はこれらの変更が skill から来たことを知らないので、skill ブランチを上に merge すると衝突または重複する。
 
-**For new skills going forward:** just merge skill branches as normal. No issue.
+**今後の新 skill について:** 通常通り skill ブランチを merge するだけ。問題なし。
 
-**For existing old-engine skills**, two migration paths:
+**既存の旧エンジン skill について**、2 つの移行パス:
 
-**Option A: Per-skill reapply (keep your fork)**
-1. For each old-engine skill: identify and revert the old changes, then merge the skill branch fresh
-2. Claude assists with identifying what to revert and resolving any conflicts
-3. Custom modifications (non-skill changes) are preserved
+**Option A: skill ごとに再適用(fork を保つ)**
+1. 各旧エンジン skill について:旧変更を識別して取り消し、その後 skill ブランチを新規に merge する
+2. Claude が何を取り消すかの識別と衝突解決を支援する
+3. カスタム修正(skill 以外の変更)は保たれる
 
-**Option B: Fresh start (cleanest)**
-1. Create a new fork from upstream
-2. Merge the skill branches you want
-3. Manually re-apply your custom (non-skill) changes
-4. Claude assists by diffing your old fork against the new one to identify custom changes
+**Option B: 新規スタート(最もクリーン)**
+1. upstream から新しい fork を作る
+2. 欲しい skill ブランチを merge する
+3. カスタム(skill 以外)変更を手動で再適用する
+4. Claude が旧 fork を新 fork と diff してカスタム変更を識別する支援をする
 
-In both cases:
-- Delete the `.nanoclaw/` directory (no longer needed)
-- The `skills-engine/` code will be removed from upstream once all skills are migrated
-- `/update-skills` only tracks skills applied via branch merge — old-engine skills won't appear in update checks
+両方のケースで:
+- `.nanoclaw/` ディレクトリを削除する(不要)
+- `skills-engine/` コードはすべての skill が移行されたら upstream から削除される
+- `/update-skills` はブランチ merge 経由で適用された skill のみを追跡する — 旧エンジン skill は更新チェックに現れない
 
-## User Workflows
+## ユーザワークフロー
 
-### Custom changes
+### カスタム変更
 
-Users make custom changes directly on their main branch. This is the standard fork workflow — their `main` IS their customized version.
+ユーザは自分の main ブランチに直接カスタム変更をする。これは標準的な fork ワークフロー — 自分の `main` がカスタマイズされたバージョンそのものである。
 
 ```bash
-# Make changes
+# 変更する
 vim src/config.ts
 git commit -am "change trigger word to @Bob"
 git push origin main
 ```
 
-Custom changes, skills, and core updates all coexist on their main branch. Git handles the three-way merging at each merge step because it can trace common ancestors through the merge history.
+カスタム変更、skill、コア更新はすべて自分の main ブランチに共存する。Git は各 merge ステップで 3-way merge を扱える — merge 履歴を通して共通祖先を辿れるからである。
 
-### Applying a skill
+### Skill の適用
 
-Run `/add-discord` in Claude Code (discovered via the marketplace plugin), or manually:
+Claude Code で `/add-discord` を実行(marketplace plugin 経由で発見)、または手動で:
 
 ```bash
 git fetch upstream skill/discord
 git merge upstream/skill/discord
-# Follow setup instructions for configuration
+# 設定のセットアップ命令に従う
 git push origin main
 ```
 
-If the user is behind upstream's main when they merge a skill branch, the merge might bring in some core changes too (since skill branches are merged-forward with main). This is generally fine — they get a compatible version of everything.
+ユーザが skill ブランチを merge する時点で upstream の main より遅れていれば、merge は一部のコア変更も持ち込むかもしれない(skill ブランチは main と merge-forward 状態だから)。一般にこれで問題ない — 互換性のあるバージョンをすべて得る。
 
-### Updating core
+### コアの更新
 
 ```bash
 git fetch upstream main
@@ -301,86 +301,86 @@ git merge upstream/main
 git push origin main
 ```
 
-This is the same as the existing `/update-nanoclaw` skill's merge path.
+これは既存の `/update-nanoclaw` skill の merge パスと同じである。
 
-### Updating skills
+### Skill の更新
 
-Run `/update-skills` or let `/update-nanoclaw` check after a core update. For each previously-merged skill branch that has new commits, Claude offers to merge the updates.
+`/update-skills` を実行するか、`/update-nanoclaw` にコア更新後にチェックさせる。新コミットがある以前 merge した skill ブランチごとに、Claude が更新の merge を提案する。
 
-### Contributing back to upstream
+### upstream に貢献する
 
-Users who want to submit a PR to upstream:
+upstream に PR を送りたいユーザ:
 
 ```bash
 git fetch upstream main
 git checkout -b my-fix upstream/main
-# Make changes
+# 変更する
 git push origin my-fix
-# Create PR from my-fix to nanocoai/nanoclaw:main
+# my-fix から nanocoai/nanoclaw:main へ PR を作る
 ```
 
-Standard fork contribution workflow. Their custom changes stay on their main and don't leak into the PR.
+標準的な fork 貢献ワークフロー。自分のカスタム変更は自分の main に残り、PR に漏れない。
 
-## Contributing a Skill
+## Skill を貢献する
 
-The flow below is for **feature skills** (branch-based). For utility skills (self-contained tools) and container skills, the contributor opens a PR that adds files directly to `.claude/skills/<name>/` or `container/skills/<name>/` — no branch extraction needed. See [CONTRIBUTING.md](../CONTRIBUTING.md) for all skill types.
+下記のフローは **feature skill**(ブランチベース)用。Utility skill(自己完結ツール)とコンテナ skill については、コントリビュータが直接 `.claude/skills/<name>/` または `container/skills/<name>/` にファイルを追加する PR を開く — ブランチ抽出は不要。すべての skill タイプは [CONTRIBUTING.md](../CONTRIBUTING.md) を参照。
 
-### Contributor flow (feature skills)
+### コントリビュータフロー(feature skill)
 
-1. Fork `nanocoai/nanoclaw`
-2. Branch from `main`
-3. Make the code changes (new channel file, modified integration points, updated package.json, .env.example additions, etc.)
-4. Open a PR to `main`
+1. `nanocoai/nanoclaw` を fork
+2. `main` からブランチを切る
+3. コード変更を行う(新 channel ファイル、変更された統合ポイント、更新された package.json、.env.example 追加 等)
+4. `main` への PR をオープン
 
-The contributor opens a normal PR — they don't need to know about skill branches or marketplace repos. They just make code changes and submit.
+コントリビュータは通常の PR を開く — skill ブランチや marketplace repo を知る必要はない。コード変更を行い submit するだけ。
 
-### Maintainer flow
+### メンテナーフロー
 
-When a skill PR is reviewed and approved:
+Skill PR がレビューされて承認されたら:
 
-1. Create a `skill/<name>` branch from the PR's commits:
+1. PR のコミットから `skill/<name>` ブランチを作成:
    ```bash
    git fetch origin pull/<PR_NUMBER>/head:skill/<name>
    git push origin skill/<name>
    ```
-2. Force-push to the contributor's PR branch, replacing it with a single commit that adds the contributor to `CONTRIBUTORS.md` (removing all code changes)
-3. Merge the slimmed PR into `main` (just the contributor addition)
-4. Add the skill's SKILL.md to the marketplace repo (`nanocoai/nanoclaw-skills`)
+2. コントリビュータの PR ブランチに force push し、`CONTRIBUTORS.md` にコントリビュータを追加する単一コミットで置き換える(全コード変更を削除)
+3. スリム化された PR を `main` に merge(コントリビュータ追加のみ)
+4. Skill の SKILL.md を marketplace repo(`nanocoai/nanoclaw-skills`)に追加
 
-This way:
-- The contributor gets merge credit (their PR is merged)
-- They're added to CONTRIBUTORS.md automatically by the maintainer
-- The skill branch is created from their work
-- `main` stays clean (no skill code)
-- The contributor only had to do one thing: open a PR with code changes
+これにより:
+- コントリビュータは merge クレジットを得る(PR が merge される)
+- CONTRIBUTORS.md にメンテナーが自動で追加する
+- Skill ブランチが彼らの作業から作られる
+- `main` はクリーンに保たれる(skill コード無し)
+- コントリビュータがすべきことは 1 つだけ:コード変更付きの PR をオープンすること
 
-**Note:** GitHub PRs from forks have "Allow edits from maintainers" checked by default, so the maintainer can push to the contributor's PR branch.
+**Note:** Fork からの GitHub PR はデフォルトで「Allow edits from maintainers」がチェックされているので、メンテナーがコントリビュータの PR ブランチに push できる。
 
 ### Skill SKILL.md
 
-The contributor can optionally provide a SKILL.md (either in the PR or separately). This goes into the marketplace repo and contains:
+コントリビュータはオプションで SKILL.md を提供できる(PR 内 or 別途)。これは marketplace repo に行き、次を含む:
 
-1. Frontmatter (name, description, triggers)
-2. Step 1: Merge the skill branch
-3. Steps 2-N: Interactive setup (create bot, get token, configure env vars, verify)
+1. Frontmatter(name、description、triggers)
+2. Step 1:skill ブランチを merge する
+3. Step 2-N:対話的セットアップ(bot 作成、token 取得、env var 設定、検証)
 
-If the contributor doesn't provide a SKILL.md, the maintainer writes one based on the PR.
+コントリビュータが SKILL.md を提供しなければ、メンテナーが PR をもとに書く。
 
-## Community Marketplaces
+## コミュニティ Marketplace
 
-Anyone can maintain their own fork with skill branches and their own marketplace repo. This enables a community-driven skill ecosystem without requiring write access to the upstream repo.
+誰でも独自の fork に skill ブランチと marketplace repo を保持できる。これは upstream リポジトリへの書き込み権限を必要としないコミュニティ駆動の skill エコシステムを可能にする。
 
-### How it works
+### 動作
 
-A community contributor:
+コミュニティコントリビュータは:
 
-1. Maintains a fork of NanoClaw (e.g., `alice/nanoclaw`)
-2. Creates `skill/*` branches on their fork with their custom skills
-3. Creates a marketplace repo (e.g., `alice/nanoclaw-skills`) with a `.claude-plugin/marketplace.json` and plugin structure
+1. NanoClaw の fork(例:`alice/nanoclaw`)を保持する
+2. 自分の fork 上にカスタム skill の `skill/*` ブランチを作る
+3. Marketplace repo(例:`alice/nanoclaw-skills`)を `.claude-plugin/marketplace.json` とプラグイン構造付きで作る
 
-### Adding a community marketplace
+### コミュニティ marketplace を追加する
 
-If the community contributor is trusted, they can open a PR to add their marketplace to NanoClaw's `.claude/settings.json`:
+コミュニティコントリビュータが信頼されていれば、NanoClaw の `.claude/settings.json` に自分の marketplace を追加する PR を開ける:
 
 ```json
 {
@@ -401,54 +401,54 @@ If the community contributor is trusted, they can open a PR to add their marketp
 }
 ```
 
-Once merged, all NanoClaw users automatically discover the community marketplace alongside the official one.
+Merge されると、すべての NanoClaw ユーザが公式と並んでコミュニティ marketplace を自動的に発見する。
 
-### Installing community skills
+### コミュニティ skill のインストール
 
-`/setup` and `/customize` ask users whether they want to enable community skills. If yes, Claude installs community marketplace plugins via `claude plugin install`:
+`/setup` と `/customize` はユーザにコミュニティ skill を有効にするか尋ねる。Yes なら、Claude は `claude plugin install` 経由でコミュニティ marketplace プラグインをインストールする:
 
 ```bash
 claude plugin install alice-skills@alice-nanoclaw-skills --scope project
 ```
 
-Community skills are hot-loaded and immediately available — no restart needed. Dependent skills are only offered after their prerequisites are met (e.g., community Telegram add-ons only after Telegram is installed).
+コミュニティ skill はホットロードされて即座に利用可能 — 再起動不要。依存する skill は前提条件が満たされた後にのみ提示される(例:コミュニティの Telegram アドオンは Telegram インストール後)。
 
-Users can also browse and install community plugins manually via `/plugin`.
+ユーザは `/plugin` 経由でコミュニティプラグインを手動でブラウズ・インストールもできる。
 
-### Properties of this system
+### このシステムの性質
 
-- **No gatekeeping required.** Anyone can create skills on their fork without permission. They only need approval to be listed in the auto-discovered marketplaces.
-- **Multiple marketplaces coexist.** Users see skills from all trusted marketplaces in `/plugin`.
-- **Community skills use the same merge pattern.** The SKILL.md just points to a different remote:
+- **ゲートキーピングは不要。** 誰でも許可なしに自分の fork に skill を作れる。自動発見される marketplace に list されるには承認だけが必要。
+- **複数の marketplace が共存する。** ユーザは `/plugin` ですべての信頼された marketplace の skill を見る。
+- **コミュニティ skill は同じ merge パターンを使う。** SKILL.md は単に異なる remote を指す:
   ```bash
   git remote add alice https://github.com/alice/nanoclaw.git
   git fetch alice skill/my-cool-feature
   git merge alice/skill/my-cool-feature
   ```
-- **Users can also add marketplaces manually.** Even without being listed in settings.json, users can run `/plugin marketplace add alice/nanoclaw-skills` to discover skills from any source.
-- **CI is per-fork.** Each community maintainer runs their own CI to keep their skill branches merged-forward. They can use the same GitHub Action as the upstream repo.
+- **ユーザは marketplace を手動でも追加できる。** settings.json に list されていなくても、`/plugin marketplace add alice/nanoclaw-skills` を実行して任意のソースから skill を発見できる。
+- **CI は fork ごと。** 各コミュニティメンテナーは自分の CI を回して自分の skill ブランチを merge-forward に保つ。upstream repo と同じ GitHub Action を使える。
 
-## Flavors
+## Flavor
 
-A flavor is a curated fork of NanoClaw — a combination of skills, custom changes, and configuration tailored for a specific use case (e.g., "NanoClaw for Sales," "NanoClaw Minimal," "NanoClaw for Developers").
+Flavor は NanoClaw のキュレートされた fork — skill、カスタム変更、特定ユースケースに合わせた設定の組合せ(例:「NanoClaw for Sales」、「NanoClaw Minimal」、「NanoClaw for Developers」)。
 
-### Creating a flavor
+### Flavor を作る
 
-1. Fork `nanocoai/nanoclaw`
-2. Merge in the skills you want
-3. Make custom changes (trigger word, prompts, integrations, etc.)
-4. Your fork's `main` IS the flavor
+1. `nanocoai/nanoclaw` を fork
+2. 欲しい skill を merge する
+3. カスタム変更を行う(トリガーワード、プロンプト、統合 等)
+4. 自分の fork の `main` が flavor そのもの
 
-### Installing a flavor
+### Flavor をインストールする
 
-During `/setup`, users are offered a choice of flavors before any configuration happens. The setup skill reads `flavors.yaml` from the repo (shipped with upstream, always up to date) and presents options:
+`/setup` 中、設定が始まる前にユーザに flavor の選択肢が提示される。Setup skill は repo から `flavors.yaml` を読み(upstream と一緒に出荷、常に最新)、オプションを提示する:
 
-AskUserQuestion: "Start with a flavor or default NanoClaw?"
+AskUserQuestion:「Flavor で始めますか、それともデフォルトの NanoClaw で?」
 - Default NanoClaw
-- NanoClaw for Sales — Gmail + Slack + CRM (maintained by alice)
-- NanoClaw Minimal — Telegram-only, lightweight (maintained by bob)
+- NanoClaw for Sales — Gmail + Slack + CRM(alice がメンテ)
+- NanoClaw Minimal — Telegram のみ、軽量(bob がメンテ)
 
-If a flavor is chosen:
+Flavor が選ばれた場合:
 
 ```bash
 git remote add <flavor-name> https://github.com/alice/nanoclaw.git
@@ -456,85 +456,85 @@ git fetch <flavor-name> main
 git merge <flavor-name>/main
 ```
 
-Then setup continues normally (dependencies, auth, container, service).
+その後 setup は通常通り続く(依存、認証、コンテナ、サービス)。
 
-**This choice is only offered on a fresh fork** — when the user's main matches or is close to upstream's main with no local commits. If `/setup` detects significant local changes (re-running setup on an existing install), it skips the flavor selection and goes straight to configuration.
+**この選択肢はフレッシュな fork でのみ提示される** — ユーザの main が upstream の main にマッチまたは近く、ローカルコミットがないとき。`/setup` が大きなローカル変更を検知した場合(既存 install で再実行)、flavor 選択をスキップして直接設定に進む。
 
-After installation, the user's fork has three remotes:
-- `origin` — their fork (push customizations here)
-- `upstream` — `nanocoai/nanoclaw` (core updates)
-- `<flavor-name>` — the flavor fork (flavor updates)
+インストール後、ユーザの fork は 3 つの remote を持つ:
+- `origin` — 自分の fork(カスタマイズをここに push)
+- `upstream` — `nanocoai/nanoclaw`(コア更新)
+- `<flavor-name>` — flavor fork(flavor 更新)
 
-### Updating a flavor
+### Flavor の更新
 
 ```bash
 git fetch <flavor-name> main
 git merge <flavor-name>/main
 ```
 
-The flavor maintainer keeps their fork updated (merging upstream, updating skills). Users pull flavor updates the same way they pull core updates.
+Flavor メンテナーが自分の fork を最新に保つ(upstream を merge、skill を更新)。ユーザはコア更新を pull するのと同じ方法で flavor 更新を pull する。
 
-### Flavors registry
+### Flavor レジストリ
 
-`flavors.yaml` lives in the upstream repo:
+`flavors.yaml` は upstream repo に住む:
 
 ```yaml
 flavors:
   - name: NanoClaw for Sales
     repo: alice/nanoclaw
-    description: Gmail + Slack + CRM integration, daily pipeline summaries
+    description: Gmail + Slack + CRM 統合、毎日のパイプラインサマリ
     maintainer: alice
 
   - name: NanoClaw Minimal
     repo: bob/nanoclaw
-    description: Telegram-only, no container overhead
+    description: Telegram のみ、コンテナオーバーヘッドなし
     maintainer: bob
 ```
 
-Anyone can PR to add their flavor. The file is available locally when `/setup` runs since it's part of the cloned repo.
+誰でも自分の flavor を追加する PR を出せる。`/setup` 実行時、clone された repo の一部なのでローカルで利用可能。
 
-### Discoverability
+### 発見可能性
 
-- **During setup** — flavor selection is offered as part of the initial setup flow
-- **`/browse-flavors` skill** — reads `flavors.yaml` and presents options at any time
-- **GitHub topics** — flavor forks can tag themselves with `nanoclaw-flavor` for searchability
-- **Discord / website** — community-curated lists
+- **セットアップ中** — flavor 選択が初期セットアップフローの一部として提示される
+- **`/browse-flavors` skill** — `flavors.yaml` を読み、いつでもオプションを提示する
+- **GitHub トピック** — flavor fork は検索性のため `nanoclaw-flavor` でタグ付けできる
+- **Discord / website** — コミュニティキュレートのリスト
 
-## Migration
+## 移行
 
-Migration from the old skills engine to branches is complete. All feature skills now live on `skill/*` branches, and the skills engine has been removed.
+旧 skills engine からブランチへの移行は完了している。すべての feature skill は今 `skill/*` ブランチに住み、skills engine は削除された。
 
-### Skill branches
+### Skill ブランチ
 
-| Branch | Base | Description |
+| ブランチ | ベース | 説明 |
 |--------|------|-------------|
 | `skill/whatsapp` | `main` | WhatsApp channel |
 | `skill/telegram` | `main` | Telegram channel |
 | `skill/slack` | `main` | Slack channel |
 | `skill/discord` | `main` | Discord channel |
 | `skill/gmail` | `main` | Gmail channel |
-| `skill/voice-transcription` | `skill/whatsapp` | OpenAI Whisper voice transcription |
-| `skill/image-vision` | `skill/whatsapp` | Image attachment processing |
-| `skill/pdf-reader` | `skill/whatsapp` | PDF attachment reading |
-| `skill/local-whisper` | `skill/voice-transcription` | Local whisper.cpp transcription |
-| `skill/ollama-tool` | `main` | Ollama MCP server for local models |
-| `skill/apple-container` | `main` | Apple Container runtime |
-| `skill/reactions` | `main` | WhatsApp emoji reactions |
+| `skill/voice-transcription` | `skill/whatsapp` | OpenAI Whisper 音声書き起こし |
+| `skill/image-vision` | `skill/whatsapp` | 画像添付処理 |
+| `skill/pdf-reader` | `skill/whatsapp` | PDF 添付読み込み |
+| `skill/local-whisper` | `skill/voice-transcription` | ローカル whisper.cpp 書き起こし |
+| `skill/ollama-tool` | `main` | ローカルモデル用 Ollama MCP server |
+| `skill/apple-container` | `main` | Apple Container ランタイム |
+| `skill/reactions` | `main` | WhatsApp 絵文字リアクション |
 
-### What was removed
+### 削除されたもの
 
-- `skills-engine/` directory (entire engine)
-- `scripts/apply-skill.ts`, `scripts/uninstall-skill.ts`, `scripts/rebase.ts`
-- `scripts/fix-skill-drift.ts`, `scripts/validate-all-skills.ts`
-- `.github/workflows/skill-drift.yml`, `.github/workflows/skill-pr.yml`
-- All `add/`, `modify/`, `tests/`, and `manifest.yaml` from skill directories
-- `.nanoclaw/` state directory
+- `skills-engine/` ディレクトリ(エンジン全体)
+- `scripts/apply-skill.ts`、`scripts/uninstall-skill.ts`、`scripts/rebase.ts`
+- `scripts/fix-skill-drift.ts`、`scripts/validate-all-skills.ts`
+- `.github/workflows/skill-drift.yml`、`.github/workflows/skill-pr.yml`
+- すべての skill ディレクトリから `add/`、`modify/`、`tests/`、`manifest.yaml`
+- `.nanoclaw/` 状態ディレクトリ
 
-Operational skills (`setup`, `debug`, `update-nanoclaw`, `customize`, `update-skills`) remain on main in `.claude/skills/`.
+オペレーショナル skill(`setup`、`debug`、`update-nanoclaw`、`customize`、`update-skills`)は main の `.claude/skills/` に残る。
 
-## What Changes
+## 何が変わるか
 
-### README Quick Start
+### README クイックスタート
 
 Before:
 ```bash
@@ -545,27 +545,27 @@ claude
 
 After:
 ```
-1. Fork nanocoai/nanoclaw on GitHub
+1. GitHub で nanocoai/nanoclaw を fork
 2. git clone https://github.com/<you>/nanoclaw.git
 3. cd nanoclaw
 4. claude
 5. /setup
 ```
 
-### Setup skill (`/setup`)
+### Setup skill(`/setup`)
 
-Updates to the setup flow:
+セットアップフローの更新:
 
-- Check if `upstream` remote exists; if not, add it: `git remote add upstream https://github.com/nanocoai/nanoclaw.git`
-- Check if `origin` points to the user's fork (not nanocoai). If it points to nanocoai, guide them through the fork migration.
-- **Install marketplace plugin:** `claude plugin install nanoclaw-skills@nanoclaw-skills --scope project` — makes all feature skills available (hot-loaded, no restart)
-- **Ask which channels to add:** present channel options (Discord, Telegram, Slack, WhatsApp, Gmail), run corresponding `/add-*` skills for selected channels
-- **Offer dependent skills:** after a channel is set up, offer relevant add-ons (e.g., Agent Swarm after Telegram, voice transcription after WhatsApp)
-- **Optionally enable community marketplaces:** ask if the user wants community skills, install those marketplace plugins too
+- `upstream` remote が存在するか確認、無ければ追加:`git remote add upstream https://github.com/nanocoai/nanoclaw.git`
+- `origin` がユーザの fork を指しているか確認(nanocoai ではない)。Nanocoai を指していたら、fork 移行を案内する。
+- **Marketplace プラグインをインストール:** `claude plugin install nanoclaw-skills@nanoclaw-skills --scope project` — すべての feature skill を利用可能にする(ホットロード、再起動なし)
+- **どの channel を追加するか尋ねる:** channel オプション(Discord、Telegram、Slack、WhatsApp、Gmail)を提示し、選択された channel の対応する `/add-*` skill を実行
+- **依存する skill を提示:** channel セットアップ後、関連アドオンを提示(例:Telegram の後に Agent Swarm、WhatsApp の後に音声書き起こし)
+- **オプションでコミュニティ marketplace を有効化:** ユーザにコミュニティ skill が欲しいか尋ね、それらの marketplace プラグインもインストール
 
 ### `.claude/settings.json`
 
-Marketplace configuration so the official marketplace is auto-registered:
+公式 marketplace が自動登録されるための marketplace 設定:
 
 ```json
 {
@@ -580,98 +580,98 @@ Marketplace configuration so the official marketplace is auto-registered:
 }
 ```
 
-### Skills directory on main
+### main 上の skill ディレクトリ
 
-The `.claude/skills/` directory on `main` retains only operational skills (setup, debug, update-nanoclaw, customize, update-skills). Feature skills (add-discord, add-telegram, etc.) live in the marketplace repo, installed via `claude plugin install` during `/setup` or `/customize`.
+`main` 上の `.claude/skills/` ディレクトリはオペレーショナル skill(setup、debug、update-nanoclaw、customize、update-skills)のみを保持する。Feature skill(add-discord、add-telegram 等)は marketplace repo に住み、`/setup` または `/customize` 中に `claude plugin install` 経由でインストールされる。
 
-### Skills engine removal
+### Skills engine の削除
 
-The following can be removed:
+以下が削除可能:
 
-- `skills-engine/` — entire directory (apply, merge, replay, state, backup, etc.)
+- `skills-engine/` — ディレクトリ全体(apply、merge、replay、state、backup 等)
 - `scripts/apply-skill.ts`
 - `scripts/uninstall-skill.ts`
 - `scripts/fix-skill-drift.ts`
 - `scripts/validate-all-skills.ts`
-- `.nanoclaw/` — state directory
-- `add/` and `modify/` subdirectories from all skill directories
-- Feature skill SKILL.md files from `.claude/skills/` on main (they now live in the marketplace)
+- `.nanoclaw/` — 状態ディレクトリ
+- すべての skill ディレクトリから `add/` と `modify/` サブディレクトリ
+- main 上の `.claude/skills/` から feature skill SKILL.md ファイル(marketplace に移動した)
 
-Operational skills (`setup`, `debug`, `update-nanoclaw`, `customize`, `update-skills`) remain on main in `.claude/skills/`.
+オペレーショナル skill(`setup`、`debug`、`update-nanoclaw`、`customize`、`update-skills`)は main の `.claude/skills/` に残る。
 
-### New infrastructure
+### 新しいインフラ
 
-- **Marketplace repo** (`nanocoai/nanoclaw-skills`) — single Claude Code plugin bundling SKILL.md files for all feature skills
-- **CI GitHub Action** — merge-forward `main` into all `skill/*` branches on every push to `main`, using Claude (Haiku) for conflict resolution
-- **`/update-skills` skill** — checks for and applies skill branch updates using git history
-- **`CONTRIBUTORS.md`** — tracks skill contributors
+- **Marketplace repo**(`nanocoai/nanoclaw-skills`) — すべての feature skill の SKILL.md ファイルをまとめた単一の Claude Code プラグイン
+- **CI GitHub Action** — `main` への push ごとにすべての `skill/*` ブランチに `main` を merge-forward、衝突解決は Claude(Haiku)を使う
+- **`/update-skills` skill** — git 履歴を使って skill ブランチ更新を確認・適用する
+- **`CONTRIBUTORS.md`** — skill コントリビュータを追跡する
 
-### Update skill (`/update-nanoclaw`)
+### Update skill(`/update-nanoclaw`)
 
-The update skill gets simpler with the branch-based approach. The old skills engine required replaying all applied skills after merging core updates — that entire step disappears. Skill changes are already in the user's git history, so `git merge upstream/main` just works.
+Update skill はブランチベースのアプローチでシンプルになる。旧 skills engine はコア更新を merge した後にすべての適用済 skill を replay する必要があった — そのステップ全体が消える。Skill 変更はすでにユーザの git 履歴にあるので、`git merge upstream/main` がそのまま動く。
 
-**What stays the same:**
-- Preflight (clean working tree, upstream remote)
-- Backup branch + tag
-- Preview (git log, git diff, file buckets)
-- Merge/cherry-pick/rebase options
-- Conflict preview (dry-run merge)
-- Conflict resolution
-- Build + test validation
-- Rollback instructions
+**そのまま残るもの:**
+- Preflight(クリーンな working tree、upstream remote)
+- バックアップブランチ + タグ
+- プレビュー(git log、git diff、ファイルバケット)
+- Merge / cherry-pick / rebase オプション
+- 衝突プレビュー(dry-run merge)
+- 衝突解決
+- ビルド + テスト検証
+- Rollback 命令
 
-**What's removed:**
-- Skill replay step (was needed by the old skills engine to re-apply skills after core update)
-- Re-running structured operations (npm deps, env vars — these are part of git history now)
+**削除されるもの:**
+- Skill replay ステップ(旧 skills engine がコア更新後に skill を再適用するのに必要だった)
+- 構造化操作の再実行(npm 依存、env var — 今は git 履歴の一部)
 
-**What's added:**
-- Optional step at the end: "Check for skill updates?" which runs the `/update-skills` logic
-- This checks whether any previously-merged skill branches have new commits (bug fixes, improvements to the skill itself — not just merge-forwards from main)
+**追加されるもの:**
+- 末尾のオプションステップ:「Skill 更新を確認?」 これは `/update-skills` ロジックを走らせる
+- これは以前 merge した skill ブランチに新コミットがあるかを確認する(バグ修正、skill 自身の改善 — 単なる main からの merge-forward ではない)
 
-**Why users don't need to re-merge skills after a core update:**
-When the user merged a skill branch, those changes became part of their git history. When they later merge `upstream/main`, git performs a normal three-way merge — the skill changes in their tree are untouched, and only core changes are brought in. The merge-forward CI ensures skill branches stay compatible with latest main, but that's for new users applying the skill fresh. Existing users who already merged the skill don't need to do anything.
+**なぜユーザがコア更新後に skill を再 merge する必要がないか:**
+ユーザが skill ブランチを merge した時、その変更は git 履歴の一部になった。後で `upstream/main` を merge するとき、git は通常の 3-way merge を行う — ツリー内の skill 変更は触られず、コア変更だけが持ち込まれる。Merge-forward CI は skill ブランチを最新 main と互換性を保つが、それは新規に skill を適用するユーザのため。既に skill を merge した既存ユーザは何もする必要がない。
 
-Users only need to re-merge a skill branch if the skill itself was updated (not just merged-forward with main). The `/update-skills` check detects this.
+ユーザが skill ブランチを再 merge する必要があるのは、skill 自身が更新されたとき(main からの merge-forward だけではない)。`/update-skills` チェックがこれを検出する。
 
-## Discord Announcement
+## Discord 告知
 
-### For existing users
+### 既存ユーザ向け
 
-> **Skills are now git branches**
+> **Skill が git ブランチになった**
 >
-> We've simplified how skills work in NanoClaw. Instead of a custom skills engine, skills are now git branches that you merge in.
+> NanoClaw の skill の仕組みを簡素化しました。カスタム skills engine の代わりに、skill は今や merge する git ブランチになっています。
 >
-> **What this means for you:**
-> - Applying a skill: `git fetch upstream skill/discord && git merge upstream/skill/discord`
-> - Updating core: `git fetch upstream main && git merge upstream/main`
-> - Checking for skill updates: `/update-skills`
-> - No more `.nanoclaw/` state directory or skills engine
+> **これがあなたにとって何を意味するか:**
+> - Skill の適用:`git fetch upstream skill/discord && git merge upstream/skill/discord`
+> - コア更新:`git fetch upstream main && git merge upstream/main`
+> - Skill 更新確認:`/update-skills`
+> - `.nanoclaw/` 状態ディレクトリと skills engine はもうありません
 >
-> **We now recommend forking instead of cloning.** This gives you a remote to push your customizations to.
+> **clone より fork を推奨します。** これによりカスタマイズを push する remote を得られます。
 >
-> **If you currently have a clone with local changes**, migrate to a fork:
-> 1. Fork `nanocoai/nanoclaw` on GitHub
-> 2. Run:
+> **現在ローカル変更付きの clone を持っているなら**、fork に移行してください:
+> 1. GitHub で `nanocoai/nanoclaw` を fork する
+> 2. 実行:
 >    ```
 >    git remote rename origin upstream
 >    git remote add origin https://github.com/<you>/nanoclaw.git
 >    git push --force origin main
 >    ```
->    This works even if you're way behind — just push your current state.
+>    上流から遠く遅れていてもこれは動きます — 現在の状態を push するだけ。
 >
-> **If you previously applied skills via the old system**, your code changes are already in your working tree — nothing to redo. You can delete the `.nanoclaw/` directory. Future skills and updates use the branch-based approach.
+> **以前旧システム経由で skill を適用していたなら**、コード変更はすでに working tree にあります — やり直す必要はありません。`.nanoclaw/` ディレクトリは削除できます。今後の skill と更新はブランチベースのアプローチを使います。
 >
-> **Discovering skills:** Skills are now available through Claude Code's plugin marketplace. Run `/plugin` in Claude Code to browse and install available skills.
+> **Skill の発見:** Skill は今 Claude Code のプラグイン marketplace 経由で利用可能です。Claude Code で `/plugin` を実行して利用可能な skill をブラウズ・インストールしてください。
 
-### For skill contributors
+### Skill コントリビュータ向け
 
-> **Contributing skills**
+> **Skill の貢献**
 >
-> To contribute a skill:
-> 1. Fork `nanocoai/nanoclaw`
-> 2. Branch from `main` and make your code changes
-> 3. Open a regular PR
+> Skill を貢献するには:
+> 1. `nanocoai/nanoclaw` を fork
+> 2. `main` からブランチを切ってコード変更
+> 3. 通常の PR をオープン
 >
-> That's it. We'll create a `skill/<name>` branch from your PR, add you to CONTRIBUTORS.md, and add the SKILL.md to the marketplace. CI automatically keeps skill branches merged-forward with `main` using Claude to resolve any conflicts.
+> それだけです。私たちがあなたの PR から `skill/<name>` ブランチを作り、CONTRIBUTORS.md にあなたを追加し、SKILL.md を marketplace に追加します。CI は Claude を使って衝突解決をしながら、skill ブランチを `main` と merge-forward 状態に自動的に保ちます。
 >
-> **Want to run your own skill marketplace?** Maintain skill branches on your fork and create a marketplace repo. Open a PR to add it to NanoClaw's auto-discovered marketplaces — or users can add it manually via `/plugin marketplace add`.
+> **自分の skill marketplace を運営したい?** 自分の fork に skill ブランチを保持して marketplace repo を作ってください。NanoClaw の自動発見 marketplace に追加する PR をオープン — またはユーザは `/plugin marketplace add` 経由で手動追加できます。

@@ -1,80 +1,80 @@
-# Build & Runtime
+# ビルドとランタイム
 
-NanoClaw runs a split stack: the host is Node + pnpm, the agent container is Bun. They communicate exclusively through two SQLite files per session — there are no shared modules between them, which is what lets them use different runtimes cleanly.
+NanoClaw は分割スタックで動く:host は Node + pnpm、agent コンテナは Bun。両者はセッションごとの 2 つの SQLite ファイル経由でのみ通信する — 両者の間に共有モジュールは存在しない。これが、異なるランタイムを綺麗に使い分けられる理由である。
 
-## Why the split
+## なぜ分割するのか
 
-- **Host stays on Node** because Baileys (WhatsApp) depends on `libsignal-node` native bindings and a long-tested WebSocket/HTTP stack. Bun's Node-API compat has improved, but this isn't where we want risk.
-- **Container runs Bun** because `bun:sqlite` is built-in (no native compile of `better-sqlite3` per image rebuild), source runs directly (no tsc build step at image build or session wake), and `bun install` is ~5-10× faster than `npm install`.
+- **host を Node のままにする** 理由:Baileys(WhatsApp)が `libsignal-node` のネイティブバインディングと長年テストされた WebSocket / HTTP スタックに依存しているため。Bun の Node-API 互換性は改善してきているが、ここはリスクを取りたい場所ではない。
+- **コンテナを Bun で動かす** 理由:`bun:sqlite` が組み込みで(イメージ再ビルドごとの `better-sqlite3` のネイティブコンパイル不要)、ソースが直接走り(イメージビルド時にもセッションウェイク時にも tsc ビルドステップが不要)、`bun install` は `npm install` より ~5-10 倍速い。
 
-Host and container each have their own package tree:
+host とコンテナはそれぞれ独自のパッケージツリーを持つ:
 
 ```
 /                             pnpm + Node 22
-  pnpm-lock.yaml              host deps (channels, Chat SDK, Baileys, better-sqlite3, etc.)
-  pnpm-workspace.yaml         minimumReleaseAge + onlyBuiltDependencies policy
+  pnpm-lock.yaml              host の依存 (channels, Chat SDK, Baileys, better-sqlite3 等)
+  pnpm-workspace.yaml         minimumReleaseAge + onlyBuiltDependencies ポリシー
 
 /container/agent-runner/      Bun 1.3+
-  bun.lock                    agent-runner runtime deps (Claude Agent SDK, MCP SDK, zod, etc.)
-  package.json                @types/bun, typescript devDeps for type-checking
+  bun.lock                    agent-runner のランタイム依存 (Claude Agent SDK, MCP SDK, zod 等)
+  package.json                @types/bun、型チェック用の typescript devDeps
 ```
 
-The container image also has pnpm + Node inside for global CLIs (`@anthropic-ai/claude-code`, `agent-browser`, `vercel`). Those are Node binaries the agent invokes at runtime, not library deps. Keeping them on pnpm preserves the supply-chain policy for CLI versions.
+コンテナイメージはグローバル CLI(`@anthropic-ai/claude-code`、`agent-browser`、`vercel`)のために、内部にも pnpm + Node を持つ。これらは agent がランタイムで呼ぶ Node バイナリで、ライブラリ依存ではない。pnpm に置いておくことで、CLI バージョンに対するサプライチェーンポリシーが保たれる。
 
-## Lockfiles
+## Lockfile
 
-| Tree | Lockfile | Manager | Regenerate after dep change |
+| ツリー | Lockfile | マネージャ | 依存変更後の再生成 |
 |------|----------|---------|----------------------------|
 | Host | `pnpm-lock.yaml` | pnpm 10 | `pnpm install` |
 | Agent-runner | `container/agent-runner/bun.lock` | Bun 1.3+ | `cd container/agent-runner && bun install` |
 
-Both are committed. CI and the Dockerfile run `--frozen-lockfile` variants — any drift between `package.json` and lockfile fails the build.
+両方とも commit する。CI と Dockerfile は `--frozen-lockfile` 系のコマンドを走らせる — `package.json` と lockfile の間のドリフトがあれば、ビルドが失敗する。
 
-## Supply chain
+## サプライチェーン
 
-- **Host + global CLIs** (pnpm): `minimumReleaseAge: 4320` (3-day hold on new versions), `onlyBuiltDependencies` allowlist for postinstall scripts. See `pnpm-workspace.yaml` and `docs/SECURITY.md`.
-- **Agent-runner** (Bun): no release-age policy — Bun doesn't have an equivalent today. The defenses are `bun.lock` pinning plus version-pinned CLIs/Bun itself via Dockerfile ARGs. When bumping `@anthropic-ai/claude-agent-sdk` or any runtime dep, review the release date on npm and bump deliberately, not via `bun update`.
+- **Host + グローバル CLI**(pnpm):`minimumReleaseAge: 4320`(新バージョンに対する 3 日間のホールド)、postinstall スクリプト用の `onlyBuiltDependencies` allowlist。`pnpm-workspace.yaml` と `docs/SECURITY.md` を参照。
+- **Agent-runner**(Bun):release-age ポリシーはない — Bun には今のところ相当する仕組みがない。防御策は `bun.lock` の pin と、Dockerfile の ARG 経由でバージョン固定された CLI および Bun 自身である。`@anthropic-ai/claude-agent-sdk` やランタイム依存をバンプする際は、npm 上のリリース日を確認し、`bun update` ではなく意図的にバンプすること。
 
-## Image build surface
+## イメージビルドのサーフェス
 
-`container/Dockerfile` is a single-stage build on `node:22-slim`:
+`container/Dockerfile` は `node:22-slim` 上のシングルステージビルドである:
 
-- **Pinned ARGs** — `BUN_VERSION`, `CLAUDE_CODE_VERSION`, `AGENT_BROWSER_VERSION`, `VERCEL_VERSION`. Bump deliberately in PRs.
-- **CJK fonts** — `ARG INSTALL_CJK_FONTS=false`. `container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through. Default build saves ~200MB; opt in when the user works with Chinese/Japanese/Korean content.
-- **BuildKit cache mounts** — `/var/cache/apt`, `/var/lib/apt`, `/root/.bun/install/cache`, `/root/.cache/pnpm`. Rebuilds where `package.json`/`bun.lock` haven't changed are fast. Requires BuildKit (default on Docker 23+, Apple Container-compat).
-- **`tini` as init** — reaps Chromium zombies, forwards signals so in-flight `outbound.db` writes finalize on SIGTERM.
-- **`entrypoint.sh`** (extracted) — `exec bun run /app/src/index.ts` under tini. Readable and diffable.
-- **No compiled `/app/dist`** — Bun runs TS directly. The host also mounts fresh source over `/app/src` at session start, so host edits take effect without rebuilding the image.
+- **Pin された ARG** — `BUN_VERSION`、`CLAUDE_CODE_VERSION`、`AGENT_BROWSER_VERSION`、`VERCEL_VERSION`。PR で意図的にバンプする。
+- **CJK フォント** — `ARG INSTALL_CJK_FONTS=false`。`container/build.sh` は `.env` から `INSTALL_CJK_FONTS` を読み、build-arg として渡す。デフォルトビルドで ~200MB 節約;ユーザが中国語/日本語/韓国語のコンテンツを扱う場合はオプトインする。
+- **BuildKit のキャッシュマウント** — `/var/cache/apt`、`/var/lib/apt`、`/root/.bun/install/cache`、`/root/.cache/pnpm`。`package.json` / `bun.lock` が変わっていない再ビルドは速い。BuildKit が必要(Docker 23+ ではデフォルト、Apple Container と互換)。
+- **`tini` を init として使う** — Chromium のゾンビプロセスを reap し、SIGTERM を転送して in-flight の `outbound.db` 書き込みを確定させる。
+- **`entrypoint.sh`**(切り出し済) — tini の下で `exec bun run /app/src/index.ts`。読みやすく diff も取りやすい。
+- **コンパイル済 `/app/dist` を持たない** — Bun が TS を直接走らせる。host はセッション開始時にフレッシュなソースを `/app/src` 上にマウントするので、host の編集はイメージを再ビルドせず反映される。
 
-## Session wake (two paths)
+## セッションウェイク(2 つの経路)
 
-1. **Base image ENTRYPOINT** — used for stdin-piped test invocations like the sample in `container/build.sh`: `tini --> entrypoint.sh` captures stdin to `/tmp/input.json`, then `exec bun run src/index.ts`.
-2. **Host-spawned session** — `src/container-runner.ts` at line ~301 uses `--entrypoint bash` with `-c 'exec bun run /app/src/index.ts'`. Bypasses tini (Docker's default PID 1 handling applies). Stdin is unused; all IO flows through the mounted session DBs.
+1. **ベースイメージの ENTRYPOINT** — `container/build.sh` のサンプルのような、stdin を流す test invocation に使う:`tini --> entrypoint.sh` が stdin を `/tmp/input.json` にキャプチャし、`exec bun run src/index.ts` する。
+2. **Host から spawn したセッション** — `src/container-runner.ts` の line ~301 が `--entrypoint bash` を `-c 'exec bun run /app/src/index.ts'` で使う。tini をバイパスする(Docker のデフォルト PID 1 ハンドリングが効く)。stdin は使われない;すべての IO はマウントされたセッション DB を流れる。
 
-Both paths end with Bun running the same source file from `/app/src/index.ts`.
+両方の経路とも、`/app/src/index.ts` の同じソースファイルを Bun が走らせて終わる。
 
-## CI shape
+## CI の形
 
-`.github/workflows/ci.yml` installs both Node (with pnpm cache) and Bun, then runs in order:
+`.github/workflows/ci.yml` は Node(pnpm キャッシュ付き)と Bun の両方をインストールし、順に実行する:
 
-1. `pnpm install --frozen-lockfile` (host)
-2. `bun install --frozen-lockfile` in `container/agent-runner/` (container)
+1. `pnpm install --frozen-lockfile`(host)
+2. `container/agent-runner/` で `bun install --frozen-lockfile`(コンテナ)
 3. `pnpm run format:check`
-4. `pnpm exec tsc --noEmit` (host typecheck)
-5. `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` (container typecheck)
-6. `pnpm exec vitest run` (host tests)
-7. `bun test` in `container/agent-runner/` (container tests)
+4. `pnpm exec tsc --noEmit`(host の型チェック)
+5. `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit`(コンテナの型チェック)
+6. `pnpm exec vitest run`(host のテスト)
+7. `container/agent-runner/` で `bun test`(コンテナのテスト)
 
-Any failure fails the PR.
+いずれかが失敗すれば PR は fail する。
 
-## Key invariants
+## 主要な不変条件
 
-- **Session DBs must use `journal_mode=DELETE`.** WAL's `-shm` memory-map doesn't cross VirtioFS between host and guest. See the doc comment at the top of `container/agent-runner/src/db/connection.ts` and `src/session-manager.ts`.
-- **Named SQL parameters in the container require the prefix in JS object keys.** `bun:sqlite` does not auto-strip `@`/`$`/`:` the way `better-sqlite3` does on the host. Use `$name` in both SQL and keys: `.run({ $id: msg.id })`. Positional `?` params work normally.
-- **Agent-runner tests run under `bun:test`, not vitest.** `vitest.config.ts` excludes the `container/agent-runner/` tree because vitest runs on Node and can't load `bun:sqlite`.
-- **No tsc build step in the container image.** Re-adding one would reintroduce the ~200-500ms per-session-wake cost we removed.
-- **Global container CLIs stay on pnpm, not Bun.** `agent-browser`, `@anthropic-ai/claude-code`, `vercel` and any future Node CLIs the agent invokes should be pinned versions under the Dockerfile's pnpm global-install block. `bun install -g` would bypass the pnpm supply-chain policy.
+- **セッション DB は `journal_mode=DELETE` を使う必要がある。** WAL の `-shm` メモリマップは host とゲストの間で VirtioFS を越えられない。`container/agent-runner/src/db/connection.ts` 先頭のドキュメントコメントと `src/session-manager.ts` を参照。
+- **コンテナ側の named SQL パラメータは、JS オブジェクトのキーにプレフィックスを必要とする。** `bun:sqlite` は host 側の `better-sqlite3` のように `@` / `$` / `:` を自動で剥がさない。SQL とキーの両方で `$name` を使う:`.run({ $id: msg.id })`。位置パラメータ `?` は通常通り動く。
+- **Agent-runner のテストは vitest ではなく `bun:test` で走る。** `vitest.config.ts` は `container/agent-runner/` ツリーを除外している(vitest は Node 上で動き、`bun:sqlite` をロードできないため)。
+- **コンテナイメージに tsc ビルドステップを置かない。** 再導入するとセッションウェイクごとに ~200-500ms のコストが復活する(取り除いた当のコスト)。
+- **コンテナのグローバル CLI は Bun ではなく pnpm に置く。** `agent-browser`、`@anthropic-ai/claude-code`、`vercel`、その他将来 agent が呼び出す Node CLI は、Dockerfile の pnpm グローバルインストールブロックの下にバージョン pin して置くべきである。`bun install -g` は pnpm のサプライチェーンポリシーをバイパスする。
 
-## Migration history
+## マイグレーション履歴
 
-This structure replaced a uniform npm-on-Node stack across both host and container. The pnpm migration landed first (PR #1771) to bring the host under supply-chain policy, then the container moved to Bun to eliminate native-module compilation and the per-wake tsc step. The split was chosen over going full-Bun because Baileys' native deps are the main risk surface on the host — the container has no such deps, so it benefits from Bun without taking the risk.
+この構造は、host とコンテナの両方をまたぐ均一な npm-on-Node スタックを置き換えたものである。まず pnpm マイグレーションがランディングして(PR #1771)、host をサプライチェーンポリシーの下に置き、次にコンテナが Bun に移行して、ネイティブモジュールのコンパイルとウェイクごとの tsc ステップを排除した。完全 Bun 化ではなく分割を選んだ理由は、Baileys のネイティブ依存が host 側のメインリスク面だから — コンテナにそうした依存はないので、リスクを取らずに Bun の恩恵を得られる。
