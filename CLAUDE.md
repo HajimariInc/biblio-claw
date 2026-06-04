@@ -6,34 +6,29 @@ biblio-shelf プロジェクトの **司書実装 repo**。**NanoClaw v2 (`nanoc
 
 > **NanoClaw v1→v2 migration banner について (本 repo では適用対象外)**: NanoClaw v2 上流 CLAUDE.md の元バージョンには冒頭に「⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️」というバナーがあり、v1 install への v2 merge 衝突を検知したら HALT して `migrate-v2.sh` を案内する指示がある。biblio-claw は **NanoClaw からの fresh fork** (v1 install を持たない、`git clone` + rsync で取り込み済) ため、バナーの状況には該当しない。`git pull` 経由で上流の更新を取り込んで衝突した場合も、biblio-claw 側 (= 当 repo の現在の状態) を正として手動 merge する。当該バナー本文は本統合で下部から削除した。詳細は Phase 1 sub PRD Task 1 完了レポートを参照。
 
-## 3 ロケーションのポインタ
+## 入室手順
 
-- **構想・設計の正本** (TO-BE): `/mnt/d/labo-obs/11-labo/biblio-shelf/` (Obsidian Vault)
-- **本 repo** (AS-IS): biblio-claw 司書実装の正本
-- **オペレーション拠点**: wf-realm の `proj/biblio-shelf.md` が索引
+biblio-claw で作業を始める / PRP コマンドを実行する前は、`/prime` コマンドを実行する。`/prime` が次を担当する:
 
-## /prime コマンドで読み取るコンテキスト
+- **コンテキストの所在**: 構想・実装・索引の 3 ロケーション
+- **標準ロード手順**: 入室時に読み込むファイルの優先順位
+- **PRP コマンドカタログ**: 起草・実装・調査・コミット・PR・レビューの 5 群と使い分け
+- **直近作業のスナップショット**: git log / `.claude/PRPs/` の更新スキャン
+- **挨拶の型**: Crane 入室時のフロー
 
-biblio-claw で作業を始める時、Crane は次の順で読み込む (NanoClaw fork 取り込み済 2026-06-01):
-
-1. 本 CLAUDE.md 下部の **NanoClaw v2 上流 CLAUDE.md セクション** + `docs/` 配下 — base アーキの理解 (最優先)
-2. wf-realm `proj/biblio-shelf.md` — 3 ロケーションのポインタ + 解消済み論点 + TBD
-3. Vault `11-labo/biblio-shelf/INDEX.md` — Vault 配下の MOC
-4. Vault `11-labo/biblio-shelf/design/milestones.md` — マイルストーン定義 + Phase 構成 + PRD 起草方針
-5. Vault `11-labo/biblio-shelf/design/tech-stack.md` — 技術スタック + 環境分離方針 + 抽象化境界
-6. `.claude/PRPs/prds/m1-shisho-kokkaku.prd.md` — M1 大 PRD (Vault から注入済)
-7. `.claude/PRPs/plans/phase-1-local-implementation.plan.md` — Phase 1 sub PRD (Task 1 完了後に /prp-plan で詳細化予定)
+詳細は `.claude/commands/prime.md`(非公開、`.claude/` 配下は gitignore 対象)。
 
 ## PRP コマンドフロー
 
 本 repo は **PRP コマンドフロー** で開発する:
 
-1. `/prp-prd` (or 議論済の場合は Vault でテンプレ埋め) → 大 PRD を `.claude/PRPs/prds/` に
+1. `/prp-prd` (or 議論済の場合は事前テンプレ埋め) → 大 PRD を `.claude/PRPs/prds/` に
 2. `/prp-plan {prd}` → 次の pending phase の Plan を `.claude/PRPs/plans/` に
 3. `/prp-implement {plan}` or `/prp-ralph {plan}` → 実装 + 検証 + レポート
 4. `/prp-review-agents` → 専門エージェント並列レビュー
 
-詳細は wf-realm `reference/prd_phase_structure.md` を参照。
+PRP / Phase 構造の階層モデル・判断軸・sub PRD の段階的展開・検証構成の詳細は、`/prime` 経由で参照する。
+
 
 ## Branch 戦略
 
@@ -106,6 +101,8 @@ M1 は **環境分離型 (D-1)** で進める:
 > **本セクション以下の指針が biblio-claw 上部運用ルールと衝突する場合**: PRP コマンドフロー / Branch 戦略 / 環境分離方針 / 公開ポリシー / `/prime` 読み込み順は biblio-claw 上部優先。アーキ理解・コード慣習 (Two-DB Session Split / Central DB / Container Config / OneCLI gateway / Bun runtime / pnpm policy 等) は NanoClaw 流に従う。
 
 # NanoClaw
+
+TODO: 日本語への翻訳をお願いします。
 
 Personal Claude assistant. See [README.md](README.md) for philosophy and setup. Architecture lives in `docs/`.
 
