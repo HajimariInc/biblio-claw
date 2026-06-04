@@ -1,8 +1,8 @@
-diff --git a/nanoclaw-src/container/agent-runner/src/poc5-1turn.ts b/nanoclaw-src/container/agent-runner/src/poc5-1turn.ts
+diff --git a/container/agent-runner/src/poc5-1turn.ts b/container/agent-runner/src/poc5-1turn.ts
 new file mode 100644
 index 0000000..fab997e
 --- /dev/null
-+++ b/nanoclaw-src/container/agent-runner/src/poc5-1turn.ts
++++ b/container/agent-runner/src/poc5-1turn.ts
 @@ -0,0 +1,39 @@
 +// PoC-5 専用エントリ: agent-runner を二層構造 (host + per-session container)
 +// なしで単体実行し、Vertex × Claude (claude-sonnet-4-6) に 1 turn 推論を
@@ -43,10 +43,10 @@ index 0000000..fab997e
 +
 +process.stdout.write('[poc5] DONE\n');
 +process.exit(0);
-diff --git a/nanoclaw-src/container/agent-runner/src/providers/claude.ts b/nanoclaw-src/container/agent-runner/src/providers/claude.ts
+diff --git a/container/agent-runner/src/providers/claude.ts b/container/agent-runner/src/providers/claude.ts
 index 0653d60..3d09024 100644
---- a/nanoclaw-src/container/agent-runner/src/providers/claude.ts
-+++ b/nanoclaw-src/container/agent-runner/src/providers/claude.ts
+--- a/container/agent-runner/src/providers/claude.ts
++++ b/container/agent-runner/src/providers/claude.ts
 @@ -402,7 +402,7 @@ export class ClaudeProvider implements AgentProvider {
          cwd: input.cwd,
          additionalDirectories: this.additionalDirectories,
