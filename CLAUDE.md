@@ -29,7 +29,6 @@ biblio-claw で作業を始める / PRP コマンドを実行する前は、`/pr
 
 PRP / Phase 構造の階層モデル・判断軸・sub PRD の段階的展開・検証構成の詳細は、`/prime` 経由で参照する。
 
-
 ## Branch 戦略
 
 biblio プロジェクト固有の branch 戦略。**本セクションは `/prp-implement` / `/prp-pr` / `/prp-mr` などの PRP コマンドのデフォルト挙動 (例: `git checkout -b feature/{plan-slug}`) を上書きする**。Crane は PRP コマンドを実行する際、本セクションを最優先する。
@@ -96,86 +95,84 @@ M1 は **環境分離型 (D-1)** で進める:
 
 # NanoClaw v2 上流 CLAUDE.md (継承)
 
-> 以下は NanoClaw v2 上流 (`nanocoai/nanoclaw` @ `2492259`) の CLAUDE.md 本体。biblio-claw は本ドキュメントを **base アーキ理解の正本**として継承する。冒頭にあった「⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️」(v1→v2 merge 防衛バナー) は本 repo 文脈では適用対象外 (上部参照) のため削除した。それ以外は上流原文を保持する。
+> 以下は NanoClaw v2 上流 (`nanocoai/nanoclaw` @ `2492259`) の CLAUDE.md 本体。biblio-claw は本ドキュメントを **base アーキ理解の正本**として継承する。冒頭にあった「⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️」(v1→v2 merge 防衛バナー) は本 repo 文脈では適用対象外 (上部参照) のため削除した。それ以外は上流原文を保持する(日本語化済み)。
 >
 > **本セクション以下の指針が biblio-claw 上部運用ルールと衝突する場合**: PRP コマンドフロー / Branch 戦略 / 環境分離方針 / 公開ポリシー / `/prime` 読み込み順は biblio-claw 上部優先。アーキ理解・コード慣習 (Two-DB Session Split / Central DB / Container Config / OneCLI gateway / Bun runtime / pnpm policy 等) は NanoClaw 流に従う。
 
 # NanoClaw
 
-TODO: 日本語への翻訳をお願いします。
+パーソナルな Claude アシスタント。理念とセットアップは [README.md](README.md) を参照。アーキテクチャは `docs/` 配下。
 
-Personal Claude assistant. See [README.md](README.md) for philosophy and setup. Architecture lives in `docs/`.
+## 概要
 
-## Quick Context
+host は単一の Node プロセスで、セッションごとの agent コンテナをオーケストレートする。プラットフォームのメッセージは channel adapter 経由で到着し、エンティティモデル(users → messaging groups → agent groups → sessions)を辿ってルーティングされ、セッションの inbound DB に書き込まれ、コンテナを起こす。コンテナ内の agent-runner は DB をポーリングし、Claude を呼び出して outbound DB に書き戻す。host は outbound DB をポーリングし、同じ adapter 経由で配信する。
 
-The host is a single Node process that orchestrates per-session agent containers. Platform messages land via channel adapters, route through an entity model (users → messaging groups → agent groups → sessions), get written into the session's inbound DB, and wake a container. The agent-runner inside the container polls the DB, calls Claude, and writes back to the outbound DB. The host polls the outbound DB and delivers through the same adapter.
+**すべてはメッセージである。** host とコンテナの間に IPC、ファイルウォッチャ、stdin パイプは存在しない。2 つのセッション DB が唯一の IO 境界である。
 
-**Everything is a message.** There is no IPC, no file watcher, no stdin piping between host and container. The two session DBs are the sole IO surface.
-
-## Entity Model
+## エンティティモデル
 
 ```
 users (id "<channel>:<handle>", kind, display_name)
-user_roles (user_id, role, agent_group_id)       — owner | admin (global or scoped)
-agent_group_members (user_id, agent_group_id)    — unprivileged access gate
-user_dms (user_id, channel_type, messaging_group_id) — cold-DM cache
+user_roles (user_id, role, agent_group_id)       — owner | admin (グローバル or スコープ付き)
+agent_group_members (user_id, agent_group_id)    — 非特権ユーザのアクセスゲート
+user_dms (user_id, channel_type, messaging_group_id) — cold-DM のキャッシュ
 
 agent_groups (workspace, memory, CLAUDE.md, personality, container config)
-    ↕ many-to-many via messaging_group_agents (session_mode, trigger_rules, priority)
-messaging_groups (one chat/channel on one platform; unknown_sender_policy)
+    ↕ messaging_group_agents による many-to-many 関係 (session_mode, trigger_rules, priority)
+messaging_groups (1 プラットフォーム上の 1 chat/channel; unknown_sender_policy)
 
-sessions (agent_group_id + messaging_group_id + thread_id → per-session container)
+sessions (agent_group_id + messaging_group_id + thread_id → セッションごとのコンテナ)
 ```
 
-Privilege is user-level (owner/admin), not agent-group-level. See [docs/isolation-model.md](docs/isolation-model.md) for the three isolation levels (`agent-shared`, `shared`, separate agents).
+権限はユーザレベル(owner / admin)で扱い、agent group レベルでは扱わない。3 つの分離レベル(`agent-shared` / `shared` / 個別 agent)については [docs/isolation-model.md](docs/isolation-model.md) を参照。
 
 ## Two-DB Session Split
 
-Each session has **two** SQLite files under `data/v2-sessions/<session_id>/`:
+各セッションは `data/v2-sessions/<session_id>/` 配下に **2 つ** の SQLite ファイルを持つ:
 
-- `inbound.db` — host writes, container reads. `messages_in`, routing, destinations, pending_questions, processing_ack.
-- `outbound.db` — container writes, host reads. `messages_out`, session_state.
+- `inbound.db` — host が書き、コンテナが読む。`messages_in`、ルーティング、destinations、pending_questions、processing_ack。
+- `outbound.db` — コンテナが書き、host が読む。`messages_out`、session_state。
 
-Exactly one writer per file — no cross-mount lock contention. Heartbeat is a file touch at `/workspace/.heartbeat`, not a DB update. Host uses even `seq` numbers, container uses odd.
+各ファイルにつき writer は厳密に 1 つ — クロスマウントのロック競合は発生しない。Heartbeat は `/workspace/.heartbeat` のファイルタッチで表現し、DB 更新ではない。host は偶数の `seq` を、コンテナは奇数の `seq` を使う。
 
 ## Central DB
 
-`data/v2.db` holds everything that isn't per-session: users, user_roles, agent_groups, messaging_groups, wiring, pending_approvals, user_dms, chat_sdk_* (for the Chat SDK bridge), schema_version. Migrations live at `src/db/migrations/`.
+`data/v2.db` はセッション専有でないすべてを保持する: users、user_roles、agent_groups、messaging_groups、wiring、pending_approvals、user_dms、chat_sdk_*(Chat SDK ブリッジ用)、schema_version。マイグレーションは `src/db/migrations/` 配下に置く。
 
-For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than the `sqlite3` CLI: `pnpm exec tsx scripts/q.ts <db> "<sql>"`. The host setup intentionally avoids depending on the `sqlite3` binary (`setup/verify.ts:5`); the wrapper goes through the `better-sqlite3` dep that setup already installs and verifies. Default-output format matches `sqlite3 -list` (pipe-separated, no header) so existing skill text reads identically.
+skill やスクリプトからのアドホッククエリには `sqlite3` CLI ではなく、ツリー内のラッパーを使うこと: `pnpm exec tsx scripts/q.ts <db> "<sql>"`。host のセットアップは `sqlite3` バイナリへの依存を意図的に避けている(`setup/verify.ts:5`)。ラッパーはセットアップが既にインストールして検証済みの `better-sqlite3` 依存を経由する。デフォルト出力フォーマットは `sqlite3 -list`(パイプ区切り、ヘッダなし)に合わせてあるので、既存の skill のテキストはそのまま読める。
 
 ## Key Files
 
-| File | Purpose |
+| ファイル | 役割 |
 |------|---------|
-| `src/index.ts` | Entry point: init DB, migrations, channel adapters, delivery polls, sweep, shutdown |
-| `src/router.ts` | Inbound routing: messaging group → agent group → session → `inbound.db` → wake |
-| `src/delivery.ts` | Polls `outbound.db`, delivers via adapter, handles system actions (schedule, approvals, etc.) |
-| `src/host-sweep.ts` | 60s sweep: `processing_ack` sync, stale detection, due-message wake, recurrence |
-| `src/session-manager.ts` | Resolves sessions; opens `inbound.db` / `outbound.db`; manages heartbeat path |
-| `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts, OneCLI `ensureAgent` |
-| `src/container-runtime.ts` | Runtime selection (Docker vs Apple containers), orphan cleanup |
-| `src/modules/permissions/access.ts` | `canAccessAgentGroup` — owner / global admin / scoped admin / member resolution against `user_roles` + `agent_group_members` |
-| `src/modules/approvals/primitive.ts` | `pickApprover`, `pickApprovalDelivery`, `requestApproval`, approval-handler registry |
-| `src/command-gate.ts` | Router-side admin command gate — queries `user_roles` directly (no env var, no container-side check) |
-| `src/onecli-approvals.ts` | OneCLI credentialed-action approval bridge |
-| `src/user-dm.ts` | Cold-DM resolution + `user_dms` cache |
-| `src/group-init.ts` | Per-agent-group filesystem scaffold (CLAUDE.md, skills, agent-runner-src overlay) |
-| `src/db/container-configs.ts` | CRUD for `container_configs` table (per-group container runtime config) |
-| `src/backfill-container-configs.ts` | Migrates legacy `container.json` files into the DB on startup |
-| `src/container-restart.ts` | Kill + on-wake respawn for agent group containers |
-| `src/db/` | DB layer — agent_groups, messaging_groups, sessions, container_configs, user_roles, user_dms, pending_*, migrations |
-| `src/channels/` | Channel adapter infra (registry, Chat SDK bridge); specific channel adapters are skill-installed from the `channels` branch |
-| `src/providers/` | Host-side provider container-config (`claude` baked in; `opencode` etc. installed from the `providers` branch) |
-| `container/agent-runner/src/` | Agent-runner: poll loop, formatter, provider abstraction, MCP tools, destinations |
-| `container/skills/` | Container skills mounted into every agent session (`onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, `slack-formatting`) |
-| `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills, per-group `agent-runner-src/` overlay) |
-| `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
-| `migrate-v2.sh` + `setup/migrate-v2/` | v1→v2 migration. Standalone script: `bash migrate-v2.sh`. Seeds DB, copies groups/sessions, installs channels, builds container, offers service switchover, then hands off to `/migrate-from-v1` skill for owner setup and CLAUDE.md cleanup. See [docs/migration-dev.md](docs/migration-dev.md). |
+| `src/index.ts` | エントリーポイント: DB 初期化、マイグレーション、channel adapter、配信ポーリング、sweep、シャットダウン |
+| `src/router.ts` | 受信ルーティング: messaging group → agent group → session → `inbound.db` → ウェイク |
+| `src/delivery.ts` | `outbound.db` をポーリングし adapter 経由で配信、システムアクション(スケジュール、承認 等)を処理 |
+| `src/host-sweep.ts` | 60 秒の sweep: `processing_ack` の同期、stale 検出、due メッセージのウェイク、再帰スケジュール |
+| `src/session-manager.ts` | セッションを解決し `inbound.db` / `outbound.db` をオープン、heartbeat パスを管理 |
+| `src/container-runner.ts` | agent group ごとに Docker コンテナを起動。セッション DB と outbox をマウント、OneCLI の `ensureAgent` |
+| `src/container-runtime.ts` | ランタイム選択(Docker vs Apple containers)、孤立プロセスのクリーンアップ |
+| `src/modules/permissions/access.ts` | `canAccessAgentGroup` — `user_roles` + `agent_group_members` に対する owner / global admin / scoped admin / member の解決 |
+| `src/modules/approvals/primitive.ts` | `pickApprover`、`pickApprovalDelivery`、`requestApproval`、approval-handler のレジストリ |
+| `src/command-gate.ts` | ルータ側の admin コマンドゲート — `user_roles` を直接クエリ(env var なし、コンテナ側チェックなし) |
+| `src/onecli-approvals.ts` | OneCLI の認証付きアクション承認ブリッジ |
+| `src/user-dm.ts` | cold-DM の解決 + `user_dms` キャッシュ |
+| `src/group-init.ts` | agent group ごとのファイルシステム scaffold(CLAUDE.md、skills、agent-runner-src のオーバーレイ) |
+| `src/db/container-configs.ts` | `container_configs` テーブル(agent group ごとのコンテナランタイム設定)の CRUD |
+| `src/backfill-container-configs.ts` | 起動時に旧 `container.json` ファイルを DB に移行 |
+| `src/container-restart.ts` | agent group コンテナの kill + on-wake 再生成 |
+| `src/db/` | DB レイヤー — agent_groups、messaging_groups、sessions、container_configs、user_roles、user_dms、pending_*、マイグレーション |
+| `src/channels/` | channel adapter のインフラ(レジストリ、Chat SDK ブリッジ)。具体的な channel adapter は `channels` ブランチから skill 経由でインストールされる |
+| `src/providers/` | host 側の provider container-config(`claude` は組み込み、`opencode` 等は `providers` ブランチからインストール) |
+| `container/agent-runner/src/` | agent-runner: ポーリングループ、フォーマッタ、provider 抽象化、MCP ツール、destinations |
+| `container/skills/` | 全 agent セッションにマウントされるコンテナ skill(`onecli-gateway`、`welcome`、`self-customize`、`agent-browser`、`slack-formatting`) |
+| `groups/<folder>/` | agent group ごとのファイルシステム(CLAUDE.md、skills、group ごとの `agent-runner-src/` オーバーレイ) |
+| `scripts/init-first-agent.ts` | 最初の DM 配線済 agent をブートストラップ(`/init-first-agent` skill から使われる) |
+| `migrate-v2.sh` + `setup/migrate-v2/` | v1→v2 マイグレーション。スタンドアロンスクリプト: `bash migrate-v2.sh`。DB を seed、groups / sessions をコピー、channels をインストール、コンテナをビルド、サービス切替を提案、その後 `/migrate-from-v1` skill に引き継いで owner セットアップと CLAUDE.md クリーンアップを行う。詳細は [docs/migration-dev.md](docs/migration-dev.md) を参照。 |
 
 ## Admin CLI (`ncl`)
 
-`ncl` queries and modifies the central DB — agent groups, messaging groups, wirings, users, roles, and more. On the host it connects via Unix socket (`src/cli/socket-server.ts`); inside containers it uses the session DB transport (`container/agent-runner/src/cli/ncl.ts`).
+`ncl` は central DB を照会・変更する — agent groups、messaging groups、wirings、users、roles など。host 上では Unix ソケット経由で接続し(`src/cli/socket-server.ts`)、コンテナ内ではセッション DB を transport として使う(`container/agent-runner/src/cli/ncl.ts`)。
 
 ```
 ncl <resource> <verb> [<id>] [--flags]
@@ -183,231 +180,231 @@ ncl <resource> help
 ncl help
 ```
 
-| Resource | Verbs | What it is |
+| リソース | 動詞 | 何か |
 |----------|-------|------------|
-| groups | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
-| messaging-groups | list, get, create, update, delete | A single chat/channel on one platform |
-| wirings | list, get, create, update, delete | Links a messaging group to an agent group (session mode, triggers) |
-| users | list, get, create, update | Platform identities (`<channel>:<handle>`) |
-| roles | list, grant, revoke | Owner / admin privileges (global or scoped to an agent group) |
-| members | list, add, remove | Unprivileged access gate for an agent group |
-| destinations | list, add, remove | Where an agent group can send messages |
-| sessions | list, get | Active sessions (read-only) |
-| user-dms | list | Cold-DM cache (read-only) |
-| dropped-messages | list | Messages from unregistered senders (read-only) |
-| approvals | list, get | Pending approval requests (read-only) |
+| groups | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | agent group(workspace、personality、container config) |
+| messaging-groups | list, get, create, update, delete | 1 プラットフォーム上の 1 chat/channel |
+| wirings | list, get, create, update, delete | messaging group と agent group の紐付け(セッションモード、トリガー) |
+| users | list, get, create, update | プラットフォーム identity(`<channel>:<handle>`) |
+| roles | list, grant, revoke | owner / admin 権限(グローバル or agent group スコープ) |
+| members | list, add, remove | agent group の非特権ユーザアクセスゲート |
+| destinations | list, add, remove | agent group がメッセージを送れる宛先 |
+| sessions | list, get | アクティブセッション(read-only) |
+| user-dms | list | cold-DM のキャッシュ(read-only) |
+| dropped-messages | list | 未登録の sender からのメッセージ(read-only) |
+| approvals | list, get | 承認待ちリクエスト(read-only) |
 
-Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions).
+主要ファイル: `src/cli/dispatch.ts`(ディスパッチャ + approval ハンドラ)、`src/cli/crud.ts`(汎用 CRUD 登録)、`src/cli/resources/`(リソースごとの定義)。
 
-## Channels and Providers (skill-installed)
+## Channels and Providers(skill 経由でインストール)
 
-Trunk does not ship any specific channel adapter or non-default agent provider. The codebase is the registry/infra; the actual adapters and providers live on long-lived sibling branches and get copied in by skills:
+trunk には具体的な channel adapter や非デフォルトの agent provider は同梱されていない。コードベースはレジストリ・インフラとしての役割を持ち、実際のアダプタと provider は長命の sibling ブランチに置き、skill 経由でコピーされる:
 
-- **`channels` branch** — Discord, Slack, Telegram, WhatsApp, Teams, Linear, GitHub, iMessage, Webex, Resend, Matrix, Google Chat, WhatsApp Cloud (+ helpers, tests, channel-specific setup steps). Installed via `/add-<channel>` skills.
-- **`providers` branch** — OpenCode (and any future non-default agent providers). Installed via `/add-opencode`.
+- **`channels` ブランチ** — Discord、Slack、Telegram、WhatsApp、Teams、Linear、GitHub、iMessage、Webex、Resend、Matrix、Google Chat、WhatsApp Cloud(+ ヘルパー、テスト、channel 固有のセットアップ手順)。`/add-<channel>` skill 経由でインストール。
+- **`providers` ブランチ** — OpenCode(および将来の非デフォルト agent provider)。`/add-opencode` 経由でインストール。
 
-Each `/add-<name>` skill is idempotent: `git fetch origin <branch>` → copy module(s) into the standard paths → append a self-registration import to the relevant barrel → `pnpm install <pkg>@<pinned-version>` → build.
+各 `/add-<name>` skill は冪等である: `git fetch origin <branch>` → 標準パスにモジュールをコピー → 対応する barrel に self-registration の import を追記 → `pnpm install <pkg>@<pinned-version>` → ビルド。
 
 ## Self-Modification
 
-One tier of agent self-modification today:
+現在の agent self-modification は 1 段階のみ:
 
-1. **`install_packages` / `add_mcp_server`** — changes to the per-agent-group container config in the DB (apt/npm deps, wire an existing MCP server). Single admin approval per request; on approve, the handler in `src/modules/self-mod/apply.ts` rebuilds the image when needed (`install_packages` only), writes an `on_wake` message, kills the container, and respawns via `onExit` callback. The on-wake message is only picked up by the fresh container's first poll — dying containers can never steal it. `container/agent-runner/src/mcp-tools/self-mod.ts`.
+1. **`install_packages` / `add_mcp_server`** — DB 上の agent group ごとのコンテナ設定の変更(apt/npm 依存、既存 MCP server の配線)。リクエストごとに admin 承認 1 回。承認されると `src/modules/self-mod/apply.ts` のハンドラが必要に応じてイメージを再ビルドし(`install_packages` のみ)、`on_wake` メッセージを書き、コンテナを kill し、`onExit` コールバック経由で再生成する。on-wake メッセージはフレッシュなコンテナの最初の poll でのみ拾われる — 死にかけのコンテナがそれを横取りすることはない。`container/agent-runner/src/mcp-tools/self-mod.ts`。
 
-A second tier (direct source-level self-edits via a draft/activate flow) is planned but not yet implemented.
+2 段目(draft/activate フロー経由でのソースレベルの直接的な self-edit)は計画段階で、未実装。
 
 ## Container Config
 
-Per-agent-group container runtime config (provider, model, packages, MCP servers, mounts, etc.) lives in the `container_configs` table in the central DB. Materialized to `groups/<folder>/container.json` at spawn time so the container runner can read it. Managed via `ncl groups config get/update` and the self-mod MCP tools.
+agent group ごとのコンテナランタイム設定(provider、model、packages、MCP servers、mounts 等)は central DB の `container_configs` テーブルに置く。spawn 時に `groups/<folder>/container.json` にマテリアライズされ、container runner がそれを読む。`ncl groups config get/update` と self-mod MCP ツール経由で管理する。
 
-**`cli_scope`** — controls what the agent can do with `ncl` from inside the container:
+**`cli_scope`** — コンテナ内から agent が `ncl` で何をできるかを制御する:
 
-| Value | Behavior |
+| 値 | 振る舞い |
 |-------|----------|
-| `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
-| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
-| `global` | Unrestricted. Set automatically for owner agent groups via `init-first-agent`. |
+| `disabled` | agent は ncl の存在自体を知らない(CLAUDE.md からも除外される)。host のディスパッチはあらゆる `cli_request` を拒否する。 |
+| `group`(デフォルト) | agent は `groups`、`sessions`、`destinations`、`members` のみアクセス可能で、自分の agent group にスコープが限定される。`--id` と group 引数は自動補完される。クロスグループアクセスは拒否される。`cli_scope` の変更は禁止される。 |
+| `global` | 制限なし。owner agent group には `init-first-agent` 経由で自動設定される。 |
 
-Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts` (instructions exclusion).
+主要ファイル: `src/db/container-configs.ts`、`src/container-config.ts`、`src/cli/dispatch.ts`(スコープ強制)、`src/claude-md-compose.ts`(命令文の除外)。
 
 ## Container Restart
 
-`ncl groups restart --id <group-id> [--rebuild] [--message <text>]`. Kills running containers; if `--message` is provided, writes an `on_wake` message and respawns via `onExit` callback. Without `--message`, containers come back on the next user message. From inside a container, `--id` is auto-filled and only the calling session is restarted.
+`ncl groups restart --id <group-id> [--rebuild] [--message <text>]`。実行中のコンテナを kill し、`--message` が指定されている場合は `on_wake` メッセージを書いて `onExit` コールバック経由で再生成する。`--message` なしの場合は次のユーザーメッセージでコンテナが復帰する。コンテナ内から実行した場合、`--id` は自動補完され、呼び出し側のセッションのみが再起動する。
 
-The `on_wake` column on `messages_in` ensures wake messages are only picked up by a fresh container's first poll iteration. This prevents the race where a dying container (still in its SIGTERM grace period) could steal the message. `killContainer` accepts an optional `onExit` callback that fires after the process exits, guaranteeing the old container is gone before the new one spawns.
+`messages_in` の `on_wake` 列は、wake メッセージがフレッシュなコンテナの最初の poll でのみ拾われることを保証する。これにより、死にかけのコンテナ(SIGTERM の grace period 中)がメッセージを横取りする競合状態を防ぐ。`killContainer` は省略可能な `onExit` コールバックを受け取り、プロセス終了後にそれが発火するので、新しいコンテナが起動する前に古いコンテナが完全に消えていることが保証される。
 
-Key files: `src/container-restart.ts`, `src/container-runner.ts` (`killContainer`), `container/agent-runner/src/db/messages-in.ts` (`getPendingMessages`).
+主要ファイル: `src/container-restart.ts`、`src/container-runner.ts`(`killContainer`)、`container/agent-runner/src/db/messages-in.ts`(`getPendingMessages`)。
 
 ## Secrets / Credentials / OneCLI
 
-API keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway. Secrets are injected into per-agent containers at request time — none are passed in env vars or through chat context. The container agent sees this via the `onecli-gateway` container skill (`container/skills/onecli-gateway/SKILL.md`), which teaches it how the proxy works, how to handle auth errors, and to never ask for raw credentials. Host-side wiring: `src/onecli-approvals.ts`, `ensureAgent()` in `container-runner.ts`. Run `onecli --help`.
+API キー、OAuth トークン、認証クレデンシャルは OneCLI gateway が管理する。シークレットはリクエスト時に agent ごとのコンテナへ注入される — env var にもチャットコンテキストにも渡さない。コンテナ内の agent はこれを `onecli-gateway` コンテナ skill(`container/skills/onecli-gateway/SKILL.md`)経由で認識する。この skill は proxy の仕組み、認証エラーの扱い方、生クレデンシャルを決して尋ねないことを agent に教える。host 側の配線: `src/onecli-approvals.ts`、`container-runner.ts` の `ensureAgent()`。詳細は `onecli --help`。
 
-### Gotcha: auto-created agents start in `selective` secret mode
+### 落とし穴: 自動生成された agent は `selective` シークレットモードで起動する
 
-When the host first spawns a session for a new agent group, `container-runner.ts:385` calls `onecli.ensureAgent({ name, identifier })`. The OneCLI `POST /api/agents` endpoint creates the agent in **`selective`** secret mode — meaning **no secrets are assigned to it by default**, even if the secrets exist in the vault and have host patterns that would otherwise match.
+host が新しい agent group のセッションを最初に spawn するとき、`container-runner.ts:385` が `onecli.ensureAgent({ name, identifier })` を呼ぶ。OneCLI の `POST /api/agents` エンドポイントは agent を **`selective`** シークレットモードで作成する — つまり、vault にシークレットが存在しホストパターンが本来マッチするものでも、**デフォルトではこの agent にシークレットが割り当てられない**。
 
-Symptom: container starts, the proxy + CA cert are wired correctly, but the agent gets `401 Unauthorized` (or similar) from APIs whose credentials *are* in the vault. The credential just isn't in this agent's allow-list.
+症状: コンテナが起動し、proxy と CA 証明書は正しく配線されているのに、vault に *実在する* クレデンシャルを使う API から `401 Unauthorized`(または類似)が返ってくる。クレデンシャルがこの agent の allow-list に入っていないだけである。
 
-The SDK does not expose `setSecretMode` — the only fix is the CLI (or the web UI at `http://127.0.0.1:10254`).
+SDK は `setSecretMode` を公開していない — 修正手段は CLI(または Web UI `http://127.0.0.1:10254`)のみ。
 
 ```bash
-# Find the agent (identifier is the agent group id)
+# agent を探す (identifier は agent group id)
 onecli agents list
 
-# Flip to "all" so every vault secret with a matching host pattern gets injected
+# "all" に切り替えて、ホストパターンがマッチする vault 内のすべてのシークレットを注入する
 onecli agents set-secret-mode --id <agent-id> --mode all
 
-# Or, stay selective and assign specific secrets
-onecli secrets list                                    # find secret ids
+# あるいは selective のまま、特定のシークレットを割り当てる
+onecli secrets list                                    # シークレット id を確認
 onecli agents set-secrets --id <agent-id> --secret-ids <id1>,<id2>
 
-# Inspect what an agent currently has
-onecli agents secrets --id <agent-id>                  # secrets assigned to this agent
-onecli secrets list                                    # all vault secrets (with host patterns)
+# 現在 agent に割り当てられているものを確認する
+onecli agents secrets --id <agent-id>                  # この agent に割り当てられたシークレット
+onecli secrets list                                    # vault の全シークレット (ホストパターン付き)
 ```
 
-If you've just enabled `mode all`, no container restart is needed — the gateway looks up secrets per request, so the next API call from the running container will see the new credentials.
+`mode all` を有効化したばかりの場合、コンテナの再起動は不要 — gateway はリクエストごとにシークレットをルックアップするので、稼働中のコンテナからの次の API 呼び出しで新しいクレデンシャルが見える。
 
-### Requiring approval for credential use
+### クレデンシャル使用時の承認要求
 
-Approval-gating credentialed actions is a **two-sided** flow:
+認証付きアクションの承認制御は **両側** のフローである:
 
-- **Server-side** (OneCLI gateway): decides *when* to hold a request and emit a pending approval. As of `onecli@1.3.0`, the CLI does **not** expose this — `rules create --action` only accepts `block` or `rate_limit`, and `secrets create` has no approval flag. Approval policies must be configured via the OneCLI web UI at `http://127.0.0.1:10254`. If/when the CLI grows an `approve` action, this section needs updating.
-- **Host-side** (nanoclaw): receives pending approvals and routes them to a human. `src/modules/approvals/onecli-approvals.ts` registers a callback via `onecli.configureManualApproval(cb)` (long-polls `GET /api/approvals/pending`). The callback uses `pickApprover` + `pickApprovalDelivery` from `src/modules/approvals/primitive.ts` to DM an approver. Approvers are resolved from the `user_roles` table — preference order: scoped admins for the agent group → global admins → owners. There is no env var like `NANOCLAW_ADMIN_USER_IDS`; roles are persisted in the central DB only.
+- **サーバ側**(OneCLI gateway): いつリクエストを保留して pending な承認を発行するかを決定する。`onecli@1.3.0` 時点では、CLI からこれを公開していない — `rules create --action` は `block` と `rate_limit` のみ受け付け、`secrets create` には承認用のフラグがない。承認ポリシーは OneCLI の Web UI `http://127.0.0.1:10254` 経由で設定する必要がある。将来 CLI に `approve` アクションが追加されたら、本セクションは更新が必要。
+- **host 側**(nanoclaw): pending な承認を受け取り、人間へ振り分ける。`src/modules/approvals/onecli-approvals.ts` が `onecli.configureManualApproval(cb)` 経由でコールバックを登録する(`GET /api/approvals/pending` を long-poll)。コールバックは `src/modules/approvals/primitive.ts` の `pickApprover` + `pickApprovalDelivery` を使って approver に DM する。approver は `user_roles` テーブルから解決される — 優先順位: agent group に対する scoped admin → global admin → owner。`NANOCLAW_ADMIN_USER_IDS` のような env var は存在しない。role は central DB にのみ永続化される。
 
-If approvals are configured server-side but the host callback isn't running (or throws), every credentialed call hangs until the gateway times out. Conversely, if the gateway has no rule asking for approval, the host callback never fires regardless of how it's wired.
+サーバ側で承認が設定されているのに host 側のコールバックが走っていない(または例外を投げる)場合、認証付き呼び出しはすべて gateway がタイムアウトするまでハングする。逆に、gateway に承認を要求するルールがなければ、配線がどうであっても host 側のコールバックは発火しない。
 
 ## Skills
 
-Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxonomy.
+skill は 4 種類ある。完全な分類は [CONTRIBUTING.md](CONTRIBUTING.md) を参照。
 
-- **Channel/provider install skills** — copy the relevant module(s) in from the `channels` or `providers` branch, wire imports, install pinned deps (e.g. `/add-discord`, `/add-slack`, `/add-whatsapp`, `/add-opencode`).
-- **Utility skills** — ship code files alongside `SKILL.md` (e.g. `/claw`).
-- **Operational skills** — instruction-only workflows (`/setup`, `/debug`, `/customize`, `/init-first-agent`, `/manage-channels`, `/init-onecli`, `/update-nanoclaw`).
-- **Container skills** — loaded inside agent containers at runtime (`container/skills/`: `onecli-gateway`, `welcome`, `self-customize`, `agent-browser`, `slack-formatting`).
+- **Channel/provider インストール skill** — `channels` または `providers` ブランチから関連モジュールをコピー、import を配線、pin した依存をインストール(例: `/add-discord`、`/add-slack`、`/add-whatsapp`、`/add-opencode`)。
+- **ユーティリティ skill** — `SKILL.md` と一緒にコードファイルを同梱する(例: `/claw`)。
+- **オペレーション skill** — 命令文だけのワークフロー(`/setup`、`/debug`、`/customize`、`/init-first-agent`、`/manage-channels`、`/init-onecli`、`/update-nanoclaw`)。
+- **コンテナ skill** — 実行時に agent コンテナ内へロードされる(`container/skills/`: `onecli-gateway`、`welcome`、`self-customize`、`agent-browser`、`slack-formatting`)。
 
-| Skill | When to Use |
+| Skill | 用途 |
 |-------|-------------|
-| `/setup` | First-time install, auth, service config |
-| `/init-first-agent` | Bootstrap the first DM-wired agent (channel pick → identity → wire → welcome DM) |
-| `/manage-channels` | Wire channels to agent groups with isolation level decisions |
-| `/customize` | Adding channels, integrations, behavior changes |
-| `/debug` | Container issues, logs, troubleshooting |
-| `/update-nanoclaw` | Bring upstream updates into a customized install |
-| `/init-onecli` | Install OneCLI Agent Vault and migrate `.env` credentials |
+| `/setup` | 初回インストール、認証、サービス設定 |
+| `/init-first-agent` | 最初の DM 配線済 agent をブートストラップ(channel 選択 → identity → 配線 → ウェルカム DM) |
+| `/manage-channels` | channel と agent group を分離レベルの判断付きで配線 |
+| `/customize` | channel 追加、統合、振る舞いの変更 |
+| `/debug` | コンテナの問題、ログ、トラブルシューティング |
+| `/update-nanoclaw` | カスタマイズ済みのインストールに上流の更新を取り込む |
+| `/init-onecli` | OneCLI Agent Vault のインストールと `.env` クレデンシャルの移行 |
 
 ## Contributing
 
-Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the four skill types and their guidelines, `SKILL.md` format rules, and the pre-submission checklist.
+PR の作成、skill の追加、その他コントリビューションの準備をする前に、必ず [CONTRIBUTING.md](CONTRIBUTING.md) を読むこと。受け付ける変更の種類、skill 4 種類とそれぞれのガイドライン、`SKILL.md` のフォーマット規則、提出前チェックリストを扱っている。
 
 ## PR Hygiene
 
-Before creating a PR, run these checks:
+PR を作る前に、次のチェックを実行すること:
 
 ```bash
 git diff upstream/main --stat HEAD
 git log upstream/main..HEAD --oneline
 ```
 
-Show the output and wait for approval. Installation-specific files (group files, .claude/settings.json, local configs) should not be included.
+出力を提示して承認を待つこと。インストール固有のファイル(group ファイル、.claude/settings.json、ローカル設定)は含めてはならない。
 
 ## Development
 
-Run commands directly — don't tell the user to run them.
+コマンドは直接実行する — ユーザーに「これを実行してください」とは伝えない。
 
 ```bash
-# Host (Node + pnpm)
-pnpm run dev          # Host with hot reload
-pnpm run build        # Compile host TypeScript (src/)
-./container/build.sh  # Rebuild agent container image (nanoclaw-agent:latest)
-pnpm test             # Host tests (vitest)
+# host (Node + pnpm)
+pnpm run dev          # ホットリロード付きで host を起動
+pnpm run build        # host の TypeScript (src/) をコンパイル
+./container/build.sh  # agent コンテナイメージ (nanoclaw-agent:latest) を再ビルド
+pnpm test             # host のテスト (vitest)
 
-# Agent-runner (Bun — separate package tree under container/agent-runner/)
-cd container/agent-runner && bun install   # After editing agent-runner deps
-cd container/agent-runner && bun test      # Container tests (bun:test)
+# agent-runner (Bun — container/agent-runner/ 配下の独立パッケージツリー)
+cd container/agent-runner && bun install   # agent-runner の依存を編集したあと
+cd container/agent-runner && bun test      # コンテナのテスト (bun:test)
 ```
 
-Container typecheck is a separate tsconfig — if you edit `container/agent-runner/src/`, run `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` from root (or `bun run typecheck` from `container/agent-runner/`).
+コンテナ側の型チェックは別の tsconfig を持つ — `container/agent-runner/src/` を編集した場合、ルートから `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` を実行する(または `container/agent-runner/` から `bun run typecheck`)。
 
-Service management:
+サービス管理:
 ```bash
 # macOS (launchd)
 launchctl load   ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # 再起動
 
 # Linux (systemd)
 systemctl --user start|stop|restart nanoclaw
 ```
 
-## Troubleshooting
+## トラブルシューティング
 
-Check these first when something goes wrong:
+何か問題が起きたら、まず次を確認する:
 
-| What | Where |
+| 何 | どこ |
 |------|-------|
-| Host logs | `logs/nanoclaw.error.log` first (delivery failures, crash-loop backoff, warnings), then `logs/nanoclaw.log` for the full routing chain |
-| Setup logs | `logs/setup.log` (overall), `logs/setup-steps/*.log` (per-step: bootstrap, environment, container, onecli, mounts, service, etc.) |
-| Session DBs | `data/v2-sessions/<agent-group>/<session>/` — `inbound.db` (`messages_in`: did the message reach the container?), `outbound.db` (`messages_out`: did the agent produce a response?) |
+| host ログ | まず `logs/nanoclaw.error.log`(配信失敗、crash-loop backoff、警告)、次に `logs/nanoclaw.log`(ルーティングチェイン全体) |
+| セットアップログ | `logs/setup.log`(全体)、`logs/setup-steps/*.log`(ステップ別: bootstrap、environment、container、onecli、mounts、service など) |
+| セッション DB | `data/v2-sessions/<agent-group>/<session>/` — `inbound.db`(`messages_in`: メッセージはコンテナに届いたか?)、`outbound.db`(`messages_out`: agent はレスポンスを生成したか?) |
 
-Note: container logs are lost after the container exits (`--rm` flag). If the agent silently failed inside the container, there's no persistent log to inspect.
+注意: コンテナログはコンテナ終了後に失われる(`--rm` フラグ)。コンテナ内で agent が silent に失敗していた場合、調査できる永続ログは残らない。
 
 ## Supply Chain Security (pnpm)
 
-This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspace.yaml`. New package versions must exist on the npm registry for 3 days before pnpm will resolve them.
+本プロジェクトは `pnpm-workspace.yaml` の `minimumReleaseAge: 4320`(3 日)を伴った pnpm を使う。新しいパッケージバージョンは npm レジストリに 3 日以上存在しないと pnpm が解決しない。
 
-**Rules — do not bypass without explicit human approval:**
-- **`minimumReleaseAgeExclude`**: Never add entries without human sign-off. If a package must bypass the release age gate, the human must approve and the entry must pin the exact version being excluded (e.g. `package@1.2.3`), never a range.
-- **`onlyBuiltDependencies`**: Never add packages to this list without human approval — build scripts execute arbitrary code during install.
-- **`pnpm install --frozen-lockfile`** should be used in CI, automation, and container builds. Never run bare `pnpm install` in those contexts.
+**ルール — 明示的な人間の承認なしにバイパスしないこと:**
+- **`minimumReleaseAgeExclude`**: 人間のサインオフなしにエントリを追加しない。release age ゲートをバイパスする必要がある場合、人間が承認し、エントリは除外対象の正確なバージョン(例: `package@1.2.3`)を pin すること。決して範囲指定しない。
+- **`onlyBuiltDependencies`**: 人間の承認なしにパッケージを追加しない — ビルドスクリプトはインストール時に任意のコードを実行する。
+- **`pnpm install --frozen-lockfile`** を CI、自動化、コンテナビルドで使うこと。これらのコンテキストで生の `pnpm install` を実行しないこと。
 
 ## Docs Index
 
-| Doc | Purpose |
+| Doc | 役割 |
 |-----|---------|
-| [docs/architecture.md](docs/architecture.md) | Full architecture writeup |
-| [docs/api-details.md](docs/api-details.md) | Host API + DB schema details |
-| [docs/db.md](docs/db.md) | DB architecture overview: three-DB model, cross-mount rules, readers/writers map |
-| [docs/db-central.md](docs/db-central.md) | Central DB (`data/v2.db`) — every table + migration system |
-| [docs/db-session.md](docs/db-session.md) | Per-session `inbound.db` + `outbound.db` schemas + seq parity |
-| [docs/agent-runner-details.md](docs/agent-runner-details.md) | Agent-runner internals + MCP tool interface |
-| [docs/isolation-model.md](docs/isolation-model.md) | Three-level channel isolation model |
-| [docs/setup-wiring.md](docs/setup-wiring.md) | What's wired, what's open in the setup flow |
-| [docs/architecture-diagram.md](docs/architecture-diagram.md) | Diagram version of the architecture |
-| [docs/build-and-runtime.md](docs/build-and-runtime.md) | Runtime split (Node host + Bun container), lockfiles, image build surface, CI, key invariants |
-| [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 architecture diff — vocabulary for where v1 things moved |
-| [docs/migration-dev.md](docs/migration-dev.md) | Migration development guide — testing, debugging, dev loop |
+| [docs/architecture.md](docs/architecture.md) | アーキテクチャの完全版 |
+| [docs/api-details.md](docs/api-details.md) | host API + DB スキーマの詳細 |
+| [docs/db.md](docs/db.md) | DB アーキテクチャ概要: three-DB モデル、クロスマウントルール、reader/writer マップ |
+| [docs/db-central.md](docs/db-central.md) | Central DB(`data/v2.db`)— 全テーブル + マイグレーションシステム |
+| [docs/db-session.md](docs/db-session.md) | セッションごとの `inbound.db` + `outbound.db` のスキーマ + seq の偶奇規約 |
+| [docs/agent-runner-details.md](docs/agent-runner-details.md) | agent-runner の内部 + MCP ツールインターフェース |
+| [docs/isolation-model.md](docs/isolation-model.md) | 3 レベルの channel 分離モデル |
+| [docs/setup-wiring.md](docs/setup-wiring.md) | セットアップフローで何が配線され、何が開いたままか |
+| [docs/architecture-diagram.md](docs/architecture-diagram.md) | アーキテクチャの図版 |
+| [docs/build-and-runtime.md](docs/build-and-runtime.md) | ランタイムの分割(Node host + Bun container)、lockfile、イメージビルド表面、CI、主要な不変条件 |
+| [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 のアーキテクチャ差分 — v1 のものが v2 のどこへ移ったかの語彙 |
+| [docs/migration-dev.md](docs/migration-dev.md) | マイグレーション開発ガイド — テスト、デバッグ、開発ループ |
 
 ## Container Build Cache
 
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+コンテナの buildkit はビルドコンテキストを強くキャッシュする。`--no-cache` 単独では COPY ステップを無効化しない — builder のボリュームが stale なファイルを保持する。本当に綺麗な再ビルドを強制するには、builder を prune したうえで `./container/build.sh` を再実行する。
 
 ## Container Runtime (Bun)
 
-The agent container runs on **Bun**; the host runs on **Node** (pnpm). They communicate only via session DBs — no shared modules. Details and rationale: [docs/build-and-runtime.md](docs/build-and-runtime.md).
+agent コンテナは **Bun** 上で動き、host は **Node**(pnpm)上で動く。両者の通信はセッション DB のみ — 共有モジュールはない。詳細と根拠: [docs/build-and-runtime.md](docs/build-and-runtime.md)。
 
-**Gotchas — trigger + action:**
+**落とし穴 — トリガーとアクション:**
 
-- **Adding or bumping a runtime dep in `container/agent-runner/`** → edit `package.json`, then `cd container/agent-runner && bun install` and commit the updated `bun.lock`. Do not run `pnpm install` there — agent-runner is not a pnpm workspace.
-- **Bumping `@anthropic-ai/claude-agent-sdk`, `@modelcontextprotocol/sdk`, or any agent-runner runtime dep** → no `minimumReleaseAge` policy applies to this tree. Check the release date on npm, pin deliberately, never `bun update` blindly.
-- **Writing a new named-param SQL insert/update in the container** → use `$name` in both SQL and JS keys: `.run({ $id: msg.id })`. `bun:sqlite` does not auto-strip the prefix the way `better-sqlite3` does on the host. Positional `?` params work normally.
-- **Adding a test in `container/agent-runner/src/`** → import from `bun:test`, not `vitest`. Vitest runs on Node and can't load `bun:sqlite`. `vitest.config.ts` excludes this tree.
-- **Adding a Node CLI the agent invokes at runtime** (like `agent-browser`, `claude-code`, `vercel`) → put it in the Dockerfile's pnpm global-install block, pinned to an exact version via a new `ARG`. Don't use `bun install -g` — that bypasses the pnpm supply-chain policy.
-- **Changing the Dockerfile entrypoint or the dynamic-spawn command** (`src/container-runner.ts` line ~301) → keep `exec bun ...` so signals forward cleanly. The image has no `/app/dist`; don't reintroduce a tsc build step.
-- **Changing session-DB pragmas** (`container/agent-runner/src/db/connection.ts`) → `journal_mode=DELETE` is load-bearing for cross-mount visibility. Read the comment block at the top of the file first.
+- **`container/agent-runner/` のランタイム依存を追加またはバンプする** → `package.json` を編集し、`cd container/agent-runner && bun install` を実行して更新された `bun.lock` をコミットする。ここで `pnpm install` を実行しないこと — agent-runner は pnpm workspace ではない。
+- **`@anthropic-ai/claude-agent-sdk`、`@modelcontextprotocol/sdk`、その他 agent-runner のランタイム依存をバンプする** → このツリーには `minimumReleaseAge` ポリシーは適用されない。npm 上のリリース日を確認し、意図的に pin し、決して `bun update` を盲目的に実行しないこと。
+- **コンテナで新しい named パラメータの SQL insert/update を書く** → SQL と JS キーの両方で `$name` を使う: `.run({ $id: msg.id })`。`bun:sqlite` は host 側の `better-sqlite3` のようにプレフィックスを自動で剥がさない。位置パラメータ `?` は通常通り動く。
+- **`container/agent-runner/src/` にテストを追加する** → `vitest` ではなく `bun:test` から import する。Vitest は Node 上で動き、`bun:sqlite` をロードできない。`vitest.config.ts` はこのツリーを除外している。
+- **agent がランタイムで呼び出す Node CLI を追加する**(`agent-browser`、`claude-code`、`vercel` のようなもの) → Dockerfile の pnpm グローバルインストールブロックに置き、新しい `ARG` で exact バージョンに pin する。`bun install -g` は使わない — それは pnpm の supply-chain ポリシーをバイパスする。
+- **Dockerfile の entrypoint または動的 spawn コマンドを変更する**(`src/container-runner.ts` の line ~301)→ `exec bun ...` を維持してシグナルがクリーンに転送されるようにする。イメージには `/app/dist` がない。tsc ビルドステップを再導入しないこと。
+- **セッション DB の pragma を変更する**(`container/agent-runner/src/db/connection.ts`)→ `journal_mode=DELETE` はクロスマウント可視性に必須である。先頭のコメントブロックを先に読むこと。
 
-## CJK font support
+## CJK フォントサポート
 
-Agent containers ship without CJK fonts by default (~200MB saved). If you notice signals the user works with Chinese/Japanese/Korean content — conversing in CJK, CJK timezone (e.g., `Asia/Tokyo`, `Asia/Shanghai`, `Asia/Seoul`, `Asia/Taipei`, `Asia/Hong_Kong`), system locale hint, or mentions of needing to render CJK in screenshots/PDFs/scraped pages — offer to enable it:
+agent コンテナはデフォルトで CJK フォントを同梱しない(~200MB の節約)。ユーザーが中国語/日本語/韓国語のコンテンツを扱う兆候 — CJK で会話している、CJK タイムゾーン(例: `Asia/Tokyo`、`Asia/Shanghai`、`Asia/Seoul`、`Asia/Taipei`、`Asia/Hong_Kong`)、システムロケールのヒント、スクリーンショット / PDF / スクレイプ済みページで CJK をレンダリングする必要があるとの言及 — に気づいた場合、有効化を提案する:
 
 ```bash
-# Ensure .env has INSTALL_CJK_FONTS=true (overwrite or append)
+# .env に INSTALL_CJK_FONTS=true があることを保証する (上書き or 追記)
 grep -q '^INSTALL_CJK_FONTS=' .env && sed -i.bak 's/^INSTALL_CJK_FONTS=.*/INSTALL_CJK_FONTS=true/' .env && rm -f .env.bak || echo 'INSTALL_CJK_FONTS=true' >> .env
 
-# Rebuild and restart so new sessions pick up the new image
+# 新しいセッションが新しいイメージを拾うように、再ビルドして再起動する
 ./container/build.sh
 launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
 # systemctl --user restart nanoclaw                # Linux
 ```
 
-`container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through as a Docker build-arg. Without CJK fonts, Chromium-rendered screenshots and PDFs containing CJK text show tofu (empty rectangles) instead of characters.
+`container/build.sh` は `.env` から `INSTALL_CJK_FONTS` を読み、Docker のビルド引数として渡す。CJK フォントがないと、Chromium がレンダリングするスクリーンショットと PDF に含まれる CJK テキストは tofu(空の四角形)として表示される。
