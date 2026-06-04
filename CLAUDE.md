@@ -349,7 +349,7 @@ systemctl --user start|stop|restart nanoclaw
 
 注意: コンテナログはコンテナ終了後に失われる(`--rm` フラグ)。コンテナ内で agent が silent に失敗していた場合、調査できる永続ログは残らない。
 
-## Supply Chain Security (pnpm)
+## サプライチェーンセキュリティ (pnpm)
 
 本プロジェクトは `pnpm-workspace.yaml` の `minimumReleaseAge: 4320`(3 日)を伴った pnpm を使う。新しいパッケージバージョンは npm レジストリに 3 日以上存在しないと pnpm が解決しない。
 
