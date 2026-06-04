@@ -4,7 +4,7 @@ biblio-shelf プロジェクトの **司書実装 repo**。**NanoClaw v2 (`nanoc
 
 > **本 CLAUDE.md の構造**: 上部 = biblio-claw 固有の運用ルール (3 ロケーション / PRP / Branch 戦略 / 環境分離 / 公開ポリシー)。下部 = NanoClaw v2 上流 CLAUDE.md を継承保持 (base アーキ理解の正本)。**衝突時の優先**: 運用ルール (PRP コマンドフロー、Branch 戦略、環境分離方針、公開ポリシー) は biblio-claw 上部を優先。**アーキ理解・コード慣習** (Two-DB Session Split / Central DB / Container Config / OneCLI gateway / Bun runtime 等) は NanoClaw 下部に従う。
 
-> **NanoClaw v1→v2 migration banner について (本 repo では適用対象外)**: NanoClaw v2 上流 CLAUDE.md の元バージョンには冒頭に「⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️」というバナーがあり、v1 install への v2 merge 衝突を検知したら HALT して `migrate-v2.sh` を案内する指示がある。biblio-claw は **NanoClaw からの fresh fork** (v1 install を持たない、`git clone` + rsync で取り込み済) ため、バナーの状況には該当しない。`git pull` 経由で上流の更新を取り込んで衝突した場合も、biblio-claw 側 (= 当 repo の現在の状態) を正として手動 merge する。当該バナー本文は本統合で下部から削除した。詳細は Phase 1 sub PRD Task 1 完了レポートを参照。
+> **NanoClaw v1→v2 migration banner について (本 repo では適用対象外)**: NanoClaw v2 上流 CLAUDE.md の元バージョンには冒頭に「⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️」というバナーがあり、v1 install への v2 merge 衝突を検知したら HALT して `migrate-v2.sh` を案内する指示がある。biblio-claw は **NanoClaw からの fresh fork** (v1 install を持たない、`git clone` + rsync で取り込み済) ため、バナーの状況には該当しない。`git pull` 経由で上流の更新を取り込んで衝突した場合も、biblio-claw 側 (= 当 repo の現在の状態) を正として手動 merge する。当該バナー本文は本統合で下部から削除した。
 
 ## 入室手順
 
@@ -13,10 +13,10 @@ biblio-claw で作業を始める / PRP コマンドを実行する前は、`/pr
 - **コンテキストの所在**: 構想・実装・索引の 3 ロケーション
 - **標準ロード手順**: 入室時に読み込むファイルの優先順位
 - **PRP コマンドカタログ**: 起草・実装・調査・コミット・PR・レビューの 5 群と使い分け
-- **直近作業のスナップショット**: git log / `.claude/PRPs/` の更新スキャン
-- **挨拶の型**: Crane 入室時のフロー
+- **直近作業のスナップショット**: git log + 非公開ディレクトリの更新スキャン
+- **挨拶の型**: 入室時のフロー
 
-詳細は `.claude/commands/prime.md`(非公開、`.claude/` 配下は gitignore 対象)。
+詳細は非公開の prime 設定を参照(`.claude/` 配下は gitignore 対象)。
 
 ## PRP コマンドフロー
 
@@ -31,7 +31,7 @@ PRP / Phase 構造の階層モデル・判断軸・sub PRD の段階的展開・
 
 ## Branch 戦略
 
-biblio プロジェクト固有の branch 戦略。**本セクションは `/prp-implement` / `/prp-pr` / `/prp-mr` などの PRP コマンドのデフォルト挙動 (例: `git checkout -b feature/{plan-slug}`) を上書きする**。Crane は PRP コマンドを実行する際、本セクションを最優先する。
+biblio プロジェクト固有の branch 戦略。**本セクションは `/prp-implement` / `/prp-pr` / `/prp-mr` などの PRP コマンドのデフォルト挙動 (例: `git checkout -b feature/{plan-slug}`) を上書きする**。PRP コマンドを実行する際、本セクションを最優先する。
 
 ### 3 層構造
 
@@ -66,7 +66,7 @@ main (Protection)
 
 - Phase 完了 = sub PRD の全 Task が base へ merge 済 + Phase verify exit 0 + base → main の PR が merge 済
 - main 直 push は禁止 (Protection)
-- 直近は CI/CD 未整備のため Protection は緩い (DEN さん手動運用)。マイルストーン走破 or CI/CD 整備で Protection を厳格化する予定
+- 直近は CI/CD 未整備のため Protection は緩い (メンテナー手動運用)。マイルストーン走破 or CI/CD 整備で Protection を厳格化する予定
 - 本方針は **biblio プロジェクト (biblio-claw / biblio-shelf) 専用**。他プロジェクトには適用しない
 
 ## 環境分離方針 (M1 採用)
@@ -76,7 +76,7 @@ M1 は **環境分離型 (D-1)** で進める:
 - **Phase 1**: docker compose で local 実装を完成 (抽象化アダプタを含む)
 - **Phase 2**: 同一バイナリを GKE へ + GCP 特有要素を追加適用 = M1 完成
 
-詳細は Vault `design/milestones.md` §本プロジェクトの環境分離方針 / Vault `design/tech-stack.md` §環境分離方針 (M1 採用) と抽象化境界 を参照。
+詳細は `/prime` 経由で参照する (環境分離方針 / 抽象化境界の設計ドキュメントは非公開エリアに格納)。
 
 ## 公開ポリシー — 重要
 
@@ -88,8 +88,7 @@ M1 は **環境分離型 (D-1)** で進める:
 ## 関連
 
 - biblio-shelf (棚、public) = `example-org/biblio-shelf` — skill 本体 + marketplace
-- NanoClaw 上流 = `nanocoai/nanoclaw` @ `2492259` (2026-05-28) を本 repo に取り込み済 (Task 1 完了 2026-06-01)
-- wf-realm = `proj/biblio-shelf.md` (オペレーション索引)
+- NanoClaw 上流 = `nanocoai/nanoclaw` @ `2492259` (2026-05-28) を本 repo に取り込み済 (Phase 1 Task 1 完了 2026-06-01)
 
 ---
 
@@ -126,7 +125,7 @@ sessions (agent_group_id + messaging_group_id + thread_id → セッションご
 
 権限はユーザレベル(owner / admin)で扱い、agent group レベルでは扱わない。3 つの分離レベル(`agent-shared` / `shared` / 個別 agent)については [docs/isolation-model.md](docs/isolation-model.md) を参照。
 
-## 2 DB セッション分割
+## Two-DB セッション分割
 
 各セッションは `data/v2-sessions/<session_id>/` 配下に **2 つ** の SQLite ファイルを持つ:
 
