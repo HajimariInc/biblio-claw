@@ -1,6 +1,6 @@
-# Contributors
+# コントリビューター
 
-Thanks to everyone who has contributed to NanoClaw!
+NanoClaw に貢献してくれたすべての方々に感謝!
 
 - [Alakazam03](https://github.com/Alakazam03) — Vaibhav Aggarwal
 - [tydev-new](https://github.com/tydev-new)

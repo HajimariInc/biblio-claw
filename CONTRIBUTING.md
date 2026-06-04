@@ -1,148 +1,148 @@
-# Contributing
+# 貢献ガイド
 
-## Before You Start
+## 始める前に
 
-1. **Check for existing work.** Search open PRs and issues before starting:
+1. **既存の作業を確認する。** 着手前に open な PR と issue を検索する:
    ```bash
    gh pr list --repo nanocoai/nanoclaw --search "<your feature>"
    gh issue list --repo nanocoai/nanoclaw --search "<your feature>"
    ```
-   If a related PR or issue exists, build on it rather than duplicating effort.
+   関連する PR や issue があれば、作業を重複させずにそれを土台にする。
 
-2. **Check alignment.** Read the [Philosophy section in README.md](README.md#philosophy). Source code changes should only be things 90%+ of users need. Skills can be more niche, but should still be useful beyond a single person's setup.
+2. **方向性を確認する。** [README.md の「設計哲学」セクション](README.md#設計哲学) を読むこと。ソースコードの変更は、90% 以上のユーザが必要とするものに限る。Skill はもっとニッチでよいが、それでも 1 人のセットアップ越しに有用であるべき。
 
-3. **One thing per PR.** Each PR should do one thing — one bug fix, one skill, one simplification. Don't mix unrelated changes in a single PR.
+3. **1 PR = 1 つのこと。** 各 PR は 1 つのことだけを行う — 1 つのバグ修正、1 つの skill、1 つの簡素化。無関係な変更を 1 つの PR に混ぜないこと。
 
-## Source Code Changes
+## ソースコードの変更
 
-**Accepted:** Bug fixes, security fixes, simplifications, reducing code.
+**受け付けるもの:** バグ修正、セキュリティ修正、簡素化、コードの削減。
 
-**Not accepted:** Features, capabilities, compatibility, enhancements. These should be skills.
+**受け付けないもの:** 機能、新たな能力、互換性対応、エンハンスメント。これらは skill にすべきである。
 
-## Skills
+## Skill
 
-NanoClaw uses [Claude Code skills](https://code.claude.com/docs/en/skills) — markdown files with optional supporting files that teach Claude how to do something. There are four types of skills in NanoClaw, each serving a different purpose.
+NanoClaw は [Claude Code skills](https://code.claude.com/docs/en/skills) を使う — markdown ファイル(任意で補助ファイル付き)で、Claude に何かのやり方を教える。NanoClaw には 4 種類の skill があり、それぞれ違う目的を持つ。
 
-### Why skills?
+### なぜ skill か?
 
-Every user should have clean and minimal code that does exactly what they need. Skills let users selectively add features to their fork without inheriting code for features they don't want.
+各ユーザは、必要なことだけを行うクリーンで最小限のコードを持つべきである。Skill はユーザに、欲しくない機能のコードを継承することなく、自分の fork に選択的に機能を追加させる。
 
-### Skill types
+### Skill の種類
 
-#### 1. Feature skills (branch-based)
+#### 1. Feature skill(ブランチベース)
 
-Add capabilities to NanoClaw by merging a git branch. The SKILL.md contains setup instructions; the actual code lives on a `skill/*` branch.
+git ブランチをマージすることで NanoClaw に能力を追加する。SKILL.md はセットアップ手順を含み、実際のコードは `skill/*` ブランチに置かれる。
 
-**Location:** `.claude/skills/` on `main` (instructions only), code on `skill/*` branch
+**配置:** `main` 上の `.claude/skills/`(命令文のみ)、コードは `skill/*` ブランチ
 
-**Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-gmail`
+**例:** `/add-telegram`、`/add-slack`、`/add-discord`、`/add-gmail`
 
-**How they work:**
-1. User runs `/add-telegram`
-2. Claude follows the SKILL.md: fetches and merges the `skill/telegram` branch
-3. Claude walks through interactive setup (env vars, bot creation, etc.)
+**動作:**
+1. ユーザが `/add-telegram` を実行する
+2. Claude が SKILL.md に従い、`skill/telegram` ブランチを fetch + merge する
+3. Claude が対話的なセットアップ(env var、bot の作成等)を案内する
 
-**Contributing a feature skill:**
-1. Fork `nanocoai/nanoclaw` and branch from `main`
-2. Make the code changes (new files, modified source, updated `package.json`, etc.)
-3. Add a SKILL.md in `.claude/skills/<name>/` with setup instructions — step 1 should be merging the branch
-4. Open a PR. We'll create the `skill/<name>` branch from your work
+**Feature skill の貢献手順:**
+1. `nanocoai/nanoclaw` を fork し、`main` からブランチを切る
+2. コードを変更する(新規ファイル、ソース修正、`package.json` 更新等)
+3. `.claude/skills/<name>/` に SKILL.md を追加し、セットアップ手順を書く — step 1 はブランチのマージにする
+4. PR を出す。あなたの作業から `skill/<name>` ブランチを作成する
 
-See `/add-telegram` for a good example. See [docs/skills-as-branches.md](docs/skills-as-branches.md) for the full system design.
+良い例として `/add-telegram` を参照。完全なシステム設計は [docs/skills-as-branches.md](docs/skills-as-branches.md) を参照。
 
-#### 2. Utility skills (with code files)
+#### 2. Utility skill(コードファイル同梱)
 
-Standalone tools that ship code files alongside the SKILL.md. The SKILL.md tells Claude how to install the tool; the code lives in the skill directory itself (e.g. in a `scripts/` subfolder).
+SKILL.md と一緒にコードファイルを同梱する単体ツール。SKILL.md は Claude にツールのインストール方法を伝え、コードは skill ディレクトリ内(例:`scripts/` サブフォルダ)に置く。
 
-**Location:** `.claude/skills/<name>/` with supporting files
+**配置:** 補助ファイル付きの `.claude/skills/<name>/`
 
-**Examples:** `/claw` (Python CLI in `scripts/claw`)
+**例:** `/claw`(`scripts/claw` 内の Python CLI)
 
-**Key difference from feature skills:** No branch merge needed. The code is self-contained in the skill directory and gets copied into place during installation.
+**Feature skill との主な違い:** ブランチマージは不要。コードは skill ディレクトリに自己完結しており、インストール時に所定の場所へコピーされる。
 
-**Guidelines:**
-- Put code in separate files, not inline in the SKILL.md
-- Use `${CLAUDE_SKILL_DIR}` to reference files in the skill directory
-- SKILL.md contains installation instructions, usage docs, and troubleshooting
+**ガイドライン:**
+- コードは SKILL.md にインラインではなく別ファイルに置く
+- skill ディレクトリ内のファイルを参照するときは `${CLAUDE_SKILL_DIR}` を使う
+- SKILL.md にはインストール手順、使い方ドキュメント、トラブルシューティングを書く
 
-#### 3. Operational skills (instruction-only)
+#### 3. オペレーション skill(命令文のみ)
 
-Workflows and guides with no code changes. The SKILL.md is the entire skill — Claude follows the instructions to perform a task.
+コード変更を伴わないワークフローとガイド。SKILL.md がそれ自身 skill そのものになる — Claude が命令文に従ってタスクを実行する。
 
-**Location:** `.claude/skills/` on `main`
+**配置:** `main` 上の `.claude/skills/`
 
-**Examples:** `/setup`, `/debug`, `/customize`, `/update-nanoclaw`, `/update-skills`
+**例:** `/setup`、`/debug`、`/customize`、`/update-nanoclaw`、`/update-skills`
 
-**Guidelines:**
-- Pure instructions — no code files, no branch merges
-- Use `AskUserQuestion` for interactive prompts
-- These stay on `main` and are always available to every user
+**ガイドライン:**
+- 純粋な命令文 — コードファイルなし、ブランチマージなし
+- 対話的なプロンプトには `AskUserQuestion` を使う
+- これらは `main` に留まり、全ユーザが常に利用できる
 
-#### 4. Container skills (agent runtime)
+#### 4. コンテナ skill(agent ランタイム)
 
-Skills that run inside the agent container, not on the host. These teach the container agent how to use tools, format output, or perform tasks. They are synced into each group's `.claude/skills/` directory when a container starts.
+ホストではなく agent コンテナ内で動く skill。コンテナの agent にツールの使い方、出力フォーマット、タスクの実行方法を教える。コンテナが起動するとき、各 group の `.claude/skills/` ディレクトリへ同期される。
 
-**Location:** `container/skills/<name>/`
+**配置:** `container/skills/<name>/`
 
-**Examples:** `agent-browser` (web browsing), `capabilities` (/capabilities command), `status` (/status command), `slack-formatting` (Slack mrkdwn syntax)
+**例:** `agent-browser`(Web ブラウジング)、`capabilities`(`/capabilities` コマンド)、`status`(`/status` コマンド)、`slack-formatting`(Slack の mrkdwn 構文)
 
-**Key difference:** These are NOT invoked by the user on the host. They're loaded by Claude Code inside the container and influence how the agent behaves.
+**主な違い:** これらはホスト上でユーザに起動されない。コンテナ内の Claude Code がロードし、agent の振る舞いに影響する。
 
-**Guidelines:**
-- Follow the same SKILL.md + frontmatter format
-- Use `allowed-tools` frontmatter to scope tool permissions
-- Keep them focused — the agent's context window is shared across all container skills
+**ガイドライン:**
+- 同じ SKILL.md + frontmatter フォーマットに従う
+- ツール権限を制限するには `allowed-tools` frontmatter を使う
+- 焦点を絞ること — agent のコンテキストウィンドウは全コンテナ skill で共有される
 
-### SKILL.md format
+### SKILL.md のフォーマット
 
-All skills use the [Claude Code skills standard](https://code.claude.com/docs/en/skills):
+すべての skill は [Claude Code skills 標準](https://code.claude.com/docs/en/skills) に従う:
 
 ```markdown
 ---
 name: my-skill
-description: What this skill does and when to use it.
+description: この skill が何をするか、いつ使うか。
 ---
 
-Instructions here...
+ここに命令文...
 ```
 
-**Rules:**
-- Keep SKILL.md **under 500 lines** — move detail to separate reference files
-- `name`: lowercase, alphanumeric + hyphens, max 64 chars
-- `description`: required — Claude uses this to decide when to invoke the skill
-- Put code in separate files, not inline in the markdown
-- See the [skills standard](https://code.claude.com/docs/en/skills) for all available frontmatter fields
+**ルール:**
+- SKILL.md は **500 行未満** に保つ — 詳細は別の参照ファイルへ移す
+- `name`:小文字、英数 + ハイフン、最大 64 文字
+- `description`:必須 — Claude はこれを使って skill を呼ぶかを判断する
+- コードは markdown にインラインではなく別ファイルに置く
+- 利用可能な全 frontmatter フィールドは [skill 標準](https://code.claude.com/docs/en/skills) を参照
 
-## Testing
+## テスト
 
-Test your contribution on a fresh clone before submitting. For skills, run the skill end-to-end and verify it works.
+提出前に、フレッシュなクローンで貢献内容をテストすること。skill の場合は end-to-end で skill を走らせ、動作することを確認する。
 
-## Pull Requests
+## プルリクエスト
 
-### Before opening
+### 開く前に
 
-1. **Link related issues.** If your PR resolves an open issue, include `Closes #123` in the description so it's auto-closed on merge.
-2. **Test thoroughly.** Run the feature yourself. For skills, test on a fresh clone.
-3. **Check for installation-specific files.** Before creating a PR, verify no installation-specific files are in your diff (see PR Hygiene in CLAUDE.md).
-4. **Check the right box** in the PR template. Labels are auto-applied based on your selection:
+1. **関連 issue をリンクする。** PR が open な issue を解決するなら、description に `Closes #123` を含めて、merge 時に自動 close されるようにする。
+2. **しっかりテストする。** 自分で機能を動かす。skill の場合はフレッシュなクローンでテストする。
+3. **インストール固有のファイルが混ざっていないか確認する。** PR を作る前に、インストール固有のファイルが diff に含まれていないことを確認する(CLAUDE.md の「PR Hygiene」セクションを参照)。
+4. **PR テンプレートで正しいチェックボックスを選ぶ。** 選択に応じてラベルが自動付与される:
 
-| Checkbox | Label |
+| チェックボックス | ラベル |
 |----------|-------|
 | Feature skill | `PR: Skill` + `PR: Feature` |
 | Utility skill | `PR: Skill` |
-| Operational/container skill | `PR: Skill` |
+| オペレーション / コンテナ skill | `PR: Skill` |
 | Fix | `PR: Fix` |
-| Simplification | `PR: Refactor` |
-| Documentation | `PR: Docs` |
+| 簡素化 | `PR: Refactor` |
+| ドキュメント | `PR: Docs` |
 
-### PR description
+### PR の description
 
-Keep it concise. Remove any template sections that don't apply. The description should cover:
+簡潔に保つ。当てはまらないテンプレートのセクションは削除する。description は次を含むべき:
 
-- **What** — what the PR adds or changes
-- **Why** — the motivation
-- **How it works** — brief explanation of the approach
-- **How it was tested** — what you did to verify it works
-- **Usage** — how the user invokes it (for skills)
+- **What** — PR が何を追加または変更するか
+- **Why** — 動機
+- **How it works** — アプローチの簡潔な説明
+- **How it was tested** — 動作確認のために何をしたか
+- **Usage** — ユーザがどう呼び出すか(skill の場合)
 
-Don't pad the description. A few clear sentences are better than lengthy paragraphs.
+description を水増ししない。長い段落より、明確な数文の方がよい。

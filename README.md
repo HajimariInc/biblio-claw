@@ -3,27 +3,25 @@
 </p>
 
 <p align="center">
-  An AI assistant that runs agents securely in their own containers. Lightweight, built to be easily understood and completely customized for your needs.
+  エージェントを専用コンテナで安全に実行する AI アシスタント。軽量で、理解しやすく、自分のニーズに合わせて完全にカスタマイズできるように作られている。
 </p>
 
 <p align="center">
   <a href="https://nanoclaw.dev">nanoclaw.dev</a>&nbsp; • &nbsp;
-  <a href="https://docs.nanoclaw.dev">docs</a>&nbsp; • &nbsp;
-  <a href="README_zh.md">中文</a>&nbsp; • &nbsp;
-  <a href="README_ja.md">日本語</a>&nbsp; • &nbsp;
+  <a href="https://docs.nanoclaw.dev">ドキュメント</a>&nbsp; • &nbsp;
   <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
   <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
 </p>
 
 ---
 
-## Why I Built NanoClaw
+## なぜ NanoClaw を作ったか
 
-[OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
+[OpenClaw](https://github.com/openclaw/openclaw) は素晴らしいプロジェクトだが、自分の生活全体へのフルアクセスを、理解できない複雑なソフトウェアに渡したまま眠ることはできなかった。OpenClaw はおよそ 50 万行のコード、53 個の設定ファイル、70 を超える依存を持つ。そのセキュリティは true な OS レベルの分離ではなく、アプリケーションレベル(allowlist、ペアリングコード)で実現されている。すべてが共有メモリを持つ 1 つの Node プロセス上で動く。
 
-NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Claude agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
+NanoClaw は同じコア機能を提供するが、コードベースは理解できるほど小さい:1 プロセスとわずかなファイルで構成される。Claude エージェントは独自の Linux コンテナで実行され、ファイルシステム分離が効く — 単なるパーミッションチェックの裏側ではない。
 
-## Quick Start
+## クイックスタート
 
 ```bash
 git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
@@ -31,12 +29,12 @@ cd nanoclaw-v2
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
+`nanoclaw.sh` は、新しいマシンから名前付きエージェントへメッセージを送れる状態まで案内する。Node、pnpm、Docker が無ければインストールし、OneCLI に Anthropic クレデンシャルを登録し、エージェントコンテナをビルドし、最初の channel(Telegram / Discord / WhatsApp / ローカル CLI)をペアリングする。途中のステップが失敗した場合、Claude Code が自動的に呼ばれて診断し、止まった位置から再開する。
 
 <details>
-<summary><strong>Migrating from NanoClaw v1?</strong></summary>
+<summary><strong>NanoClaw v1 から移行したい?</strong></summary>
 
-Run from a fresh v2 checkout next to your v1 install:
+既存の v1 install の隣に、新しい v2 のチェックアウトを置いて実行する:
 
 ```bash
 git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
@@ -44,175 +42,175 @@ cd nanoclaw-v2
 bash migrate-v2.sh
 ```
 
-`migrate-v2.sh` finds your v1 install (sibling directory, or `NANOCLAW_V1_PATH=/path/to/nanoclaw`), migrates state into the v2 checkout, then `exec`s into Claude Code to finish the parts that need judgment (owner seeding, CLAUDE.local.md cleanup, fork-customisation replay).
+`migrate-v2.sh` は v1 install を見つけ(隣接ディレクトリ、または `NANOCLAW_V1_PATH=/path/to/nanoclaw`)、状態を v2 チェックアウトに移行したのち、判断が必要な部分(owner シード、CLAUDE.local.md のクリーンアップ、fork カスタマイズの再適用)を仕上げるために Claude Code に `exec` で引き継ぐ。
 
-Run the script directly, not from inside a Claude session — the deterministic side needs interactive prompts and real shell I/O for Node/pnpm bootstrap, Docker, OneCLI, and the container build.
+このスクリプトは Claude セッション内からではなく直接実行すること — 決定的な部分は対話的なプロンプトと、Node/pnpm のブートストラップ、Docker、OneCLI、コンテナビルドのために実シェルの I/O を必要とする。
 
-**What it does:** merges `.env`, seeds the v2 DB from `registered_groups`, copies group folders + session data + scheduled tasks, installs the channel adapters you select, copies channel auth state (including Baileys keystore + LID mappings for WhatsApp), builds the agent container.
+**何をするか:** `.env` をマージし、`registered_groups` から v2 DB を seed し、group フォルダ + セッションデータ + スケジュール済タスクをコピーし、選択した channel adapter をインストールし、channel の認証状態をコピーし(WhatsApp の Baileys keystore + LID マッピングを含む)、エージェントコンテナをビルドする。
 
-**What it doesn't:** flip the system service. Pick *"switch to v2"* at the prompt, or do it manually after testing — your v1 install is left untouched.
+**何をしないか:** システムサービスを切り替えない。プロンプトで *"switch to v2"* を選ぶか、テスト後に手動で切り替える — v1 install はそのまま残る。
 
-See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different and [docs/migration-dev.md](docs/migration-dev.md) for development notes.
+何が違うかは [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md)、開発時の注意は [docs/migration-dev.md](docs/migration-dev.md) を参照。
 
 </details>
 
-## Philosophy
+## 設計哲学
 
-**Small enough to understand.** One process, a few source files and no microservices. If you want to understand the full NanoClaw codebase, just ask Claude Code to walk you through it.
+**理解できるほど小さく。** 1 プロセス、いくつかのソースファイル、マイクロサービスなし。NanoClaw のコードベース全体を理解したくなったら、Claude Code に頼んで一緒にウォークスルーしてもらえばよい。
 
-**Secure by isolation.** Agents run in Linux containers and they can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
+**分離によるセキュリティ。** エージェントは Linux コンテナで動き、明示的にマウントしたものしか見られない。コマンドはホストではなくコンテナの中で動くので、bash アクセスを許しても安全である。
 
-**Built for the individual user.** NanoClaw isn't a monolithic framework; it's software that fits each user's exact needs. Instead of becoming bloatware, NanoClaw is designed to be bespoke. You make your own fork and have Claude Code modify it to match your needs.
+**個人ユーザのために作る。** NanoClaw はモノリシックなフレームワークではない;各ユーザの正確なニーズに合わせるソフトウェアである。肥大化する代わりに、NanoClaw は誂え(bespoke)を前提に作られている。自分の fork を作り、Claude Code に手を入れさせて自分のニーズに合わせる。
 
-**Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that it's safe to make changes.
+**カスタマイズ = コード変更。** 設定ファイルの肥大はない。振る舞いを変えたい? コードを書き換える。コードベースは変更が安全なほど小さい。
 
-**AI-native, hybrid by design.** The install and onboarding flow is an optimized scripted path, fast and deterministic. When a step needs judgment, whether a failed install, a guided decision, or a customization, control hands off to Claude Code seamlessly. Beyond setup there's no monitoring dashboard or debugging UI either: describe the problem in chat and Claude Code handles it.
+**AI ネイティブ、設計上ハイブリッド。** インストールとオンボーディングのフローは、最適化された決定的スクリプトのパスで、速くて確実。判断が必要なステップ — インストール失敗、誘導付きの判断、カスタマイズ — に来たら、制御は Claude Code にシームレスに渡される。セットアップ以外でも、監視ダッシュボードやデバッグ UI は存在しない:問題はチャットで説明すれば Claude Code が対応する。
 
-**Skills over features.** Trunk ships the registry and infrastructure, not specific channel adapters or alternative agent providers. Channels (Discord, Slack, Telegram, WhatsApp, …) live on a long-lived `channels` branch; alternative providers (OpenCode, Ollama) live on `providers`. You run `/add-telegram`, `/add-opencode`, etc. and the skill copies exactly the module(s) you need into your fork. No feature you didn't ask for.
+**機能ではなくスキル。** Trunk が出荷するのはレジストリとインフラであり、特定の channel adapter や代替の agent provider ではない。Channels(Discord、Slack、Telegram、WhatsApp 等)は長命の `channels` ブランチに置かれ、代替 provider(OpenCode、Ollama)は `providers` ブランチに置かれる。`/add-telegram`、`/add-opencode` 等を実行すると、skill が必要なモジュールだけを fork にコピーする。頼んでいない機能は付いてこない。
 
-**Best harness, best model.** NanoClaw natively uses Claude Code via Anthropic's official Claude Agent SDK, so you get the latest Claude models and Claude Code's full toolset, including the ability to modify and expand your own NanoClaw fork. Other providers are drop-in options: `/add-codex` for OpenAI's Codex (ChatGPT subscription or API key), `/add-opencode` for OpenRouter, Google, DeepSeek and more via OpenCode, and `/add-ollama-provider` for local open-weight models. Provider is configurable per agent group.
+**最良の harness、最良のモデル。** NanoClaw は Anthropic 公式の Claude Agent SDK 経由で Claude Code をネイティブに使うので、最新の Claude モデルと Claude Code の全ツール — 自身の NanoClaw fork を修正・拡張する機能を含む — を使える。他の provider はドロップイン式の選択肢:`/add-codex` は OpenAI の Codex(ChatGPT サブスクリプションまたは API キー)、`/add-opencode` は OpenRouter / Google / DeepSeek 等を OpenCode 経由、`/add-ollama-provider` はローカルの open-weight モデル。Provider は agent group ごとに設定可能である。
 
-## What It Supports
+## サポートしているもの
 
-- **Multi-channel messaging** — WhatsApp, Telegram, Discord, Slack, Microsoft Teams, iMessage, Matrix, Google Chat, Webex, Linear, GitHub, WeChat, and email via Resend. Installed on demand with `/add-<channel>` skills. Run one or many at the same time.
-- **Flexible isolation** — connect each channel to its own agent for full privacy, share one agent across many channels for unified memory with separate conversations, or fold multiple channels into a single shared session so one conversation spans many surfaces. Pick per channel via `/manage-channels`. See [docs/isolation-model.md](docs/isolation-model.md).
-- **Per-agent workspace** — each agent group has its own `CLAUDE.md`, its own memory, its own container, and only the mounts you allow. Nothing crosses the boundary unless you wire it to.
-- **Scheduled tasks** — recurring jobs that run Claude and can message you back
-- **Web access** — search and fetch content from the web
-- **Container isolation** — agents are sandboxed in Docker (macOS/Linux/WSL2), with optional [Docker Sandboxes](docs/docker-sandboxes.md) micro-VM isolation or Apple Container as a macOS-native opt-in
-- **Credential security** — agents never hold raw API keys. Outbound requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects credentials at request time and enforces per-agent policies and rate limits.
+- **マルチチャネルメッセージング** — WhatsApp、Telegram、Discord、Slack、Microsoft Teams、iMessage、Matrix、Google Chat、Webex、Linear、GitHub、WeChat、Resend 経由のメール。`/add-<channel>` skill でオンデマンドにインストール。複数を同時に走らせてよい。
+- **柔軟な分離** — 各 channel を独自の agent に接続して完全プライバシー、複数 channel で 1 つの agent を共有して統一メモリ + 会話分離、複数 channel を 1 つの共有セッションにまとめて 1 つの会話が複数の場所をまたぐ、のいずれかを選べる。`/manage-channels` で channel ごとに選択する。[docs/isolation-model.md](docs/isolation-model.md) を参照。
+- **agent ごとの workspace** — 各 agent group は自分の `CLAUDE.md`、自分のメモリ、自分のコンテナ、許可したマウントだけを持つ。配線しない限り境界を越えるものはない。
+- **スケジュール済タスク** — 定期的に Claude を走らせ、結果をメッセージで返してくれる
+- **Web アクセス** — Web の検索とコンテンツ取得
+- **コンテナ分離** — エージェントは Docker(macOS / Linux / WSL2)でサンドボックス化、オプションで [Docker Sandboxes](docs/docker-sandboxes.md) によるマイクロ VM 分離、または macOS ネイティブのオプトインとして Apple Container を選べる
+- **クレデンシャルセキュリティ** — エージェントは生の API キーを保持しない。アウトバウンドリクエストは [OneCLI's Agent Vault](https://github.com/onecli/onecli) を経由し、リクエスト時にクレデンシャルを注入し、agent ごとのポリシーとレート制限を強制する。
 
-## Usage
+## 使い方
 
-Talk to your assistant with the trigger word (default: `@Andy`):
+トリガーワード(デフォルト:`@Andy`)でアシスタントに話しかける:
 
 ```
-@Andy send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
-@Andy review the git history for the past week each Friday and update the README if there's drift
-@Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
+@Andy 平日の朝 9 時に営業パイプラインの概要を送って(私の Obsidian vault フォルダにアクセス可)
+@Andy 毎週金曜日に過去 1 週間の git 履歴をレビューし、ドリフトがあれば README を更新して
+@Andy 毎週月曜の朝 8 時に Hacker News と TechCrunch から AI 関連ニュースをまとめてブリーフィングをメッセージして
 ```
 
-From a channel you own or administer, you can manage groups and tasks:
+自分が所有または管理する channel からは、group とタスクの管理ができる:
 ```
-@Andy list all scheduled tasks across groups
-@Andy pause the Monday briefing task
-@Andy join the Family Chat group
+@Andy 全 group のスケジュール済タスクをリストして
+@Andy 月曜のブリーフィングタスクを一時停止して
+@Andy Family Chat group に参加して
 ```
 
-## Customizing
+## カスタマイズ
 
-NanoClaw doesn't use configuration files. To make changes, just tell Claude Code what you want:
+NanoClaw は設定ファイルを使わない。変更したいことは Claude Code に伝えるだけ:
 
-- "Change the trigger word to @Bob"
-- "Remember in the future to make responses shorter and more direct"
-- "Add a custom greeting when I say good morning"
-- "Store conversation summaries weekly"
+- "トリガーワードを @Bob に変えて"
+- "今後は応答を短く直接的にすることを覚えておいて"
+- "おはようと言ったらカスタムの挨拶を返すようにして"
+- "会話のサマリを毎週保存するようにして"
 
-Or run `/customize` for guided changes.
+または、誘導付きの変更には `/customize` を実行する。
 
-The codebase is small enough that Claude can safely modify it.
+コードベースは Claude が安全に変更できるほど小さい。
 
-## Contributing
+## 貢献
 
-**Don't add features. Add skills.**
+**機能を追加しない。skill を追加する。**
 
-If you want to add a new channel or agent provider, don't add it to trunk. New channel adapters land on the `channels` branch; new agent providers land on `providers`. Users install them in their own fork with `/add-<name>` skills, which copy the relevant module(s) into the standard paths, wire the registration, and pin dependencies.
+新しい channel や agent provider を追加したい場合、trunk には追加しない。新しい channel adapter は `channels` ブランチに、新しい agent provider は `providers` ブランチに置く。ユーザは自分の fork で `/add-<name>` skill を使ってインストールする。skill は関連モジュールを標準パスにコピーし、登録を配線し、依存を pin する。
 
-This keeps trunk as pure registry and infra, and every fork stays lean — users get the channels and providers they asked for and nothing else.
+これにより trunk は純粋なレジストリとインフラに保たれ、各 fork は痩せたままになる — ユーザは頼んだ channel と provider だけを得て、それ以外は得ない。
 
 ### RFS (Request for Skills)
 
-Skills we'd like to see:
+欲しい skill のリスト:
 
-**Communication Channels**
-- `/add-signal` — Add Signal as a channel
+**通信チャネル**
+- `/add-signal` — Signal を channel として追加する
 
-## Requirements
+## 動作要件
 
-- macOS or Linux (Windows via WSL2)
-- Node.js 20+ and pnpm 10+ (the installer will install both if missing)
-- [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
-- [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
+- macOS または Linux(Windows は WSL2 経由)
+- Node.js 20+ と pnpm 10+(インストーラが無ければ入れる)
+- [Docker Desktop](https://docker.com/products/docker-desktop)(macOS / Windows)または Docker Engine(Linux)
+- [Claude Code](https://claude.ai/download) — `/customize`、`/debug`、セットアップ中のエラー回復、すべての `/add-<channel>` skill のために必要
 
-## Architecture
+## アーキテクチャ
 
 ```
 messaging apps → host process (router) → inbound.db → container (Bun, Claude Agent SDK) → outbound.db → host process (delivery) → messaging apps
 ```
 
-A single Node host orchestrates per-session agent containers. When a message arrives, the host routes it via the entity model (user → messaging group → agent group → session), writes it to the session's `inbound.db`, and wakes the container. The agent-runner inside the container polls `inbound.db`, runs Claude, and writes responses to `outbound.db`. The host polls `outbound.db` and delivers back through the channel adapter.
+単一の Node host が、セッションごとの agent コンテナをオーケストレートする。メッセージが届くと、host はエンティティモデル(user → messaging group → agent group → session)を辿ってルーティングし、セッションの `inbound.db` に書き込み、コンテナを起こす。コンテナ内の agent-runner は `inbound.db` をポーリングし、Claude を走らせ、応答を `outbound.db` に書き込む。host は `outbound.db` をポーリングし、channel adapter 経由で返信する。
 
-Two SQLite files per session, each with exactly one writer — no cross-mount contention, no IPC, no stdin piping. Channels and alternative providers self-register at startup; trunk ships the registry and the Chat SDK bridge, while the adapters themselves are skill-installed per fork.
+セッションごとに 2 つの SQLite ファイル、各ファイルにつき writer は厳密に 1 つ — クロスマウントの競合なし、IPC なし、stdin パイプなし。Channels と代替 provider は起動時に self-register する;trunk が出荷するのはレジストリと Chat SDK ブリッジで、adapter 本体は fork ごとに skill でインストールする。
 
-For the full architecture writeup see [docs/architecture.md](docs/architecture.md); for the three-level isolation model see [docs/isolation-model.md](docs/isolation-model.md).
+アーキテクチャ完全版は [docs/architecture.md](docs/architecture.md)、3 レベルの分離モデルは [docs/isolation-model.md](docs/isolation-model.md) を参照。
 
-Key files:
-- `src/index.ts` — entry point: DB init, channel adapters, delivery polls, sweep
-- `src/router.ts` — inbound routing: messaging group → agent group → session → `inbound.db`
-- `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions
-- `src/host-sweep.ts` — 60s sweep: stale detection, due-message wake, recurrence
-- `src/session-manager.ts` — resolves sessions, opens `inbound.db` / `outbound.db`
-- `src/container-runner.ts` — spawns per-agent-group containers, OneCLI credential injection
-- `src/db/` — central DB (users, roles, agent groups, messaging groups, wiring, migrations)
-- `src/channels/` — channel adapter infra (adapters installed via `/add-<channel>` skills)
-- `src/providers/` — host-side provider config (`claude` baked in; others via skills)
-- `container/agent-runner/` — Bun agent-runner: poll loop, MCP tools, provider abstraction
-- `groups/<folder>/` — per-agent-group filesystem (`CLAUDE.md`, skills, container config)
+主要ファイル:
+- `src/index.ts` — エントリーポイント:DB 初期化、channel adapter、配信ポーリング、sweep
+- `src/router.ts` — 受信ルーティング:messaging group → agent group → session → `inbound.db`
+- `src/delivery.ts` — `outbound.db` をポーリング、adapter 経由で配信、システムアクションを処理
+- `src/host-sweep.ts` — 60 秒の sweep:stale 検出、due メッセージのウェイク、再帰スケジュール
+- `src/session-manager.ts` — セッションを解決、`inbound.db` / `outbound.db` をオープン
+- `src/container-runner.ts` — agent group ごとのコンテナを起動、OneCLI でクレデンシャル注入
+- `src/db/` — central DB(users、roles、agent groups、messaging groups、wiring、マイグレーション)
+- `src/channels/` — channel adapter のインフラ(adapter は `/add-<channel>` skill でインストール)
+- `src/providers/` — host 側の provider 設定(`claude` は組み込み、他は skill 経由)
+- `container/agent-runner/` — Bun の agent-runner:ポーリングループ、MCP ツール、provider 抽象化
+- `groups/<folder>/` — agent group ごとのファイルシステム(`CLAUDE.md`、skill、コンテナ設定)
 
 ## FAQ
 
-**Why Docker?**
+**なぜ Docker?**
 
-Docker provides cross-platform support (macOS, Linux and Windows via WSL2) and a mature ecosystem. On macOS, you can optionally switch to Apple Container via `/convert-to-apple-container` for a lighter-weight native runtime. For additional isolation, [Docker Sandboxes](docs/docker-sandboxes.md) run each container inside a micro VM.
+Docker はクロスプラットフォームサポート(macOS、Linux、Windows は WSL2 経由)と成熟したエコシステムを提供する。macOS では、より軽量なネイティブランタイムのため `/convert-to-apple-container` で Apple Container に切り替えてもよい。追加の分離のために、[Docker Sandboxes](docs/docker-sandboxes.md) は各コンテナをマイクロ VM の中で動かす。
 
-**Can I run this on Linux or Windows?**
+**Linux や Windows でも動かせるか?**
 
-Yes. Docker is the default runtime and works on macOS, Linux, and Windows (via WSL2). Just run `bash nanoclaw.sh`.
+動かせる。Docker はデフォルトのランタイムで、macOS、Linux、Windows(WSL2 経由)で動く。`bash nanoclaw.sh` を実行するだけ。
 
-**Is this secure?**
+**これは安全か?**
 
-Agents run in containers, not behind application-level permission checks. They can only access explicitly mounted directories. Credentials never enter the container — outbound API requests route through [OneCLI's Agent Vault](https://github.com/onecli/onecli), which injects authentication at the proxy level and supports rate limits and access policies. You should still review what you're running, but the codebase is small enough that you actually can. See the [security documentation](https://docs.nanoclaw.dev/concepts/security) for the full security model.
+エージェントは、アプリケーションレベルのパーミッションチェックの裏側ではなく、コンテナの中で動く。明示的にマウントされたディレクトリにしかアクセスできない。クレデンシャルはコンテナに入らない — アウトバウンドの API リクエストは [OneCLI's Agent Vault](https://github.com/onecli/onecli) を経由し、proxy レベルで認証を注入し、レート制限とアクセスポリシーをサポートする。何を動かしているかは確認すべきだが、コードベースは実際に確認できるほど小さい。完全なセキュリティモデルは [security documentation](https://docs.nanoclaw.dev/concepts/security) を参照。
 
-**Why no configuration files?**
+**なぜ設定ファイルがないのか?**
 
-We don't want configuration sprawl. Every user should customize NanoClaw so that the code does exactly what they want, rather than configuring a generic system. If you prefer having config files, you can tell Claude to add them.
+設定の肥大化を避けたい。各ユーザは、汎用システムを設定する代わりに、コードがちょうどやりたいことをするように NanoClaw をカスタマイズすべきである。設定ファイルがある方が好みなら、Claude に追加するように頼めばよい。
 
-**Can I use third-party or open-source models?**
+**third-party や open-source モデルは使えるか?**
 
-Yes. The supported path is `/add-opencode` (OpenRouter, OpenAI, Google, DeepSeek, and more via OpenCode config) or `/add-ollama-provider` (local open-weight models via Ollama). Both are configurable per agent group, so different agents can run on different backends in the same install.
+使える。サポートされている経路は `/add-opencode`(OpenCode 設定経由で OpenRouter、OpenAI、Google、DeepSeek 等)または `/add-ollama-provider`(Ollama 経由のローカル open-weight モデル)。両方とも agent group ごとに設定可能なので、同じ install 内で異なる agent が異なるバックエンドで動かせる。
 
-For one-off experiments, any Claude API-compatible endpoint also works via `.env`:
+単発の実験用には、Claude API 互換のエンドポイントを `.env` 経由で使うこともできる:
 
 ```bash
 ANTHROPIC_BASE_URL=https://your-api-endpoint.com
 ANTHROPIC_AUTH_TOKEN=your-token-here
 ```
 
-**How do I debug issues?**
+**問題のデバッグはどうするか?**
 
-Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach that underlies NanoClaw.
+Claude Code に聞く。「なぜ scheduler が走っていないのか?」「最近のログには何があるか?」「なぜこのメッセージに応答がないのか?」 これが NanoClaw の根幹にある AI ネイティブなアプローチである。
 
-**Why isn't the setup working for me?**
+**セットアップが上手くいかないのはなぜか?**
 
-If a step fails, `nanoclaw.sh` hands off to Claude Code to diagnose and resume. If that doesn't resolve it, run `claude`, then `/debug`. If Claude identifies an issue likely to affect other users, open a PR against the relevant setup step or skill.
+ステップが失敗すると、`nanoclaw.sh` は Claude Code に引き継ぎ、診断と再開を行う。それで解決しない場合は、`claude` を起動して `/debug` を実行する。Claude が他のユーザにも影響しそうな問題を特定したら、該当するセットアップステップまたは skill に対して PR を出してほしい。
 
-**What changes will be accepted into the codebase?**
+**コードベースに受け入れられる変更は何か?**
 
-Only security fixes, bug fixes, and clear improvements will be accepted to the base configuration. That's all.
+ベース設定に受け入れられるのはセキュリティ修正、バグ修正、明確な改善のみ。それだけである。
 
-Everything else (new capabilities, OS compatibility, hardware support, enhancements) should be contributed as skills on the `channels` or `providers` branch.
+それ以外(新しい機能、OS 互換、ハードウェアサポート、エンハンスメント)はすべて、`channels` または `providers` ブランチに skill として貢献すべきである。
 
-This keeps the base system minimal and lets every user customize their installation without inheriting features they don't want.
+これにより、ベースシステムを最小に保ち、各ユーザが望まない機能を継承することなく、自分のインストールをカスタマイズできるようになる。
 
-## Community
+## コミュニティ
 
-Questions? Ideas? [Join the Discord](https://discord.gg/VDdww8qS42).
+質問は? アイデアは? [Discord に参加してほしい](https://discord.gg/VDdww8qS42)。
 
-## Changelog
+## 変更履歴
 
-See [CHANGELOG.md](CHANGELOG.md) for breaking changes, or the [full release history](https://docs.nanoclaw.dev/changelog) on the documentation site.
+破壊的変更は [CHANGELOG.md](CHANGELOG.md)、完全なリリース履歴は [ドキュメントサイトの changelog](https://docs.nanoclaw.dev/changelog) を参照。
 
-## License
+## ライセンス
 
 MIT
 
