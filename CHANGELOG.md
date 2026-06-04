@@ -1,6 +1,15 @@
 # Changelog
 
-NanoClaw の重要な変更はすべて本ファイルに記録する。
+NanoClaw 上流および biblio-claw fork の重要な変更を本ファイルに記録する。biblio-claw 固有の変更は冒頭の `[biblio-claw-*]` セクションへ、上流 NanoClaw のリリースは `[2.x.x]` セクションへ追記する。
+
+## [biblio-claw-m1-p1-task-1] - 2026-06-01
+
+biblio-claw fork の Phase 1 Task 1 (NanoClaw 取り込み + ドキュメント整理) を完了。
+
+- **NanoClaw v2 fork 取り込み。** `nanocoai/nanoclaw` @ `2492259` (2026-05-28) を biblio-claw の base として rsync で root flat 展開で取り込み (`.git` / `.claude` は除外)。
+- **ドキュメント日本語化。** CLAUDE.md / ルート 6 ファイル (README, CONTRIBUTING, CODE_OF_CONDUCT, CHANGELOG, CONTRIBUTORS, RELEASING) / `docs/` 23 ファイルを日本語化。
+- **上流提供翻訳ファイルの統廃合。** `README.md` 自体を日本語化したため、上流が同梱していた `README_ja.md` と `README_zh.md` は削除。
+- **biblio-claw 固有運用ルール追加。** CLAUDE.md 上部に PRP コマンドフロー / Branch 戦略 / 環境分離方針 / 公開ポリシーを追記。NanoClaw v2 上流継承部分は CLAUDE.md 下部に保持し、衝突時の優先ルールを明示。
 
 ## [2.0.64] - 2026-05-18
 
