@@ -4,10 +4,8 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
-import path from 'path';
-
+import { getDsnProvider, getSchedulerProvider, getSecretProvider } from './adapters/index.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
-import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
@@ -69,8 +67,18 @@ async function main(): Promise<void> {
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
-  // 1. Init central DB
-  const dbPath = path.join(DATA_DIR, 'v2.db');
+  // 0b. Resolve environment-difference adapters (DSN / scheduler / secret).
+  // The app body uses these factories instead of hard-coded env-dependent code,
+  // so Phase 2 swaps implementations + env without touching callers.
+  const dsn = getDsnProvider();
+  log.info('Adapters resolved', {
+    dsn: dsn.name,
+    scheduler: getSchedulerProvider().name,
+    secret: getSecretProvider().name,
+  });
+
+  // 1. Init central DB (location comes from the DSN adapter)
+  const dbPath = dsn.centralDbPath();
   const db = initDb(dbPath);
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });

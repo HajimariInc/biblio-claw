@@ -21,7 +21,10 @@ export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', '
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+// Data root — overridable via DATA_DIR so Phase 2 (GKE) can point at a
+// different mount without code changes. The DSN adapter derives all DB paths
+// from this value. Resolved at process start (the real override granularity).
+export const DATA_DIR = process.env.DATA_DIR || path.resolve(PROJECT_ROOT, 'data');
 
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.
