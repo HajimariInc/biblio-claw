@@ -29,6 +29,7 @@
 import type Database from 'better-sqlite3';
 import fs from 'fs';
 
+import { getSchedulerProvider, type SchedulerProvider } from './adapters/scheduler/index.js';
 import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
@@ -58,7 +59,6 @@ export function parseSqliteUtc(s: string): number {
   return Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z');
 }
 
-const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
 // nothing — kill and restart on the next inbound.
@@ -117,21 +117,25 @@ export function decideStuckAction(args: {
   return { action: 'ok' };
 }
 
-let running = false;
+// The periodic tick is supplied by a SchedulerProvider (env-swappable). The
+// sweep *body* (sweepSession et al.) is environment-independent and stays here;
+// only the loop mechanism is delegated.
+let scheduler: SchedulerProvider | null = null;
 
 export function startHostSweep(): void {
-  if (running) return;
-  running = true;
-  sweep();
+  if (scheduler) return;
+  scheduler = getSchedulerProvider();
+  scheduler.start(sweepOnce);
+  log.info('Host sweep scheduled', { scheduler: scheduler.name });
 }
 
 export function stopHostSweep(): void {
-  running = false;
+  scheduler?.stop();
+  scheduler = null;
 }
 
-async function sweep(): Promise<void> {
-  if (!running) return;
-
+/** One sweep pass over all active sessions. Never throws (errors are logged). */
+async function sweepOnce(): Promise<void> {
   try {
     const sessions = getActiveSessions();
     for (const session of sessions) {
@@ -140,8 +144,6 @@ async function sweep(): Promise<void> {
   } catch (err) {
     log.error('Host sweep error', { err });
   }
-
-  setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 
 async function sweepSession(session: Session): Promise<void> {

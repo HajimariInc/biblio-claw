@@ -14,10 +14,10 @@ import type Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 
+import { getDsnProvider } from './adapters/dsn/index.js';
 import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
-import { DATA_DIR } from './config.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -43,24 +43,28 @@ function isPathInside(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+// Session DB path algebra is owned by the DSN adapter so the data root /
+// location is env-swappable for Phase 2. These wrappers keep the original
+// export signatures (many call sites) and just delegate.
+
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
-  return path.join(DATA_DIR, 'v2-sessions');
+  return getDsnProvider().sessionsBaseDir();
 }
 
 /** Directory for a specific session: sessions/{agent_group_id}/{session_id}/ */
 export function sessionDir(agentGroupId: string, sessionId: string): string {
-  return path.join(sessionsBaseDir(), agentGroupId, sessionId);
+  return getDsnProvider().sessionDir(agentGroupId, sessionId);
 }
 
 /** Path to the host-owned inbound DB (messages_in + delivered). */
 export function inboundDbPath(agentGroupId: string, sessionId: string): string {
-  return path.join(sessionDir(agentGroupId, sessionId), 'inbound.db');
+  return getDsnProvider().inboundDbPath(agentGroupId, sessionId);
 }
 
 /** Path to the container-owned outbound DB (messages_out + processing_ack). */
 export function outboundDbPath(agentGroupId: string, sessionId: string): string {
-  return path.join(sessionDir(agentGroupId, sessionId), 'outbound.db');
+  return getDsnProvider().outboundDbPath(agentGroupId, sessionId);
 }
 
 /** Path to the container heartbeat file (touched instead of DB writes). */

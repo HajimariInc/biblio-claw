@@ -337,7 +337,7 @@ export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || 'Andy';
 const PROJECT_ROOT = process.cwd();
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const DATA_DIR = process.env.DATA_DIR || path.resolve(PROJECT_ROOT, 'data'); // env で差し替え可 (DSN アダプタが解決)
 
 // コンテナ設定
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';
