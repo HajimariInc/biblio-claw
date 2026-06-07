@@ -1,0 +1,67 @@
+# biblio-claw — local 結線土台 (Phase 1)
+#
+# OneCLI gateway + postgres のみを compose で起動する。host (NanoClaw) は
+# compose 外で `pnpm run dev` し、通常の docker daemon 接続で agent コンテナを
+# spawn する。host を compose service にしない理由は plan の ARCHITECT 判断ログ
+# (docker.sock DinD / volume の cwd 絶対パスが daemon 視点で破綻する 2 問題回避)。
+#
+# 起動: docker compose up -d --wait
+# 停止: docker compose down            (データ保持)
+#       docker compose down -v         (postgres/onecli データも破棄)
+#
+# bind host は 0.0.0.0 が既定。agent コンテナは host.docker.internal:10255 で
+# proxy に届く必要があり (PoC-2 教訓)、127.0.0.1 bind だと host-gateway 経由で
+# 到達できないため。local 専用構成。
+
+name: biblio-claw
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-onecli}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onecli}
+      POSTGRES_DB: ${POSTGRES_DB:-onecli}
+    volumes:
+      # named volume — cwd 絶対パスの bind mount を避ける (plan ARCHITECT)。
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # OneCLI は entrypoint で prisma migrate deploy を打つため、postgres が
+      # 受け付ける前に起動すると永久 retry → exit 1 (PoC-5 教訓 L428)。
+      # depends_on: service_healthy で起動順を保証する。
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-onecli}']
+      interval: 5s
+      timeout: 3s
+      start_period: 15s
+      retries: 10
+    networks:
+      - biblio
+
+  onecli:
+    image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-1.30.0}
+    container_name: biblio-onecli
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # 10254 = REST/Dashboard, 10255 = MITM proxy。
+      - '${ONECLI_BIND_HOST:-0.0.0.0}:10254:10254'
+      - '${ONECLI_BIND_HOST:-0.0.0.0}:10255:10255'
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-onecli}:${POSTGRES_PASSWORD:-onecli}@postgres:5432/${POSTGRES_DB:-onecli}
+      APP_URL: http://localhost:10254
+      GATEWAY_API_URL: http://localhost:10255
+    volumes:
+      - onecli-data:/app/data
+    networks:
+      - biblio
+
+volumes:
+  pgdata:
+  onecli-data:
+
+networks:
+  biblio:
+    driver: bridge

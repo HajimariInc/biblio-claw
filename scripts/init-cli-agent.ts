@@ -22,6 +22,7 @@ import path from 'path';
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
+import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -123,6 +124,12 @@ async function main(): Promise<void> {
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+
+  // biblio-claw Phase 1: Vertex publisher model ID. claude-code on Vertex talks
+  // rawPredict to anthropic/models/<model>, so the container.json `model` field
+  // must be the publisher ID, not an Anthropic API alias. Override via
+  // `ncl groups config update --model ...` post-init if needed.
+  updateContainerConfigScalars(ag.id, { model: 'claude-sonnet-4-6' });
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
