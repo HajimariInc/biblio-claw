@@ -3,11 +3,14 @@
  *
  * Abstracts *where* the central DB and per-session DBs live so the app body
  * never hard-codes a filesystem layout. Phase 1 ships a local-filesystem
- * implementation; Phase 2 swaps in a GKE/Cloud SQL variant by adding one class
+ * implementation; Phase 2 points at a GKE persistent volume by adding one class
  * and flipping `DSN_PROVIDER` — no caller changes.
  *
  * Scope is path/location resolution ONLY. The DB engine stays better-sqlite3
- * (PRD §Constraints); this adapter does not switch SQLite for another engine.
+ * and the storage stays SQLite-on-disk across both phases (PRD §Constraints:
+ * PostgreSQL/Cloud SQL is explicitly out of scope; persistence is PVC + SQLite).
+ * This adapter resolves paths; it does not switch the engine or the storage
+ * model.
  */
 export interface DsnProvider {
   readonly name: string;

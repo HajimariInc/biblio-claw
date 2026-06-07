@@ -1,3 +1,4 @@
+import { log } from '../../log.js';
 import type { SchedulerProvider } from './types.js';
 
 /** Default sweep cadence — one tick per minute (was host-sweep's SWEEP_INTERVAL_MS). */
@@ -24,6 +25,13 @@ export class LocalScheduler implements SchedulerProvider {
       if (!this.running) return;
       try {
         await tick();
+      } catch (err) {
+        // `tick` is expected to be self-contained (host-sweep's sweepOnce
+        // swallows its own errors), but the SchedulerProvider contract allows
+        // a rejecting tick. Log instead of letting `void loop()` surface an
+        // unhandledRejection, and keep the loop alive — one bad tick must not
+        // silently kill the sweep.
+        log.error('Scheduler tick threw', { err });
       } finally {
         // Re-check: stop() may have fired while the tick was in flight.
         if (this.running) {

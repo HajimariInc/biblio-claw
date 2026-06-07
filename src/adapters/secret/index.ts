@@ -2,8 +2,10 @@
  * SecretProvider factory. Selected by `SECRET_PROVIDER` (default `onecli`).
  *
  * Memoized — this MUST be a singleton: container-runner and onecli-approvals
- * both resolve through here and need to share the same OneCLI client (and its
- * one manual-approval long-poll handle).
+ * both resolve through here and need to share the same OneCLI client instance,
+ * so the gateway's connection/session state isn't duplicated. (The manual-
+ * approval long-poll handle itself is held by onecli-approvals' own module
+ * variable, not by the provider — but it is registered on this shared client.)
  */
 import { OneCLISecretProvider } from './onecli.js';
 import type { SecretProvider } from './types.js';

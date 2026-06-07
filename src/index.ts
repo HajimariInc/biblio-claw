@@ -4,7 +4,7 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
-import { getDsnProvider, getSchedulerProvider, getSecretProvider } from './adapters/index.js';
+import { getDsnProvider, getSecretProvider } from './adapters/index.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
@@ -67,15 +67,13 @@ async function main(): Promise<void> {
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
-  // 0b. Resolve environment-difference adapters (DSN / scheduler / secret).
-  // The app body uses these factories instead of hard-coded env-dependent code,
-  // so Phase 2 swaps implementations + env without touching callers.
+  // 0b. Resolve environment-difference adapters used here at boot. The app body
+  // uses these factories instead of hard-coded env-dependent code, so Phase 2
+  // swaps implementations + env without touching callers. The scheduler is
+  // resolved (and logged) inside startHostSweep, not here — resolving it just to
+  // read its name would create and discard an unused instance.
   const dsn = getDsnProvider();
-  log.info('Adapters resolved', {
-    dsn: dsn.name,
-    scheduler: getSchedulerProvider().name,
-    secret: getSecretProvider().name,
-  });
+  log.info('Adapters resolved', { dsn: dsn.name, secret: getSecretProvider().name });
 
   // 1. Init central DB (location comes from the DSN adapter)
   const dbPath = dsn.centralDbPath();

@@ -27,9 +27,11 @@ export interface SecretProvider {
   /**
    * Inject the gateway proxy + CA into a container's docker `args`.
    *
-   * ⚠ MUTATES the `args` array in place (appends `-e`/`-v` flags). Returns
-   * false if the gateway couldn't be applied — the caller decides whether to
-   * refuse the spawn (responsibility stays with container-runner).
+   * ⚠ MUTATES the `args` array in place — the OneCLI gateway appends the docker
+   * flags it needs (proxy env vars + CA cert volume; exact flags are the SDK's
+   * concern). Returns false if the gateway couldn't be applied — the caller
+   * decides whether to refuse the spawn (responsibility stays with
+   * container-runner).
    */
   applyContainerSecrets(args: string[], options?: ApplyContainerConfigOptions): Promise<boolean>;
 

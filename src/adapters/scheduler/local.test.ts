@@ -70,6 +70,21 @@ describe('LocalScheduler', () => {
     deferred.resolve();
   });
 
+  it('keeps the loop alive when a tick rejects (logs instead of dying)', async () => {
+    const tick = vi.fn().mockRejectedValueOnce(new Error('transient tick failure')).mockResolvedValue(undefined);
+    const s = new LocalScheduler(1000);
+    s.start(tick);
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tick).toHaveBeenCalledTimes(1);
+
+    // The rejected tick must not stop the loop — the next one is still armed.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(tick).toHaveBeenCalledTimes(2);
+
+    s.stop();
+  });
+
   it('stop() before start() is a no-op', () => {
     const s = new LocalScheduler();
     expect(() => s.stop()).not.toThrow();
