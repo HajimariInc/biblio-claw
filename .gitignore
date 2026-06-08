@@ -24,6 +24,8 @@ groups/*
 *.keys.json
 .env
 .env*
+# .env.example はテンプレート (公開対象) なので除外解除
+!.env.example
 
 # Temp files
 .tmp-*

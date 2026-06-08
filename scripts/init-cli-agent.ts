@@ -22,6 +22,7 @@ import path from 'path';
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
+import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -103,6 +104,7 @@ async function main(): Promise<void> {
   // 2. Agent group + filesystem.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
+  const isNewGroup = !ag;
   if (!ag) {
     const agId = generateId('ag');
     createAgentGroup({
@@ -117,12 +119,25 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
+  // initGroupFilesystem calls ensureContainerConfig internally — the
+  // container_configs row is guaranteed to exist after this line, which is a
+  // hard precondition for updateContainerConfigScalars below (otherwise the
+  // UPDATE would match 0 rows and silently no-op).
   initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+
+  // biblio-claw Phase 1: Vertex publisher model ID. claude-code on Vertex talks
+  // rawPredict to anthropic/models/<model>, so the container.json `model` field
+  // must be the publisher ID, not an Anthropic API alias. New groups only —
+  // reusing an existing group must preserve any manual override done via
+  // `ncl groups config update --model ...`.
+  if (isNewGroup) {
+    updateContainerConfigScalars(ag.id, { model: 'claude-sonnet-4-6' });
+  }
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
