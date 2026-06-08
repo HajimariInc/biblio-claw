@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# biblio-claw: Phase 1 結線の自動検証 (Task 7)
+# biblio-claw: Phase 1 結線の自動検証
 #
-# 親 scripts/verify-phase-1.sh は Phase 1 完全版の入口で、その下流にいる本
-# スクリプトが Task 1-5 (= 土台起動 + Vertex 接続) の自動検証を担う。
-# Task 6/7 (Slack 往復) は外部依存 (Slack token + Event Subscriptions
-# 設定 = DEN さん操作) のため、自動チェックは「Slack adapter が
-# 取り込まれているか」と「.env に token が入っているか」までで、
-# 1 往復の事実上は host を起動して手動確認する。
+# 親 scripts/verify-phase-1.sh の下流で、土台起動 (docker compose) +
+# OneCLI 疎通 + Vertex secret 投入 + provider 配線 を 5 段で自動検証する。
+# Slack 往復は外部依存 (Slack token + Event Subscriptions 設定 = DEN さん操作)
+# のため本スクリプトの範囲外。参考として Slack 取り込み状態 + token 有無は
+# 末尾で表示するが、自動 fail にはしない。1 往復の事実は host を起動して
+# 手動確認する。
 #
 # 使い方:
 #   bash scripts/verify-phase-1-wiring.sh
@@ -46,16 +46,21 @@ ONECLI_API="${ONECLI_URL%/}/v1"
 
 # --- 1. compose 土台 ---
 info "[1/5] docker compose 土台 (OneCLI + postgres)"
-docker compose ps --format json 2>/dev/null | jq -r '.Name + " " + .State' | grep -q "biblio-onecli running" \
-  || fail "biblio-onecli が起動していない — 'docker compose up -d --wait' を実行"
-docker compose ps --format json 2>/dev/null | jq -r '.Name + " " + .State' | grep -q "biblio-claw-postgres-1 running" \
+# stderr を捨てない — docker daemon 未起動 / compose ファイル不正 / permission
+# 不足が「コンテナが起動していない」エラーに化けるのを防ぐ (本 PR レビュー指摘)。
+docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-onecli running" \
+  || fail "biblio-onecli が起動していない — 'docker compose up -d --wait' を実行 (docker daemon の起動も確認)"
+docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-claw-postgres-1 running" \
   || fail "biblio-claw-postgres-1 が起動していない — 'docker compose up -d --wait' を実行"
 ok "OneCLI + postgres 起動中"
 
 # --- 2. OneCLI REST 疎通 ---
 info "[2/5] OneCLI REST 疎通 (${ONECLI_API}/secrets)"
-http_code=$(curl -s -o /dev/null -w "%{http_code}" "${ONECLI_API}/secrets")
-[ "$http_code" = "200" ] || fail "OneCLI REST が 200 を返さない (got=${http_code})"
+# -sS: 進捗バーは抑制、curl 自身のエラー (DNS / TLS / 接続失敗) は stderr に
+# 出す。curl が exit 非 0 で終わると %{http_code} が出力されないため、その
+# 場合は "000" を明示代入して fail メッセージに「接続失敗」と分かる形にする。
+http_code=$(curl -sS -o /dev/null -w "%{http_code}" "${ONECLI_API}/secrets") || http_code="000"
+[ "$http_code" = "200" ] || fail "OneCLI REST が 200 を返さない (got=${http_code} / 000=接続失敗、それ以外は HTTP code)"
 ok "OneCLI REST OK (HTTP 200)"
 
 # --- 3. Vertex secret 存在 ---

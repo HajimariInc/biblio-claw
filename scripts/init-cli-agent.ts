@@ -104,6 +104,7 @@ async function main(): Promise<void> {
   // 2. Agent group + filesystem.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
+  const isNewGroup = !ag;
   if (!ag) {
     const agId = generateId('ag');
     createAgentGroup({
@@ -118,6 +119,10 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
+  // initGroupFilesystem calls ensureContainerConfig internally — the
+  // container_configs row is guaranteed to exist after this line, which is a
+  // hard precondition for updateContainerConfigScalars below (otherwise the
+  // UPDATE would match 0 rows and silently no-op).
   initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n` +
@@ -127,9 +132,12 @@ async function main(): Promise<void> {
 
   // biblio-claw Phase 1: Vertex publisher model ID. claude-code on Vertex talks
   // rawPredict to anthropic/models/<model>, so the container.json `model` field
-  // must be the publisher ID, not an Anthropic API alias. Override via
-  // `ncl groups config update --model ...` post-init if needed.
-  updateContainerConfigScalars(ag.id, { model: 'claude-sonnet-4-6' });
+  // must be the publisher ID, not an Anthropic API alias. New groups only —
+  // reusing an existing group must preserve any manual override done via
+  // `ncl groups config update --model ...`.
+  if (isNewGroup) {
+    updateContainerConfigScalars(ag.id, { model: 'claude-sonnet-4-6' });
+  }
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);

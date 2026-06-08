@@ -90,8 +90,11 @@ delete_secret() {
 ensure_secret() {
   local host token
   host="$(vertex_host)"
-  token="$(gcloud auth application-default print-access-token 2>/dev/null)" \
-    || fail "ADC アクセストークン取得に失敗 (gcloud auth application-default login --project ${ANTHROPIC_VERTEX_PROJECT_ID} が必要)"
+  # gcloud の stderr は捨てない。失敗時の理由 (credential 破損 / permission /
+  # クォータ等) がユーザーに見えないと debug 不能になる。ADC token 自体は
+  # stdout (= "$()" 経由でシェル変数) にのみ流れ、stderr には出ない。
+  token="$(gcloud auth application-default print-access-token)" \
+    || fail "ADC アクセストークン取得に失敗 (上の gcloud エラーを確認。未ログインなら: gcloud auth application-default login --project ${ANTHROPIC_VERTEX_PROJECT_ID})"
   [ -n "$token" ] || fail "ADC アクセストークンが空"
   delete_secret
   SECRET_TOKEN="$token" jq -n \
@@ -107,10 +110,28 @@ ensure_secret() {
 
 # set_all_agents_mode_all: 既存全 agent を secretMode=all に昇格 (selective 401 回避)。
 #   agent がまだ無ければスキップ (host 初回 spawn 後に再実行で all 化される)。
+#   重要: GET /agents の失敗は 404 (バージョン差で endpoint 無し) を除いて fail
+#   に格上げする。5xx / 接続失敗を info で握りつぶすと、secret 投入は成功して
+#   いるのに agent が selective のまま残り、後続の全 Vertex 呼び出しが silent
+#   401 になる (本 PR レビュー Critical 指摘)。
+#   個別 agent への PATCH は best-effort で継続 (1 agent の問題で全体を止めない)。
 set_all_agents_mode_all() {
-  local ids n=0
-  ids="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/agents" | jq -r '.[].id')" \
-    || { info "agents 取得不可 — secret-mode 設定をスキップ"; return 0; }
+  local body_file http_code ids n=0
+  body_file="$(mktemp)"
+  trap 'rm -f "$body_file"' RETURN
+  http_code="$(curl -sS -o "$body_file" -w '%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
+    || fail "GET /v1/agents への接続に失敗 — OneCLI が起動しているか確認 (docker compose logs onecli)"
+  case "$http_code" in
+    200) ;;
+    404)
+      info "GET /v1/agents が 404 — OneCLI バージョン差の可能性。secret-mode 設定をスキップ"
+      return 0
+      ;;
+    *)
+      fail "GET /v1/agents が HTTP ${http_code} を返した — OneCLI ログを確認: docker compose logs onecli"
+      ;;
+  esac
+  ids="$(jq -r '.[].id' < "$body_file")"
   if [ -z "$ids" ]; then
     info "agent がまだ存在しない — host が初回 spawn した後に本スクリプトを再実行すると all 化される"
     return 0

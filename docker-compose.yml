@@ -28,7 +28,7 @@ services:
       - pgdata:/var/lib/postgresql
     healthcheck:
       # OneCLI は entrypoint で prisma migrate deploy を打つため、postgres が
-      # 受け付ける前に起動すると永久 retry → exit 1 (PoC-5 教訓 L428)。
+      # 受け付ける前に起動すると永久 retry → exit 1 (PoC-5 で確認)。
       # depends_on: service_healthy で起動順を保証する。
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-onecli}']
       interval: 5s

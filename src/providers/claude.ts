@@ -6,10 +6,12 @@
  *     ANTHROPIC_VERTEX_PROJECT_ID is present in .env. claude-code talks
  *     Vertex's rawPredict format directly, but we suppress its google-auth
  *     path (CLAUDE_CODE_SKIP_VERTEX_AUTH=1) and hand it a dummy
- *     ANTHROPIC_AUTH_TOKEN. The container's HTTPS_PROXY points at the OneCLI
- *     gateway, which MITM-injects a real ADC Bearer for
- *     aiplatform.googleapis.com (see scripts/onecli-vertex-secret.sh). The
- *     real credential never enters the container.
+ *     ANTHROPIC_AUTH_TOKEN. HTTPS_PROXY pointing at the OneCLI gateway and
+ *     the MITM CA are injected by container-runner via the secret adapter
+ *     (src/adapters/secret/onecli.ts → applyContainerSecrets), not here.
+ *     The OneCLI gateway rewrites Authorization on the wire with a real ADC
+ *     Bearer for aiplatform.googleapis.com (see scripts/onecli-vertex-secret.sh).
+ *     The real credential never enters the container.
  *
  *  2. Custom Anthropic-compatible endpoint: set when ANTHROPIC_BASE_URL is
  *     present (the original NanoClaw setup path). Same dummy-token trick,
