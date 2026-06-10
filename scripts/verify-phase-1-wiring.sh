@@ -26,12 +26,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# --- ログヘルパ (stderr) ---
-info() { printf '[INFO] %s\n' "$*" >&2; }
-ok()   { printf '[OK] %s\n' "$*" >&2; }
-warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
-
 # --- .env 読み込み (あれば、無くても進行) ---
 if [ -f "${ROOT}/.env" ]; then
   set -a
@@ -43,6 +37,11 @@ fi
 : "${ANTHROPIC_VERTEX_PROJECT_ID:=hajimari-ai-hackathon-2026}"
 : "${CLOUD_ML_REGION:=global}"
 ONECLI_API="${ONECLI_URL%/}/v1"
+
+# --- 共通 lib を読み込む (info / ok / warn / fail / vertex_host)。
+# 本 verify は set_all_agents_mode_all を呼ばないため OC_AUTH は不要。
+# shellcheck source=scripts/onecli-lib.sh
+. "${ROOT}/scripts/onecli-lib.sh"
 
 # --- 1. compose 土台 ---
 info "[1/5] docker compose 土台 (OneCLI + postgres)"
@@ -65,9 +64,8 @@ ok "OneCLI REST OK (HTTP 200)"
 
 # --- 3. Vertex secret 存在 ---
 info "[3/5] Vertex secret (type=generic, host=vertex) が投入済か"
-host_pattern=$([ "${CLOUD_ML_REGION}" = "global" ] \
-  && echo "aiplatform.googleapis.com" \
-  || echo "${CLOUD_ML_REGION}-aiplatform.googleapis.com")
+# vertex_host は scripts/onecli-lib.sh で定義 (PR #6 レビュー I9 関連の重複解消)
+host_pattern="$(vertex_host)"
 # curl と jq の失敗を 1 つの `curl | jq || fail` にまとめると、curl の接続失敗
 # (DNS / TLS / ポート不通) も「Vertex secret が未投入」と誤報して操作者を
 # scripts/onecli-vertex-secret.sh の再実行に誘導してしまう。curl と jq の
