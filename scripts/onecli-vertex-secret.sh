@@ -124,7 +124,9 @@ ensure_secret() {
 set_all_agents_mode_all() {
   local body_file http_code ids n=0
   body_file="$(mktemp)"
-  trap 'rm -f "$body_file"' RETURN
+  # RETURN は関数の正常終了でのみ発火 — fail (exit 1) では発火せず一時ファイルが残る。
+  # EXIT を併用して exit 経路でも確実にクリーンアップする。
+  trap 'rm -f "$body_file"' RETURN EXIT
   http_code="$(curl -sS -o "$body_file" -w '%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
     || fail "GET /v1/agents への接続に失敗 — OneCLI が起動しているか確認 (docker compose logs onecli)"
   case "$http_code" in

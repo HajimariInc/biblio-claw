@@ -70,10 +70,13 @@ for c in curl jq node; do
 done
 
 # 必須 env チェック (空のまま cat すると曖昧なエラーになるため即 fail)。
+# "${!v:-}" は「未設定」と「空文字設定 (= GH_APP_ID=)」を同一扱いするので、
+# fail メッセージも両方を示唆する形にする (= 「未設定」だけだと .env で
+# 空文字設定したユーザが混乱する)。
 need() {
   local v="$1"
   if [ -z "${!v:-}" ]; then
-    fail "必須 env が未設定: $v (.env に追記して再実行)"
+    fail "必須 env が未設定または空: $v (.env に値を設定して再実行)"
   fi
 }
 
@@ -113,7 +116,13 @@ mint_token() {
   export SIDECAR_TOKEN_HTTP="$http"
   case "$http" in
     2??) : ;;
-    *) fail "[sidecar] access_tokens が 2xx でない (http=$http / body 先頭は $(printf '%s' "$body" | head -c 200))" ;;
+    *)
+      # body の改行 / CR を除去 — マルチライン JSON エラーで [FAIL] 行が複数行に分散すると
+      # 「次のステップの出力か?」と誤読しやすい。
+      local body_preview
+      body_preview="$(printf '%s' "$body" | head -c 200 | tr '\r\n' '  ')"
+      fail "[sidecar] access_tokens が 2xx でない (http=$http) body: ${body_preview}"
+      ;;
   esac
   token="$(printf '%s' "$body" | jq -r '.token // empty')"
   body=""; unset body
@@ -176,7 +185,9 @@ upsert_gh_secret() {
 set_all_agents_mode_all() {
   local body_file http_code ids n=0
   body_file="$(mktemp)"
-  trap 'rm -f "$body_file"' RETURN
+  # RETURN は関数の正常終了でのみ発火 — fail (exit 1) では発火せず一時ファイルが残る。
+  # EXIT を併用して exit 経路でも確実にクリーンアップする。
+  trap 'rm -f "$body_file"' RETURN EXIT
   http_code="$(curl -sS -o "$body_file" -w '%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
     || fail "GET /v1/agents への接続に失敗 — OneCLI が起動しているか確認 (docker compose logs onecli)"
   case "$http_code" in

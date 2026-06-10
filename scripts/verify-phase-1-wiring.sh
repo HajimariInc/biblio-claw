@@ -76,7 +76,7 @@ curl -fsS "${ONECLI_API}/secrets" \
   || fail "Vertex secret が未投入 — 'bash scripts/onecli-vertex-secret.sh' を実行"
 ok "Vertex secret OK (host=${host_pattern}, headerName=authorization, valueFormat=Bearer {value})"
 
-# --- 3.5 GH secret 存在 (= Sidecar 投入済 / Task 7-B) ---
+# --- 3.5 GH secret 存在 (= Sidecar 投入済) ---
 info "[3.5/5] GH secret (type=generic, host=${GH_API_HOST:-api.github.com}) が投入済か"
 curl -fsS "${ONECLI_API}/secrets" \
   | jq -e --arg h "${GH_API_HOST:-api.github.com}" 'any(.[];
