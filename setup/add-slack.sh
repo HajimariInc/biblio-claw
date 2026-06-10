@@ -5,7 +5,8 @@
 # — the operator-facing app creation walkthrough + credential paste live in
 # setup/channels/slack.ts. Credentials come in via env vars:
 # SLACK_BOT_TOKEN (required), SLACK_APP_TOKEN (required for Socket Mode),
-# SLACK_SIGNING_SECRET (optional, retained only for legacy webhook callers).
+# SLACK_SIGNING_SECRET (optional — Socket Mode does not require it, but
+# setup/auto collects it for completeness; persisted only when non-empty).
 #
 # Emits exactly one status block on stdout (ADD_SLACK) at the end. All chatty
 # progress messages go to stderr so setup:auto's raw-log capture sees the full
@@ -16,8 +17,6 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-slack/SKILL.md.
-# biblio-claw Phase 1: bumped 4.26.0 -> 4.30.0 for native Socket Mode support
-# (mode:"socket" + appToken). Release 2026-06-02, minimumReleaseAge: 4320 (3d) 適合.
 ADAPTER_VERSION="@chat-adapter/slack@4.30.0"
 
 # Resolve which remote carries the channels branch — handles forks where
@@ -30,10 +29,13 @@ CHANNELS_BRANCH="${CHANNELS_REMOTE}/channels"
 emit_status() {
   local status=$1 error=${2:-}
   local already=${ADAPTER_ALREADY_INSTALLED:-false}
+  local signing_secret_set=false
+  [ -n "${SLACK_SIGNING_SECRET:-}" ] && signing_secret_set=true
   echo "=== NANOCLAW SETUP: ADD_SLACK ==="
   echo "STATUS: ${status}"
   echo "ADAPTER_VERSION: ${ADAPTER_VERSION}"
   echo "ADAPTER_ALREADY_INSTALLED: ${already}"
+  echo "SLACK_SIGNING_SECRET_SET: ${signing_secret_set}"
   [ -n "$error" ] && echo "ERROR: ${error}"
   echo "=== END ==="
 }
@@ -116,16 +118,29 @@ cp .env data/env/env
 log "Restarting service so the new adapter picks up the credentials…"
 # shellcheck source=setup/lib/install-slug.sh
 source "$PROJECT_ROOT/setup/lib/install-slug.sh"
+# biblio-claw は docker compose 環境のため launchd/systemd ユニットを持たない。
+# 上流 NanoClaw の launchctl/systemctl 経路は本 repo では失敗するのが正常。
+# 失敗を silent にせず、手動再起動が必要であることを操作者に明示する。
+restarted=false
 case "$(uname -s)" in
   Darwin)
-    launchctl kickstart -k "gui/$(id -u)/$(launchd_label)" >&2 2>/dev/null || true
+    if launchctl kickstart -k "gui/$(id -u)/$(launchd_label)" >&2 2>/dev/null; then
+      restarted=true
+    fi
     ;;
   Linux)
-    systemctl --user restart "$(systemd_unit)" >&2 2>/dev/null \
-      || sudo systemctl restart "$(systemd_unit)" >&2 2>/dev/null \
-      || true
+    if systemctl --user restart "$(systemd_unit)" >&2 2>/dev/null \
+      || sudo systemctl restart "$(systemd_unit)" >&2 2>/dev/null; then
+      restarted=true
+    fi
     ;;
 esac
+if ! $restarted; then
+  log "Service restart skipped (no launchd/systemd unit found)."
+  log "→ docker compose 環境では host プロセスを手動で再起動してください:"
+  log "    pnpm run dev   (foreground) or"
+  log "    docker compose restart nanoclaw  (compose 上の場合)"
+fi
 
 # Give the Slack adapter a moment to finish starting the webhook listener
 # before emitting success.

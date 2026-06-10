@@ -5,6 +5,7 @@
 import { createSlackAdapter } from '@chat-adapter/slack';
 
 import { readEnvFile } from '../env.js';
+import { log } from '../log.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
@@ -21,8 +22,9 @@ registerChannelAdapter('slack', {
     bridge.resolveChannelName = async (platformId: string) => {
       try {
         const info = await slackAdapter.fetchThread(platformId);
-        return (info as { channelName?: string }).channelName ?? null;
-      } catch {
+        return info.channelName ?? null;
+      } catch (err) {
+        log.debug('resolveChannelName: fetchThread failed (non-critical)', { platformId, err });
         return null;
       }
     };

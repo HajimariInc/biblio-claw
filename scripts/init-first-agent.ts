@@ -216,10 +216,10 @@ async function main(): Promise<void> {
       'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
 
-  // biblio-claw Phase 1: Vertex publisher model ID. claude-code on Vertex talks
-  // rawPredict to anthropic/models/<model>, so the container.json `model` field
-  // must be the publisher ID, not an Anthropic API alias. New groups only —
-  // reusing an existing group must preserve any manual override done via
+  // Vertex publisher model ID. claude-code on Vertex talks rawPredict to
+  // anthropic/models/<model>, so the container.json `model` field must be the
+  // publisher ID, not an Anthropic API alias. New groups only — reusing an
+  // existing group must preserve any manual override done via
   // `ncl groups config update --model ...`.
   if (isNewGroup) {
     updateContainerConfigScalars(ag.id, { model: 'claude-sonnet-4-6' });
