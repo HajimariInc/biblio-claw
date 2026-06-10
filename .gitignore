@@ -27,6 +27,8 @@ groups/*
 .env*
 # .env.example はテンプレート (公開対象) なので除外解除
 !.env.example
+# 開発者ローカルの秘匿ファイル置き場 (PEM / token 等を一時保管)
+.secrets/
 
 # Temp files
 .tmp-*
