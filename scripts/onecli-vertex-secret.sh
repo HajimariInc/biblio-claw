@@ -82,11 +82,15 @@ secret_id() {
 }
 
 # delete_secret: 既存 Vertex secret を削除 (無ければ何もしない / 冪等)。
+#   curl 失敗時は素の set -e で「[FAIL] なしの silent 終了」になり、操作者が
+#   「DELETE 失敗 / DELETE 成功で次の POST がコケた」を判別できなくなるため、
+#   明示的に || fail を発行する (PR #6 レビュー I1)。
 delete_secret() {
   local id
   id="$(secret_id)"
   if [ -n "$id" ] && [ "$id" != "null" ]; then
-    curl -fsS "${OC_AUTH[@]}" -X DELETE "${ONECLI_API}/secrets/${id}" >/dev/null
+    curl -fsS "${OC_AUTH[@]}" -X DELETE "${ONECLI_API}/secrets/${id}" >/dev/null \
+      || fail "DELETE /v1/secrets/${id} に失敗 — OneCLI ログを確認 (docker compose logs onecli)"
   fi
   return 0
 }
@@ -145,7 +149,11 @@ set_all_agents_mode_all() {
       fail "GET /v1/agents が HTTP ${http_code} を返した — OneCLI ログを確認: docker compose logs onecli"
       ;;
   esac
-  ids="$(printf '%s' "$body" | jq -r '.[].id')"
+  # jq が pipefail で死んだ場合に [FAIL] 表示なしで bash がデフォルト終了する
+  # 既存 silent failure を回避 (PR #6 レビュー I2)。OneCLI バージョンアップで
+  # GET /v1/agents が配列以外 (例: {"agents":[...]}) を返した場合に発火する。
+  ids="$(printf '%s' "$body" | jq -r '.[].id' 2>/dev/null)" \
+    || fail "GET /v1/agents のレスポンスが期待する配列形式でない — OneCLI バージョン差の可能性 (body 先頭: ${body:0:200})"
   if [ -z "$ids" ]; then
     info "agent がまだ存在しない — host が初回 spawn した後に本スクリプトを再実行すると all 化される"
     return 0

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { log } from '../../log.js';
 import { getSchedulerProvider } from './index.js';
-import { LocalScheduler } from './local.js';
+import { FATAL_FAILURE_THRESHOLD, LocalScheduler } from './local.js';
 
 describe('LocalScheduler', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -98,6 +99,59 @@ describe('LocalScheduler', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(tick).toHaveBeenCalledTimes(1);
     s.stop();
+  });
+
+  // PR #6 review P7: tick が連続失敗したときに on-call が気づける形で signal
+  // を出す。閾値以下は log.error、閾値到達で 1 回だけ log.fatal、その後再成功
+  // でカウンタがリセットされること。
+  it('escalates to log.fatal once at the consecutive-failure threshold', async () => {
+    const fatalSpy = vi.spyOn(log, 'fatal').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    const tick = vi.fn().mockRejectedValue(new Error('persistent failure'));
+    const s = new LocalScheduler(1000);
+    s.start(tick);
+
+    // Advance through THRESHOLD ticks. Each one rejects.
+    for (let i = 0; i < FATAL_FAILURE_THRESHOLD; i++) {
+      await vi.advanceTimersByTimeAsync(i === 0 ? 0 : 1000);
+    }
+    expect(tick).toHaveBeenCalledTimes(FATAL_FAILURE_THRESHOLD);
+    expect(fatalSpy).toHaveBeenCalledTimes(1);
+
+    // Past the threshold, no further fatals (one signal is enough).
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fatalSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls.length).toBeGreaterThanOrEqual(FATAL_FAILURE_THRESHOLD);
+
+    s.stop();
+    fatalSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it('resets the consecutive-failure counter after a successful tick', async () => {
+    const fatalSpy = vi.spyOn(log, 'fatal').mockImplementation(() => {});
+    vi.spyOn(log, 'error').mockImplementation(() => {});
+    // Alternate fail / fail / success / fail / fail / fail / fail — never hits 5 in a row.
+    const tick = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('1'))
+      .mockRejectedValueOnce(new Error('2'))
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('3'))
+      .mockRejectedValueOnce(new Error('4'))
+      .mockRejectedValueOnce(new Error('5'))
+      .mockRejectedValueOnce(new Error('6'));
+    const s = new LocalScheduler(1000);
+    s.start(tick);
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 6; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    // Success reset → only 4 consecutive failures at the end → no fatal.
+    expect(fatalSpy).not.toHaveBeenCalled();
+    s.stop();
+    vi.restoreAllMocks();
   });
 });
 

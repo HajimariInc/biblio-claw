@@ -207,7 +207,11 @@ set_all_agents_mode_all() {
       fail "GET /v1/agents が HTTP ${http_code} を返した — OneCLI ログを確認: docker compose logs onecli"
       ;;
   esac
-  ids="$(printf '%s' "$body" | jq -r '.[].id')"
+  # jq が pipefail で死んだ場合に [FAIL] 表示なしで bash がデフォルト終了する
+  # 既存 silent failure を回避 (PR #6 レビュー I2)。OneCLI バージョンアップで
+  # GET /v1/agents が配列以外 (例: {"agents":[...]}) を返した場合に発火する。
+  ids="$(printf '%s' "$body" | jq -r '.[].id' 2>/dev/null)" \
+    || fail "GET /v1/agents のレスポンスが期待する配列形式でない — OneCLI バージョン差の可能性 (body 先頭: ${body:0:200})"
   if [ -z "$ids" ]; then
     info "agent がまだ存在しない — host が初回 spawn した後に本スクリプトを再実行すると all 化される"
     return 0

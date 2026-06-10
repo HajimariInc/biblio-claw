@@ -68,7 +68,13 @@ info "[3/5] Vertex secret (type=generic, host=vertex) が投入済か"
 host_pattern=$([ "${CLOUD_ML_REGION}" = "global" ] \
   && echo "aiplatform.googleapis.com" \
   || echo "${CLOUD_ML_REGION}-aiplatform.googleapis.com")
-curl -fsS "${ONECLI_API}/secrets" \
+# curl と jq の失敗を 1 つの `curl | jq || fail` にまとめると、curl の接続失敗
+# (DNS / TLS / ポート不通) も「Vertex secret が未投入」と誤報して操作者を
+# scripts/onecli-vertex-secret.sh の再実行に誘導してしまう。curl と jq の
+# 失敗箇所を分離する (PR #6 レビュー P6)。
+secrets_resp="$(curl -fsS "${ONECLI_API}/secrets" 2>&1)" \
+  || fail "OneCLI /secrets への接続失敗 (step 2 通過後) — OneCLI が落ちた可能性 (docker compose logs onecli) / curl: ${secrets_resp}"
+printf '%s' "$secrets_resp" \
   | jq -e --arg h "$host_pattern" 'any(.[];
       .type=="generic" and .hostPattern==$h
       and .injectionConfig.headerName=="authorization"
@@ -78,7 +84,11 @@ ok "Vertex secret OK (host=${host_pattern}, headerName=authorization, valueForma
 
 # --- 3.5 GH secret 存在 (= Sidecar 投入済) ---
 info "[3.5/5] GH secret (type=generic, host=${GH_API_HOST:-api.github.com}) が投入済か"
-curl -fsS "${ONECLI_API}/secrets" \
+# 同じく curl / jq の失敗分離 (PR #6 レビュー P6)。step 3 と同じ secrets レスポンスを
+# 再利用してもよいが、step 間で OneCLI が落ちた稀ケースを拾うためここで再取得する。
+secrets_resp="$(curl -fsS "${ONECLI_API}/secrets" 2>&1)" \
+  || fail "OneCLI /secrets への接続失敗 (step 3 通過後に落ちた可能性) — docker compose logs onecli を確認 / curl: ${secrets_resp}"
+printf '%s' "$secrets_resp" \
   | jq -e --arg h "${GH_API_HOST:-api.github.com}" 'any(.[];
       .type=="generic" and .hostPattern==$h
       and .injectionConfig.headerName=="authorization"

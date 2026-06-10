@@ -70,7 +70,22 @@ if need_install; then
   }
 
   log "Copying adapter from ${CHANNELS_BRANCH}…"
-  git show "${CHANNELS_BRANCH}:src/channels/slack.ts" > src/channels/slack.ts
+  # Write atomically via a temp file. A naked `git show ... > dst` leaves an
+  # empty dst behind when git show fails (e.g. ref exists but path moved),
+  # and the subsequent build still passes — leaving an empty Slack adapter
+  # that silently skips registration (PR #6 review P8).
+  tmp_slack="$(mktemp)"
+  trap 'rm -f "$tmp_slack"' EXIT
+  if ! git show "${CHANNELS_BRANCH}:src/channels/slack.ts" > "$tmp_slack"; then
+    emit_status failed "git show ${CHANNELS_BRANCH}:src/channels/slack.ts failed"
+    exit 1
+  fi
+  if [ ! -s "$tmp_slack" ]; then
+    emit_status failed "git show ${CHANNELS_BRANCH}:src/channels/slack.ts produced an empty file"
+    exit 1
+  fi
+  mv "$tmp_slack" src/channels/slack.ts
+  trap - EXIT
 
   # Append self-registration import if missing.
   if ! grep -q "^import './slack.js';" src/channels/index.ts; then
