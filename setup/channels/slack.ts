@@ -50,6 +50,7 @@ export async function runSlackChannel(displayName: string): Promise<ChannelFlowR
   if (intro === 'back') return BACK_TO_CHANNEL_SELECTION;
 
   const token = await collectBotToken();
+  const appToken = await collectAppToken();
   const signingSecret = await collectSigningSecret();
   const info = await validateSlackToken(token);
 
@@ -64,6 +65,7 @@ export async function runSlackChannel(displayName: string): Promise<ChannelFlowR
     {
       env: {
         SLACK_BOT_TOKEN: token,
+        SLACK_APP_TOKEN: appToken,
         SLACK_SIGNING_SECRET: signingSecret,
       },
       extraFields: {
@@ -149,8 +151,14 @@ async function walkThroughAppCreation(): Promise<'continue' | 'back'> {
       '     • files:read, files:write',
       '  3. App Home → enable "Messages Tab" and "Allow users to send',
       '     slash commands and messages from the messages tab"',
-      '  4. Basic Information → copy the "Signing Secret"',
-      '  5. Install to Workspace → copy the "Bot User OAuth Token" (xoxb-…)',
+      '  4. Socket Mode → toggle "Enable Socket Mode" ON',
+      '  5. Basic Information → App-Level Tokens → "Generate Token and',
+      '     Scopes" with scope `connections:write` → copy the token (xapp-…)',
+      '  6. Event Subscriptions → toggle "Enable Events" ON, add bot events',
+      '     (message.im for DM, message.groups for private channels)',
+      '  7. Basic Information → copy the "Signing Secret"',
+      '     (Socket Mode does not require it, but kept for completeness)',
+      '  8. Install to Workspace → copy the "Bot User OAuth Token" (xoxb-…)',
     ].join('\n'),
     'Create a Slack app',
   );
@@ -171,7 +179,7 @@ async function walkThroughAppCreation(): Promise<'continue' | 'back'> {
 
   ensureAnswer(
     await p.confirm({
-      message: 'Got your bot token and signing secret?',
+      message: 'Got your bot token (xoxb-…), app-level token (xapp-…), and signing secret?',
       initialValue: true,
     }),
   );
@@ -207,6 +215,40 @@ async function collectBotToken(): Promise<string> {
   const token = (answer as string).trim();
   setupLog.userInput(
     'slack_bot_token',
+    `${token.slice(0, 10)}…${token.slice(-4)}`,
+  );
+  return token;
+}
+
+async function collectAppToken(): Promise<string> {
+  const existing = readEnvKey('SLACK_APP_TOKEN');
+  if (existing && existing.startsWith('xapp-') && existing.length >= 24) {
+    const reuse = ensureAnswer(await p.confirm({
+      message: `Found an existing Slack app-level token (${existing.slice(0, 10)}…). Use it?`,
+      initialValue: true,
+    }));
+    if (reuse) {
+      setupLog.userInput('slack_app_token', 'reused-existing');
+      return existing;
+    }
+  }
+
+  const answer = ensureAnswer(
+    await p.password({
+      message: 'Paste your Slack app-level token (xapp-…, connections:write scope)',
+      clearOnError: true,
+      validate: (v) => {
+        const t = (v ?? '').trim();
+        if (!t) return 'App-level token is required for Socket Mode';
+        if (!t.startsWith('xapp-')) return 'App-level tokens start with xapp-';
+        if (t.length < 24) return "That's shorter than a real Slack app-level token";
+        return undefined;
+      },
+    }),
+  );
+  const token = (answer as string).trim();
+  setupLog.userInput(
+    'slack_app_token',
     `${token.slice(0, 10)}…${token.slice(-4)}`,
   );
   return token;

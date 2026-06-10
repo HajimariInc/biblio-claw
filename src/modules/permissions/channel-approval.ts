@@ -176,8 +176,12 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
           updateMessagingGroup(originMg.id, { name });
           originMg.name = name;
         }
-      } catch {
-        /* non-critical */
+      } catch (err) {
+        log.debug('resolveChannelName failed (non-critical)', {
+          channelType: originChannelType,
+          platformId: originMg.platform_id,
+          err,
+        });
       }
     }
   }
