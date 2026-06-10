@@ -76,6 +76,16 @@ curl -fsS "${ONECLI_API}/secrets" \
   || fail "Vertex secret が未投入 — 'bash scripts/onecli-vertex-secret.sh' を実行"
 ok "Vertex secret OK (host=${host_pattern}, headerName=authorization, valueFormat=Bearer {value})"
 
+# --- 3.5 GH secret 存在 (= Sidecar 投入済 / Task 7-B) ---
+info "[3.5/5] GH secret (type=generic, host=${GH_API_HOST:-api.github.com}) が投入済か"
+curl -fsS "${ONECLI_API}/secrets" \
+  | jq -e --arg h "${GH_API_HOST:-api.github.com}" 'any(.[];
+      .type=="generic" and .hostPattern==$h
+      and .injectionConfig.headerName=="authorization"
+      and (.injectionConfig.valueFormat|test("Bearer";"i")))' >/dev/null \
+  || fail "GH secret が未投入 — 'bash scripts/onecli-gh-secret.sh' を実行"
+ok "GH secret OK (host=${GH_API_HOST:-api.github.com}, headerName=authorization, valueFormat=Bearer {value})"
+
 # --- 4. provider 配線 (claude.ts が index.ts から import されているか) ---
 info "[4/5] src/providers/index.ts が claude.ts を import しているか"
 grep -q "^import './claude.js';" "${ROOT}/src/providers/index.ts" \

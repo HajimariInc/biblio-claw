@@ -22,6 +22,7 @@ groups/*
 
 # Secrets
 *.keys.json
+*.pem
 .env
 .env*
 # .env.example はテンプレート (公開対象) なので除外解除
