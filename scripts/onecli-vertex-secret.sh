@@ -70,8 +70,14 @@ vertex_host() {
 }
 
 # secret_id: name=VERTEX_SECRET_NAME の secret id を stdout に返す (無ければ空)。
+#   curl 出力を変数に受けてから jq に流す。curl 失敗を fail で止めないと、
+#   呼び出し側が「未存在」と誤判定する (Vertex は DELETE→POST 流儀のため
+#   GH ほど深刻ではないが、可観測性のため fail を発行する)。
 secret_id() {
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" \
+  local out
+  out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
+    || fail "GET /v1/secrets への接続に失敗 (secret_id)"
+  printf '%s' "$out" \
     | jq -r --arg n "$VERTEX_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1
 }
 
@@ -150,7 +156,9 @@ set_all_agents_mode_all() {
 
 main() {
   info "OneCLI REST=${ONECLI_API} / project=${ANTHROPIC_VERTEX_PROJECT_ID} / region=${CLOUD_ML_REGION}"
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null 2>&1 \
+  # stderr を捨てない — curl の接続エラー (DNS / TLS / 接続拒否のメッセージ) が
+  # 「到達できない」だけだと debug 不能になるため、curl 自身のエラーは端末に流す。
+  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
     || fail "OneCLI REST に到達できない (${ONECLI_API}) — 'docker compose up -d --wait' 済みか確認"
   ensure_secret
   set_all_agents_mode_all

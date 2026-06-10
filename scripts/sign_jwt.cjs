@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// scripts/sign_jwt.js — GitHub App 用 RS256 JWT 署名 (Node 組み込み crypto / npm install 不要)
+// scripts/sign_jwt.cjs — GitHub App 用 RS256 JWT 署名 (Node 組み込み crypto / npm install 不要)
 //
 // 秘密の非露出 (絶対):
 //   - PEM は stdin (fd 0) から受け取り、argv・一時ファイルには一切載せない。
@@ -25,7 +25,9 @@ let pem;
 try {
   pem = fs.readFileSync(0, 'utf8');
 } catch (e) {
-  process.stderr.write('sign_jwt: PEM の stdin 読込に失敗\n');
+  // e.code (EACCES / ENOENT / EPIPE) または e.message を可視化。
+  // 元情報を消すと「stdin 失敗」だけで原因切り分けができない。
+  process.stderr.write(`sign_jwt: PEM の stdin 読込に失敗: ${e.code || e.message}\n`);
   process.exit(1);
 }
 if (!pem || !/BEGIN[^-]*PRIVATE KEY/.test(pem)) {
@@ -51,7 +53,9 @@ let sig;
 try {
   sig = crypto.sign('RSA-SHA256', Buffer.from(signingInput), pem);
 } catch (e) {
-  process.stderr.write('sign_jwt: 署名に失敗 (PEM が不正な秘密鍵)\n');
+  // OpenSSL エラー (e.message) は PEM 内容を含まない (Node crypto はエラー文字列のみ)。
+  // FIPS mode / HSM / 鍵長不一致などの具体原因は e.message に出る。
+  process.stderr.write(`sign_jwt: 署名に失敗 (PEM が不正な秘密鍵): ${e.message}\n`);
   process.exit(1);
 }
 
