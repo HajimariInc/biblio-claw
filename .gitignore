@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.npm-cache/
+# pnpm content-addressable store (created when running in sandbox mode)
+.pnpm-store/
+# Build output
+dist/
+
+# Local data & auth
+store/
+data/
+logs/
+
+# Groups - per-installation state, not tracked
+groups/*
+
+# Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
+# per-group memory (CLAUDE.local.md) must never be committed.
+**/CLAUDE.local.md
+**/.claude-shared.md
+**/.claude-fragments/
+
+# Secrets
+*.keys.json
+*.pem
+.env
+.env*
+# .env.example はテンプレート (公開対象) なので除外解除
+!.env.example
+# 開発者ローカルの秘匿ファイル置き場 (PEM / token 等を一時保管)
+.secrets/
+
+# Temp files
+.tmp-*
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Skills system (local per-installation state)
+.nanoclaw/
+
+agents-sdk-docs
+
+# biblio-claw — Claude Code 設定・PRP 議論内容は当面非公開
+# (memory: biblio_claw_claude_dir_private)
+.claude/
