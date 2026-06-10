@@ -18,6 +18,12 @@ name: biblio-claw
 services:
   postgres:
     image: postgres:18-alpine
+    # container_name を明示する (= biblio-onecli と同じパターン)。デフォルト命名
+    # `<project>-<service>-<replica>` は COMPOSE_PROJECT_NAME 上書きや別 clone
+    # ディレクトリから起動した場合に名前が変わり、verify-phase-1-wiring.sh が
+    # ハードコード grep していた `biblio-claw-postgres-1` と一致しなくなる偽陰性
+    # を生む (PR #6 レビュー I8)。
+    container_name: biblio-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-onecli}

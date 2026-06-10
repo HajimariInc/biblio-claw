@@ -50,8 +50,8 @@ info "[1/5] docker compose 土台 (OneCLI + postgres)"
 # 不足が「コンテナが起動していない」エラーに化けるのを防ぐ (本 PR レビュー指摘)。
 docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-onecli running" \
   || fail "biblio-onecli が起動していない — 'docker compose up -d --wait' を実行 (docker daemon の起動も確認)"
-docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-claw-postgres-1 running" \
-  || fail "biblio-claw-postgres-1 が起動していない — 'docker compose up -d --wait' を実行"
+docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-postgres running" \
+  || fail "biblio-postgres が起動していない — 'docker compose up -d --wait' を実行"
 ok "OneCLI + postgres 起動中"
 
 # --- 2. OneCLI REST 疎通 ---
