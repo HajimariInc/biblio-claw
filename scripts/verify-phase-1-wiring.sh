@@ -65,14 +65,17 @@ ok "OneCLI REST OK (HTTP 200)"
 
 # --- 3. Vertex secret 存在 ---
 info "[3/5] Vertex secret (type=generic, host=vertex) が投入済か"
-# vertex_host は scripts/onecli-lib.sh で定義 (PR #6 レビュー I9 関連の重複解消)
+# vertex_host は scripts/onecli-lib.sh で定義
 host_pattern="$(vertex_host)"
 # curl と jq の失敗を 1 つの `curl | jq || fail` にまとめると、curl の接続失敗
 # (DNS / TLS / ポート不通) も「Vertex secret が未投入」と誤報して操作者を
-# scripts/onecli-vertex-secret.sh の再実行に誘導してしまう。curl と jq の
-# 失敗箇所を分離する (PR #6 レビュー P6)。
-secrets_resp="$(curl -fsS "${ONECLI_API}/secrets" 2>&1)" \
-  || fail "OneCLI /secrets への接続失敗 (step 2 通過後) — OneCLI が落ちた可能性 (docker compose logs onecli) / curl: ${secrets_resp}"
+# scripts/onecli-vertex-secret.sh の再実行に誘導する。curl と jq の失敗を分離。
+# `2>&1` を使うと curl の stderr 警告 (TLS deprecation など) が body に混入して
+# jq が parse 失敗するため、curl の成功/失敗判定だけ取り、失敗時の診断は別経路。
+# step 3 で 1 回取得 → step 3.5 で再利用 (compose_ps と同じパターン)。
+if ! secrets_resp="$(curl -fsS "${ONECLI_API}/secrets")"; then
+  fail "OneCLI /secrets への接続失敗 (step 2 通過後) — OneCLI が落ちた可能性 (docker compose logs onecli) / 詳細は `curl -v ${ONECLI_API}/secrets` を手動実行"
+fi
 printf '%s' "$secrets_resp" \
   | jq -e --arg h "$host_pattern" 'any(.[];
       .type=="generic" and .hostPattern==$h
@@ -83,10 +86,7 @@ ok "Vertex secret OK (host=${host_pattern}, headerName=authorization, valueForma
 
 # --- 3.5 GH secret 存在 (= Sidecar 投入済) ---
 info "[3.5/5] GH secret (type=generic, host=${GH_API_HOST:-api.github.com}) が投入済か"
-# 同じく curl / jq の失敗分離 (PR #6 レビュー P6)。step 3 と同じ secrets レスポンスを
-# 再利用してもよいが、step 間で OneCLI が落ちた稀ケースを拾うためここで再取得する。
-secrets_resp="$(curl -fsS "${ONECLI_API}/secrets" 2>&1)" \
-  || fail "OneCLI /secrets への接続失敗 (step 3 通過後に落ちた可能性) — docker compose logs onecli を確認 / curl: ${secrets_resp}"
+# step 3 で取得した secrets_resp を再利用 (step 2 で OneCLI 疎通確認済み)。
 printf '%s' "$secrets_resp" \
   | jq -e --arg h "${GH_API_HOST:-api.github.com}" 'any(.[];
       .type=="generic" and .hostPattern==$h
