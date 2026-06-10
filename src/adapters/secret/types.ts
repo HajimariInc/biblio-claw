@@ -18,6 +18,16 @@ import type {
 /** Manual-approval callback — mirrors OneCLI's ManualApprovalCallback. */
 export type ApprovalCallback = (request: ApprovalRequest) => Promise<'approve' | 'deny'>;
 
+/**
+ * SecretProvider contract.
+ *
+ * IMPORTANT: the process must hold a single instance. `container-runner` and
+ * `onecli-approvals` share state through the same underlying OneCLI client and
+ * must observe the same `configureManualApproval` handle. Use
+ * `getSecretProvider()` (in `./index.ts`) rather than constructing implementations
+ * directly — the factory memoizes the instance to enforce this. Bypassing the
+ * factory leads to silently duplicated approval callbacks and lost vault state.
+ */
 export interface SecretProvider {
   readonly name: string;
 
