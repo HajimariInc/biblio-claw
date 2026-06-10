@@ -12,8 +12,6 @@ import type { SecretProvider } from './types.js';
 
 export type { ApprovalCallback, SecretProvider } from './types.js';
 
-const KNOWN_PROVIDERS = ['onecli'];
-
 let instance: SecretProvider | null = null;
 
 export function getSecretProvider(): SecretProvider {
@@ -24,7 +22,7 @@ export function getSecretProvider(): SecretProvider {
       instance = new OneCLISecretProvider();
       break;
     default:
-      throw new Error(`Unknown SECRET_PROVIDER: ${name}. Known: ${KNOWN_PROVIDERS.join(', ')}`);
+      throw new Error(`Unknown SECRET_PROVIDER: ${name}. Known: onecli`);
   }
   return instance;
 }

@@ -72,14 +72,6 @@ export function heartbeatPath(agentGroupId: string, sessionId: string): string {
   return path.join(sessionDir(agentGroupId, sessionId), '.heartbeat');
 }
 
-/**
- * @deprecated Use inboundDbPath / outboundDbPath instead.
- * Kept temporarily for test compatibility during migration.
- */
-export function sessionDbPath(agentGroupId: string, sessionId: string): string {
-  return inboundDbPath(agentGroupId, sessionId);
-}
-
 function generateId(): string {
   return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }

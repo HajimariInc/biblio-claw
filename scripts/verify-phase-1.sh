@@ -20,20 +20,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "[verify-phase-1] === static layer ==="
-echo "[verify-phase-1] 1/4 pnpm install --frozen-lockfile"
+# 下流の verify-phase-1-wiring.sh と出力ストリームを揃える (PR #6 レビュー code-simplifier 些細 #6)。
+# 進捗行は stderr (= info) に統一。素の echo を使うと wrapper / 下流で stdout/stderr が混在し、
+# CI などで「失敗時の情報」を stderr で拾うフローと相性が悪くなる。
+# shellcheck source=scripts/onecli-lib.sh
+. "${ROOT}/scripts/onecli-lib.sh"
+
+info "=== static layer ==="
+info "1/4 pnpm install --frozen-lockfile"
 pnpm install --frozen-lockfile
 
-echo "[verify-phase-1] 2/4 typecheck (tsc --noEmit)"
+info "2/4 typecheck (tsc --noEmit)"
 pnpm exec tsc --noEmit
 
-echo "[verify-phase-1] 3/4 unit tests (vitest run)"
+info "3/4 unit tests (vitest run)"
 pnpm test
 
-echo "[verify-phase-1] 4/4 adapter factory resolution smoke"
+info "4/4 adapter factory resolution smoke"
 pnpm exec tsx scripts/adapters-smoke.ts
 
-echo "[verify-phase-1] === wiring layer ==="
+info "=== wiring layer ==="
 bash "${ROOT}/scripts/verify-phase-1-wiring.sh"
 
-echo "[verify-phase-1] OK (static + wiring 完全版)"
+ok "verify-phase-1: 通過 (static + wiring 完全版)"

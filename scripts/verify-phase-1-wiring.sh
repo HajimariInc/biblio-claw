@@ -47,9 +47,10 @@ ONECLI_API="${ONECLI_URL%/}/v1"
 info "[1/5] docker compose 土台 (OneCLI + postgres)"
 # stderr を捨てない — docker daemon 未起動 / compose ファイル不正 / permission
 # 不足が「コンテナが起動していない」エラーに化けるのを防ぐ (本 PR レビュー指摘)。
-docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-onecli running" \
+compose_ps="$(docker compose ps --format json | jq -r '.Name + " " + .State')"
+echo "$compose_ps" | grep -q "biblio-onecli running" \
   || fail "biblio-onecli が起動していない — 'docker compose up -d --wait' を実行 (docker daemon の起動も確認)"
-docker compose ps --format json | jq -r '.Name + " " + .State' | grep -q "biblio-postgres running" \
+echo "$compose_ps" | grep -q "biblio-postgres running" \
   || fail "biblio-postgres が起動していない — 'docker compose up -d --wait' を実行"
 ok "OneCLI + postgres 起動中"
 

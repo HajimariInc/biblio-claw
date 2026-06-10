@@ -11,8 +11,6 @@ import type { DsnProvider } from './types.js';
 
 export type { DsnProvider } from './types.js';
 
-const KNOWN_PROVIDERS = ['local'];
-
 let instance: DsnProvider | null = null;
 
 export function getDsnProvider(): DsnProvider {
@@ -23,7 +21,7 @@ export function getDsnProvider(): DsnProvider {
       instance = new LocalDsnProvider();
       break;
     default:
-      throw new Error(`Unknown DSN_PROVIDER: ${name}. Known: ${KNOWN_PROVIDERS.join(', ')}`);
+      throw new Error(`Unknown DSN_PROVIDER: ${name}. Known: local`);
   }
   return instance;
 }
