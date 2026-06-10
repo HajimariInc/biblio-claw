@@ -2,16 +2,17 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: Phase 1 (local 結線) 実装中。docker compose で OneCLI gateway + postgres を起動、host を `pnpm run dev` で動かし、Vertex × Claude (`claude-sonnet-4-6` global) に OneCLI MITM 経由で接続して応答を取得するところまで成立。Slack 1 往復は次フェーズ。
+> **ステータス**: Phase 1 (local 結線) 実装中。Vertex × Claude (`claude-sonnet-4-6` global) に OneCLI MITM 経由で接続し、Slack Socket Mode で 1 往復成立。GitHub App PEM → installation token 経由の GitHub REST 認可 (Sidecar 経路) を配線済み。
 
 ## クイックスタート (biblio-claw, local)
 
 ```bash
 cp .env.example .env
-# .env に Vertex project / Slack token (Phase 1 では未使用でも可) を埋める
+# .env に Vertex project / Slack token / GitHub App (App ID + Installation ID + PEM パス) を埋める
 gcloud auth application-default login --project hajimari-ai-hackathon-2026
 docker compose up -d --wait
 bash scripts/onecli-vertex-secret.sh     # ADC token を OneCLI に投入
+bash scripts/onecli-gh-secret.sh         # GitHub installation token を OneCLI に投入 (.env に GH_APP_* 設定済の場合)
 pnpm install
 ./container/build.sh                      # agent コンテナをビルド (初回のみ)
 pnpm exec tsx scripts/init-cli-agent.ts --display-name <name> --agent-name <agent>

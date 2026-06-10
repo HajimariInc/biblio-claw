@@ -70,8 +70,14 @@ vertex_host() {
 }
 
 # secret_id: name=VERTEX_SECRET_NAME の secret id を stdout に返す (無ければ空)。
+#   curl 出力を変数に受けてから jq に流す。curl 失敗を fail で止めないと、
+#   呼び出し側が「未存在」と誤判定する (Vertex は DELETE→POST 流儀のため
+#   GH ほど深刻ではないが、可観測性のため fail を発行する)。
 secret_id() {
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" \
+  local out
+  out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
+    || fail "GET /v1/secrets への接続に失敗 (secret_id)"
+  printf '%s' "$out" \
     | jq -r --arg n "$VERTEX_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1
 }
 
@@ -115,12 +121,20 @@ ensure_secret() {
 #   いるのに agent が selective のまま残り、後続の全 Vertex 呼び出しが silent
 #   401 になる (本 PR レビュー Critical 指摘)。
 #   個別 agent への PATCH は best-effort で継続 (1 agent の問題で全体を止めない)。
+# 一時ファイル + trap RETURN を使わない理由:
+#   bash の `trap ... RETURN` は当該関数の return だけでなく、後続の他関数
+#   (= main) の return でも発火する仕様 (extdebug off の標準動作)。その時点で
+#   `local body_file` は scope を抜けて unset 扱い (set -u 配下で unbound) に
+#   なり、機能成功後に「body_file: unbound variable」で exit 1 になる既存
+#   latent バグがあった (PR #5 の gh スクリプト実走行で検出、Vertex 側も同症状)。
+# 対策: curl -w で末尾に http_code を付け、1 変数で body + code を受ける。
+#   一時ファイル / trap を完全排除。
 set_all_agents_mode_all() {
-  local body_file http_code ids n=0
-  body_file="$(mktemp)"
-  trap 'rm -f "$body_file"' RETURN
-  http_code="$(curl -sS -o "$body_file" -w '%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
+  local resp http_code body ids n=0
+  resp="$(curl -sS -w $'\n%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
     || fail "GET /v1/agents への接続に失敗 — OneCLI が起動しているか確認 (docker compose logs onecli)"
+  http_code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
   case "$http_code" in
     200) ;;
     404)
@@ -131,7 +145,7 @@ set_all_agents_mode_all() {
       fail "GET /v1/agents が HTTP ${http_code} を返した — OneCLI ログを確認: docker compose logs onecli"
       ;;
   esac
-  ids="$(jq -r '.[].id' < "$body_file")"
+  ids="$(printf '%s' "$body" | jq -r '.[].id')"
   if [ -z "$ids" ]; then
     info "agent がまだ存在しない — host が初回 spawn した後に本スクリプトを再実行すると all 化される"
     return 0
@@ -150,7 +164,9 @@ set_all_agents_mode_all() {
 
 main() {
   info "OneCLI REST=${ONECLI_API} / project=${ANTHROPIC_VERTEX_PROJECT_ID} / region=${CLOUD_ML_REGION}"
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null 2>&1 \
+  # stderr を捨てない — curl の接続エラー (DNS / TLS / 接続拒否のメッセージ) が
+  # 「到達できない」だけだと debug 不能になるため、curl 自身のエラーは端末に流す。
+  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
     || fail "OneCLI REST に到達できない (${ONECLI_API}) — 'docker compose up -d --wait' 済みか確認"
   ensure_secret
   set_all_agents_mode_all
