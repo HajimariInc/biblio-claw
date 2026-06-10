@@ -5,19 +5,21 @@ import type { SchedulerProvider } from './types.js';
 export const DEFAULT_INTERVAL_MS = 60_000;
 
 /**
+ * Threshold at which "tick has been throwing for too long" becomes an
+ * operationally meaningful event. 5 consecutive failures at the 60s default
+ * interval = 5 minutes of dead sweep — long enough to be a real outage,
+ * short enough that the first FATAL fires before the on-call window closes.
+ * After the initial fatal, the loop re-escalates every multiple of the
+ * threshold (10, 15, 20 …) so a long outage doesn't go silent (PR #6 review R1).
+ */
+export const FATAL_FAILURE_THRESHOLD = 5;
+
+/**
  * Local scheduler: a recursive `setTimeout` loop (NOT `setInterval`). The next
  * tick is only armed after the previous one resolves, so a slow sweep can never
  * overlap itself — preserving the single-in-flight property the host sweep
  * relied on.
  */
-/**
- * Threshold at which "tick has been throwing for too long" becomes an
- * operationally meaningful event. 5 consecutive failures at the 60s default
- * interval = 5 minutes of dead sweep — long enough to be a real outage,
- * short enough that the first FATAL fires before the on-call window closes.
- */
-export const FATAL_FAILURE_THRESHOLD = 5;
-
 export class LocalScheduler implements SchedulerProvider {
   readonly name = 'local';
   private running = false;
@@ -51,13 +53,18 @@ export class LocalScheduler implements SchedulerProvider {
           err,
           consecutiveFailures: this.consecutiveFailures,
         });
-        if (this.consecutiveFailures === FATAL_FAILURE_THRESHOLD) {
-          // Escalate exactly once at the threshold. The loop keeps running —
-          // we don't crash the host because a transient outage (network /
-          // OneCLI restart) shouldn't take down the whole process. The fatal
-          // log entry is the on-call signal.
+        if (
+          this.consecutiveFailures >= FATAL_FAILURE_THRESHOLD &&
+          this.consecutiveFailures % FATAL_FAILURE_THRESHOLD === 0
+        ) {
+          // Escalate at the threshold and every multiple thereafter (5, 10, 15
+          // …). The loop keeps running — we don't crash the host because a
+          // transient outage (network / OneCLI restart) shouldn't take down the
+          // whole process. The fatal log entry is the on-call signal, and
+          // re-firing prevents a long outage from going silent after the first
+          // fatal (PR #6 review R1).
           log.fatal(
-            `Scheduler has failed ${FATAL_FAILURE_THRESHOLD} ticks in a row — sweep is effectively dead. Investigate immediately.`,
+            `Scheduler has failed ${this.consecutiveFailures} ticks in a row — sweep is effectively dead. Investigate immediately.`,
             { consecutiveFailures: this.consecutiveFailures, err },
           );
         }

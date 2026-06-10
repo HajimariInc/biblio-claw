@@ -101,28 +101,43 @@ describe('LocalScheduler', () => {
     s.stop();
   });
 
-  // PR #6 review P7: tick が連続失敗したときに on-call が気づける形で signal
-  // を出す。閾値以下は log.error、閾値到達で 1 回だけ log.fatal、その後再成功
-  // でカウンタがリセットされること。
-  it('escalates to log.fatal once at the consecutive-failure threshold', async () => {
+  // tick が連続失敗したときに on-call が気づける形で signal を出す。閾値未満は
+  // log.error のみ、閾値到達で初回 log.fatal、その後も閾値の倍数 (5/10/15…)
+  // ごとに log.fatal を再発火する (長期障害の sweep 完全停止が無音化しない、
+  // PR #6 review R1)。
+  it('emits log.fatal at the threshold and at every multiple thereafter', async () => {
     const fatalSpy = vi.spyOn(log, 'fatal').mockImplementation(() => {});
     const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
     const tick = vi.fn().mockRejectedValue(new Error('persistent failure'));
     const s = new LocalScheduler(1000);
     s.start(tick);
 
-    // Advance through THRESHOLD ticks. Each one rejects.
-    for (let i = 0; i < FATAL_FAILURE_THRESHOLD; i++) {
+    // Advance through THRESHOLD-1 ticks. fatal must NOT have fired yet — the
+    // threshold guard is the load-bearing contract, not an off-by-one accident.
+    for (let i = 0; i < FATAL_FAILURE_THRESHOLD - 1; i++) {
       await vi.advanceTimersByTimeAsync(i === 0 ? 0 : 1000);
     }
+    expect(tick).toHaveBeenCalledTimes(FATAL_FAILURE_THRESHOLD - 1);
+    expect(fatalSpy).not.toHaveBeenCalled();
+
+    // THRESHOLD-th tick → first fatal.
+    await vi.advanceTimersByTimeAsync(1000);
     expect(tick).toHaveBeenCalledTimes(FATAL_FAILURE_THRESHOLD);
     expect(fatalSpy).toHaveBeenCalledTimes(1);
 
-    // Past the threshold, no further fatals (one signal is enough).
-    await vi.advanceTimersByTimeAsync(1000);
-    await vi.advanceTimersByTimeAsync(1000);
+    // Next THRESHOLD-1 ticks: still no new fatal (only multiples re-escalate).
+    for (let i = 0; i < FATAL_FAILURE_THRESHOLD - 1; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+    }
     expect(fatalSpy).toHaveBeenCalledTimes(1);
-    expect(errorSpy.mock.calls.length).toBeGreaterThanOrEqual(FATAL_FAILURE_THRESHOLD);
+
+    // 2 * THRESHOLD-th tick → second fatal.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(tick).toHaveBeenCalledTimes(2 * FATAL_FAILURE_THRESHOLD);
+    expect(fatalSpy).toHaveBeenCalledTimes(2);
+
+    // error log is emitted on every failure.
+    expect(errorSpy.mock.calls.length).toBe(2 * FATAL_FAILURE_THRESHOLD);
 
     s.stop();
     fatalSpy.mockRestore();
