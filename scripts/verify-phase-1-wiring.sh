@@ -90,17 +90,25 @@ for key in CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_SKIP_VERTEX_AUTH ANTHROPIC_VERTEX_
 done
 ok "Vertex env 群 (7 キー) が claude provider config に揃っている"
 
-# --- 6. Slack 結線状態 (自動チェックは存在確認のみ) ---
-info "[+] Slack 結線状態 (参考: 自動チェックは存在確認のみ)"
+# --- 6. Slack 結線状態 (自動チェックは存在確認のみ、1 往復は外部依存で手動) ---
+info "[+] Slack 結線状態 (参考: 自動チェックは存在確認のみ、1 往復は手動目視)"
 slack_adapter_present="no"
 slack_token_present="no"
+slack_socket_mode="no"
 [ -f "${ROOT}/src/channels/slack.ts" ] && grep -q "^import './slack.js';" "${ROOT}/src/channels/index.ts" 2>/dev/null \
   && slack_adapter_present="yes"
 [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_APP_TOKEN:-}" ] && slack_token_present="yes"
+[ -f "${ROOT}/src/channels/slack.ts" ] && grep -q "mode: 'socket'" "${ROOT}/src/channels/slack.ts" 2>/dev/null \
+  && slack_socket_mode="yes"
 info "  slack adapter 取り込み: ${slack_adapter_present}"
+info "  slack adapter Socket Mode 化: ${slack_socket_mode}"
 info "  slack token (.env): ${slack_token_present}"
-if [ "$slack_adapter_present" = "no" ] || [ "$slack_token_present" = "no" ]; then
-  warn "Slack 1 往復 (Task 6/7 完全版) はまだ実行できない。次の plan で取り込み + DEN さん操作 (Slack app Event Subscriptions) 待ち"
+if [ "$slack_adapter_present" = "yes" ] \
+  && [ "$slack_socket_mode" = "yes" ] \
+  && [ "$slack_token_present" = "yes" ]; then
+  ok "Slack adapter + Socket Mode + token 投入済 (1 往復は手動目視確認)"
+else
+  warn "Slack 1 往復はまだ実行できない — 不足: adapter 取り込み / Socket Mode 化 / token (.env) のいずれか"
 fi
 
 # --- 完了 ---
@@ -114,6 +122,12 @@ ok "   2) pnpm run dev &  (host を起動)"
 ok "   3) pnpm run chat 'Reply with exactly: BIBLIO_WIRING_OK'"
 ok "      → 'BIBLIO_WIRING_OK' が返れば Vertex 経路成立"
 ok ""
-ok " Slack 1 往復は Task 6 (Slack adapter 取り込み) 完了 + DEN さんの"
-ok " Slack app 設定 (Event Subscriptions) 後に手動で確認 → 次の plan"
+ok " Slack 1 往復は手動で目視確認:"
+ok "   1) pnpm run dev &  (host を起動、Slack adapter が socket connected ログを出すこと)"
+ok "   2) pnpm exec tsx scripts/init-first-agent.ts \\"
+ok "        --channel slack \\"
+ok "        --user-id slack:<DEN-Slack-userID> \\"
+ok "        --platform-id slack:<DM-channelID> \\"
+ok "        --display-name '<司書 agent 名>'"
+ok "   3) Slack DM で司書に話しかけ、Vertex 経由応答が返れば Phase 1 マイルストーン達成"
 ok "================================================================"

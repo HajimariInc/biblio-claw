@@ -190,6 +190,7 @@ async function main(): Promise<void> {
   // 2. Agent group + filesystem.
   const folder = `dm-with-${normalizeName(args.displayName)}`;
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
+  const isNewGroup = !ag;
   if (!ag) {
     const agId = generateId('ag');
     createAgentGroup({
@@ -204,12 +205,25 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
+  // initGroupFilesystem calls ensureContainerConfig internally — the
+  // container_configs row is guaranteed to exist after this line, which is a
+  // hard precondition for updateContainerConfigScalars below (otherwise the
+  // UPDATE would match 0 rows and silently no-op).
   initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+
+  // biblio-claw Phase 1: Vertex publisher model ID. claude-code on Vertex talks
+  // rawPredict to anthropic/models/<model>, so the container.json `model` field
+  // must be the publisher ID, not an Anthropic API alias. New groups only —
+  // reusing an existing group must preserve any manual override done via
+  // `ncl groups config update --model ...`.
+  if (isNewGroup) {
+    updateContainerConfigScalars(ag.id, { model: 'claude-sonnet-4-6' });
+  }
 
   // 2b. Assign the user a role for this agent group. The caller picks via
   // --role; the channel drivers default to 'owner' for the self-host case.

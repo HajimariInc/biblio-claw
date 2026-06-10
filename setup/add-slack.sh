@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Install the Slack adapter, persist SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET to
-# .env + data/env/env, and restart the service. Non-interactive — the
-# operator-facing app creation walkthrough + credential paste live in
+# Install the Slack adapter (Socket Mode), persist SLACK_BOT_TOKEN +
+# SLACK_APP_TOKEN to .env + data/env/env, and restart the service. Non-interactive
+# — the operator-facing app creation walkthrough + credential paste live in
 # setup/channels/slack.ts. Credentials come in via env vars:
-# SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
+# SLACK_BOT_TOKEN (required), SLACK_APP_TOKEN (required for Socket Mode),
+# SLACK_SIGNING_SECRET (optional, retained only for legacy webhook callers).
 #
 # Emits exactly one status block on stdout (ADD_SLACK) at the end. All chatty
 # progress messages go to stderr so setup:auto's raw-log capture sees the full
@@ -15,7 +16,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-slack/SKILL.md.
-ADAPTER_VERSION="@chat-adapter/slack@4.26.0"
+# biblio-claw Phase 1: bumped 4.26.0 -> 4.30.0 for native Socket Mode support
+# (mode:"socket" + appToken). Release 2026-06-02, minimumReleaseAge: 4320 (3d) 適合.
+ADAPTER_VERSION="@chat-adapter/slack@4.30.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -41,9 +44,12 @@ if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
   emit_status failed "SLACK_BOT_TOKEN env var not set"
   exit 1
 fi
-if [ -z "${SLACK_SIGNING_SECRET:-}" ]; then
-  emit_status failed "SLACK_SIGNING_SECRET env var not set"
+if [ -z "${SLACK_APP_TOKEN:-}" ]; then
+  emit_status failed "SLACK_APP_TOKEN env var not set (required for Socket Mode)"
   exit 1
+fi
+if [ -z "${SLACK_SIGNING_SECRET:-}" ]; then
+  log "SLACK_SIGNING_SECRET not set — skipping (Socket Mode does not require it)."
 fi
 
 need_install() {
@@ -98,7 +104,10 @@ upsert_env() {
   fi
 }
 upsert_env SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN"
-upsert_env SLACK_SIGNING_SECRET "$SLACK_SIGNING_SECRET"
+upsert_env SLACK_APP_TOKEN "$SLACK_APP_TOKEN"
+if [ -n "${SLACK_SIGNING_SECRET:-}" ]; then
+  upsert_env SLACK_SIGNING_SECRET "$SLACK_SIGNING_SECRET"
+fi
 
 # Container reads from data/env/env (the host mounts it).
 mkdir -p data/env
