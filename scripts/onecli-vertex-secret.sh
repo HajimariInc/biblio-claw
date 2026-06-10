@@ -108,8 +108,7 @@ ensure_secret() {
   ok "Vertex secret 投入 OK (name=${VERTEX_SECRET_NAME} / type=generic / host=${host} / headerName=authorization / valueFormat=Bearer {value} / 値はマスク)"
 }
 
-# set_all_agents_mode_all は scripts/onecli-lib.sh から source 済み
-# (PR #6 レビュー I9: Vertex / GH スクリプト間の 32 行重複を解消)。
+# set_all_agents_mode_all は scripts/onecli-lib.sh で定義済み。
 
 main() {
   info "OneCLI REST=${ONECLI_API} / project=${ANTHROPIC_VERTEX_PROJECT_ID} / region=${CLOUD_ML_REGION}"
