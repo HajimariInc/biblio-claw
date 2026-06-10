@@ -2,7 +2,7 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: Phase 1 (local 結線) 実装中。Vertex × Claude (`claude-sonnet-4-6` global) に OneCLI MITM 経由で接続し、Slack Socket Mode で 1 往復成立。GitHub App PEM → installation token 経由の GitHub REST 認可 (Sidecar 経路) を配線済み。
+> **ステータス**: Phase 1 (local 結線) 完了。Vertex × Claude (`claude-sonnet-4-6` global) に OneCLI MITM 経由で接続し、Slack Socket Mode で 1 往復成立。GitHub App PEM → installation token 経由の GitHub REST 認可 (Sidecar 経路) を配線済み。次は Phase 2 (Prod デプロイ — GKE + Cloud SQL + WI binding)。
 
 ## クイックスタート (biblio-claw, local)
 
@@ -168,7 +168,7 @@ messaging apps → host process (router) → inbound.db → container (Bun, Clau
 
 単一の Node host が、セッションごとの agent コンテナをオーケストレートする。メッセージが届くと、host はエンティティモデル(user → messaging group → agent group → session)を辿ってルーティングし、セッションの `inbound.db` に書き込み、コンテナを起こす。コンテナ内の agent-runner は `inbound.db` をポーリングし、Claude を走らせ、応答を `outbound.db` に書き込む。host は `outbound.db` をポーリングし、channel adapter 経由で返信する。
 
-セッションごとに 2 つの SQLite ファイル、各ファイルにつき writer は厳密に 1 つ — クロスマウントの競合なし、IPC なし、stdin パイプなし。Channels と代替 provider は起動時に self-register する;trunk が出荷するのはレジストリと Chat SDK ブリッジで、adapter 本体は fork ごとに skill でインストールする。
+セッションごとに 2 つの SQLite ファイル、各ファイルにつき writer は厳密に 1 つ — クロスマウントの競合なし、IPC なし、stdin パイプなし。Channels と代替 provider は起動時に self-register する;上流 NanoClaw では trunk が出荷するのはレジストリと Chat SDK ブリッジのみで adapter 本体は fork ごとに skill でインストールするが、**biblio-claw では Slack adapter (`src/channels/slack.ts`) を trunk に直接コミット済** (CLAUDE.md §チャネルと provider §biblio-claw 流の運用)。
 
 アーキテクチャ完全版は [docs/architecture.md](docs/architecture.md)、3 レベルの分離モデルは [docs/isolation-model.md](docs/isolation-model.md) を参照。
 
@@ -180,7 +180,7 @@ messaging apps → host process (router) → inbound.db → container (Bun, Clau
 - `src/session-manager.ts` — セッションを解決、`inbound.db` / `outbound.db` をオープン
 - `src/container-runner.ts` — agent group ごとのコンテナを起動、OneCLI でクレデンシャル注入
 - `src/db/` — central DB(users、roles、agent groups、messaging groups、wiring、マイグレーション)
-- `src/channels/` — channel adapter のインフラ(adapter は `/add-<channel>` skill でインストール)
+- `src/channels/` — channel adapter のインフラ(上流 NanoClaw では adapter は `/add-<channel>` skill でインストール / biblio-claw では Slack adapter を trunk に直接収録済み)
 - `src/providers/` — host 側の provider 設定(`claude` は組み込み、他は skill 経由)
 - `container/agent-runner/` — Bun の agent-runner:ポーリングループ、MCP ツール、provider 抽象化
 - `groups/<folder>/` — agent group ごとのファイルシステム(`CLAUDE.md`、skill、コンテナ設定)

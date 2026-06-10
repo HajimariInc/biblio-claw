@@ -7,7 +7,12 @@
 //
 // env:
 //   GH_APP_ID        : JWT の iss (App ID。必須)
-//   JWT_EXP_SECONDS  : iat からの有効秒数 (既定 540 = 9 分。GitHub 上限 10 分)
+//   JWT_EXP_SECONDS  : exp を「現在時刻から何秒後」に設定するか (既定 540)。
+//                      iat = now - 60 (クロックドリフト吸収) なので、JWT の
+//                      有効期間 (exp - iat) = JWT_EXP_SECONDS + 60。既定では
+//                      540 + 60 = 600 秒 = 10 分 (GitHub 上限ちょうど)。
+//                      旧コメントの「iat からの有効秒数 540 = 9 分」は両方
+//                      誤りだったので訂正 (PR #6 レビュー I3)。
 'use strict';
 
 const crypto = require('crypto');

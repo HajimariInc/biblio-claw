@@ -44,7 +44,7 @@ data/
         outbox/<message_id>/              ← agent が生成した添付
 ```
 
-パスヘルパー:`sessionDir()`、`inboundDbPath()`、`outboundDbPath()`、`heartbeatPath()` — すべて `src/session-manager.ts` 内。
+パスヘルパー:`sessionDir()`、`inboundDbPath()`、`outboundDbPath()`、`heartbeatPath()` — ラッパー (既存シグネチャを保ったままの薄い委譲) は `src/session-manager.ts` 内、パス算出の実体は `getDsnProvider()` (= `src/adapters/dsn/`、Phase 1 で新設)。Phase 2 で DB の所在を local 専用から GKE PV へ差し替える際は `src/adapters/dsn/` 配下に `gcp` 実装を追加して `DSN_PROVIDER` env で切り替える。
 
 ---
 
