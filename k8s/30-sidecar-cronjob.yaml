@@ -23,7 +23,11 @@ metadata:
     app.kubernetes.io/name: biblio-claw
     app.kubernetes.io/component: sidecar
 spec:
-  schedule: '*/50 * * * *'              # 50 分周期 (token TTL = ~60min)
+  # cron の `*/N` は「N の倍数の分」(0, N, 2N, ...) で、N が 60 の約数でないと
+  # 「N 分間隔」にならない。`*/50` は 0 分と 50 分の 2 回/時 = 1:50→2:00 が 10 分で
+  # 隣接実行が密集する。30 は 60 の約数で「30 分間隔」が成立し、token TTL ~60min
+  # に対する安全マージンも 2 倍。Job 自体は数十秒で終わるため周期短縮の負荷は無視可。
+  schedule: '*/30 * * * *'              # 30 分間隔 (token TTL ~60min に対する安全マージン)
   concurrencyPolicy: Forbid             # 多重起動禁止 (同一 token を重複投入しない)
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

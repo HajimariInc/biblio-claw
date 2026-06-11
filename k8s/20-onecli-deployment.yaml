@@ -32,6 +32,14 @@ spec:
             # IAM 認証 = password 不要。username = "biblio-onecli@<project>.iam"。
             # URL 内の `@` は user に含まれるため %40 でエンコード。
             # 接続先は同 Pod 内の cloud-sql-proxy = 127.0.0.1:5432。
+            #
+            # 実機確認要 (実機適用後): OneCLI 内部の Prisma / PG ドライバが %40 を
+            # decodeURIComponent して cloud-sql-proxy に "biblio-onecli@<project>.iam"
+            # として渡すか。kubectl logs deployment/biblio-onecli -c cloud-sql-proxy
+            # で `FATAL: role "biblio-onecli%40..." does not exist` が出ていない
+            # (= 接続成功) なら OK。失敗時は username 形式変更 (例: client_email を
+            # K8s Secret 経由で別 env に渡す or proxy --auto-iam-authn の代替経路) を
+            # 検討する。
             - name: DATABASE_URL
               value: 'postgresql://biblio-onecli%40hajimari-ai-hackathon-2026.iam@127.0.0.1:5432/biblio_onecli?sslmode=disable'
             - { name: APP_URL, value: 'http://localhost:10254' }

@@ -88,30 +88,38 @@ boots_after="$(read_boots)"
 ok "[boots] $boots_before → $boots_after (= PVC + SQLite 永続化が機能)"
 
 # === 8. Sidecar CronJob (直近 Job 完了 + OneCLI 反映) ===
+# Sidecar の動作 = 司書 agent が GitHub に到達できる前提条件で、ここを warn にすると
+# Phase 2 verify exit 0 = M1 完成判定が「Sidecar 一度も成功せず GH token 未投入」の
+# 状態で通ってしまう (CronJob の backoffLimit=3 使い果たし silent 失敗との相乗)。
+# 必須条件として fail に格上げする。
 recent_job="$(kubectl get jobs -n "$NS" --selector=app.kubernetes.io/component=sidecar --sort-by='.status.startTime' -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || echo "")"
 if [ -z "$recent_job" ]; then
-  warn "[sidecar] 完了済 Job がまだない — CronJob 次回起動を待つか kubectl create job --from=cronjob/biblio-sidecar biblio-sidecar-init-1 -n $NS で手動初回実行"
+  fail "[sidecar] 完了済 Job がまだない — CronJob 次回起動を待つか kubectl create job --from=cronjob/biblio-sidecar biblio-sidecar-init-1 -n $NS で手動初回実行"
+fi
+job_complete="$(kubectl get job "$recent_job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")"
+if [ "$job_complete" != "True" ]; then
+  fail "[sidecar] 直近 Job $recent_job 未 Complete (status=$job_complete) — kubectl logs job/$recent_job -n $NS で debug"
+fi
+ok "[sidecar] 直近 Job $recent_job Completed"
+
+# OneCLI 側に token 反映確認
+token_len="$(kubectl exec "$orch_pod" -n "$NS" -- curl -sS "http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets" | jq -r '.[] | select(.name=="biblio-claw-gh-token") | .value' 2>/dev/null | wc -c)"
+if [ "$token_len" -gt 10 ]; then
+  ok "[sidecar] OneCLI に biblio-claw-gh-token 反映済 (value 長=$token_len)"
 else
-  job_complete="$(kubectl get job "$recent_job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")"
-  if [ "$job_complete" = "True" ]; then
-    ok "[sidecar] 直近 Job $recent_job Completed"
-    # OneCLI 側に token 反映確認
-    token_len="$(kubectl exec "$orch_pod" -n "$NS" -- curl -sS "http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets" | jq -r '.[] | select(.name=="biblio-claw-gh-token") | .value' 2>/dev/null | wc -c)"
-    if [ "$token_len" -gt 10 ]; then
-      ok "[sidecar] OneCLI に biblio-claw-gh-token 反映済 (value 長=$token_len)"
-    else
-      warn "[sidecar] OneCLI に biblio-claw-gh-token が見えない (value 長=$token_len) — Job の logs を確認: kubectl logs job/$recent_job -n $NS"
-    fi
-  else
-    warn "[sidecar] 直近 Job $recent_job 未 Complete (status=$job_complete) — kubectl logs job/$recent_job -n $NS で debug"
-  fi
+  fail "[sidecar] OneCLI に biblio-claw-gh-token が見えない (value 長=$token_len) — Job の logs を確認: kubectl logs job/$recent_job -n $NS"
 fi
 
-# === 9. Slack 接続痕跡 (orchestrator 統合パターン、A 案) ===
+# === 9. Slack 接続痕跡 (orchestrator 統合パターン、A 案、本確認は任意) ===
+# A 案では Slack token (biblio-slack-tokens secret) が optional のため、未投入の運用も
+# 成立する (Slack を使わない検証等)。warn で継続するのは intent — Sidecar (§8) と
+# 違い Slack は本 verify の必須条件ではない。Slack を使う構成で痕跡が見えない場合は
+# `kubectl get secret biblio-slack-tokens -n $NS` で token 投入を確認する。
+# (`grep` は過去ログ対象でリアルタイム状態の判定ではない点も留意。)
 if kubectl logs "$orch_pod" -n "$NS" --tail=200 2>/dev/null | grep -E "(slack|Slack)" >/dev/null; then
   ok "[slack] orchestrator ログに Slack 接続痕跡あり (詳細は kubectl logs $orch_pod -n $NS)"
 else
-  warn "[slack] orchestrator ログに Slack 接続痕跡なし — kubectl get secret biblio-slack-tokens -n $NS で token 投入を確認"
+  warn "[slack] orchestrator ログに Slack 接続痕跡なし — Slack を使う構成なら biblio-slack-tokens の投入を確認 (kubectl get secret biblio-slack-tokens -n $NS)"
 fi
 
 ok "==== Phase 2 GKE wiring assertion 全 pass (A 案) ===="
