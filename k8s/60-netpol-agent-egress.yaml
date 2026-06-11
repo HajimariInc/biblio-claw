@@ -1,0 +1,65 @@
+# agent Pod egress = OneCLI ClusterIP + DNS のみに制限する NetworkPolicy (PoC-5 / PoC-16 写経)。
+#
+# A 案 (plan §補足) では agent Pod を Phase 2 では立てない (M2 以降の別 milestone)
+# ため、本 NetworkPolicy は podSelector に match する Pod がない状態で apply される
+# = 実質的な egress 制限効果は M2 で agent Pod が立った時に発動する。
+# manifest としてここに置く理由:
+#   1. M2 着手時に「NetworkPolicy だけ別途用意する」忘れを防ぐ
+#   2. apply 順序の依存 (NetworkPolicy → Pod) を Phase 2 段階で確認できる
+#   3. plan §Task 7 の Implementation 通り、PoC-5 写経の制限ルールを保存
+#
+# 制限ルール:
+#   - NodeLocal DNS (169.254.20.10/32) と kube-dns Pod への TCP/UDP 53 を許可
+#   - 0.0.0.0/0 except 169.254.169.254/32 (GCE metadata は明示 block) への
+#     TCP 443 / 10254 / 10255 を許可。TCP 443 はインターネット上の任意の HTTPS
+#     へのアウトバウンドを含む (agent が OneCLI MITM を経由して外部 API を呼ぶ
+#     経路で、OneCLI ClusterIP 経由のため実体は OneCLI で集約される)。
+#     10254/10255 は OneCLI の REST/proxy port。
+#   - 上記以外はすべて egress 不可 (default-deny on policyTypes: Egress)
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: biblio-agent-egress
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: biblio-claw
+      app.kubernetes.io/component: agent
+  policyTypes:
+    - Egress
+  egress:
+    # GKE Autopilot NodeLocal DNS — 既定 ON で必須 (PoC-5 写経の核)
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # kube-dns Pod 直接 (fallback)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # 全 HTTPS + OneCLI port、ただし GCE metadata (169.254.169.254/32) は明示 block
+    # (keyless ADC は OneCLI 経由で受領、Pod metadata 直結は agent には不要 +
+    #  NetworkPolicy 検証の対照アサート)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 10254 }
+        - { protocol: TCP, port: 10255 }

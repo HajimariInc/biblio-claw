@@ -1,0 +1,69 @@
+# OneCLI gateway + cloud-sql-auth-proxy sidecar の 2 コンテナ Pod。
+# - OneCLI: 10254 (REST/Dashboard) / 10255 (MITM proxy) を listen
+# - cloud-sql-proxy: WI で IAM 認証して 127.0.0.1:5432 に Cloud SQL を proxy
+# replicas=1 + Recreate: OneCLI secret store の整合性確保 (Phase 1 + PoC-12 と同)。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: biblio-onecli
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: onecli
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: biblio-claw
+      app.kubernetes.io/component: onecli
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: biblio-claw
+        app.kubernetes.io/component: onecli
+    spec:
+      serviceAccountName: biblio-onecli-ksa
+      containers:
+        - name: onecli
+          image: ghcr.io/onecli/onecli:1.30.0
+          env:
+            # IAM 認証 = password 不要。username = "biblio-onecli@<project>.iam"。
+            # URL 内の `@` は user に含まれるため %40 でエンコード。
+            # 接続先は同 Pod 内の cloud-sql-proxy = 127.0.0.1:5432。
+            #
+            # 実機確認要 (実機適用後): OneCLI 内部の Prisma / PG ドライバが %40 を
+            # decodeURIComponent して cloud-sql-proxy に "biblio-onecli@<project>.iam"
+            # として渡すか。kubectl logs deployment/biblio-onecli -c cloud-sql-proxy
+            # で `FATAL: role "biblio-onecli%40..." does not exist` が出ていない
+            # (= 接続成功) なら OK。失敗時は username 形式変更 (例: client_email を
+            # K8s Secret 経由で別 env に渡す or proxy --auto-iam-authn の代替経路) を
+            # 検討する。
+            - name: DATABASE_URL
+              value: 'postgresql://biblio-onecli%40hajimari-ai-hackathon-2026.iam@127.0.0.1:5432/biblio_onecli?sslmode=disable'
+            - { name: APP_URL, value: 'http://localhost:10254' }
+            - { name: GATEWAY_API_URL, value: 'http://localhost:10255' }
+          ports:
+            - { name: gateway, containerPort: 10254 }
+            - { name: proxy, containerPort: 10255 }
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+        - name: cloud-sql-proxy
+          # Cloud SQL Auth Proxy v2 (gcr.io/cloud-sql-connectors)。
+          # --auto-iam-authn で WI 経由の IAM 認証 = GSA biblio-onecli が必要 role を保持。
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.16.0
+          args:
+            - '--auto-iam-authn'
+            # cloud-sql-proxy v2 のデフォルトは PUBLIC IP を試みる。biblio-pgsql は
+            # Private IP only (--no-assign-ip で作成、Task 1.4) のため明示指定が必要。
+            # 未指定だと: "instance does not have IP of type PUBLIC" で接続失敗する。
+            - '--private-ip'
+            - '--port=5432'
+            - 'hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql'
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi

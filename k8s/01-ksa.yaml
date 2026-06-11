@@ -1,0 +1,34 @@
+# Kubernetes ServiceAccount × 3。
+# Vault gke-iam.md §3 方針: WI が必要なのは Sidecar / OneCLI の 2 体のみ。
+# orchestrator は全外部 API を OneCLI 経由で叩く = keyless ADC 不要 → annotation なし。
+# agent KSA は本 Phase ではスコープ外 (補足: plan §補足 "A 案採用" 参照)。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: biblio-orchestrator-ksa
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: biblio-onecli-ksa
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: onecli
+  annotations:
+    iam.gke.io/gcp-service-account: biblio-onecli@hajimari-ai-hackathon-2026.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: biblio-sidecar-ksa
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: sidecar
+  annotations:
+    iam.gke.io/gcp-service-account: biblio-sidecar@hajimari-ai-hackathon-2026.iam.gserviceaccount.com

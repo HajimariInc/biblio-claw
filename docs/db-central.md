@@ -320,6 +320,23 @@ CREATE TABLE container_configs (
 - **Reader:** `src/container-config.ts`、`src/container-runner.ts`、`src/cli/dispatch.ts`(scope 強制)、`src/claude-md-compose.ts`
 - **Writer:** `src/db/container-configs.ts`、`src/modules/self-mod/apply.ts`、`src/backfill-container-configs.ts`
 
+### 1.16 `boots`
+
+biblio-claw 追加。`id=1` の単一行を持ち、host 起動毎に `count` を monotonic increment する決定的指紋テーブル。Phase 2 verify (`scripts/verify-phase-2-wiring.sh` §7) で「Pod 再作成跨ぎで count が増える」ことを assertion することで、PVC + SQLite の永続化が機能していることを確認する (PoC-13 写経)。
+
+```sql
+CREATE TABLE boots (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  count        INTEGER NOT NULL DEFAULT 0,
+  last_boot_at TEXT NOT NULL
+);
+```
+
+- `CHECK (id = 1)` により、同 PVC を再 attach した orchestrator が必ず 1 行だけ保持する。
+- 初期行は migration016 が `INSERT OR IGNORE` で投入するため、boot-counter 側は単純な UPDATE で count を増分できる (古い SQLite の `INSERT...ON CONFLICT` 非対応問題を回避)。
+- **Reader:** `src/boot-counter.ts`、`scripts/verify-phase-2-wiring.sh` (kubectl exec 経由)
+- **Writer:** `src/boot-counter.ts` (`incrementBootCounter()`)
+
 ---
 
 ## 2. マイグレーションシステム
@@ -341,6 +358,7 @@ CREATE TABLE container_configs (
 | 009 | `009-drop-pending-credentials.ts` | 廃止された `pending_credentials` テーブルを drop |
 | 014 | `014-container-configs.ts` | `container_configs` — agent group ごとのコンテナランタイム設定 |
 | 015 | `015-cli-scope.ts` | `ALTER TABLE container_configs ADD COLUMN cli_scope` |
+| 016 | `016-boots.ts` | `boots` — biblio-claw 追加。Phase 2 verify 用の決定的指紋 (PVC + SQLite 永続化アサーション) |
 
 005 と 006 は意図的に欠番 — 初期開発中にマイグレーションが番号付け直された。
 

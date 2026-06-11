@@ -1,0 +1,23 @@
+# OneCLI への in-cluster アクセス用 ClusterIP Service。
+# gateway (REST/Dashboard) 10254 / proxy (MITM) 10255 を expose。
+# orchestrator は環境変数 ONECLI_URL でこの Service の gateway port に到達する。
+apiVersion: v1
+kind: Service
+metadata:
+  name: biblio-onecli
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: onecli
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: onecli
+  ports:
+    - name: gateway
+      port: 10254
+      targetPort: gateway
+    - name: proxy
+      port: 10255
+      targetPort: proxy
