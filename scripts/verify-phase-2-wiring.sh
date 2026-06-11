@@ -62,8 +62,11 @@ container_count="$(kubectl get pod "$onecli_pod" -n "$NS" -o jsonpath='{.status.
 ok "[onecli] Pod $onecli_pod 内 $container_count container Ready"
 
 # === 6. OneCLI REST 疎通 (orchestrator Pod 内から in-cluster ClusterIP 経由) ===
+# image に curl / jq は焼かない方針 (Dockerfile 軽量化、Step 2.7 検証で判明)。
+# Node 22 の global fetch を使う = host プロセスと同じ runtime を再利用、追加依存なし。
 orch_pod="biblio-orchestrator-0"
-kubectl exec "$orch_pod" -n "$NS" -- curl -fsS "http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets" >/dev/null \
+kubectl exec "$orch_pod" -n "$NS" -- node -e \
+  "fetch('http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets').then(r => { if (!r.ok) { console.error('HTTP', r.status); process.exit(1); } }).catch(e => { console.error(e.message); process.exit(1); })" \
   || fail "[onecli] orchestrator から OneCLI REST に到達できない (in-cluster ClusterIP 経由)"
 ok "[onecli] orchestrator → OneCLI REST 疎通"
 
@@ -102,13 +105,25 @@ if [ "$job_complete" != "True" ]; then
 fi
 ok "[sidecar] 直近 Job $recent_job Completed"
 
-# OneCLI 側に token 反映確認
-token_len="$(kubectl exec "$orch_pod" -n "$NS" -- curl -sS "http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets" | jq -r '.[] | select(.name=="biblio-claw-gh-token") | .value' 2>/dev/null | wc -c)"
-if [ "$token_len" -gt 10 ]; then
-  ok "[sidecar] OneCLI に biblio-claw-gh-token 反映済 (value 長=$token_len)"
-else
-  fail "[sidecar] OneCLI に biblio-claw-gh-token が見えない (value 長=$token_len) — Job の logs を確認: kubectl logs job/$recent_job -n $NS"
-fi
+# OneCLI 側に token 反映確認 (curl/jq 非依存、node fetch を使う)。
+# 注: OneCLI は GET /v1/secrets で value を mask した形 (length=0) で返す設計のため、
+# value 長ではなく "secret の存在 + 想定 hostPattern との一致" で判定する。
+token_state="$(kubectl exec "$orch_pod" -n "$NS" -- node -e \
+  "fetch('http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets').then(r => r.json()).then(secrets => { const t = secrets.find(s => s.name === 'biblio-claw-gh-token'); process.stdout.write(t ? 'present:' + t.hostPattern : 'absent'); }).catch(e => { process.stdout.write('error:' + e.message); })" 2>/dev/null)"
+case "$token_state" in
+  present:api.github.com)
+    ok "[sidecar] OneCLI に biblio-claw-gh-token 反映済 (hostPattern=api.github.com、value は OneCLI が mask)"
+    ;;
+  present:*)
+    warn "[sidecar] biblio-claw-gh-token は存在するが hostPattern が想定外 ($token_state) — Sidecar の env を確認"
+    ;;
+  absent)
+    fail "[sidecar] OneCLI に biblio-claw-gh-token が見えない — Job logs を確認: kubectl logs job/$recent_job -n $NS"
+    ;;
+  *)
+    fail "[sidecar] OneCLI への secrets list 取得に失敗 ($token_state)"
+    ;;
+esac
 
 # === 9. Slack 接続痕跡 (orchestrator 統合パターン、A 案、本確認は任意) ===
 # A 案では Slack token (biblio-slack-tokens secret) が optional のため、未投入の運用も
