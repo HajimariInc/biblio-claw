@@ -6,6 +6,7 @@
  */
 import { getDsnProvider, getSecretProvider } from './adapters/index.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
+import { incrementBootCounter } from './boot-counter.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
@@ -80,6 +81,10 @@ async function main(): Promise<void> {
   const db = initDb(dbPath);
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
+
+  // Phase 2 verify 用の boots カウンタ (PoC-13 写経の決定的指紋)。
+  // PVC + SQLite の永続化が機能していることを Pod 再作成跨ぎの increment で確認する。
+  incrementBootCounter(db);
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
