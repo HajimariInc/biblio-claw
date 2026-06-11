@@ -3,7 +3,7 @@ import path from 'path';
 import { log } from './log.js';
 
 /**
- * Resolve values for the requested keys from `.env` (preferred) and
+ * Resolve values for the requested keys from `<cwd>/.env` (preferred) and
  * fall back to `process.env` for keys not populated from the file.
  *
  * The file is read each call (no caching) and values are NOT loaded
@@ -12,6 +12,12 @@ import { log } from './log.js';
  * work in containerised environments (GKE Pod / docker run) where the
  * project-local `.env` is absent and values arrive via env vars
  * injected by the runtime (envFrom secretRef, --env-file, etc.).
+ *
+ * Key presence in `.env` wins over `process.env` even when the file
+ * value is empty — i.e. writing `FOO=` in `.env` deliberately suppresses
+ * a `process.env.FOO` set elsewhere. The `process.env` fallback path
+ * still skips empty strings since callers (Slack token etc.) treat
+ * empty as "not configured".
  */
 export function readEnvFile(keys: string[]): Record<string, string> {
   const envFile = path.join(process.cwd(), '.env');
@@ -22,7 +28,12 @@ export function readEnvFile(keys: string[]): Record<string, string> {
   try {
     content = fs.readFileSync(envFile, 'utf-8');
   } catch (err) {
-    log.debug('.env file not found, falling back to process.env', { err });
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      log.debug('.env file not found, falling back to process.env', { envFile });
+    } else {
+      log.warn('.env file unreadable, falling back to process.env', { envFile, code, err });
+    }
   }
 
   if (content !== null) {
@@ -40,12 +51,12 @@ export function readEnvFile(keys: string[]): Record<string, string> {
       ) {
         value = value.slice(1, -1);
       }
-      if (value) result[key] = value;
+      result[key] = value;
     }
   }
 
   for (const key of keys) {
-    if (result[key]) continue;
+    if (result[key] !== undefined) continue;
     const fromEnv = process.env[key];
     if (fromEnv && fromEnv.length > 0) {
       result[key] = fromEnv;

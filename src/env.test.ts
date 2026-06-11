@@ -82,4 +82,11 @@ describe('readEnvFile', () => {
     const result = readEnvFile(['EMPTY']);
     expect(result).toEqual({});
   });
+
+  it('honors `.env` empty value to suppress process.env fallback', () => {
+    fs.writeFileSync(path.join(tempDir, '.env'), 'FOO=\n');
+    process.env.FOO = 'from-env';
+    const result = readEnvFile(['FOO']);
+    expect(result).toEqual({ FOO: '' });
+  });
 });
