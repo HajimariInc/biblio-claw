@@ -1,0 +1,36 @@
+# biblio-claw sidecar image — Phase 2 CronJob で 50 分周期 GH installation token 更新。
+# 構成:
+#   - base: alpine:3.20 (軽量)
+#   - tools: bash, curl, jq, nodejs (Phase 1 既存 script の依存)
+#   - scripts/* を焼き込み。実行時はそのまま CMD で起動可能。
+#
+# Phase 1 で実証済の scripts/onecli-gh-secret.sh をそのまま使う (= verify-phase-1
+# regression なし)。PEM の取得は CronJob YAML 側の initContainer (gcloud CLI image)
+# で /pem/key.pem に書き出すので、本 image には gcloud SDK を含めない (責務分離 +
+# image 軽量化)。
+#
+# Build:   docker build -f Dockerfile.sidecar -t biblio-sidecar:m1-p2 .
+# AR push: docker tag biblio-sidecar:m1-p2 \
+#            asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar:m1-p2 && \
+#          docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar:m1-p2
+
+FROM alpine:3.20
+
+RUN apk add --no-cache bash curl jq nodejs ca-certificates && \
+    rm -rf /var/cache/apk/*
+
+# Phase 1 で実証済の scripts を焼き込む。
+# 同名で /scripts 配下に配置することで、既存 script 内の
+#   ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+#   → ROOT="/" となり、$ROOT/scripts/sign_jwt.cjs = /scripts/sign_jwt.cjs
+#   $ROOT/scripts/onecli-lib.sh = /scripts/onecli-lib.sh
+# で正しく相互参照される。
+COPY scripts/onecli-gh-secret.sh /scripts/onecli-gh-secret.sh
+COPY scripts/sign_jwt.cjs        /scripts/sign_jwt.cjs
+COPY scripts/onecli-lib.sh       /scripts/onecli-lib.sh
+RUN chmod +x /scripts/onecli-gh-secret.sh
+
+WORKDIR /scripts
+
+# CronJob は本 CMD を 50 分周期で実行 (k8s/30-sidecar-cronjob.yaml)。
+CMD ["bash", "/scripts/onecli-gh-secret.sh"]

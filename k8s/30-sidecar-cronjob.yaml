@@ -1,0 +1,94 @@
+# Sidecar CronJob: 50 分周期で GH installation token を更新し OneCLI に投入する。
+# token TTL = ~60min なので 50 分周期で余裕 (再生成失敗で次の周期に滑り込める)。
+#
+# 構造:
+#   - initContainer fetch-pem: gcloud で Secret Manager から PEM を取得し、
+#     emptyDir { medium: Memory } (= tmpfs) の /pem/key.pem に書き出す。
+#     書き終えたら chmod 0400 で main container だけ読めるようにする。
+#     ディスクに書かない + Pod 終了で揮発 = 露出窓を最小化。
+#   - container sidecar: Phase 1 で実証済の onecli-gh-secret.sh を実行。
+#     PEM ファイルパスを GH_APP_PEM_PATH=/pem/key.pem で渡すだけで、
+#     既存ロジックがそのまま動く (env 切替なし、verify-phase-1 regression なし)。
+#
+# WI:
+#   - serviceAccountName: biblio-sidecar-ksa (GSA biblio-sidecar に impersonate)
+#   - GSA は roles/secretmanager.secretAccessor on biblio-gh-app-pem を保持 (Task 2.2)
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: biblio-sidecar
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: sidecar
+spec:
+  schedule: '*/50 * * * *'              # 50 分周期 (token TTL = ~60min)
+  concurrencyPolicy: Forbid             # 多重起動禁止 (同一 token を重複投入しない)
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3                   # 失敗時 3 回まで K8s 標準リトライ
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: biblio-claw
+            app.kubernetes.io/component: sidecar
+        spec:
+          serviceAccountName: biblio-sidecar-ksa
+          restartPolicy: OnFailure
+          volumes:
+            - name: pem
+              emptyDir:
+                medium: Memory          # tmpfs = ディスク非書き込み、Pod 終了で揮発
+          initContainers:
+            - name: fetch-pem
+              image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+              command:
+                - sh
+                - -c
+                - |
+                  set -euo pipefail
+                  gcloud secrets versions access latest \
+                    --secret=biblio-gh-app-pem \
+                    --project=hajimari-ai-hackathon-2026 \
+                    > /pem/key.pem
+                  chmod 0400 /pem/key.pem
+              volumeMounts:
+                - name: pem
+                  mountPath: /pem
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+          containers:
+            - name: sidecar
+              image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar:m1-p2
+              # CMD は Dockerfile.sidecar で ["bash", "/scripts/onecli-gh-secret.sh"]
+              env:
+                - { name: ONECLI_URL, value: 'http://biblio-onecli.biblio-claw.svc.cluster.local:10254' }
+                - { name: GH_APP_PEM_PATH, value: /pem/key.pem }
+                - { name: GH_API_HOST, value: api.github.com }
+                - { name: GH_SECRET_NAME, value: biblio-claw-gh-token }
+                - { name: GH_SECRET_HEADER, value: authorization }
+                - { name: GH_SECRET_VALUE_FORMAT, value: 'Bearer {value}' }
+                - { name: JWT_EXP_SECONDS, value: '540' }
+                - name: GH_APP_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: biblio-gh-app
+                      key: app-id
+                - name: GH_INSTALLATION_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: biblio-gh-app
+                      key: installation-id
+              volumeMounts:
+                - name: pem
+                  mountPath: /pem
+                  readOnly: true
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
