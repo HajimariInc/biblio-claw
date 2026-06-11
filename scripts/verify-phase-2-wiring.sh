@@ -68,10 +68,13 @@ kubectl exec "$orch_pod" -n "$NS" -- curl -fsS "http://biblio-onecli.${NS}.svc.c
 ok "[onecli] orchestrator → OneCLI REST 疎通"
 
 # === 7. boots カウンタ (PVC + SQLite 永続化検証、PoC-13 写経の決定的指紋) ===
+# NOTE: kubectl exec 内では pnpm exec tsx (host 推奨ラッパー) が使えないため node -e で
+# 直接呼ぶ (例外的用途)。stderr は捨てない — require('better-sqlite3') 失敗や kubectl
+# 接続エラーが silent に空文字を返して set -e で abort される silent failure を防ぐ。
 read_boots() {
   kubectl exec "$orch_pod" -n "$NS" -- node -e \
     "const Database = require('better-sqlite3'); const db = new Database('/data/v2.db'); const r = db.prepare('SELECT count FROM boots WHERE id = 1').get(); console.log(r ? r.count : 0);" \
-    2>/dev/null
+    || fail "[boots] orchestrator Pod 内での DB 読み取りに失敗 — image 内の better-sqlite3 / DB パスを確認"
 }
 boots_before="$(read_boots)"
 info "[boots] 現在値: $boots_before"

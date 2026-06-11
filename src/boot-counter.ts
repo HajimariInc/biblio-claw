@@ -17,12 +17,21 @@ import { log } from './log.js';
  * @returns 増分後の count (異常時は -1)
  */
 export function incrementBootCounter(db: Database.Database): number {
-  db.prepare(`UPDATE boots SET count = count + 1, last_boot_at = datetime('now') WHERE id = 1`).run();
+  const result = db
+    .prepare(`UPDATE boots SET count = count + 1, last_boot_at = datetime('now') WHERE id = 1`)
+    .run();
+  if (result.changes === 0) {
+    // migration016 で id=1 行が必ず確保されるはずなので、ここに来るのは異常。
+    // 行が消えた、または異なる DB を見ている可能性 (DSN 切替ミス / PVC 取り違え 等)。
+    // UPDATE の changes を見ずに直後の SELECT に進むと、行がなくても count が変わらない
+    // 古い値が読めるケースで気付けない (silent failure) ため、ここで必ず検知する。
+    log.error('boots UPDATE affected 0 rows — id=1 row missing, migration016 not applied or wrong DB?');
+    return -1;
+  }
   const row = db.prepare('SELECT count FROM boots WHERE id = 1').get() as { count: number } | undefined;
   if (!row) {
-    // migration016 で id=1 行が必ず作成されるので、ここに来るのは異常。
-    // boots テーブル自体が無いか、migration が走っていない状態。
-    log.error('boots row missing — migration016 not applied?');
+    // UPDATE が changes=1 で成功した直後に SELECT で行が見えないのは、より深刻な異常。
+    log.error('boots SELECT returned no row immediately after successful UPDATE — DB inconsistency?');
     return -1;
   }
   log.info('Boot counter incremented', { count: row.count });
