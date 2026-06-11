@@ -2,6 +2,17 @@
 
 NanoClaw 上流および biblio-claw fork の重要な変更を本ファイルに記録する。biblio-claw 固有の変更は冒頭の `[biblio-claw-*]` セクションへ、上流 NanoClaw のリリースは `[2.x.x]` セクションへ追記する。
 
+## [biblio-claw-m1-p1] - 2026-06-11
+
+biblio-claw fork の **M1 Phase 1 (local 実装)** を完了し、`base/m1-p1-lib` → `main` に合流 (PR #6)。NanoClaw v2 fork 取り込み + 環境差分吸収アダプタ + docker compose 土台 + Slack Socket Mode + GitHub App Sidecar の積み上げで、Phase 1 verify (`scripts/verify-phase-1.sh exit 0`) 達成。次は Phase 2 (Prod デプロイ — GKE + Cloud SQL + WI binding)。
+
+- **環境差分吸収アダプタ 3 種を新設** (PR #2)。`DsnProvider` / `SchedulerProvider` / `SecretProvider` を `src/adapters/` 配下に切り出し、env switch (`DSN_PROVIDER` / `SCHEDULER_PROVIDER` / `SECRET_PROVIDER`) で Phase 2 の Prod 実装に差し替え可能な境界として設置。
+- **docker compose 土台 + Vertex × Claude 接続経路を成立** (PR #3)。`docker-compose.yml` で OneCLI gateway + PostgreSQL を起動、`src/providers/claude.ts` の env 群 (`CLAUDE_CODE_USE_VERTEX` / `ANTHROPIC_VERTEX_PROJECT_ID` / `CLOUD_ML_REGION` 等) で Vertex 経由 `claude-sonnet-4-6` (global) に OneCLI MITM で接続。`scripts/onecli-vertex-secret.sh` で ADC token を OneCLI に投入する経路を確立。
+- **Slack adapter を Socket Mode で取り込み** (PR #4)。`src/channels/slack.ts` を biblio-claw の trunk に直接コミット (= 上流 NanoClaw の skill 経由インストール方針との差分)。`SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` で 1 往復の配線を成立。`setup/add-slack.sh` で adapter 取り込みの自動化。
+- **GitHub App Sidecar token 経路を実装** (PR #5)。`scripts/onecli-gh-secret.sh` + `scripts/sign_jwt.cjs` で GitHub App PEM → RS256 JWT → installation token を発行し、OneCLI に投入。agent コンテナは creds 配付なしに `gh` で GitHub REST API に到達可能。token 有効期限 ~60min で `PATCH /v1/secrets/:id` での value 単独更新も対応 (50 分間隔の自動化は Phase 2 で GKE CronJob 化予定)。
+- **Phase 1 verify 完全版** (PR #5)。`scripts/verify-phase-1.sh` を静的層 (pnpm install / tsc / vitest / アダプタ smoke) + wiring 層 (docker compose / OneCLI 疎通 / Vertex secret / GH secret / provider 配線) の 2 段で構成。
+- **PR #6 レビュー対応** (1〜3 回目)。専門エージェント並列レビューでの指摘 (Critical / Important / 提案 / 些細 / 退行) を順次反映。silent failure 解消 (scheduler 連続失敗エスカレーション / shell の `|| fail` 追加)、共通 lib 切り出し (`scripts/onecli-lib.sh`)、JSDoc 補強 (`SchedulerProvider` の tick 非重複 / `SecretProvider` の singleton 制約)、テスト追加 (`sign_jwt.cjs` / `src/channels/slack.ts` factory) 等を含む。
+
 ## [biblio-claw-m1-p1-task-1] - 2026-06-01
 
 biblio-claw fork の Phase 1 Task 1 (NanoClaw 取り込み + ドキュメント整理) を完了。
