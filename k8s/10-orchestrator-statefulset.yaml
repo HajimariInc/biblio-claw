@@ -46,6 +46,13 @@ spec:
             - { name: CLOUD_ML_REGION, value: global }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
+            # === A 案補完 (agent K8s spawn 未対応のため container runtime check を skip) ===
+            # NanoClaw 上流の host は起動時 docker daemon チェック (docker info) を必須
+            # としており、Pod 内で docker 不在のため FATAL クラッシュする。本 env で skip し
+            # orchestrator + channel adapter のみで起動する。M2 で K8s Job spawn を実装した
+            # ら本 env を削除して agent spawn を復活させる。詳細: src/index.ts の "2. Container
+            # runtime" ブロック (Phase 2 PR #7 で追加)。
+            - { name: SKIP_CONTAINER_RUNTIME_CHECK, value: 'true' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
