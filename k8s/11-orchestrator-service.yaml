@@ -1,0 +1,20 @@
+# Headless Service: StatefulSet の stable DNS のため必須。
+# orchestrator は wire port を listen しない (Slack は Socket Mode 外向き接続のみ)
+# が、Headless Service は port が最低 1 つ必要なので placeholder を 1 つ置く。
+apiVersion: v1
+kind: Service
+metadata:
+  name: biblio-orchestrator
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+  ports:
+    - name: placeholder
+      port: 8080
+      targetPort: 8080

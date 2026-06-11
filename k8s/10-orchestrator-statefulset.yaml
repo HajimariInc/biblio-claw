@@ -1,0 +1,69 @@
+# Orchestrator: NanoClaw host プロセスを GKE 上で動かす単一の StatefulSet。
+# replicas=1 で SQLite + PVC が安全 (PoC-13 写経)。
+# A 案 (plan §補足) 採用: Slack adapter は src/channels/slack.ts で
+# main host に統合済のため、本 Pod の envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN
+# を受け取れば self-registration が token を見つけて起動する = 別 Pod 不要。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: biblio-orchestrator
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+spec:
+  serviceName: biblio-orchestrator
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: biblio-claw
+      app.kubernetes.io/component: orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: biblio-claw
+        app.kubernetes.io/component: orchestrator
+    spec:
+      serviceAccountName: biblio-orchestrator-ksa
+      containers:
+        - name: orchestrator
+          # Phase 1 build の image を AR に push してから apply する想定。
+          # tag `m1-p1` で SHA を Phase 1 と一致させる (plan §UX Design L162)。
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
+          env:
+            # === 環境差分アダプタの env switch (Phase 1 で仕込み済) ===
+            - { name: DSN_PROVIDER, value: gke } # Task 3 で追加した case 'gke'
+            - { name: SCHEDULER_PROVIDER, value: local }
+            - { name: SECRET_PROVIDER, value: onecli }
+            # === DSN root (PVC mountPath) ===
+            - { name: DATA_DIR, value: /data }
+            # === OneCLI gateway (in-cluster ClusterIP) ===
+            - { name: ONECLI_URL, value: 'http://biblio-onecli.biblio-claw.svc.cluster.local:10254' }
+            # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===
+            - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
+            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
+            - { name: CLOUD_ML_REGION, value: global }
+            # === Assistant identity ===
+            - { name: ASSISTANT_NAME, value: biblio }
+          # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
+          # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
+          envFrom:
+            - secretRef:
+                name: biblio-slack-tokens
+                optional: true
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            # GKE Autopilot 用に requests のみ指定 (Autopilot が limits を同値に補完)
+            requests:
+              cpu: 500m
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ['ReadWriteOnce']
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            storage: 1Gi
