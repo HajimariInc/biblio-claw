@@ -125,16 +125,22 @@ case "$token_state" in
     ;;
 esac
 
-# === 9. Slack 接続痕跡 (orchestrator 統合パターン、A 案、本確認は任意) ===
-# A 案では Slack token (biblio-slack-tokens secret) が optional のため、未投入の運用も
-# 成立する (Slack を使わない検証等)。warn で継続するのは intent — Sidecar (§8) と
-# 違い Slack は本 verify の必須条件ではない。Slack を使う構成で痕跡が見えない場合は
-# `kubectl get secret biblio-slack-tokens -n $NS` で token 投入を確認する。
-# (`grep` は過去ログ対象でリアルタイム状態の判定ではない点も留意。)
-if kubectl logs "$orch_pod" -n "$NS" --tail=200 2>/dev/null | grep -E "(slack|Slack)" >/dev/null; then
-  ok "[slack] orchestrator ログに Slack 接続痕跡あり (詳細は kubectl logs $orch_pod -n $NS)"
+# === 9. Slack adapter 起動 (orchestrator 統合パターン、A 案) ===
+# M1 Acceptance に「Slack 接続成立」が明記されているため、本 verify では Slack adapter
+# 起動を必須条件として fail 判定する。判定ロジックは "Channel adapter started" + 'channel="slack"'
+# の 2 条件共起 — 単純な /slack/ では `Channel credentials missing, skipping channel="slack"`
+# (= adapter skip = 偽陽性) と区別できない (2026-06-11 のセッションで実際に踏んだ silent failure)。
+# 起動成功ログ形式: src/channels/channel-registry.ts:89 の `log.info('Channel adapter started', { channel, type })`
+# orchestrator は pino-pretty 系 formatter で ANSI color code をログに挟むため、剥離してから grep する
+# (剥がさないと `Channel adapter started\x1b[39m \x1b[35mchannel="slack"` のように regex の `channel=`
+# 連続にマッチしない silent failure を起こす)。
+orch_logs="$(kubectl logs "$orch_pod" -n "$NS" --tail=300 2>/dev/null | sed -r 's/\x1b\[[0-9;]*m//g' || true)"
+if echo "$orch_logs" | grep -E 'Channel adapter started.*channel="slack"' >/dev/null; then
+  ok "[slack] Slack adapter 起動済 (Channel adapter started + channel=\"slack\" 両一致)"
+elif echo "$orch_logs" | grep -E 'Channel credentials missing.*channel="slack"' >/dev/null; then
+  fail "[slack] Slack credentials が adapter から見えていない — env.ts の process.env fallback 動作 + biblio-slack-tokens Secret 投入 (kubectl get secret biblio-slack-tokens -n $NS) を確認"
 else
-  warn "[slack] orchestrator ログに Slack 接続痕跡なし — Slack を使う構成なら biblio-slack-tokens の投入を確認 (kubectl get secret biblio-slack-tokens -n $NS)"
+  fail "[slack] Slack adapter 起動痕跡も credentials missing 痕跡も見えない — kubectl logs $orch_pod -n $NS --tail=300 で生ログを目視確認"
 fi
 
 ok "==== Phase 2 GKE wiring assertion 全 pass (A 案) ===="
