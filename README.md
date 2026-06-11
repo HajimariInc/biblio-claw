@@ -2,7 +2,7 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: Phase 1 (local 結線) 完了。Vertex × Claude (`claude-sonnet-4-6` global) に OneCLI MITM 経由で接続し、Slack Socket Mode で 1 往復成立。GitHub App PEM → installation token 経由の GitHub REST 認可 (Sidecar 経路) を配線済み。次は Phase 2 (Prod デプロイ — GKE + Cloud SQL + WI binding)。
+> **ステータス**: M1 Phase 2 (Prod デプロイ) 完了 — GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet + OneCLI Deployment (cloud-sql-proxy sidecar 同居) + Sidecar CronJob (`*/30` で GH installation token を OneCLI へ自動投入) が稼働、Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-2-wiring.sh exit 0` で全項目 OK)。配線済の bot に DM して会話成立させる初期化 (init-first-agent 相当) は M2 スコープ。
 
 ## クイックスタート (biblio-claw, local)
 
