@@ -22,6 +22,88 @@ pnpm run chat "hello"                     # CLI から司書と会話 (smoke 用
 
 詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。
 
+## Phase 2 運用メモ (GKE デプロイ後の bootstrap / メンテ)
+
+> ⚠️ **暫定セクション** — 今後本格的な運用マニュアル (将来の `docs/operations.md` 等) を立てる予定。手順が枯れてきたら本セクションを最小化し、詳細は専用マニュアルに転記する。それまでは初回デプロイ + 再構築の手順帳として本セクションを参照する。
+
+### Cloud SQL `postgres` user パスワード変更 (初回 Bootstrap GRANT)
+
+Phase 2 では Cloud SQL `biblio-pgsql` を **IAM 認証 + Private IP only** (`--no-assign-ip` + `cloudsql.iam_authentication=on`) で運用するため、組み込み管理者 (`postgres` user) は通常パスワード未設定状態で放置する。
+
+ただし PostgreSQL 15+ の `public` schema は新規 DB 作成直後の状態で IAM user (`biblio-onecli@hajimari-ai-hackathon-2026.iam`) が CREATE 権限を持たない (`pg_database_owner` 所有)。OneCLI 起動時の Prisma migrate が `ERROR: permission denied for schema public` で失敗するため、**初回デプロイ時に `postgres` user 経由で 1 回だけ GRANT を発行する**必要がある (Bootstrap GRANT)。
+
+実行が必要なタイミング:
+- 初回 GKE デプロイ (`scripts/teardown-phase-2.sh` で削除した後の再構築含む)
+- M5 提出後の本番再開時
+
+#### 手順
+
+```bash
+# 1. 一時パスワード生成 + postgres user に設定 (操作後すぐ別ランダム値で上書き = revoke)
+PG_TEMP_PASS=$(openssl rand -base64 32)
+gcloud sql users set-password postgres \
+  --instance=biblio-pgsql --password="$PG_TEMP_PASS" \
+  --project=hajimari-ai-hackathon-2026
+
+# 2. 短命 Bootstrap Pod (psql + cloud-sql-proxy) を立てて GRANT 実行
+#    Pod 内 env として PG_TEMP_PASS を注入、Pod 終了で消える
+cat <<YAML | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-grant-bootstrap
+  namespace: biblio-claw
+spec:
+  serviceAccountName: biblio-onecli-ksa
+  restartPolicy: Never
+  containers:
+    - name: psql
+      image: postgres:18-alpine
+      command:
+        - sh
+        - -c
+        - |
+          for i in 1 2 3 4 5; do nc -z 127.0.0.1 5432 && break; sleep 2; done
+          PGPASSWORD="\$PG_TEMP_PASS" psql -h 127.0.0.1 -U postgres -d biblio_onecli \
+            -c 'GRANT CREATE, USAGE ON SCHEMA public TO "biblio-onecli@hajimari-ai-hackathon-2026.iam";'
+          echo DONE; sleep 3
+      env:
+        - name: PG_TEMP_PASS
+          value: "$PG_TEMP_PASS"
+    - name: cloud-sql-proxy
+      image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.16.0
+      args: ["--private-ip", "--port=5432", "hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql"]
+YAML
+
+# 3. 完了確認 + Pod 削除
+kubectl wait pod/db-grant-bootstrap -n biblio-claw \
+  --for=jsonpath='{.status.containerStatuses[?(@.name=="psql")].state.terminated.exitCode}'=0 \
+  --timeout=120s
+kubectl logs db-grant-bootstrap -n biblio-claw -c psql
+kubectl delete pod db-grant-bootstrap -n biblio-claw
+
+# 4. postgres password を別のランダム値で上書き = 運用者も値を知らない状態に
+gcloud sql users set-password postgres \
+  --instance=biblio-pgsql \
+  --password="$(openssl rand -base64 32)" \
+  --project=hajimari-ai-hackathon-2026
+unset PG_TEMP_PASS
+
+# 5. OneCLI Deployment を rollout restart → Prisma migrate deploy 成功を確認
+kubectl rollout restart deployment/biblio-onecli -n biblio-claw
+kubectl rollout status deployment/biblio-onecli -n biblio-claw --timeout=180s
+kubectl logs deployment/biblio-onecli -n biblio-claw -c onecli --tail=30 \
+  | grep -E "(All migrations|gateway ready|Ready in)"
+```
+
+#### security 上の注意
+
+- 一時パスワードは「生成 → 使用 → 別ランダム値で上書き」の流れで運用者の手元にも残さない設計 (Step 1 → Step 4)
+- Step 4 の overwrite で実質的に `postgres` user は無効化される (運用は IAM 認証経路のみ)
+- `gcloud sql users delete postgres` は built-in 制約で削除不可、上書きで対処
+- teardown 時は Cloud SQL インスタンスごと削除されるため別途 cleanup 不要 (`scripts/teardown-phase-2.sh` 参照)
+- 本手順で発行する一時パスワードは Cloud SQL に対する administrator credentials なので、実行ログ・shell 履歴・スクリーンショット等への流出に注意
+
 > **以下は NanoClaw 上流 README を継承する**。biblio-claw のために書き換えていない部分が多く含まれる。本リポジトリ向けの公式手順は上記「クイックスタート」と `CLAUDE.md` を優先すること。
 
 ---
