@@ -28,7 +28,8 @@ spec:
       containers:
         - name: orchestrator
           # Phase 1 build の image を AR に push してから apply する想定。
-          # tag `m1-p1` で SHA を Phase 1 と一致させる (plan §UX Design L162)。
+          # tag `m1-p1` で SHA を Phase 1 と一致させる (アプリ image 不変原則
+          # = Phase 2 のスコープが env + manifest に閉じている根拠)。
           image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
           env:
             # === 環境差分アダプタの env switch (Phase 1 で仕込み済) ===

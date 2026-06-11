@@ -39,6 +39,11 @@ case "${1:-}" in
   *) fail "usage: $0 [--dry-run | --confirm]" ;;
 esac
 
+# --confirm 実行時の失敗件数カウンタ。run() で増分し、最終 summary で warn を発火する
+# 用途 (silent failure 防止)。複数 delete の連鎖失敗を「途中まで成功 + 残り未削除」
+# として可視化する。dry-run では使わない (実行していないため)。
+WARN_COUNT=0
+
 if $DRY_RUN; then
   info "==== Phase 2 teardown (dry-run mode、何も削除しない) ===="
 else
@@ -47,13 +52,18 @@ else
   sleep 10
 fi
 
-# run: dry-run なら [dry-run] log、--confirm なら実行 (失敗時は warn で継続)
+# run: dry-run なら [dry-run] log、--confirm なら実行 (失敗時は WARN_COUNT++ + warn 継続)。
+# 削除は best-effort で前進したいが、連鎖失敗を summary で必ず可視化するため
+# 失敗件数をスクリプトレベルで集計する。
 run() {
   if $DRY_RUN; then
     info "[dry-run] $*"
   else
     info "[exec] $*"
-    "$@" || warn "(command failed, 継続)"
+    if ! "$@"; then
+      WARN_COUNT=$((WARN_COUNT + 1))
+      warn "(command failed, 継続) — $*"
+    fi
   fi
 }
 
@@ -87,6 +97,18 @@ if $DRY_RUN; then
   info "self-grant role の解除は別途:"
   info "  gcloud projects remove-iam-policy-binding $PROJECT --member=user:<DEN> --role=roles/servicenetworking.networksAdmin"
   info "  gcloud projects remove-iam-policy-binding $PROJECT --member=user:<DEN> --role=roles/secretmanager.admin"
+elif [ "$WARN_COUNT" -gt 0 ]; then
+  printf '\n'
+  warn "==== Phase 2 teardown 終了 — $WARN_COUNT 件の失敗あり ===="
+  warn "削除失敗が含まれる可能性。次のコマンドで残存リソースを確認 + 手動 cleanup を推奨:"
+  warn "  kubectl get all -n $NS"
+  warn "  gcloud container clusters list --filter='name:biblio-prod' --project=$PROJECT"
+  warn "  gcloud sql instances list --filter='name:biblio-pgsql' --project=$PROJECT"
+  warn "  gcloud artifacts repositories list --location=$REGION --project=$PROJECT --filter='name~biblio-claw'"
+  warn "  gcloud iam service-accounts list --filter='email~biblio' --project=$PROJECT"
+  warn "  gcloud compute networks list --filter='name:biblio-net' --project=$PROJECT"
+  warn "Secret Manager biblio-gh-app-pem は残置 (本番運用継続のため)"
+  exit 1
 else
-  ok "==== Phase 2 teardown 完了 (Secret Manager biblio-gh-app-pem は残置) ===="
+  ok "==== Phase 2 teardown 完了 — 全コマンド成功 (Secret Manager biblio-gh-app-pem は残置) ===="
 fi

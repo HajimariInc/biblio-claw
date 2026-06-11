@@ -82,8 +82,8 @@ async function main(): Promise<void> {
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
 
-  // Phase 2 verify 用の boots カウンタ (PoC-13 写経の決定的指紋)。
-  // PVC + SQLite の永続化が機能していることを Pod 再作成跨ぎの increment で確認する。
+  // PVC + SQLite の永続化が機能していることを Pod 再作成跨ぎの boots increment で
+  // 確認する (Phase 2 verify-phase-2-wiring.sh §7 = 永続化検証の決定的指紋)。
   // 戻り値 -1 は increment 失敗 (migration016 未適用 等)。host は起動を継続するが
   // PVC 永続化が壊れている兆候として可視化する (silent failure 防止)。
   const bootCount = incrementBootCounter(db);

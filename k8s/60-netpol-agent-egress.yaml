@@ -11,7 +11,10 @@
 # 制限ルール:
 #   - NodeLocal DNS (169.254.20.10/32) と kube-dns Pod への TCP/UDP 53 を許可
 #   - 0.0.0.0/0 except 169.254.169.254/32 (GCE metadata は明示 block) への
-#     TCP 443 / 10254 / 10255 を許可 (OneCLI ClusterIP の port + 一般 HTTPS)
+#     TCP 443 / 10254 / 10255 を許可。TCP 443 はインターネット上の任意の HTTPS
+#     へのアウトバウンドを含む (agent が OneCLI MITM を経由して外部 API を呼ぶ
+#     経路で、OneCLI ClusterIP 経由のため実体は OneCLI で集約される)。
+#     10254/10255 は OneCLI の REST/proxy port。
 #   - 上記以外はすべて egress 不可 (default-deny on policyTypes: Egress)
 
 apiVersion: networking.k8s.io/v1
