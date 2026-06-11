@@ -57,6 +57,10 @@ spec:
           image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.16.0
           args:
             - '--auto-iam-authn'
+            # cloud-sql-proxy v2 のデフォルトは PUBLIC IP を試みる。biblio-pgsql は
+            # Private IP only (--no-assign-ip で作成、Task 1.4) のため明示指定が必要。
+            # 未指定だと: "instance does not have IP of type PUBLIC" で接続失敗する。
+            - '--private-ip'
             - '--port=5432'
             - 'hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql'
           resources:
