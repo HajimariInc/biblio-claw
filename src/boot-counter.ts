@@ -17,12 +17,8 @@ import { log } from './log.js';
  * @returns 増分後の count (異常時は -1)
  */
 export function incrementBootCounter(db: Database.Database): number {
-  db.prepare(
-    `UPDATE boots SET count = count + 1, last_boot_at = datetime('now') WHERE id = 1`,
-  ).run();
-  const row = db.prepare('SELECT count FROM boots WHERE id = 1').get() as
-    | { count: number }
-    | undefined;
+  db.prepare(`UPDATE boots SET count = count + 1, last_boot_at = datetime('now') WHERE id = 1`).run();
+  const row = db.prepare('SELECT count FROM boots WHERE id = 1').get() as { count: number } | undefined;
   if (!row) {
     // migration016 で id=1 行が必ず作成されるので、ここに来るのは異常。
     // boots テーブル自体が無いか、migration が走っていない状態。
