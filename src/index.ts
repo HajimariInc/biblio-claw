@@ -6,6 +6,7 @@
  */
 import { getDsnProvider, getSecretProvider } from './adapters/index.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
+import { incrementBootCounter } from './boot-counter.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
@@ -81,6 +82,15 @@ async function main(): Promise<void> {
   runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
 
+  // PVC + SQLite の永続化が機能していることを Pod 再作成跨ぎの boots increment で
+  // 確認する (Phase 2 verify-phase-2-wiring.sh §7 = 永続化検証の決定的指紋)。
+  // 戻り値 -1 は increment 失敗 (migration016 未適用 等)。host は起動を継続するが
+  // PVC 永続化が壊れている兆候として可視化する (silent failure 防止)。
+  const bootCount = incrementBootCounter(db);
+  if (bootCount === -1) {
+    log.warn('Boot counter failed — PVC persistence may be broken, continuing startup', { dbPath });
+  }
+
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
   backfillContainerConfigs();
@@ -88,9 +98,23 @@ async function main(): Promise<void> {
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
 
-  // 2. Container runtime
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+  // 2. Container runtime (A 案: agent K8s spawn は M2 以降のため env で skip 可能)
+  // Phase 2 plan §補足の A 案 (Slack を orchestrator 統合 + agent K8s 化を M2 以降に
+  // 延期) を実装上で機能させるための補完。本 env を true にすると docker daemon
+  // チェックを skip し、orchestrator + channel adapter のみで起動する。
+  // 副作用: agent spawn (Slack/CLI で agent と対話) 時に container-runner.ts が
+  // docker run を呼び失敗する。M1 Phase 2 の完成判定 (orchestrator 起動 + Slack
+  // 接続 + boots 永続化 + Sidecar token 投入) では agent spawn は不要のため成立する。
+  // M2 で K8s Job spawn を実装したら本 env を false (省略) に戻す。
+  if (process.env.SKIP_CONTAINER_RUNTIME_CHECK === 'true') {
+    log.warn(
+      'Container runtime check skipped (SKIP_CONTAINER_RUNTIME_CHECK=true) — ' +
+        'agent spawn は無効、orchestrator + channel adapter のみ動く (Phase 2 A 案)',
+    );
+  } else {
+    ensureContainerRuntimeRunning();
+    cleanupOrphans();
+  }
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {

@@ -1,0 +1,51 @@
+# biblio-claw Dockerfile (host 用) の build context から除外。
+# Dockerfile.sidecar build 時にも同じ context が使われるが、Dockerfile.sidecar の
+# COPY は scripts/ のみ参照するため除外で問題なし。
+
+# Build 成果物 / state ディレクトリ
+node_modules
+dist
+groups
+data
+logs
+
+# Git / IDE / メタファイル
+.git
+.gitignore
+.dockerignore
+.github
+.husky
+.nvmrc
+.mcp.json
+
+# 環境 / 秘密 (絶対に image に焼かない)
+.env
+.env.*
+*.pem
+*.key
+
+# AI Agent 設定 / 非公開ドキュメント
+.claude
+
+# Docker 関連 (Dockerfile 本体は別途 docker build で参照される)
+Dockerfile
+Dockerfile.sidecar
+docker-compose.yml
+
+# Test / lint config (host runtime には不要)
+vitest.config.ts
+vitest.skills.config.ts
+
+# 別 build target (agent-runner image は container/build.sh で別途 build)
+container
+
+# K8s manifest / setup (image には焼かない)
+k8s
+setup
+docs
+
+# Markdown / changelog (runtime 不要)
+README.md
+CHANGELOG.md
+CLAUDE.md
+CONTRIBUTING.md

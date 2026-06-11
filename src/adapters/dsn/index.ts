@@ -6,6 +6,7 @@
  * (Phase 2) implementation, an env switch is simpler and the known set stays
  * explicit (ARCHITECT decision, see plan §補足).
  */
+import { GkeDsnProvider } from './gke.js';
 import { LocalDsnProvider } from './local.js';
 import type { DsnProvider } from './types.js';
 
@@ -20,8 +21,11 @@ export function getDsnProvider(): DsnProvider {
     case 'local':
       instance = new LocalDsnProvider();
       break;
+    case 'gke':
+      instance = new GkeDsnProvider();
+      break;
     default:
-      throw new Error(`Unknown DSN_PROVIDER: ${name}. Known: local`);
+      throw new Error(`Unknown DSN_PROVIDER: ${name}. Known: local, gke`);
   }
   return instance;
 }
