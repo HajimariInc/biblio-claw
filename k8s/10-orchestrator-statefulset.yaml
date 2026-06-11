@@ -28,9 +28,12 @@ spec:
       containers:
         - name: orchestrator
           # Phase 1 build の image を AR に push してから apply する想定。
-          # tag `m1-p1` で SHA を Phase 1 と一致させる (アプリ image 不変原則
-          # = Phase 2 のスコープが env + manifest に閉じている根拠)。
+          # tag `m1-p1` を Phase 2 中の iteration で何度か上書き push するため、
+          # 同 tag への push 後に rollout で確実に新 SHA を引かせるべく Always 指定する。
+          # M1 完成判定後 (base/m1-p2-prod-deploy への merge 時) に digest pin へ
+          # 切り替える運用を想定 (reproducibility 担保)。
           image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
+          imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch (Phase 1 で仕込み済) ===
             - { name: DSN_PROVIDER, value: gke } # Task 3 で追加した case 'gke'
