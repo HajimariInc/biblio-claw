@@ -47,4 +47,9 @@ agents-sdk-docs
 
 # biblio-claw — Claude Code 設定・PRP 議論内容は当面非公開
 # (memory: biblio_claw_claude_dir_private)
-.claude/
+# 親ディレクトリそのものを ignore すると配下の `!` 例外が効かないため、
+# 中身を deny して templates/ だけ allow する流儀で書く
+.claude/*
+# 例外: .claude/templates/ は repo 同梱 (fork した人 / PC 移行時 / 大会審査員向け)
+# 使い方: 必要時に手で repo root へ cp し、終わったら repo root 側を rm する
+!.claude/templates/

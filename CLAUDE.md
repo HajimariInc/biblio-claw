@@ -31,45 +31,66 @@ PRP / Phase 構造の階層モデル・判断軸・sub PRD の段階的展開・
 
 ## Branch 戦略
 
-biblio プロジェクト固有の branch 戦略。**本セクションは `/prp-implement` / `/prp-pr` / `/prp-mr` などの PRP コマンドのデフォルト挙動 (例: `git checkout -b feature/{plan-slug}`) を上書きする**。PRP コマンドを実行する際、本セクションを最優先する。
+biblio プロジェクトの branch 戦略 — **全 Milestone を横断する運用ルール**。`/prp-implement` / `/prp-pr` / `/prp-mr` などの PRP コマンドのデフォルト挙動を上書きする。PRP コマンド実行時、本セクションを最優先する。
 
-### 3 層構造
+### 4 階層モデル (M2 以降の正書き)
 
-| 層 | 命名規則 | base | 目的 |
+```
+main (Protection)                                ← Milestone の終着点
+  └─ base/<prd-slug>                             ← PRD (1 Milestone = N PRD)
+       └─ feature/phase-<N>-<slug>               ← Phase (= plan)
+            └─ Task (plan 内チェックリスト、ブランチなし)
+```
+
+| 階層 | 命名規則 | base | 目的 |
 | :--- | :--- | :--- | :--- |
-| **main** (Protection branch) | `main` | - | Prod 同等のリソース状態 (原則)。マイルストーン走破 or CI/CD 整備までは緩い運用 |
-| **sub PRD 層** | `base/<M>-<P>-<phase-slug>` | `main` | sub PRD = Phase 1 件分の作業を集約する中間ブランチ。Phase 完了で main へ merge |
-| **作業層** | `feature/phase-<N>-task-<M>-<slug>` | 対応する `base/<M>-<P>-<phase-slug>` | plan の Task 1 件 = 1 feature ブランチ。base へ PR + コードレビュー + 修正 + merge |
+| **main** (Protection) | `main` | - | Prod 同等のリソース状態。Milestone 完了 = 配下 PRD 全てが合流した状態 |
+| **PRD** | `base/<prd-slug>` | `main` | 1 Milestone 内の独立した実装計画単位。Milestone 配下で `base/m<N>-<a/b/c>-<theme>` 形式 (例: `base/m2-a-foundation`)、Milestone なしの単発 PRD は `base/<theme>` |
+| **Phase** (= plan) | `feature/phase-<N>-<slug>` | 対応する `base/<prd-slug>` | PRD 内の中間達成点。**1 plan = 1 feature の 1:1 対応**。Task はブランチを切らず plan 内チェックに降格 |
 
-### 例 (M1 Phase 1)
+> **重要 (M1 の反省)**: 旧モデル (1 M = 1 PRD + sub PRD = Phase 単位 + Task per feature branch) を採用した M1 で **過剰分割の歪** が出た (Phase 2 plan = 68KB / Task per feature で命名揺れ多発)。M2 以降は **1 plan = 1 feature の 1:1 対応** + plan サイズ規律 (25-40KB / 300-500 行) で運用する。M1 の branch (`base/m1-p1-lib` / `base/m1-p2-prod-deploy`) は旧ルール基準で残置 (= 履歴扱い、書き換えない)。
+
+### 例 (M2 想定)
 
 ```
 main (Protection)
- ├── base/m1-p1-lib                               ← Phase 1 sub PRD のベース (実体)
- │    ├── feature/phase-1-local-implementation        ← Task 1 (NanoClaw fork 取り込み)
- │    ├── feature/phase-1-adapters                     ← 環境差分アダプタ
- │    ├── feature/phase-1-wiring                       ← docker compose + Vertex
- │    ├── feature/phase-1-task-1-add-slack-socket-mode ← Slack adapter
- │    ├── feature/phase-1-task-7b-sidecar-verify       ← Sidecar + verify
- │    └── ...
- └── base/m1-p2-prod-deploy                       ← Phase 2 sub PRD のベース (Phase 1 完了後)
-      ├── feature/phase-2-task-1-cloudsql-wire
-      └── ...
+ ├── base/m2-a-foundation                  ← PRD A: 基盤回収
+ │    ├── feature/phase-1-m1-cleanup         ← Phase 1 (M1 残課題)
+ │    └── feature/phase-2-init-first-agent   ← Phase 2 (init-first-agent)
+ └── base/m2-b-marketplace                 ← PRD B: marketplace 本体 (PRD A 完了後)
+      ├── feature/phase-1-shiire             ← Phase 1 (仕入れ)
+      ├── feature/phase-2-kenpin             ← Phase 2 (検品)
+      └── feature/phase-3-chinretsu          ← Phase 3 (陳列)
 ```
 
 ### PRP コマンドへの適用
 
-- **`/prp-plan`**: 新規 Phase 着手時、`main` から `base/<M>-<P>-<phase-slug>` を切る
-- **`/prp-implement` / `/prp-ralph`**: 各 Task 着手時、対応する `base/<M>-<P>-...` から `feature/phase-<N>-task-<M>-<slug>` を切る
-- **`/prp-pr` / `/prp-mr`**: feature → base への PR を作成。Phase 完了時に **別途** base → main への PR を作成
-- **デフォルトとの差**: prp-implement のテンプレートは `git checkout -b feature/{plan-slug}` だが、本ルールでは **2 階層 (base/\* → feature/\*)** で運用する
+| コマンド | 起こすもの | branch 操作 |
+| :--- | :--- | :--- |
+| `/prp-milestone` | Milestone overview | なし (Vault に書き出す) |
+| `/prp-prd` | PRD | `main` から `base/<prd-slug>` を切る (PRD 着手時) |
+| `/prp-plan` | Phase plan | なし (plan ファイル生成のみ) |
+| `/prp-implement` / `/prp-ralph` | Phase plan の実装 | 対応する `base/<prd-slug>` から `feature/phase-<N>-<slug>` を切る |
+| `/prp-pr` / `/prp-mr` | PR / MR 作成 | feature → base への PR を作成。PRD 完了時に **別途** base → main の PR を作成 |
+
+**デフォルトとの差**: `/prp-implement` のテンプレートは `git checkout -b feature/{plan-slug}` だが、本ルールでは **2 階層 (base/\* → feature/\*)** で運用する。
 
 ### 運用上の注意
 
-- Phase 完了 = sub PRD の全 Task が base へ merge 済 + Phase verify exit 0 + base → main の PR が merge 済
+- **PRD 完了** = PRD の全 Phase が base へ merge 済 + 統合 verify exit 0 + base → main の PR merge 済
+- **Milestone 完了** = 配下 PRD 全てが main に合流した状態
 - main 直 push は禁止 (Protection)
-- 直近は CI/CD 未整備のため Protection は緩い (メンテナー手動運用)。マイルストーン走破 or CI/CD 整備で Protection を厳格化する予定
-- 本方針は **biblio プロジェクト (biblio-claw / biblio-shelf) 専用**。他プロジェクトには適用しない
+- 直近は CI/CD 未整備のため Protection は緩い (メンテナー手動運用)。Milestone 走破 or CI/CD 整備で Protection を厳格化する予定
+- 本方針は biblio プロジェクト (biblio-claw / biblio-shelf) の **全 Milestone 横断**。他プロジェクトには汎用化済の wf-realm `reference/prd_phase_structure.md` を参照
+
+### 関連ドキュメント
+
+階層モデル・命名・PRP の汎用方法論と biblio 固有の事例集は次に分離:
+
+- wf-realm `reference/prd_phase_structure.md` — **汎用方法論の正本** (階層・命名・PRP・検証戦略)
+  - WHEN: 階層モデルの根拠・他プロジェクトへの適用判断・汎用ベストプラクティスを確認したいとき
+- Vault `11-labo/biblio-shelf/design/branch-strategy.md` — **biblio 固有の事例集**
+  - WHEN: M1 で何が歪んだかの振り返り / M2 の具体構成 / 注入経路の運用 / PoC との関係を確認したいとき
 
 ## 環境分離方針 (M1 採用)
 
@@ -89,7 +110,7 @@ M1 は **環境分離型 (D-1)** で進める:
 
 ## 関連
 
-- biblio-shelf (棚、public) = `example-org/biblio-shelf` — skill 本体 + marketplace
+- biblio-shelf (棚、public) = `HajimariInc/biblio-shelf` — skill 本体 + marketplace (2026-06-12 旧 `example-org` org から移設)
 - NanoClaw 上流 = `nanocoai/nanoclaw` @ `2492259` (2026-05-28) を本 repo に取り込み済 (Phase 1 Task 1 完了 2026-06-01)
 
 ---
