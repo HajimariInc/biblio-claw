@@ -2,24 +2,23 @@
  * Container Runner v2
  * Spawns agent containers with session folder + agent group folder mounts.
  * The container runs the v2 agent-runner which polls the session DB.
+ *
+ * Runtime-agnostic: the actual spawn is delegated to a
+ * `ContainerRuntimeProvider` (Docker locally, K8s Job on GKE) selected via the
+ * `CONTAINER_PROVIDER` env var. This file builds a runtime-neutral
+ * `AgentSpawnSpec` (mounts, env, command, OneCLI raw args) and hands it off.
  */
-import { ChildProcess, execSync, spawn } from 'child_process';
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
+import { getContainerRuntimeProvider } from './adapters/container/index.js';
+import type { AgentHandle, AgentSpawnSpec } from './adapters/container/index.js';
 import { getSecretProvider } from './adapters/secret/index.js';
-import {
-  CONTAINER_IMAGE,
-  CONTAINER_IMAGE_BASE,
-  CONTAINER_INSTALL_LABEL,
-  DATA_DIR,
-  GROUPS_DIR,
-  TIMEZONE,
-} from './config.js';
+import { CONTAINER_IMAGE, CONTAINER_IMAGE_BASE, DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -45,7 +44,7 @@ import {
 import type { AgentGroup, Session } from './types.js';
 
 /** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+const activeContainers = new Map<string, { handle: AgentHandle; agentGroupId: string }>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -118,12 +117,12 @@ async function spawnContainer(session: Session): Promise<void> {
 
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
-  // and buildContainerArgs so we don't re-read.
+  // and buildContainerSpec so we don't re-read.
   const containerConfig = materializeContainerJson(agentGroup.id);
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
-  // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
+  // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
@@ -131,10 +130,11 @@ async function spawnContainer(session: Session): Promise<void> {
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(
+  const spec = await buildContainerSpec(
     mounts,
     containerName,
     agentGroup,
+    session,
     containerConfig,
     provider,
     contribution,
@@ -149,39 +149,44 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const runtime = getContainerRuntimeProvider();
+  const handle = await runtime.spawn(spec);
 
-  activeContainers.set(session.id, { process: container, containerName });
+  activeContainers.set(session.id, { handle, agentGroupId: agentGroup.id });
   markContainerRunning(session.id);
-
-  // Log stderr
-  container.stderr?.on('data', (data) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
-    }
-  });
-
-  // stdout is unused in v2 (all IO is via session DB)
-  container.stdout?.on('data', () => {});
 
   // No host-side idle timeout. Stale/stuck detection is driven by the host
   // sweep reading heartbeat mtime + processing_ack claim age + container_state
   // (see src/host-sweep.ts). This avoids killing long-running legitimate work
   // on a wall-clock timer.
 
-  container.on('close', (code) => {
-    activeContainers.delete(session.id);
-    markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
-    log.info('Container exited', { sessionId: session.id, code, containerName });
-  });
-
-  container.on('error', (err) => {
-    activeContainers.delete(session.id);
-    markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
-    log.error('Container spawn error', { sessionId: session.id, err });
-  });
+  // waitForExit() is contracted never to reject, but the .then() body itself
+  // (markContainerStopped, stopTypingRefresh) could throw on DB lock or
+  // similar — without a .catch(), Node turns that into an unhandledRejection
+  // and the cleanup silently skips, leaving zombie entries in activeContainers.
+  handle
+    .waitForExit()
+    .then((info) => {
+      activeContainers.delete(session.id);
+      markContainerStopped(session.id);
+      stopTypingRefresh(session.id);
+      log.info('Container exited', {
+        sessionId: session.id,
+        code: info.code,
+        reason: info.reason,
+        handleId: handle.id,
+      });
+    })
+    .catch((err) => {
+      // Last-resort: drop the activeContainers entry so the next wake doesn't
+      // skip spawn due to a stuck zombie, then surface the failure.
+      activeContainers.delete(session.id);
+      log.error('Container exit handler failed', {
+        sessionId: session.id,
+        handleId: handle.id,
+        err,
+      });
+    });
 }
 
 /** Kill a container for a session. */
@@ -189,16 +194,13 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
 
+  log.info('Killing container', { sessionId, reason, handleId: entry.handle.id });
   if (onExit) {
-    entry.process.once('close', onExit);
+    entry.handle.waitForExit().finally(onExit);
   }
-
-  log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
-  try {
-    stopContainer(entry.containerName);
-  } catch {
-    entry.process.kill('SIGKILL');
-  }
+  entry.handle.kill().catch((err) => {
+    log.warn('Container kill failed', { sessionId, err });
+  });
 }
 
 /**
@@ -391,25 +393,24 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 }
 
-async function buildContainerArgs(
+async function buildContainerSpec(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
+  session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
-  provider: string,
+  _provider: string,
   providerContribution: ProviderContainerContribution,
-  agentIdentifier?: string,
-): Promise<string[]> {
-  const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
-
-  // Environment — only vars read by code we don't own.
-  // Everything NanoClaw-specific is in container.json (read by runner at startup).
-  args.push('-e', `TZ=${TIMEZONE}`);
+  agentIdentifier: string,
+): Promise<AgentSpawnSpec> {
+  // Base env — only vars read by code we don't own. Everything NanoClaw-
+  // specific is in container.json (read by runner at startup).
+  const env: { name: string; value: string }[] = [{ name: 'TZ', value: TIMEZONE }];
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {
-      args.push('-e', `${key}=${value}`);
+      env.push({ name: key, value });
     }
   }
 
@@ -418,46 +419,48 @@ async function buildContainerArgs(
   // a transient hard failure: if we can't wire the gateway, we don't spawn.
   // The caller (router or host-sweep) catches the throw, leaves the inbound
   // message pending, and the next sweep tick retries.
+  //
+  // We pass a dedicated `onecliArgs` array (not the spec env list) because
+  // applyContainerSecrets() mutates it with Docker CLI flags (`-e`, `-v`,
+  // optional `--add-host`). The Provider translates that raw blob into its
+  // native shape (Docker concats them; K8sJobProvider parses to env / volumes
+  // / hostAliases). Keeping it raw means the OneCLI SDK contract stays the
+  // single source of truth.
+  const onecliArgs: string[] = [];
   const secret = getSecretProvider();
-  if (agentIdentifier) {
-    await secret.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-  }
-  const onecliApplied = await secret.applyContainerSecrets(args, { addHostMapping: false, agent: agentIdentifier });
+  await secret.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  const onecliApplied = await secret.applyContainerSecrets(onecliArgs, {
+    addHostMapping: false,
+    agent: agentIdentifier,
+  });
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
 
-  // Host gateway
-  args.push(...hostGatewayArgs());
-
-  // User mapping
+  // User mapping — Docker maps to `--user`, K8sJobProvider ignores this in
+  // favor of the image-default user (Autopilot restricts arbitrary UIDs).
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/home/node');
-  }
-
-  // Volume mounts
-  for (const mount of mounts) {
-    if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
-    } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
-    }
-  }
-
-  // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
-  args.push('--entrypoint', 'bash');
+  const runAsUser = hostUid != null && hostUid !== 0 && hostUid !== 1000 ? { uid: hostUid, gid: hostGid } : null;
 
   // Use per-agent-group image if one has been built, otherwise base image
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
-  args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
-
-  return args;
+  return {
+    agentGroupId: agentGroup.id,
+    agentGroupName: agentGroup.name,
+    agentGroupFolder: agentGroup.folder,
+    sessionId: session.id,
+    image: imageTag,
+    mounts,
+    env,
+    onecliApplyArgs: onecliArgs,
+    command: ['-c', 'exec bun run /app/src/index.ts'],
+    containerName,
+    runAsUser,
+    agentIdentifier,
+  };
 }
 
 /** Build a per-agent-group Docker image with custom packages. */
@@ -495,7 +498,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   const tmpDockerfile = path.join(DATA_DIR, `Dockerfile.${agentGroupId}`);
   fs.writeFileSync(tmpDockerfile, dockerfile);
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
+    execSync(`docker build -t ${imageTag} -f ${tmpDockerfile} .`, {
       cwd: DATA_DIR,
       stdio: 'pipe',
       timeout: 900_000,
@@ -504,7 +507,6 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     fs.unlinkSync(tmpDockerfile);
   }
 
-  // Store the image tag in the DB
   updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
 
   log.info('Per-agent-group image built', { agentGroupId, imageTag });

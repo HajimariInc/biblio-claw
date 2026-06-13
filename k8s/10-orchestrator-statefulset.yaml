@@ -1,8 +1,11 @@
 # Orchestrator: NanoClaw host プロセスを GKE 上で動かす単一の StatefulSet。
-# replicas=1 で SQLite + PVC が安全 (PoC-13 写経)。
-# A 案 (plan §補足) 採用: Slack adapter は src/channels/slack.ts で
-# main host に統合済のため、本 Pod の envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN
-# を受け取れば self-registration が token を見つけて起動する = 別 Pod 不要。
+# replicas=1 で SQLite + PVC が安全。
+#
+# 構成方針:
+# - Slack adapter は host に統合済 (src/channels/slack.ts) のため、本 Pod の
+#   envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN を受け取れば別 Pod 不要。
+# - agent コンテナは CONTAINER_PROVIDER=k8s で K8s Job として spawn
+#   (k8s/02-orchestrator-rbac.yaml の RBAC が前提)。
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -27,16 +30,28 @@ spec:
       serviceAccountName: biblio-orchestrator-ksa
       containers:
         - name: orchestrator
-          # tag `m1-p1` を Phase 2 / M2 着手期の iteration で何度か上書き push するため、
-          # 同 tag への push 後に rollout で確実に新 SHA を引かせるべく Always 指定する。
-          # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること (reproducibility 担保)。
+          # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
+          # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
+          # (reproducibility 担保)。
           image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
           imagePullPolicy: Always
           env:
-            # === 環境差分アダプタの env switch (Phase 1 で仕込み済) ===
-            - { name: DSN_PROVIDER, value: gke } # Task 3 で追加した case 'gke'
+            # === 環境差分アダプタの env switch ===
+            - { name: DSN_PROVIDER, value: gke } # src/adapters/dsn/gke.ts
             - { name: SCHEDULER_PROVIDER, value: local }
             - { name: SECRET_PROVIDER, value: onecli }
+            # agent コンテナを K8s Job として spawn する Provider に切替
+            # (`docker` default は Pod 内に dockerd 不在で FATAL になる)
+            - { name: CONTAINER_PROVIDER, value: k8s }
+            # K8sJobProvider が createNamespacedJob namespace + Informer path に使う
+            - { name: BIBLIO_NAMESPACE, value: biblio-claw }
+            # agent Job が pull する image。container-runner.ts:buildContainerSpec
+            # で spec.image にセットされ、K8sJobProvider が Job spec の image に
+            # 写し込む。`imagePullPolicy: Always` で同 tag への上書き push に追従。
+            - {
+                name: CONTAINER_IMAGE,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m1-p1,
+              }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
             # === OneCLI gateway (in-cluster ClusterIP) ===
@@ -47,13 +62,6 @@ spec:
             - { name: CLOUD_ML_REGION, value: global }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
-            # === A 案補完 (agent K8s spawn 未対応のため container runtime check を skip) ===
-            # NanoClaw 上流の host は起動時 docker daemon チェック (docker info) を必須
-            # としており、Pod 内で docker 不在のため FATAL クラッシュする。本 env で skip し
-            # orchestrator + channel adapter のみで起動する。M2 で K8s Job spawn を実装した
-            # ら本 env を削除して agent spawn を復活させる。詳細: src/index.ts の "2. Container
-            # runtime" ブロック (Phase 2 PR #7 で追加)。
-            - { name: SKIP_CONTAINER_RUNTIME_CHECK, value: 'true' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:

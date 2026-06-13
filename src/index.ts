@@ -11,7 +11,7 @@ import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
-import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
+import { getContainerRuntimeProvider } from './adapters/container/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
@@ -98,23 +98,13 @@ async function main(): Promise<void> {
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
 
-  // 2. Container runtime (A 案: agent K8s spawn は M2 以降のため env で skip 可能)
-  // Phase 2 plan §補足の A 案 (Slack を orchestrator 統合 + agent K8s 化を M2 以降に
-  // 延期) を実装上で機能させるための補完。本 env を true にすると docker daemon
-  // チェックを skip し、orchestrator + channel adapter のみで起動する。
-  // 副作用: agent spawn (Slack/CLI で agent と対話) 時に container-runner.ts が
-  // docker run を呼び失敗する。M1 Phase 2 の完成判定 (orchestrator 起動 + Slack
-  // 接続 + boots 永続化 + Sidecar token 投入) では agent spawn は不要のため成立する。
-  // M2 で K8s Job spawn を実装したら本 env を false (省略) に戻す。
-  if (process.env.SKIP_CONTAINER_RUNTIME_CHECK === 'true') {
-    log.warn(
-      'Container runtime check skipped (SKIP_CONTAINER_RUNTIME_CHECK=true) — ' +
-        'agent spawn は無効、orchestrator + channel adapter のみ動く (Phase 2 A 案)',
-    );
-  } else {
-    ensureContainerRuntimeRunning();
-    cleanupOrphans();
-  }
+  // 2. Container runtime — provider-selected via CONTAINER_PROVIDER env
+  // (`docker` for local dev, `k8s` for GKE). Pre-flight check (docker info /
+  // K8s API reach) plus orphan sweep run regardless of provider.
+  const containerRuntime = getContainerRuntimeProvider();
+  await containerRuntime.ensureRuntime();
+  await containerRuntime.cleanupOrphans();
+  log.info(`container runtime = ${containerRuntime.name}`);
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
