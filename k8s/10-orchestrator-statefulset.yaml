@@ -1,8 +1,11 @@
 # Orchestrator: NanoClaw host プロセスを GKE 上で動かす単一の StatefulSet。
 # replicas=1 で SQLite + PVC が安全 (PoC-13 写経)。
-# A 案 (plan §補足) 採用: Slack adapter は src/channels/slack.ts で
-# main host に統合済のため、本 Pod の envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN
-# を受け取れば self-registration が token を見つけて起動する = 別 Pod 不要。
+# A 案 (M1 Phase 2): Slack adapter は src/channels/slack.ts で main host に統合
+# 済のため、本 Pod の envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN を受け取れば
+# self-registration が token を見つけて起動する = 別 Pod 不要。
+# M2 Phase 1: CONTAINER_PROVIDER=k8s を有効化し、agent コンテナを K8s Job として
+# spawn する (k8s/02-orchestrator-rbac.yaml の RBAC が前提)。SKIP_CONTAINER_
+# RUNTIME_CHECK env は廃止 — Provider 抽象化で K8s API の到達確認に置換。
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -33,10 +36,23 @@ spec:
           image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
           imagePullPolicy: Always
           env:
-            # === 環境差分アダプタの env switch (Phase 1 で仕込み済) ===
-            - { name: DSN_PROVIDER, value: gke } # Task 3 で追加した case 'gke'
+            # === 環境差分アダプタの env switch ===
+            - { name: DSN_PROVIDER, value: gke } # src/adapters/dsn/gke.ts
             - { name: SCHEDULER_PROVIDER, value: local }
             - { name: SECRET_PROVIDER, value: onecli }
+            # M2 Phase 1: agent コンテナを K8s Job として spawn する Provider に切替。
+            # `docker` (default) の場合は dockerd を要求して FATAL クラッシュする。
+            - { name: CONTAINER_PROVIDER, value: k8s } # src/adapters/container/k8s.ts
+            # === K8s Job spawn 用設定 ===
+            # K8sJobProvider が createNamespacedJob 第 1 引数 + Informer path に使う
+            - { name: BIBLIO_NAMESPACE, value: biblio-claw }
+            # Job template の image (= agent コンテナの実体)。tag は orchestrator と
+            # 同じ Artifact Registry レポジトリだが nanoclaw-agent image を指す。
+            # `imagePullPolicy: Always` で latest 系 tag の上書き push にも追従する。
+            - {
+                name: BIBLIO_AGENT_IMAGE,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m1-p1,
+              }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
             # === OneCLI gateway (in-cluster ClusterIP) ===
@@ -47,13 +63,6 @@ spec:
             - { name: CLOUD_ML_REGION, value: global }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
-            # === A 案補完 (agent K8s spawn 未対応のため container runtime check を skip) ===
-            # NanoClaw 上流の host は起動時 docker daemon チェック (docker info) を必須
-            # としており、Pod 内で docker 不在のため FATAL クラッシュする。本 env で skip し
-            # orchestrator + channel adapter のみで起動する。M2 で K8s Job spawn を実装した
-            # ら本 env を削除して agent spawn を復活させる。詳細: src/index.ts の "2. Container
-            # runtime" ブロック (Phase 2 PR #7 で追加)。
-            - { name: SKIP_CONTAINER_RUNTIME_CHECK, value: 'true' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
