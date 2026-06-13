@@ -52,9 +52,12 @@ ROLE="biblio-orchestrator-agent-spawner"
 kubectl get role "$ROLE" -n "$NS" >/dev/null 2>&1 \
   || fail "[rbac] Role $ROLE が存在しない — k8s/02-orchestrator-rbac.yaml が apply されているか確認 (kubectl apply -f k8s/02-orchestrator-rbac.yaml)"
 
-# Job operations が allowed されているか確認 (batch/jobs に create + watch + delete)
+# Job operations が allowed されているか確認 (batch/jobs に create + watch + delete)。
+# kubectl jsonpath は配列をそのまま指すと `["a","b"]` の JSON literal を返すことが
+# あるため、`range ...[*]` で各要素を空白区切りに展開してから含有チェックする。
 required_verbs=("create" "get" "list" "watch" "delete")
-jobs_verbs="$(kubectl get role "$ROLE" -n "$NS" -o jsonpath='{.rules[?(@.resources[0]=="jobs")].verbs}')"
+jobs_verbs="$(kubectl get role "$ROLE" -n "$NS" \
+  -o jsonpath='{range .rules[?(@.resources[0]=="jobs")].verbs[*]}{@} {end}')"
 for v in "${required_verbs[@]}"; do
   case " $jobs_verbs " in
     *" $v "*) ;;
@@ -86,7 +89,12 @@ echo "$log_tail" | grep -qF "container runtime = k8s" \
 ok "[runtime] orchestrator log に Provider 切替痕跡を確認"
 
 # === §6. SKIP_CONTAINER_RUNTIME_CHECK が消えている (codebase + StatefulSet env) ===
-sticks_in_code="$(grep -rE 'SKIP_CONTAINER_RUNTIME_CHECK' "${ROOT}/src" "${ROOT}/scripts" "${ROOT}/k8s" 2>/dev/null | wc -l)"
+# 本 verify script 自身は assertion で文字列を含むため --exclude で除外する
+# (除外しないと self-reference 9 件で false fail になる)。
+# `grep ... | wc -l` は 0 match で grep exit 1 → pipefail で script abort になる。
+# `wc -l` 末尾の `|| true` で pipeline を成功扱いに固定する。
+sticks_in_code="$(grep -rE --exclude='verify-phase-m2-1.sh' 'SKIP_CONTAINER_RUNTIME_CHECK' \
+  "${ROOT}/src" "${ROOT}/scripts" "${ROOT}/k8s" 2>/dev/null | wc -l || true)"
 [ "$sticks_in_code" = "0" ] \
   || fail "[cleanup] SKIP_CONTAINER_RUNTIME_CHECK が src/scripts/k8s 配下に ${sticks_in_code} 件残っている — git grep で確認"
 ok "[cleanup] SKIP_CONTAINER_RUNTIME_CHECK は src/scripts/k8s から完全に消えた"
