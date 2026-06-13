@@ -15,13 +15,7 @@ import path from 'path';
 import { getContainerRuntimeProvider } from './adapters/container/index.js';
 import type { AgentHandle, AgentSpawnSpec } from './adapters/container/index.js';
 import { getSecretProvider } from './adapters/secret/index.js';
-import {
-  CONTAINER_IMAGE,
-  CONTAINER_IMAGE_BASE,
-  DATA_DIR,
-  GROUPS_DIR,
-  TIMEZONE,
-} from './config.js';
+import { CONTAINER_IMAGE, CONTAINER_IMAGE_BASE, DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
@@ -432,10 +426,7 @@ async function buildContainerSpec(
   // favor of the image-default user (Autopilot restricts arbitrary UIDs).
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  const runAsUser =
-    hostUid != null && hostUid !== 0 && hostUid !== 1000
-      ? { uid: hostUid, gid: hostGid }
-      : null;
+  const runAsUser = hostUid != null && hostUid !== 0 && hostUid !== 1000 ? { uid: hostUid, gid: hostGid } : null;
 
   // Use per-agent-group image if one has been built, otherwise base image
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
