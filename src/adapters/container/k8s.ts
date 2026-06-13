@@ -1,28 +1,33 @@
 /**
  * K8sJobContainerRuntimeProvider — runs each agent as a K8s Batch v1 Job.
  *
- * Selected on GKE via `CONTAINER_PROVIDER=k8s`. Reads its config from env
- * (BIBLIO_NAMESPACE, BIBLIO_AGENT_IMAGE, HOSTNAME) and the in-cluster KSA
- * token (loadFromCluster).
+ * Selected on GKE via `CONTAINER_PROVIDER=k8s`. Reads `BIBLIO_NAMESPACE` and
+ * `HOSTNAME` from env, and the in-cluster KSA token via `loadFromCluster()`.
+ * The agent image comes through `spec.image` (resolved by container-runner
+ * from the `CONTAINER_IMAGE` env or per-group override).
  *
  * Spawn flow:
- *   1. Build a V1Job body — generateName, labels for NetworkPolicy match
- *      (`app.kubernetes.io/component=agent`), podAffinity to the orchestrator
- *      pod (RWO PVC needs them on the same node), securityContext lockdown.
- *   2. Translate the AgentSpawnSpec — env stays as env, mounts under `/data`
- *      become hostPath volumes (same-node guarantee → same backing PVC),
- *      OneCLI raw args parse out into env / hostPath volumes / hostAliases.
+ *   1. Build a V1Job body — `generateName` (avoid create/delete races),
+ *      labels for NetworkPolicy match (`app.kubernetes.io/component=agent`),
+ *      podAffinity to the orchestrator pod (RWO PVC needs same node),
+ *      securityContext lockdown.
+ *   2. Translate the AgentSpawnSpec — env stays as env, `spec.mounts` under
+ *      `/data` become hostPath volumes (same-node guarantee → same backing
+ *      PVC). `spec.onecliApplyArgs` is parsed (`-e` / `-v` / `--add-host`)
+ *      into env / hostPath volumes / hostAliases regardless of host path.
  *   3. createNamespacedJob, register a deferred in `pending[jobName]`.
  *   4. Informer (one per provider instance, namespace-scoped, label-filtered)
- *      watches Job conditions; on Complete/Failed it resolves the deferred.
+ *      watches Job conditions; `add`/`update` resolve on `Complete`/`Failed`,
+ *      `delete` resolves any pending entry that hasn't fired yet (background
+ *      cascade can remove the Job before its condition update arrives).
  *
- * Mounts under non-/data paths are *intentionally skipped* — they refer to
- * orchestrator image-layer files (e.g. `/app/src`, `/app/skills`) that aren't
- * reachable from another pod via hostPath. The agent image already ships the
- * same files at the same paths, so the agent finds them natively. Group dirs
- * (`<cwd>/groups/<folder>`) are also skipped today since M2 Phase 1 verifies
- * spawn against a test fixture, not a real agent group; dynamic-group support
- * is Phase 2+ scope and will move groups under DATA_DIR or to a Volume.
+ * `spec.mounts` whose hostPath is outside `/data` are intentionally skipped
+ * — orchestrator image-layer files (e.g. `/app/src`, `/app/skills`) aren't
+ * reachable from another pod via hostPath. The agent image already ships
+ * the same files at the same paths. Group dirs (`<cwd>/groups/<folder>`)
+ * are also skipped — they live on the orchestrator's local FS. Future
+ * dynamic-group support has to either move groups under DATA_DIR or use a
+ * shared Volume.
  */
 import * as k8s from '@kubernetes/client-node';
 
@@ -30,7 +35,6 @@ import { log } from '../../log.js';
 import type { AgentExitInfo, AgentHandle, AgentSpawnSpec, ContainerRuntimeProvider, VolumeMount } from './types.js';
 
 const DEFAULT_NAMESPACE = 'biblio-claw';
-const DEFAULT_AGENT_IMAGE = 'nanoclaw-agent:latest';
 const DEFAULT_ORCHESTRATOR_POD = 'biblio-orchestrator-0';
 const INFORMER_RECONNECT_MS = 5_000;
 
@@ -53,10 +57,8 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
   private batchApi?: k8s.BatchV1Api;
   private informer?: k8s.Informer<k8s.V1Job> & k8s.ObjectCache<k8s.V1Job>;
   private readonly namespace = process.env.BIBLIO_NAMESPACE || DEFAULT_NAMESPACE;
-  private readonly agentImage = process.env.BIBLIO_AGENT_IMAGE || DEFAULT_AGENT_IMAGE;
   private readonly orchestratorPodName = process.env.HOSTNAME || DEFAULT_ORCHESTRATOR_POD;
   private readonly pending = new Map<string, Pending>();
-  private informerStopping = false;
 
   async ensureRuntime(): Promise<void> {
     this.kc = new k8s.KubeConfig();
@@ -71,7 +73,6 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     log.info('K8s container runtime ready', {
       namespace: this.namespace,
       orchestratorPod: this.orchestratorPodName,
-      agentImage: this.agentImage,
     });
   }
 
@@ -86,13 +87,16 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
         const conds = job.status?.conditions ?? [];
         const done = conds.some((c) => (c.type === 'Complete' || c.type === 'Failed') && c.status === 'True');
         if (done && job.metadata?.name) {
+          const jobName = job.metadata.name;
           await this.batchApi
             .deleteNamespacedJob({
-              name: job.metadata.name,
+              name: jobName,
               namespace: this.namespace,
               propagationPolicy: 'Background',
             })
-            .catch(() => undefined);
+            .catch((err) => {
+              log.warn('K8s Job delete failed during orphan cleanup', { jobName, err });
+            });
         }
       }
     } catch (err) {
@@ -204,13 +208,18 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     );
     informer.on('add', (job) => this.onJobUpdate(job));
     informer.on('update', (job) => this.onJobUpdate(job));
+    // `delete` catches the case where a Job is removed before its terminal
+    // condition reaches the informer — e.g. kill() via background cascade
+    // delete, or `ttlSecondsAfterFinished` GC racing the update watch event.
+    // Without this, `pending[jobName]` would never resolve and the host's
+    // session bookkeeping (activeContainers / onExit) would leak.
+    informer.on('delete', (job) => this.onJobDelete(job));
     informer.on('error', async (err) => {
-      if (this.informerStopping) return;
       log.warn('K8s informer error, restarting', { err });
       try {
         await informer.stop();
-      } catch {
-        /* ignore */
+      } catch (stopErr) {
+        log.warn('K8s informer stop() failed during restart', { err: stopErr });
       }
       setTimeout(() => {
         informer.start().catch((e) => log.error('K8s informer restart failed', { err: e }));
@@ -235,6 +244,21 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
         reason: handle.killed ? 'killed' : failed ? 'failed' : 'complete',
       });
     }
+  }
+
+  private onJobDelete(job: k8s.V1Job): void {
+    const jobName = job.metadata?.name;
+    if (!jobName) return;
+    const handle = this.pending.get(jobName);
+    if (!handle) return;
+    // The Job is gone before any condition reached us. If kill() was called,
+    // honor that; otherwise treat the disappearance as a failed run (= the
+    // host should not silently assume success).
+    this.pending.delete(jobName);
+    handle.resolve({
+      code: job.status?.succeeded ?? null,
+      reason: handle.killed ? 'killed' : 'failed',
+    });
   }
 
   private commonLabels(spec: AgentSpawnSpec): Record<string, string> {

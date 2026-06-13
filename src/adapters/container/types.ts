@@ -52,8 +52,12 @@ export interface AgentSpawnSpec {
   onecliApplyArgs: ReadonlyArray<string>;
   /** Entrypoint command (shell + script). */
   command: ReadonlyArray<string>;
-  /** Container name (Docker) — K8sJobProvider ignores this and uses generateName. */
-  containerName: string;
+  /**
+   * Container name hint. Docker uses it as `--name`; K8sJobProvider ignores it
+   * and uses `metadata.generateName` instead (K8s Jobs need unique suffixes to
+   * avoid create/delete races).
+   */
+  containerName?: string;
   /**
    * Host UID to run as, when non-root / non-1000. Null = use image default.
    * Docker maps this to `--user`; K8s maps it to securityContext.runAsUser.

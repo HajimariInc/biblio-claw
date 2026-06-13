@@ -9,8 +9,7 @@
 # - pods + pods/log は debug 用 (read-only)。失敗 Job の log を kubectl logs で
 #   取得できるようにする
 #
-# 参照: plan Task 8 + GKE Autopilot RBAC how-to
-# https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+# 参照: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

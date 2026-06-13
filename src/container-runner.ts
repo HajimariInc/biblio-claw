@@ -160,17 +160,33 @@ async function spawnContainer(session: Session): Promise<void> {
   // (see src/host-sweep.ts). This avoids killing long-running legitimate work
   // on a wall-clock timer.
 
-  handle.waitForExit().then((info) => {
-    activeContainers.delete(session.id);
-    markContainerStopped(session.id);
-    stopTypingRefresh(session.id);
-    log.info('Container exited', {
-      sessionId: session.id,
-      code: info.code,
-      reason: info.reason,
-      handleId: handle.id,
+  // waitForExit() is contracted never to reject, but the .then() body itself
+  // (markContainerStopped, stopTypingRefresh) could throw on DB lock or
+  // similar — without a .catch(), Node turns that into an unhandledRejection
+  // and the cleanup silently skips, leaving zombie entries in activeContainers.
+  handle
+    .waitForExit()
+    .then((info) => {
+      activeContainers.delete(session.id);
+      markContainerStopped(session.id);
+      stopTypingRefresh(session.id);
+      log.info('Container exited', {
+        sessionId: session.id,
+        code: info.code,
+        reason: info.reason,
+        handleId: handle.id,
+      });
+    })
+    .catch((err) => {
+      // Last-resort: drop the activeContainers entry so the next wake doesn't
+      // skip spawn due to a stuck zombie, then surface the failure.
+      activeContainers.delete(session.id);
+      log.error('Container exit handler failed', {
+        sessionId: session.id,
+        handleId: handle.id,
+        err,
+      });
     });
-  });
 }
 
 /** Kill a container for a session. */
@@ -482,9 +498,6 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   const tmpDockerfile = path.join(DATA_DIR, `Dockerfile.${agentGroupId}`);
   fs.writeFileSync(tmpDockerfile, dockerfile);
   try {
-    // Docker-only path — per-agent-group image builds run on the local host
-    // (Phase 1 / dev). On K8s we use the pre-baked agent image from Artifact
-    // Registry instead; nothing here is called.
     execSync(`docker build -t ${imageTag} -f ${tmpDockerfile} .`, {
       cwd: DATA_DIR,
       stdio: 'pipe',
@@ -494,7 +507,6 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     fs.unlinkSync(tmpDockerfile);
   }
 
-  // Store the image tag in the DB
   updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
 
   log.info('Per-agent-group image built', { agentGroupId, imageTag });

@@ -1,10 +1,8 @@
 /**
  * DockerContainerRuntimeProvider — wraps `docker` CLI for local dev.
  *
- * Owns the bits that previously lived in container-runtime.ts and the Docker-
- * specific args assembly that used to be in container-runner.ts. Both the
- * `docker info` pre-flight and the orphan sweep stay synchronous-execSync so
- * the host's startup ordering is unchanged from M1.
+ * `docker info` pre-flight and the orphan sweep stay synchronous (`execSync`)
+ * so the host startup sequence never `await`s on a daemon probe.
  */
 import { ChildProcess, execSync, spawn } from 'child_process';
 import os from 'os';
@@ -60,8 +58,17 @@ class DockerAgentHandle implements AgentHandle {
     this.killed = true;
     try {
       stopContainer(this.id);
-    } catch {
-      this.process.kill('SIGKILL');
+    } catch (err) {
+      log.warn('docker stop failed, falling back to SIGKILL', {
+        containerName: this.id,
+        err,
+      });
+      const killed = this.process.kill('SIGKILL');
+      if (!killed) {
+        log.warn('SIGKILL failed (process likely already exited)', {
+          containerName: this.id,
+        });
+      }
     }
   }
 }
@@ -112,7 +119,11 @@ export class DockerContainerRuntimeProvider implements ContainerRuntimeProvider 
   }
 
   spawn(spec: AgentSpawnSpec): Promise<AgentHandle> {
-    const args: string[] = ['run', '--rm', '--name', spec.containerName, '--label', CONTAINER_INSTALL_LABEL];
+    if (!spec.containerName) {
+      throw new Error('DockerContainerRuntimeProvider requires spec.containerName (assign one in container-runner)');
+    }
+    const containerName = spec.containerName;
+    const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
     for (const { name, value } of spec.env) {
       args.push('-e', `${name}=${value}`);
@@ -142,7 +153,7 @@ export class DockerContainerRuntimeProvider implements ContainerRuntimeProvider 
     args.push(...spec.command);
 
     log.info('Docker spawn', {
-      containerName: spec.containerName,
+      containerName,
       agentGroup: spec.agentGroupName,
       sessionId: spec.sessionId,
     });
@@ -156,6 +167,6 @@ export class DockerContainerRuntimeProvider implements ContainerRuntimeProvider 
     });
     child.stdout?.on('data', () => {});
 
-    return Promise.resolve(new DockerAgentHandle(spec.containerName, child));
+    return Promise.resolve(new DockerAgentHandle(containerName, child));
   }
 }

@@ -313,6 +313,66 @@ describe('K8sJobContainerRuntimeProvider Informer plumbing', () => {
     await new Promise((r) => setTimeout(r, 5));
     expect(resolved).toBe(false);
   });
+
+  it('resolves waitForExit on delete event when no Complete/Failed update arrived (background cascade race)', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-raced' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    const handle = await p.spawn(makeSpec());
+    const cbs = captureCallbacks();
+    const wait = handle.waitForExit();
+    cbs.delete({ metadata: { name: 'biblio-agent-raced' }, status: {} });
+    await expect(wait).resolves.toMatchObject({ reason: 'failed' });
+  });
+
+  it('resolves waitForExit with reason=killed when kill() preceded the delete event', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-killed' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    const handle = await p.spawn(makeSpec());
+    const cbs = captureCallbacks();
+    const wait = handle.waitForExit();
+    await handle.kill();
+    cbs.delete({ metadata: { name: 'biblio-agent-killed' }, status: {} });
+    await expect(wait).resolves.toMatchObject({ reason: 'killed' });
+  });
+
+  it('on error: stops informer, schedules restart after RECONNECT_MS', async () => {
+    vi.useFakeTimers();
+    try {
+      batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+      const p = new K8sJobContainerRuntimeProvider();
+      await p.ensureRuntime();
+      const cbs = captureCallbacks();
+      informer.start.mockClear();
+      informer.stop.mockClear();
+      await cbs.error(new Error('410 Gone'));
+      expect(informer.stop).toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(informer.start).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('on error: when stop() itself throws, still schedules restart', async () => {
+    vi.useFakeTimers();
+    try {
+      batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+      const p = new K8sJobContainerRuntimeProvider();
+      await p.ensureRuntime();
+      const cbs = captureCallbacks();
+      informer.stop.mockRejectedValueOnce(new Error('stop blew up'));
+      informer.start.mockClear();
+      await cbs.error(new Error('connection reset'));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(informer.start).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('K8sJobContainerRuntimeProvider kill', () => {
@@ -330,6 +390,17 @@ describe('K8sJobContainerRuntimeProvider kill', () => {
         propagationPolicy: 'Background',
       }),
     );
+  });
+});
+
+describe('K8sJobContainerRuntimeProvider spawn error path', () => {
+  it('throws when createNamespacedJob fails (e.g. 403 Forbidden from missing RBAC)', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    const apiErr = Object.assign(new Error('Forbidden'), { statusCode: 403 });
+    batchApi.createNamespacedJob.mockRejectedValueOnce(apiErr);
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await expect(p.spawn(makeSpec())).rejects.toThrow(/Forbidden/);
   });
 });
 
