@@ -20,7 +20,10 @@ const HOME_DIR = process.env.HOME || os.homedir();
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
+// Group filesystem root — overridable via GROUPS_DIR so the K8sJobProvider
+// can point it under DATA_DIR (= /data/groups) and survive translateSpec's
+// `/data/` hostPath filter. Same shape as DATA_DIR below.
+export const GROUPS_DIR = process.env.GROUPS_DIR || path.resolve(PROJECT_ROOT, 'groups');
 // Data root — overridable via DATA_DIR so Phase 2 (GKE) can point at a
 // different mount without code changes. The DSN adapter derives all DB paths
 // from this value. Resolved at process start (the real override granularity).

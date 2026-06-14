@@ -48,12 +48,19 @@ spec:
             # agent Job が pull する image。container-runner.ts:buildContainerSpec
             # で spec.image にセットされ、K8sJobProvider が Job spec の image に
             # 写し込む。`imagePullPolicy: Always` で同 tag への上書き push に追従。
+            # M2 PRD A Phase 2 で agent-runner src / skills / CLAUDE.md を焼き込み
+            # (container/Dockerfile) たため tag を m2-p2 に bump。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m1-p1,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m2-p2,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
+            # === Group filesystem root (M2 PRD A Phase 2) ===
+            # K8sJobProvider:translateSpec が agent Pod の hostPath mount を
+            # /data/ 配下のみ通すため、groups/<folder>/ も PVC subPath で見える
+            # /data/groups/ に置く。src/config.ts:GROUPS_DIR が env override 対応済。
+            - { name: GROUPS_DIR, value: /data/groups }
             # === OneCLI gateway (in-cluster ClusterIP) ===
             - { name: ONECLI_URL, value: 'http://biblio-onecli.biblio-claw.svc.cluster.local:10254' }
             # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===
