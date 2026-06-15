@@ -61,6 +61,14 @@ spec:
             # /data/ 配下のみ通すため、groups/<folder>/ も PVC subPath で見える
             # /data/groups/ に置く。src/config.ts:GROUPS_DIR が env override 対応済。
             - { name: GROUPS_DIR, value: /data/groups }
+            # === agent Pod 用 PVC + Secret 名 (M2 PRD A Phase 2.5) ===
+            # GKE Autopilot Warden が hostPath を全 deny する制約を回避するため、
+            # agent Pod は orchestrator の既存 RWO PVC (data-biblio-orchestrator-0)
+            # を podAffinity 経由で同 node 共有 mount + subPath で個別 view する。
+            # ONECLI_CA_SECRET_NAME は k8s/05-onecli-ca-secret.yaml の投入手順で
+            # 作る Secret 名 (= 手動投入 MVP、Phase 2.6 で OneCLI sidecar 化)。
+            - { name: AGENT_PVC_NAME, value: data-biblio-orchestrator-0 }
+            - { name: ONECLI_CA_SECRET_NAME, value: biblio-onecli-ca }
             # === OneCLI gateway (in-cluster ClusterIP) ===
             - { name: ONECLI_URL, value: 'http://biblio-onecli.biblio-claw.svc.cluster.local:10254' }
             # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===

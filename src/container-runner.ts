@@ -261,17 +261,45 @@ function buildMounts(
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
+  // K8sJobProvider maps every `/data` path to a `subPath` under the shared
+  // orchestrator PVC (= GKE Autopilot disallows write-mode hostPath, so the
+  // hostPath model from Phase 1 can't survive Warden admission). Compute the
+  // subPath here so DockerProvider (which ignores the field) and
+  // K8sJobProvider (which honours it) both consume the same mount list.
+  // image-layer paths (`<cwd>/container/...`) are left subPath-less — they
+  // live in the agent image, not the PVC.
+  const subPathOf = (hostPath: string): string | undefined => {
+    const rel = path.relative(DATA_DIR, hostPath);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+    return rel;
+  };
+
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
-  mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
+  mounts.push({
+    hostPath: sessDir,
+    subPath: subPathOf(sessDir),
+    containerPath: '/workspace',
+    readonly: false,
+  });
 
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
-  mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
+  mounts.push({
+    hostPath: groupDir,
+    subPath: subPathOf(groupDir),
+    containerPath: '/workspace/agent',
+    readonly: false,
+  });
 
   // container.json — nested RO mount on top of RW group dir so the agent
   // can read its config but cannot modify it.
   const containerJsonPath = path.join(groupDir, 'container.json');
   if (fs.existsSync(containerJsonPath)) {
-    mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
+    mounts.push({
+      hostPath: containerJsonPath,
+      subPath: subPathOf(containerJsonPath),
+      containerPath: '/workspace/agent/container.json',
+      readonly: true,
+    });
   }
 
   // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
@@ -283,21 +311,37 @@ function buildMounts(
   // a nested mount there.
   const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
   if (fs.existsSync(composedClaudeMd)) {
-    mounts.push({ hostPath: composedClaudeMd, containerPath: '/workspace/agent/CLAUDE.md', readonly: true });
+    mounts.push({
+      hostPath: composedClaudeMd,
+      subPath: subPathOf(composedClaudeMd),
+      containerPath: '/workspace/agent/CLAUDE.md',
+      readonly: true,
+    });
   }
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
   if (fs.existsSync(fragmentsDir)) {
-    mounts.push({ hostPath: fragmentsDir, containerPath: '/workspace/agent/.claude-fragments', readonly: true });
+    mounts.push({
+      hostPath: fragmentsDir,
+      subPath: subPathOf(fragmentsDir),
+      containerPath: '/workspace/agent/.claude-fragments',
+      readonly: true,
+    });
   }
 
   // Global memory directory — always read-only.
   const globalDir = path.join(GROUPS_DIR, 'global');
   if (fs.existsSync(globalDir)) {
-    mounts.push({ hostPath: globalDir, containerPath: '/workspace/global', readonly: true });
+    mounts.push({
+      hostPath: globalDir,
+      subPath: subPathOf(globalDir),
+      containerPath: '/workspace/global',
+      readonly: true,
+    });
   }
 
   // Shared CLAUDE.md — read-only, imported by the composed entry point via
-  // the `.claude-shared.md` symlink inside the group dir.
+  // the `.claude-shared.md` symlink inside the group dir. image-layer path,
+  // so it gets no subPath (K8s reads it from the agent image's `/app/CLAUDE.md`).
   const sharedClaudeMd = path.join(process.cwd(), 'container', 'CLAUDE.md');
   if (fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
@@ -305,7 +349,12 @@ function buildMounts(
 
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
   // skill symlinks)
-  mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
+  mounts.push({
+    hostPath: claudeDir,
+    subPath: subPathOf(claudeDir),
+    containerPath: '/home/node/.claude',
+    readonly: false,
+  });
 
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');

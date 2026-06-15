@@ -52,7 +52,14 @@ function makeSpec(overrides: Partial<AgentSpawnSpec> = {}): AgentSpawnSpec {
     sessionId: 'session-1',
     image: 'asia-northeast1-docker.pkg.dev/proj/repo/nanoclaw-agent:m1-p1',
     mounts: [
-      { hostPath: '/data/v2-sessions/group-1/session-1', containerPath: '/workspace', readonly: false },
+      {
+        hostPath: '/data/v2-sessions/group-1/session-1',
+        subPath: 'v2-sessions/group-1/session-1',
+        containerPath: '/workspace',
+        readonly: false,
+      },
+      // image-layer mount carries no subPath — K8s path must skip it because
+      // the agent image already ships `/app/skills` at the same path.
       { hostPath: '/app/skills', containerPath: '/app/skills', readonly: true },
     ],
     env: [
@@ -179,6 +186,16 @@ describe('K8sJobContainerRuntimeProvider.spawn — job body assembly', () => {
     expect(sc.capabilities.drop).toEqual(['ALL']);
   });
 
+  it('sets pod-level fsGroup=1000 so the shared PVC subPath is owned by the agent user', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec());
+    const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
+    expect(podSpec.securityContext).toEqual({ fsGroup: 1000 });
+  });
+
   it('sets backoffLimit=0 (host re-spawns) and ttlSecondsAfterFinished=120 (debug grace)', async () => {
     batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
     batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
@@ -192,22 +209,74 @@ describe('K8sJobContainerRuntimeProvider.spawn — job body assembly', () => {
 });
 
 describe('K8sJobContainerRuntimeProvider.spawn — spec translation', () => {
-  it('converts /data hostPath mounts into K8s volumes; skips non-/data mounts', async () => {
+  it('maps subPath mounts onto a single shared PVC volume; skips subPath-less (image-layer) mounts', async () => {
     batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
     batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
     const p = new K8sJobContainerRuntimeProvider();
     await p.ensureRuntime();
     await p.spawn(makeSpec());
     const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
-    const dataMounts = podSpec.containers[0].volumeMounts.filter(
+    const sharedVol = podSpec.volumes.find((v: { name: string }) => v.name === 'vol-shared');
+    expect(sharedVol).toBeDefined();
+    expect(sharedVol.persistentVolumeClaim).toEqual({ claimName: 'data-biblio-orchestrator-0' });
+    // Exactly one entry per subPath mount in the spec — `/workspace` should
+    // land via `vol-shared` + the relative subPath.
+    const workspace = podSpec.containers[0].volumeMounts.filter(
       (m: { mountPath: string }) => m.mountPath === '/workspace',
     );
-    expect(dataMounts).toHaveLength(1);
-    // /app/skills mount is image-internal — must NOT appear as a hostPath mount.
-    const skillsMount = podSpec.containers[0].volumeMounts.find(
-      (m: { mountPath: string }) => m.mountPath === '/app/skills',
+    expect(workspace).toEqual([
+      {
+        name: 'vol-shared',
+        mountPath: '/workspace',
+        subPath: 'v2-sessions/group-1/session-1',
+        readOnly: false,
+      },
+    ]);
+    // image-layer mount carried no subPath, so it must NOT be projected onto the PVC.
+    const skills = podSpec.containers[0].volumeMounts.find((m: { mountPath: string }) => m.mountPath === '/app/skills');
+    expect(skills).toBeUndefined();
+  });
+
+  it('mounts the OneCLI CA Secret at /etc/ssl/certs/onecli regardless of OneCLI -v args', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec());
+    const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
+    const caVol = podSpec.volumes.find((v: { name: string }) => v.name === 'onecli-ca');
+    expect(caVol).toBeDefined();
+    expect(caVol.secret).toEqual({ secretName: 'biblio-onecli-ca' });
+    const caMount = podSpec.containers[0].volumeMounts.find(
+      (m: { mountPath: string }) => m.mountPath === '/etc/ssl/certs/onecli',
     );
-    expect(skillsMount).toBeUndefined();
+    expect(caMount).toEqual({
+      name: 'onecli-ca',
+      mountPath: '/etc/ssl/certs/onecli',
+      readOnly: true,
+    });
+  });
+
+  it('drops OneCLI `-v HOST:CONT:ro` host-path mounts (Warden denies them; CA Secret covers the same need)', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec());
+    const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
+    // The two `-v` entries in makeSpec must NOT surface as additional mounts.
+    const onecliPem = podSpec.containers[0].volumeMounts.find(
+      (m: { mountPath: string }) => m.mountPath === '/etc/ssl/onecli.pem',
+    );
+    expect(onecliPem).toBeUndefined();
+    const combined = podSpec.containers[0].volumeMounts.find(
+      (m: { mountPath: string }) => m.mountPath === '/tmp/onecli-combined-ca.pem',
+    );
+    expect(combined).toBeUndefined();
+    // And no hostPath volumes at all — Warden's `autogke-no-write-mode-hostpath`
+    // constraint blocks any of them on Autopilot.
+    const hostPathVols = podSpec.volumes.filter((v: { hostPath?: unknown }) => v.hostPath !== undefined);
+    expect(hostPathVols).toEqual([]);
   });
 
   it('parses OneCLI `-e KEY=VAL` into the env list', async () => {
@@ -225,21 +294,54 @@ describe('K8sJobContainerRuntimeProvider.spawn — spec translation', () => {
     expect(proxy.value).toBe('http://biblio-onecli.biblio-claw.svc:10255');
   });
 
-  it('parses OneCLI `-v HOST:CONT:ro` into hostPath volume + readOnly volumeMount', async () => {
+  it('honours AGENT_PVC_NAME env to override the shared PVC claim name', async () => {
+    vi.stubEnv('AGENT_PVC_NAME', 'alternate-pvc');
     batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
     batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
     const p = new K8sJobContainerRuntimeProvider();
     await p.ensureRuntime();
     await p.spawn(makeSpec());
     const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
-    const caMount = podSpec.containers[0].volumeMounts.find(
-      (m: { mountPath: string }) => m.mountPath === '/etc/ssl/onecli.pem',
+    const sharedVol = podSpec.volumes.find((v: { name: string }) => v.name === 'vol-shared');
+    expect(sharedVol.persistentVolumeClaim).toEqual({ claimName: 'alternate-pvc' });
+  });
+
+  it('honours ONECLI_CA_SECRET_NAME env to override the CA bundle Secret name', async () => {
+    vi.stubEnv('ONECLI_CA_SECRET_NAME', 'alt-ca-secret');
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec());
+    const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
+    const caVol = podSpec.volumes.find((v: { name: string }) => v.name === 'onecli-ca');
+    expect(caVol.secret).toEqual({ secretName: 'alt-ca-secret' });
+  });
+
+  it('skips mounts that carry no subPath when running on K8s', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(
+      makeSpec({
+        mounts: [
+          // No subPath — agent image already ships this path, K8s must skip it.
+          { hostPath: '/app/src', containerPath: '/app/src', readonly: true },
+          {
+            hostPath: '/data/groups/foo',
+            subPath: 'groups/foo',
+            containerPath: '/workspace/agent',
+            readonly: false,
+          },
+        ],
+      }),
     );
-    expect(caMount).toBeDefined();
-    expect(caMount.readOnly).toBe(true);
-    const caVol = podSpec.volumes.find((v: { name: string }) => v.name === caMount.name);
-    expect(caVol.hostPath.path).toBe('/var/lib/onecli/ca.pem');
-    expect(caVol.hostPath.type).toBe('File');
+    const podSpec = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
+    const sharedMounts = podSpec.containers[0].volumeMounts.filter((m: { name: string }) => m.name === 'vol-shared');
+    expect(sharedMounts).toHaveLength(1);
+    expect(sharedMounts[0].mountPath).toBe('/workspace/agent');
+    expect(sharedMounts[0].subPath).toBe('groups/foo');
   });
 
   it('runs the entry point as `bash -c <script>`', async () => {

@@ -32,11 +32,22 @@
 import * as k8s from '@kubernetes/client-node';
 
 import { log } from '../../log.js';
-import type { AgentExitInfo, AgentHandle, AgentSpawnSpec, ContainerRuntimeProvider, VolumeMount } from './types.js';
+import type { AgentExitInfo, AgentHandle, AgentSpawnSpec, ContainerRuntimeProvider } from './types.js';
 
 const DEFAULT_NAMESPACE = 'biblio-claw';
 const DEFAULT_ORCHESTRATOR_POD = 'biblio-orchestrator-0';
 const INFORMER_RECONNECT_MS = 5_000;
+
+const DEFAULT_AGENT_PVC_NAME = 'data-biblio-orchestrator-0';
+const DEFAULT_ONECLI_CA_SECRET_NAME = 'biblio-onecli-ca';
+const SHARED_PVC_VOLUME_NAME = 'vol-shared';
+const ONECLI_CA_VOLUME_NAME = 'onecli-ca';
+const ONECLI_CA_MOUNT_PATH = '/etc/ssl/certs/onecli';
+// node:22-slim's `node` user (UID/GID 1000). The PoC-17 PVC-share writeup uses
+// fsGroup to align the mounted volume's group ownership with the container
+// user; same idea here so the agent process can read/write the shared PVC
+// after K8s applies the subPath mounts.
+const AGENT_FS_GROUP = 1000;
 
 interface Pending {
   resolve: (info: AgentExitInfo) => void;
@@ -122,6 +133,13 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
           spec: {
             restartPolicy: 'Never',
             affinity: this.podAffinityToOrchestrator(),
+            // fsGroup aligns ownership on the shared PVC mount with the
+            // container user (node:22-slim's `node`, UID/GID 1000). Without
+            // it the subPath mounts come up root-owned and bun:sqlite can't
+            // open the session DBs. PoC-17 used the same pattern (fsGroup:101
+            // for the sqlite3 image); the value differs but the mechanism
+            // does not.
+            securityContext: { fsGroup: AGENT_FS_GROUP },
             ...(native.hostAliases.length > 0 ? { hostAliases: native.hostAliases } : {}),
             containers: [
               {
@@ -295,17 +313,52 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     const volumeMounts: k8s.V1VolumeMount[] = [];
     const hostAliases: k8s.V1HostAlias[] = [];
 
-    let volIdx = 0;
-    const addHostPathMount = (m: VolumeMount, type?: string): void => {
-      const name = `vol-${volIdx++}`;
-      volumes.push({ name, hostPath: { path: m.hostPath, ...(type ? { type } : {}) } });
-      volumeMounts.push({ name, mountPath: m.containerPath, readOnly: m.readonly });
-    };
+    // GKE Autopilot denies write-mode hostPath (Warden constraint
+    // `autogke-no-write-mode-hostpath`), so every mount that backs onto the
+    // host filesystem rides the orchestrator's RWO PVC instead. Same-node
+    // co-tenancy is guaranteed by `podAffinityToOrchestrator()`, which lets
+    // a single RWO PVC be shared between the StatefulSet pod and this Job
+    // pod (per the GKE docs on RWO access mode).
+    const pvcName = process.env.AGENT_PVC_NAME ?? DEFAULT_AGENT_PVC_NAME;
+    const caSecretName = process.env.ONECLI_CA_SECRET_NAME ?? DEFAULT_ONECLI_CA_SECRET_NAME;
 
+    let pvcVolumeAdded = false;
     for (const m of spec.mounts) {
-      if (!m.hostPath.startsWith('/data/') && m.hostPath !== '/data') continue;
-      addHostPathMount(m, 'Directory');
+      // image-layer mounts (no subPath) are baked into the agent image — the
+      // Phase 2 `container/build.sh` step copies `container/CLAUDE.md`,
+      // `container/agent-runner/src`, and `container/skills` to the same
+      // paths the Docker bind mounts use. Skipping them keeps the K8s pod
+      // spec hostPath-free.
+      if (m.subPath === undefined) continue;
+      if (!pvcVolumeAdded) {
+        volumes.push({
+          name: SHARED_PVC_VOLUME_NAME,
+          persistentVolumeClaim: { claimName: pvcName },
+        });
+        pvcVolumeAdded = true;
+      }
+      volumeMounts.push({
+        name: SHARED_PVC_VOLUME_NAME,
+        mountPath: m.containerPath,
+        subPath: m.subPath,
+        readOnly: m.readonly,
+      });
     }
+
+    // OneCLI proxy CA bundle is mounted from a K8s Secret as a Phase 2.5 MVP.
+    // Phase 2.6 will collapse this into an OneCLI sidecar with emptyDir
+    // sharing (PoC-5 pattern). Keep the volume regardless of whether the
+    // orchestrator side appended `-v /tmp/onecli-*.pem` (skipped below) so
+    // the agent always sees the certs at a stable path.
+    volumes.push({
+      name: ONECLI_CA_VOLUME_NAME,
+      secret: { secretName: caSecretName },
+    });
+    volumeMounts.push({
+      name: ONECLI_CA_VOLUME_NAME,
+      mountPath: ONECLI_CA_MOUNT_PATH,
+      readOnly: true,
+    });
 
     if (spec.runAsUser) {
       env.push({ name: 'HOME', value: '/home/node' });
@@ -318,19 +371,12 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
         const eq = kv.indexOf('=');
         if (eq > 0) env.push({ name: kv.substring(0, eq), value: kv.substring(eq + 1) });
       } else if (a === '-v' && i + 1 < spec.onecliApplyArgs.length) {
-        const v = spec.onecliApplyArgs[++i];
-        const parts = v.split(':');
-        const readOnly = parts.length >= 3 && parts[parts.length - 1] === 'ro';
-        const hostPath = parts[0];
-        const containerPath = parts[1];
-        if (!hostPath || !containerPath) continue;
-        const isFile = /\.(pem|crt|json|conf|cert)$/.test(hostPath);
-        const name = `vol-${volIdx++}`;
-        volumes.push({
-          name,
-          hostPath: { path: hostPath, type: isFile ? 'File' : 'Directory' },
-        });
-        volumeMounts.push({ name, mountPath: containerPath, readOnly });
+        // `-v` from OneCLI's applyContainerConfig points at host-side
+        // `/tmp/onecli-*.pem` paths that don't survive Warden. The Secret
+        // mount above carries the same CA material in a Warden-compatible
+        // way, so drop the OneCLI-supplied hostPath silently.
+        ++i;
+        continue;
       } else if (a === '--add-host' && i + 1 < spec.onecliApplyArgs.length) {
         const mapping = spec.onecliApplyArgs[++i];
         const [hostname, ip] = mapping.split(':');
