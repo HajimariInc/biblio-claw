@@ -49,6 +49,15 @@ const ONECLI_CA_MOUNT_PATH = '/etc/ssl/certs/onecli';
 // after K8s applies the subPath mounts.
 const AGENT_FS_GROUP = 1000;
 
+// OneCLI SDK's `applyContainerConfig` returns Docker-flavoured env values —
+// `HTTPS_PROXY=http://...@host.docker.internal:10255` and
+// `NODE_EXTRA_CA_CERTS=/tmp/onecli-gateway-ca.pem`. Neither resolves inside a
+// GKE Pod. Rewrite both to cluster-native equivalents in `translateSpec`.
+const ONECLI_DOCKER_HOST = 'host.docker.internal';
+const DEFAULT_ONECLI_SERVICE_HOST = 'biblio-onecli.biblio-claw.svc.cluster.local';
+const ONECLI_PROXY_ENV_NAMES = new Set(['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']);
+const ONECLI_COMBINED_CA_PATH = `${ONECLI_CA_MOUNT_PATH}/onecli-combined-ca.pem`;
+
 interface Pending {
   resolve: (info: AgentExitInfo) => void;
   killed: boolean;
@@ -381,6 +390,24 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
         const mapping = spec.onecliApplyArgs[++i];
         const [hostname, ip] = mapping.split(':');
         if (hostname && ip) hostAliases.push({ ip, hostnames: [hostname] });
+      }
+    }
+
+    // Rewrite OneCLI's Docker-flavoured proxy + CA env values to their K8s
+    // equivalents. `applyContainerConfig` always returns the same host /
+    // path regardless of where the agent will run; the SDK has no K8s mode.
+    // Override the in-cluster Service DNS via `ONECLI_SERVICE_HOST` env if
+    // the namespace/name differs from the biblio-claw default.
+    const serviceHost = process.env.ONECLI_SERVICE_HOST ?? DEFAULT_ONECLI_SERVICE_HOST;
+    for (const e of env) {
+      if (e.name === undefined || e.value === undefined) continue;
+      if (ONECLI_PROXY_ENV_NAMES.has(e.name) && e.value.includes(ONECLI_DOCKER_HOST)) {
+        e.value = e.value.split(ONECLI_DOCKER_HOST).join(serviceHost);
+      } else if (e.name === 'NODE_EXTRA_CA_CERTS') {
+        // The Docker path (`/tmp/onecli-gateway-ca.pem`) was bind-mounted by
+        // OneCLI's `-v` arg, which we drop above. The K8s Secret mount lays
+        // the combined bundle down at a fixed sibling path.
+        e.value = ONECLI_COMBINED_CA_PATH;
       }
     }
 

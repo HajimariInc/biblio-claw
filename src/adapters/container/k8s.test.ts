@@ -66,13 +66,23 @@ function makeSpec(overrides: Partial<AgentSpawnSpec> = {}): AgentSpawnSpec {
       { name: 'TZ', value: 'Asia/Tokyo' },
       { name: 'NODE_ENV', value: 'production' },
     ],
+    // OneCLI SDK always returns Docker-flavoured values from
+    // applyContainerConfig (host.docker.internal + /tmp host-side CA path).
+    // translateSpec post-processes them into K8s equivalents; tests below
+    // assert the rewritten form.
     onecliApplyArgs: [
       '-e',
-      'HTTPS_PROXY=http://biblio-onecli.biblio-claw.svc:10255',
+      'HTTPS_PROXY=http://x:aoc_token@host.docker.internal:10255',
       '-e',
-      'NODE_EXTRA_CA_CERTS=/etc/ssl/onecli.pem',
+      'HTTP_PROXY=http://x:aoc_token@host.docker.internal:10255',
+      '-e',
+      'https_proxy=http://x:aoc_token@host.docker.internal:10255',
+      '-e',
+      'http_proxy=http://x:aoc_token@host.docker.internal:10255',
+      '-e',
+      'NODE_EXTRA_CA_CERTS=/tmp/onecli-gateway-ca.pem',
       '-v',
-      '/var/lib/onecli/ca.pem:/etc/ssl/onecli.pem:ro',
+      '/tmp/onecli-proxy-ca.pem:/tmp/onecli-proxy-ca.pem:ro',
       '-v',
       '/tmp/onecli-combined-ca.pem:/tmp/onecli-combined-ca.pem:ro',
     ],
@@ -279,7 +289,7 @@ describe('K8sJobContainerRuntimeProvider.spawn — spec translation', () => {
     expect(hostPathVols).toEqual([]);
   });
 
-  it('parses OneCLI `-e KEY=VAL` into the env list', async () => {
+  it('parses OneCLI `-e KEY=VAL` into the env list (proxy host rewritten for K8s)', async () => {
     batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
     batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
     const p = new K8sJobContainerRuntimeProvider();
@@ -291,7 +301,39 @@ describe('K8sJobContainerRuntimeProvider.spawn — spec translation', () => {
     expect(names).toContain('HTTPS_PROXY');
     expect(names).toContain('NODE_EXTRA_CA_CERTS');
     const proxy = env.find((e: { name: string }) => e.name === 'HTTPS_PROXY');
-    expect(proxy.value).toBe('http://biblio-onecli.biblio-claw.svc:10255');
+    // OneCLI hands us `host.docker.internal` (Docker-only DNS); the K8s
+    // post-process points it at the in-cluster Service DNS.
+    expect(proxy.value).toBe('http://x:aoc_token@biblio-onecli.biblio-claw.svc.cluster.local:10255');
+  });
+
+  it('rewrites OneCLI Docker-flavoured HTTP(S)_PROXY + NODE_EXTRA_CA_CERTS to K8s equivalents', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec());
+    const env = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec.containers[0].env;
+    const serviceHost = 'biblio-onecli.biblio-claw.svc.cluster.local';
+    for (const name of ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']) {
+      const e = env.find((x: { name: string }) => x.name === name);
+      expect(e, `${name} should be present`).toBeDefined();
+      expect(e.value, `${name} should target the in-cluster Service DNS`).toContain(serviceHost);
+      expect(e.value, `${name} must not keep host.docker.internal`).not.toContain('host.docker.internal');
+    }
+    const ca = env.find((x: { name: string }) => x.name === 'NODE_EXTRA_CA_CERTS');
+    expect(ca.value).toBe('/etc/ssl/certs/onecli/onecli-combined-ca.pem');
+  });
+
+  it('honours ONECLI_SERVICE_HOST env to override the in-cluster Service DNS for proxy URLs', async () => {
+    vi.stubEnv('ONECLI_SERVICE_HOST', 'biblio-onecli.alt-ns.svc.cluster.local');
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec());
+    const env = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec.containers[0].env;
+    const proxy = env.find((e: { name: string }) => e.name === 'HTTPS_PROXY');
+    expect(proxy.value).toBe('http://x:aoc_token@biblio-onecli.alt-ns.svc.cluster.local:10255');
   });
 
   it('honours AGENT_PVC_NAME env to override the shared PVC claim name', async () => {
