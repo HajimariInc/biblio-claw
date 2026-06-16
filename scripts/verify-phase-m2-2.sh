@@ -145,8 +145,12 @@ ok "[slack] agent Job spawn 確認 (${jobs_count} 個)"
 # `autogke-no-write-mode-hostpath` が出ていれば PVC subPath モデルへの移行が
 # 失敗している (spec.mounts に subPath が乗っていない / k8s.ts が hostPath を
 # 生成している)。直近 180s に絞って誤検出を抑える。
-warden_blocks="$(kubectl logs "$ORCH_POD" -n "$NS" --since=180s 2>/dev/null | sed -r "$ANSI_STRIP" | grep -c 'autogke-no-write-mode-hostpath' || echo 0)"
-[ "${warden_blocks:-0}" = "0" ] \
+# 注意: `grep -c` は 0 件マッチでも `0` を出力して exit 1 を返すため、
+# `|| echo 0` を付けると `0\n0` の二重出力で = 比較が壊れる。`|| true` で
+# exit 1 だけ吸収して `grep -c` 自身の `0` を使う。
+warden_blocks="$(kubectl logs "$ORCH_POD" -n "$NS" --since=180s 2>/dev/null | sed -r "$ANSI_STRIP" | grep -c 'autogke-no-write-mode-hostpath' || true)"
+warden_blocks="${warden_blocks:-0}"
+[ "$warden_blocks" = "0" ] \
   || fail "[warden] Warden block 痕跡が orchestrator log に ${warden_blocks} 回出ている — PVC subPath モデルへの移行を再確認: kubectl logs $ORCH_POD -n $NS --since=180s | grep autogke-no-write-mode-hostpath"
 ok "[warden] Warden block 痕跡なし (直近 180s)"
 
