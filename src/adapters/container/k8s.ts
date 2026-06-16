@@ -355,10 +355,11 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     }
 
     // OneCLI proxy CA bundle is mounted from a K8s Secret as a Phase 2.5 MVP.
-    // Phase 2.6 will collapse this into an OneCLI sidecar with emptyDir
-    // sharing (PoC-5 pattern). Keep the volume regardless of whether the
-    // orchestrator side appended `-v /tmp/onecli-*.pem` (skipped below) so
-    // the agent always sees the certs at a stable path.
+    // TODO(phase-2.6): collapse this Secret mount into an OneCLI sidecar with
+    // emptyDir sharing (PoC-5 pattern) so CA rotation is automatic. Until
+    // then, k8s/onecli-ca-secret.md documents the manual create-secret flow.
+    // The volume is mounted regardless of whether OneCLI emitted `-v /tmp/...`
+    // (we drop those above) so the agent always sees the certs at a stable path.
     volumes.push({
       name: ONECLI_CA_VOLUME_NAME,
       secret: { secretName: caSecretName },
@@ -383,8 +384,15 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
         // `-v` from OneCLI's applyContainerConfig points at host-side
         // `/tmp/onecli-*.pem` paths that don't survive Warden. The Secret
         // mount above carries the same CA material in a Warden-compatible
-        // way, so drop the OneCLI-supplied hostPath silently.
-        ++i;
+        // way, so drop the OneCLI-supplied hostPath. Logged at debug so a
+        // future OneCLI version that starts emitting non-CA `-v` args (e.g.
+        // socket files, additional cert paths) is discoverable instead of
+        // silently lost.
+        const dropped = spec.onecliApplyArgs[++i];
+        log.debug('K8s: dropping OneCLI -v hostPath mount (Warden deny; CA covered by Secret)', {
+          dropped,
+          agentGroup: spec.agentGroupName,
+        });
         continue;
       } else if (a === '--add-host' && i + 1 < spec.onecliApplyArgs.length) {
         const mapping = spec.onecliApplyArgs[++i];
@@ -401,12 +409,28 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     const serviceHost = process.env.ONECLI_SERVICE_HOST ?? DEFAULT_ONECLI_SERVICE_HOST;
     for (const e of env) {
       if (e.name === undefined || e.value === undefined) continue;
-      if (ONECLI_PROXY_ENV_NAMES.has(e.name) && e.value.includes(ONECLI_DOCKER_HOST)) {
-        e.value = e.value.split(ONECLI_DOCKER_HOST).join(serviceHost);
-      } else if (e.name === 'NODE_EXTRA_CA_CERTS') {
+      if (ONECLI_PROXY_ENV_NAMES.has(e.name)) {
+        if (e.value.includes(ONECLI_DOCKER_HOST)) {
+          e.value = e.value.split(ONECLI_DOCKER_HOST).join(serviceHost);
+        } else {
+          // Proxy env present but doesn't reference host.docker.internal —
+          // OneCLI may have changed format (e.g. returning localhost or
+          // 127.0.0.1) and the value won't resolve inside a Pod. Surface it
+          // instead of letting the agent fail later with timeouts.
+          log.warn('K8s: proxy env value does not contain expected Docker host — not rewriting', {
+            name: e.name,
+            value: e.value,
+            expected: ONECLI_DOCKER_HOST,
+            agentGroup: spec.agentGroupName,
+          });
+        }
+      } else if (e.name === 'NODE_EXTRA_CA_CERTS' && e.value.includes('/tmp/')) {
         // The Docker path (`/tmp/onecli-gateway-ca.pem`) was bind-mounted by
         // OneCLI's `-v` arg, which we drop above. The K8s Secret mount lays
-        // the combined bundle down at a fixed sibling path.
+        // the combined bundle down at a fixed sibling path. The `/tmp/`
+        // guard avoids clobbering a future K8s-native value (e.g. a
+        // sidecar-managed colon-separated path that already includes the
+        // system CA bundle).
         e.value = ONECLI_COMBINED_CA_PATH;
       }
     }

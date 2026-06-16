@@ -1,0 +1,86 @@
+# OneCLI proxy CA bundle 投入手順 (M2 PRD A Phase 2.5)
+
+本ドキュメントは **apply しない**。Secret 自体は `kubectl create secret` コマンドで作る。
+ファイル拡張子を `.md` にしているのは、`kubectl apply -f k8s/` で誤って `apiVersion` を持たない空 yaml として silent skip され、運用者が「適用完了」と勘違いする事故を防ぐため。
+
+## 背景
+
+GKE Autopilot Warden が `autogke-no-write-mode-hostpath` 制約で agent Pod の hostPath mount を全 deny する。OneCLI が `applyContainerConfig` で渡してくる `-v /tmp/onecli-proxy-ca.pem:/tmp/onecli-proxy-ca.pem:ro` 等の hostPath mount は K8s 経路では deny されるため、CA bundle を K8s Secret 経由で agent Pod に渡す。
+
+Phase 2.5 では手動投入 MVP として扱い、自動 rotation は **TODO(phase-2.6)**: OneCLI を orchestrator Pod sidecar に統合した上 (PoC-5 写経)、emptyDir 共有で完全自動化する予定。
+
+## Phase 2.5 投入手順 (DEN さん手動、agent Pod 起動の前提)
+
+### 1. orchestrator Pod から OneCLI が生成した CA bundle 2 個を取得
+
+OneCLI proxy 起動時に `/tmp/` に書かれる、既存 Phase 1/2 で確認済。
+
+```bash
+kubectl exec -n biblio-claw biblio-orchestrator-0 -- \
+  cat /tmp/onecli-proxy-ca.pem > /tmp/onecli-proxy-ca.pem
+kubectl exec -n biblio-claw biblio-orchestrator-0 -- \
+  cat /tmp/onecli-combined-ca.pem > /tmp/onecli-combined-ca.pem
+```
+
+### 2. K8s Secret として投入 (biblio-claw namespace)
+
+```bash
+kubectl create secret generic biblio-onecli-ca \
+  --from-file=onecli-proxy-ca.pem=/tmp/onecli-proxy-ca.pem \
+  --from-file=onecli-combined-ca.pem=/tmp/onecli-combined-ca.pem \
+  --namespace biblio-claw
+```
+
+### 3. 検証
+
+```bash
+kubectl get secret biblio-onecli-ca -n biblio-claw \
+  -o jsonpath='{.data}' | jq 'keys'
+# 期待: ["onecli-combined-ca.pem", "onecli-proxy-ca.pem"]
+```
+
+### 4. 一時ファイル削除
+
+```bash
+rm /tmp/onecli-proxy-ca.pem /tmp/onecli-combined-ca.pem
+```
+
+## マウント先
+
+`K8sJobContainerRuntimeProvider.translateSpec` (`src/adapters/container/k8s.ts`) が agent Pod の Job spec に次を組み込む:
+
+```yaml
+volumes:
+  - name: onecli-ca
+    secret:
+      secretName: biblio-onecli-ca   # ← env ONECLI_CA_SECRET_NAME で override 可
+volumeMounts:
+  - name: onecli-ca
+    mountPath: /etc/ssl/certs/onecli
+    readOnly: true
+```
+
+agent コンテナは `/etc/ssl/certs/onecli/onecli-proxy-ca.pem` と `/etc/ssl/certs/onecli/onecli-combined-ca.pem` を読める。OneCLI 利用側 (agent-runner) の `NODE_EXTRA_CA_CERTS` 等の指定は OneCLI が `applyContainerConfig` 経由で env を返すのでそちらに委ねる (K8s 経路では translateSpec が Docker 由来パスを `/etc/ssl/certs/onecli/onecli-combined-ca.pem` に rewrite する)。
+
+## 再投入が必要なタイミング
+
+OneCLI Pod の再起動 / 再 deploy などで CA bundle が再生成されたとき。検出方法:
+
+- agent Pod の起動が `MountVolume.SetUp failed` で fail する (Secret 不在)
+- agent Pod 内で `curl -v https://api.anthropic.com/` 等が TLS verify error
+
+上記が発生したら delete + 上記手順 1-3 を再実行:
+
+```bash
+kubectl delete secret biblio-onecli-ca -n biblio-claw
+```
+
+## TODO(phase-2.6)
+
+本 Phase 2.5 は MVP として手動投入を許容する。Phase 2.6 で次を実装する:
+
+- OneCLI を orchestrator Pod sidecar に統合 (PoC-5 写経、Native sidecar pattern)
+- CA bundle は emptyDir 共有経由で同 Pod 内 container 間でやりとり
+- agent Pod は OneCLI の生成 CA を直接参照、Secret 経路は廃止
+
+それまでは本ファイル + 上記手順を運用ドキュメントとして残す。Secret の値 (CA bundle PEM 内容) は機密情報のため repo にコミットしない。
