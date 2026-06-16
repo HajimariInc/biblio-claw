@@ -14,6 +14,7 @@ import path from 'path';
 
 import { getContainerRuntimeProvider } from './adapters/container/index.js';
 import type { AgentHandle, AgentSpawnSpec } from './adapters/container/index.js';
+import { subPathOf } from './adapters/container/mounts.js';
 import { getSecretProvider } from './adapters/secret/index.js';
 import { CONTAINER_IMAGE, CONTAINER_IMAGE_BASE, DATA_DIR, GROUPS_DIR, TIMEZONE } from './config.js';
 import { materializeContainerJson } from './container-config.js';
@@ -266,18 +267,35 @@ function buildMounts(
   // hostPath model from Phase 1 can't survive Warden admission). Compute the
   // subPath here so DockerProvider (which ignores the field) and
   // K8sJobProvider (which honours it) both consume the same mount list.
-  // image-layer paths (`<cwd>/container/...`) are left subPath-less — they
-  // live in the agent image, not the PVC.
-  const subPathOf = (hostPath: string): string | undefined => {
-    const rel = path.relative(DATA_DIR, hostPath);
-    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  //
+  // On GKE, `DATA_DIR=/data` and `GROUPS_DIR=/data/groups` are set via env on
+  // the orchestrator StatefulSet so every data mount falls inside DATA_DIR.
+  // If a deployment forgets to override these (e.g. GROUPS_DIR left at the
+  // local default `<cwd>/groups`), `subPathOf` returns undefined for the
+  // group / .claude / global mounts and `expectInDataDir` below surfaces
+  // that as a warn — otherwise the K8s provider would silently skip every
+  // affected mount and the agent would come up with /workspace/agent empty.
+  //
+  // image-layer paths (`<cwd>/container/...`) are intentionally left
+  // subPath-less — they live in the agent image, not the PVC, and never
+  // call `expectInDataDir`.
+  const expectInDataDir = (hostPath: string, label: string): string | undefined => {
+    const rel = subPathOf(hostPath, DATA_DIR);
+    if (rel === undefined) {
+      log.warn('mount hostPath is outside DATA_DIR — K8s will skip this mount', {
+        label,
+        hostPath,
+        DATA_DIR,
+        agentGroup: agentGroup.id,
+      });
+    }
     return rel;
   };
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({
     hostPath: sessDir,
-    subPath: subPathOf(sessDir),
+    subPath: expectInDataDir(sessDir, 'session-dir'),
     containerPath: '/workspace',
     readonly: false,
   });
@@ -285,7 +303,7 @@ function buildMounts(
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({
     hostPath: groupDir,
-    subPath: subPathOf(groupDir),
+    subPath: expectInDataDir(groupDir, 'group-dir'),
     containerPath: '/workspace/agent',
     readonly: false,
   });
@@ -296,7 +314,7 @@ function buildMounts(
   if (fs.existsSync(containerJsonPath)) {
     mounts.push({
       hostPath: containerJsonPath,
-      subPath: subPathOf(containerJsonPath),
+      subPath: expectInDataDir(containerJsonPath, 'container-json'),
       containerPath: '/workspace/agent/container.json',
       readonly: true,
     });
@@ -313,7 +331,7 @@ function buildMounts(
   if (fs.existsSync(composedClaudeMd)) {
     mounts.push({
       hostPath: composedClaudeMd,
-      subPath: subPathOf(composedClaudeMd),
+      subPath: expectInDataDir(composedClaudeMd, 'composed-claude-md'),
       containerPath: '/workspace/agent/CLAUDE.md',
       readonly: true,
     });
@@ -322,7 +340,7 @@ function buildMounts(
   if (fs.existsSync(fragmentsDir)) {
     mounts.push({
       hostPath: fragmentsDir,
-      subPath: subPathOf(fragmentsDir),
+      subPath: expectInDataDir(fragmentsDir, 'claude-fragments'),
       containerPath: '/workspace/agent/.claude-fragments',
       readonly: true,
     });
@@ -333,7 +351,7 @@ function buildMounts(
   if (fs.existsSync(globalDir)) {
     mounts.push({
       hostPath: globalDir,
-      subPath: subPathOf(globalDir),
+      subPath: expectInDataDir(globalDir, 'global-memory'),
       containerPath: '/workspace/global',
       readonly: true,
     });
@@ -351,7 +369,7 @@ function buildMounts(
   // skill symlinks)
   mounts.push({
     hostPath: claudeDir,
-    subPath: subPathOf(claudeDir),
+    subPath: expectInDataDir(claudeDir, 'claude-shared'),
     containerPath: '/home/node/.claude',
     readonly: false,
   });
@@ -366,15 +384,25 @@ function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
-  // Additional mounts from container config
+  // Additional mounts from container config — typically point at agent-group
+  // workspace overrides; on K8s they're projected onto the shared PVC iff the
+  // hostPath happens to be inside DATA_DIR. We don't warn here because users
+  // legitimately use additionalMounts for paths outside DATA_DIR on Docker
+  // (where the field is honored as a literal bind mount).
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
-    mounts.push(...validated);
+    for (const m of validated) {
+      mounts.push({ ...m, subPath: subPathOf(m.hostPath, DATA_DIR) });
+    }
   }
 
-  // Provider-contributed mounts (e.g. opencode-xdg)
+  // Provider-contributed mounts (e.g. opencode-xdg) — same policy as
+  // additionalMounts above. Honour any subPath the provider supplied; fall
+  // back to deriving one from DATA_DIR for paths that happen to live there.
   if (providerContribution.mounts) {
-    mounts.push(...providerContribution.mounts);
+    for (const m of providerContribution.mounts) {
+      mounts.push({ ...m, subPath: m.subPath ?? subPathOf(m.hostPath, DATA_DIR) });
+    }
   }
 
   return mounts;
