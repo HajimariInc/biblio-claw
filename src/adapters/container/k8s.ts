@@ -34,29 +34,29 @@ import * as k8s from '@kubernetes/client-node';
 import { log } from '../../log.js';
 import type { AgentExitInfo, AgentHandle, AgentSpawnSpec, ContainerRuntimeProvider } from './types.js';
 
+// Cluster / informer config
 const DEFAULT_NAMESPACE = 'biblio-claw';
 const DEFAULT_ORCHESTRATOR_POD = 'biblio-orchestrator-0';
 const INFORMER_RECONNECT_MS = 5_000;
 
+// Shared PVC — agent Pod rides the orchestrator's RWO PVC via subPath mounts
+// (Phase 2.5; GKE Autopilot Warden denies hostPath).
 const DEFAULT_AGENT_PVC_NAME = 'data-biblio-orchestrator-0';
-const DEFAULT_ONECLI_CA_SECRET_NAME = 'biblio-onecli-ca';
 const SHARED_PVC_VOLUME_NAME = 'vol-shared';
+const AGENT_FS_GROUP = 1000; // node:22-slim `node` UID/GID — aligns PVC group ownership (PoC-17)
+
+// OneCLI CA Secret mount — TODO(phase-2.6): replace with sidecar + emptyDir.
+const DEFAULT_ONECLI_CA_SECRET_NAME = 'biblio-onecli-ca';
 const ONECLI_CA_VOLUME_NAME = 'onecli-ca';
 const ONECLI_CA_MOUNT_PATH = '/etc/ssl/certs/onecli';
-// node:22-slim's `node` user (UID/GID 1000). The PoC-17 PVC-share writeup uses
-// fsGroup to align the mounted volume's group ownership with the container
-// user; same idea here so the agent process can read/write the shared PVC
-// after K8s applies the subPath mounts.
-const AGENT_FS_GROUP = 1000;
+const ONECLI_COMBINED_CA_PATH = `${ONECLI_CA_MOUNT_PATH}/onecli-combined-ca.pem`;
 
-// OneCLI SDK's `applyContainerConfig` returns Docker-flavoured env values —
-// `HTTPS_PROXY=http://...@host.docker.internal:10255` and
-// `NODE_EXTRA_CA_CERTS=/tmp/onecli-gateway-ca.pem`. Neither resolves inside a
-// GKE Pod. Rewrite both to cluster-native equivalents in `translateSpec`.
+// OneCLI env rewrite — SDK's applyContainerConfig returns Docker-flavoured
+// values (`...@host.docker.internal:10255`, `/tmp/onecli-gateway-ca.pem`)
+// that don't resolve inside a Pod; rewrite to cluster-native equivalents.
 const ONECLI_DOCKER_HOST = 'host.docker.internal';
 const DEFAULT_ONECLI_SERVICE_HOST = 'biblio-onecli.biblio-claw.svc.cluster.local';
 const ONECLI_PROXY_ENV_NAMES = new Set(['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']);
-const ONECLI_COMBINED_CA_PATH = `${ONECLI_CA_MOUNT_PATH}/onecli-combined-ca.pem`;
 
 interface Pending {
   resolve: (info: AgentExitInfo) => void;
@@ -401,40 +401,46 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
       }
     }
 
-    // Rewrite OneCLI's Docker-flavoured proxy + CA env values to their K8s
-    // equivalents. `applyContainerConfig` always returns the same host /
-    // path regardless of where the agent will run; the SDK has no K8s mode.
-    // Override the in-cluster Service DNS via `ONECLI_SERVICE_HOST` env if
-    // the namespace/name differs from the biblio-claw default.
+    this.rewriteOneCLIEnv(env, spec.agentGroupName);
+
+    return { env, volumes, volumeMounts, hostAliases };
+  }
+
+  /**
+   * Rewrite OneCLI's Docker-flavoured proxy + CA env values to K8s-native
+   * equivalents. `applyContainerConfig` returns the same Docker host / path
+   * regardless of runtime (the SDK has no K8s mode), so the provider must
+   * translate after the fact. Override the in-cluster Service DNS via
+   * `ONECLI_SERVICE_HOST` env if the namespace/name differs from default.
+   */
+  private rewriteOneCLIEnv(env: k8s.V1EnvVar[], agentGroupName: string): void {
     const serviceHost = process.env.ONECLI_SERVICE_HOST ?? DEFAULT_ONECLI_SERVICE_HOST;
     for (const e of env) {
       if (e.name === undefined || e.value === undefined) continue;
+
       if (ONECLI_PROXY_ENV_NAMES.has(e.name)) {
-        if (e.value.includes(ONECLI_DOCKER_HOST)) {
-          e.value = e.value.split(ONECLI_DOCKER_HOST).join(serviceHost);
-        } else {
-          // Proxy env present but doesn't reference host.docker.internal —
-          // OneCLI may have changed format (e.g. returning localhost or
-          // 127.0.0.1) and the value won't resolve inside a Pod. Surface it
-          // instead of letting the agent fail later with timeouts.
+        if (!e.value.includes(ONECLI_DOCKER_HOST)) {
+          // OneCLI changed its proxy host format (e.g. localhost / 127.0.0.1).
+          // The value won't resolve inside a Pod, so surface it instead of
+          // letting the agent fail later with timeouts.
           log.warn('K8s: proxy env value does not contain expected Docker host — not rewriting', {
             name: e.name,
             value: e.value,
             expected: ONECLI_DOCKER_HOST,
-            agentGroup: spec.agentGroupName,
+            agentGroup: agentGroupName,
           });
+          continue;
         }
-      } else if (e.name === 'NODE_EXTRA_CA_CERTS' && e.value.includes('/tmp/')) {
-        // The Docker path (`/tmp/onecli-gateway-ca.pem`) was bind-mounted by
-        // OneCLI's `-v` arg, which we drop above. The K8s Secret mount lays
-        // the combined bundle down at a fixed sibling path. The `/tmp/`
-        // guard avoids clobbering a future K8s-native value (e.g. a
-        // sidecar-managed colon-separated path that already includes the
-        // system CA bundle).
+        e.value = e.value.split(ONECLI_DOCKER_HOST).join(serviceHost);
+        continue;
+      }
+
+      // The `/tmp/` guard avoids clobbering a future K8s-native value (e.g.
+      // a sidecar-managed colon-separated path that already includes the
+      // system CA bundle).
+      if (e.name === 'NODE_EXTRA_CA_CERTS' && e.value.includes('/tmp/')) {
         e.value = ONECLI_COMBINED_CA_PATH;
       }
     }
-
-    return { env, volumes, volumeMounts, hostAliases };
   }
 }

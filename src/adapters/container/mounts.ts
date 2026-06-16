@@ -10,26 +10,12 @@
 import path from 'node:path';
 
 /**
- * Compute the PVC subPath for a host-side absolute path, relative to
- * `dataDir`.
+ * Returns the relative path of `hostPath` under `dataDir`, or `undefined`
+ * if outside. On the K8s path, `undefined` makes the provider skip the mount
+ * (= image-layer paths, or misconfigured GROUPS_DIR — see `expectInDataDir`
+ * in `container-runner.ts` for the warn-on-surprise wrapper).
  *
- * Returns the relative path if `hostPath` is a strict subpath of `dataDir`.
- * Returns `undefined` when `hostPath` is outside `dataDir` — caused by either
- *
- *   1. An image-layer path (e.g. `<cwd>/container/CLAUDE.md`) that is
- *      intentionally outside `DATA_DIR` because the agent image bakes it in.
- *   2. A configuration mistake — most commonly `GROUPS_DIR` not being
- *      env-overridden to a `DATA_DIR` subdirectory (`/data/groups`) on GKE,
- *      leaving it at the local default (`<cwd>/groups`).
- *
- * On the K8s job spawn path, `undefined` makes the provider skip the mount
- * entirely — the agent Pod won't see that path through the shared PVC.
- * Callers that *expect* `hostPath` to be inside `DATA_DIR` (session dir,
- * group dir, .claude shared) should treat `undefined` as a configuration
- * error and surface it (see `container-runner.ts:expectInDataDir`).
- *
- * `dataDir` is passed in (not imported from `config.js`) so unit tests can
- * exercise boundary cases without stubbing the env-overridable constant.
+ * `dataDir` is injected (not imported) so unit tests avoid stubbing env.
  */
 export function subPathOf(hostPath: string, dataDir: string): string | undefined {
   const rel = path.relative(dataDir, hostPath);
