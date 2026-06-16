@@ -165,6 +165,30 @@ describe('DockerContainerRuntimeProvider.spawn', () => {
     const [, args] = spawnMock.mock.calls[0];
     expect(args).not.toContain('--user');
   });
+
+  it('ignores VolumeMount.subPath on the Docker path and keeps the hostPath:containerPath bind mount', async () => {
+    const p = new DockerContainerRuntimeProvider();
+    await p.spawn(
+      makeSpec({
+        mounts: [
+          {
+            hostPath: '/data/groups/foo',
+            // subPath is honoured only on K8s — Docker uses hostPath as-is.
+            subPath: 'groups/foo',
+            containerPath: '/workspace/agent',
+            readonly: false,
+          },
+        ],
+      }),
+    );
+    const [, args] = spawnMock.mock.calls[0];
+    expect(args).toContain('-v');
+    expect(args).toContain('/data/groups/foo:/workspace/agent');
+    expect(args.join(' ')).not.toContain('subPath');
+    // The bind mount must come from the absolute hostPath, never a relative
+    // subPath-only form like `groups/foo:/workspace/agent`.
+    expect(args).not.toContain('groups/foo:/workspace/agent');
+  });
 });
 
 describe('DockerAgentHandle.waitForExit', () => {

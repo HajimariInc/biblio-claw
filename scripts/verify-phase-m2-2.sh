@@ -7,7 +7,7 @@
 #   §3. agent image (nanoclaw-agent) に焼き込み 3 ファイル (probe Pod 経由)
 #   §4. init-first-agent-gke.sh が冪等実行可能で Init complete.
 #   §5. central DB 6 テーブル + container_configs に first-agent の行
-#   §6. Slack 入力 → agent K8s Job spawn (手動誘導)
+#   §6. Slack 入力 → agent K8s Job spawn (手動誘導) + Warden block 痕跡 0 + Pod Ready (Phase 2.5)
 #   §7. outbound.db に messages_out ≥ 1 行 (Vertex → agent-runner 経路の完走)
 #   §8. Slack thread に bot 返信到達 (手動 verify [Y/n])
 #   §9. Pod 再作成跨ぎで messages_in/out + boots カウンタ永続化
@@ -140,6 +140,54 @@ done
 [ "${jobs_count:-0}" -ge 1 ] \
   || fail "[slack] agent Job が spawn されない — orchestrator log を確認: kubectl logs $ORCH_POD -n $NS --tail=200"
 ok "[slack] agent Job spawn 確認 (${jobs_count} 個)"
+
+# Phase 2.5 強化: Warden block の痕跡が orchestrator log に出ていないこと。
+# `autogke-no-write-mode-hostpath` が出ていれば PVC subPath モデルへの移行が
+# 失敗している (spec.mounts に subPath が乗っていない / k8s.ts が hostPath を
+# 生成している)。直近 180s に絞って誤検出を抑える。
+# 注意: `grep -c` は 0 件マッチでも `0` を出力して exit 1 を返すため、
+# `|| echo 0` を付けると `0\n0` の二重出力で = 比較が壊れる。`|| true` で
+# exit 1 だけ吸収して `grep -c` 自身の `0` を使う。
+# kubectl の stderr (Forbidden 等) は別ファイルに逃がし、非空なら warn を出す
+# (= 認可エラー時に「Warden 痕跡なし」と誤判定するリスクの軽減)。
+KCTL_ERR="$(mktemp -t verify-m2-2-kctl.XXXXXX.err)"
+trap 'rm -f "$KCTL_ERR"' EXIT
+warden_blocks="$(kubectl logs "$ORCH_POD" -n "$NS" --since=180s 2>"$KCTL_ERR" | sed -r "$ANSI_STRIP" | grep -c 'autogke-no-write-mode-hostpath' || true)"
+warden_blocks="${warden_blocks:-0}"
+if [ -s "$KCTL_ERR" ]; then
+  warn "[warden] kubectl logs が stderr を出力 (= 認可/接続エラーの可能性): $(sed -n '1,3p' "$KCTL_ERR" | tr '\n' ' ')"
+fi
+[ "$warden_blocks" = "0" ] \
+  || fail "[warden] Warden block 痕跡が orchestrator log に ${warden_blocks} 回出ている — PVC subPath モデルへの移行を再確認: kubectl logs $ORCH_POD -n $NS --since=180s | grep autogke-no-write-mode-hostpath"
+ok "[warden] Warden block 痕跡なし (直近 180s)"
+
+# Phase 2.5 強化: 最新 agent Job の Pod が Running/Succeeded に到達。
+# Secret 不在で MountVolume.SetUp failed のときは Pending のままになるため、
+# 120s 以内に Running/Succeeded に到達しなければ fail させる。
+: > "$KCTL_ERR"
+latest_job="$(kubectl get jobs -n "$NS" -l app.kubernetes.io/component=agent --sort-by='.status.startTime' -o jsonpath='{.items[-1:].metadata.name}' 2>"$KCTL_ERR" || echo '')"
+if [ -s "$KCTL_ERR" ]; then
+  warn "[pod] kubectl get jobs stderr: $(sed -n '1,3p' "$KCTL_ERR" | tr '\n' ' ')"
+fi
+if [ -z "${latest_job:-}" ]; then
+  fail "[pod] 最新 agent Job 名を解決できない"
+fi
+pod_phase="Pending"
+for _ in $(seq 1 60); do
+  : > "$KCTL_ERR"
+  pod_phase="$(kubectl get pods -n "$NS" -l "job-name=$latest_job" -o jsonpath='{.items[0].status.phase}' 2>"$KCTL_ERR" || echo 'Pending')"
+  case "$pod_phase" in
+    Running|Succeeded) break ;;
+  esac
+  sleep 2
+done
+if [ -s "$KCTL_ERR" ]; then
+  warn "[pod] kubectl get pods stderr (最終 iter): $(sed -n '1,3p' "$KCTL_ERR" | tr '\n' ' ')"
+fi
+case "$pod_phase" in
+  Running|Succeeded) ok "[pod] agent Pod phase=$pod_phase (job=$latest_job)" ;;
+  *) fail "[pod] agent Pod が Running/Succeeded に到達せず (actual=$pod_phase) — kubectl describe pods -n $NS -l job-name=$latest_job" ;;
+esac
 
 # === §7. outbound.db に messages_out ≥ 1 行 ===
 # Vertex → agent-runner → outbound.db の経路が動いた証拠。session-id は最新の
