@@ -46,12 +46,13 @@ host とコンテナはそれぞれ独自のパッケージツリーを持つ:
 - **`entrypoint.sh`**(切り出し済) — tini の下で `exec bun run /app/src/index.ts`。読みやすく diff も取りやすい。
 - **コンパイル済 `/app/dist` を持たない** — Bun が TS を直接走らせる。host はセッション開始時にフレッシュなソースを `/app/src` 上にマウントするので、host の編集はイメージを再ビルドせず反映される。
 
-## セッションウェイク(2 つの経路)
+## セッションウェイク(3 つの経路)
 
 1. **ベースイメージの ENTRYPOINT** — `container/build.sh` のサンプルのような、stdin を流す test invocation に使う:`tini --> entrypoint.sh` が stdin を `/tmp/input.json` にキャプチャし、`exec bun run src/index.ts` する。
-2. **Host から spawn したセッション** — `src/container-runner.ts` の line ~301 が `--entrypoint bash` を `-c 'exec bun run /app/src/index.ts'` で使う。tini をバイパスする(Docker のデフォルト PID 1 ハンドリングが効く)。stdin は使われない;すべての IO はマウントされたセッション DB を流れる。
+2. **Host から Docker spawn したセッション** (`CONTAINER_PROVIDER=docker`、local 開発) — `src/adapters/container/docker.ts` が `--entrypoint bash` を `-c 'exec bun run /app/src/index.ts'` で使う。tini をバイパスする(Docker のデフォルト PID 1 ハンドリングが効く)。stdin は使われない;すべての IO はマウントされたセッション DB を流れる。
+3. **Host から K8s Job spawn したセッション** (`CONTAINER_PROVIDER=k8s`、GKE) — `src/adapters/container/k8s.ts` が Batch v1 Job を `createNamespacedJob` で発行し、`containers[0].command = ['bash']` + `args = ['-c', 'exec bun run /app/src/index.ts']` を設定する。同じく tini はバイパスし、K8s が Pod の PID 1 ハンドリングを担う。`/data` 配下のセッション DB は **orchestrator の RWO PVC (`data-biblio-orchestrator-0`) を podAffinity で同ノード共有し、subPath volumeMount で個別 view としてマウント** する (M2 PRD A Phase 2.5 で移行)。OneCLI proxy CA bundle は K8s Secret (`biblio-onecli-ca`) からマウントし、agent Pod の `securityContext.fsGroup` を `1000` に設定して `node` ユーザ (UID/GID 1000) がそれを読み書きできるようにする。`translateSpec` は OneCLI SDK が返す Docker 由来 env (`HTTPS_PROXY=...@host.docker.internal:10255`、`NODE_EXTRA_CA_CERTS=/tmp/onecli-gateway-ca.pem`) を K8s 用 (`biblio-onecli.biblio-claw.svc.cluster.local:10255`、`/etc/ssl/certs/onecli/onecli-combined-ca.pem`) に post-process する。Secret の中身は M2 PRD A Phase 3 で **orchestrator Pod 内の OneCLI Native sidecar が emptyDir 経由で生成した CA bundle を `src/sidecar/ca-secret-sync.ts` が起動時 + 60s 周期で自動 upsert** する (Phase 2.5 までは `kubectl create secret` の手動投入だったが、本 Phase で廃止)。hostPath は GKE Autopilot Warden (`autogke-no-write-mode-hostpath`) に deny されるため使わない。
 
-両方の経路とも、`/app/src/index.ts` の同じソースファイルを Bun が走らせて終わる。
+3 経路とも、`/app/src/index.ts` の同じソースファイルを Bun が走らせて終わる。
 
 ## CI の形
 

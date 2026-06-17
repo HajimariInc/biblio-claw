@@ -1,0 +1,55 @@
+# orchestrator が agent コンテナを K8s Job として spawn / 監視 / 削除するための
+# 最小権限 Role + RoleBinding。`CONTAINER_PROVIDER=k8s` で動く host (= src/adapters/
+# container/k8s.ts) が必要とする API verbs を allowlist する。
+#
+# 設計方針:
+# - namespaced Role を使う。ClusterRole は不要 (biblio-claw namespace 内で完結)
+# - batch/jobs に create/get/list/watch/delete を付与 — spawn (create) + Informer
+#   (list/watch) + 完了 cleanup (delete) のため
+# - pods + pods/log は debug 用 (read-only)。失敗 Job の log を kubectl logs で
+#   取得できるようにする
+# - secrets に get/list/create/update/patch を付与 — M2 PRD A Phase 3 で
+#   ca-secret-sync が OneCLI sidecar 生成 CA bundle を K8s Secret `biblio-onecli-ca`
+#   に自動 upsert するため。delete は付けない (stale Secret は手動 cleanup、
+#   orchestrator が誤って消す経路を作らない)。
+#
+# 参照: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: biblio-orchestrator-agent-spawner
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+rules:
+  - apiGroups: ['batch']
+    resources: ['jobs']
+    verbs: ['create', 'get', 'list', 'watch', 'delete']
+  - apiGroups: ['']
+    resources: ['pods']
+    verbs: ['get', 'list', 'watch']
+  - apiGroups: ['']
+    resources: ['pods/log']
+    verbs: ['get']
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get', 'list', 'create', 'update', 'patch']
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: biblio-orchestrator-agent-spawner
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: biblio-orchestrator-ksa
+    namespace: biblio-claw
+roleRef:
+  kind: Role
+  apiGroup: rbac.authorization.k8s.io
+  name: biblio-orchestrator-agent-spawner

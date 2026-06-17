@@ -1,0 +1,30 @@
+# biblio-claw vertex-token-rotator sidecar image (M2 PRD A Phase 3、TBD-3 案 B)。
+# google-cloud-cli:slim ベース。`gcloud auth application-default print-access-token` を
+# 叩いて ADC token を OneCLI に投入する用途のみで、他の重い依存は持たせない。本 image は ~375MB。
+#
+# image streaming (GKE Autopilot 既定 ON) で startup ペナルティは緩和される。
+#
+# 同 Pod 内 OneCLI sidecar (localhost:10254) + orchestrator KSA → biblio-orchestrator
+# GSA (`roles/aiplatform.user`) の WI 経路を前提に動く。orchestrator Pod の
+# Native sidecar 構成は k8s/10-orchestrator-statefulset.yaml の `vertex-token-rotator`
+# container として参照される。
+#
+# Build:   docker build -f Dockerfile.sidecar.vertex -t biblio-sidecar-vertex:m2-p3 .
+# AR push: docker tag biblio-sidecar-vertex:m2-p3 \
+#            asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m2-p3 && \
+#          docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m2-p3
+
+FROM gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash curl jq ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY scripts/vertex-rotate.sh        /scripts/vertex-rotate.sh
+COPY scripts/onecli-vertex-secret.sh /scripts/onecli-vertex-secret.sh
+COPY scripts/onecli-lib.sh           /scripts/onecli-lib.sh
+RUN chmod +x /scripts/vertex-rotate.sh /scripts/onecli-vertex-secret.sh
+
+WORKDIR /scripts
+
+CMD ["bash", "/scripts/vertex-rotate.sh"]

@@ -20,6 +20,16 @@ export interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+  /**
+   * Optional sub-path inside a shared PVC. Used only on the K8s job spawn
+   * path — K8sJobContainerRuntimeProvider.translateSpec maps it to
+   * `volumeMounts[].subPath` so multiple mounts can share one PVC volume
+   * (the orchestrator's RWO PVC mounted at the same node via podAffinity).
+   * Docker path ignores this field — the existing hostPath:containerPath
+   * bind mount continues to work locally because the upstream filesystem
+   * is the same.
+   */
+  subPath?: string;
 }
 
 export interface ProviderContainerContext {

@@ -6,9 +6,13 @@
 #   - agent-runner (our TypeScript code): Bun, mounted RO at /app/src by host
 #   - globally-installed Node CLIs (claude-code, agent-browser, vercel): pnpm + Node
 #
-# Source is never baked in — /app/src is provided by a shared read-only
-# bind mount at runtime (see src/container-runner.ts). Source-only changes
-# never require an image rebuild.
+# biblio-claw deviation (M2 PRD A Phase 2): bake static sources into the image.
+# Upstream NanoClaw mounts /app/src at runtime via hostPath so source edits don't
+# trigger a rebuild. On GKE the K8sJobProvider drops hostPath mounts that don't
+# start with /data/ (translateSpec, src/adapters/container/k8s.ts), so the only
+# way agent Pods can see agent-runner / skills / container CLAUDE.md is to bake
+# them in. Docker Compose keeps the runtime mount on top of the baked copy, so
+# local dev sees edits without rebuilding — the bake is transparent there.
 
 FROM node:22-slim
 
@@ -71,11 +75,18 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     rm -rf /root/.bun
 
 # ---- agent-runner deps -------------------------------------------------------
-# Deps are cached independently of CLI versions. Source is NOT baked in —
-# it's provided by the shared RO mount at runtime.
+# Deps are cached independently of CLI versions.
 WORKDIR /app
 
 COPY agent-runner/package.json agent-runner/bun.lock ./
+
+# biblio-claw addition (M2 PRD A Phase 2): bake agent-runner src / skills /
+# container CLAUDE.md before `bun install` so the install layer can resolve any
+# source-side workspace refs. Compose hostPath mounts still win at runtime in
+# local dev (transparent). See header comment for the K8s rationale.
+COPY agent-runner/src/ /app/src/
+COPY skills/           /app/skills/
+COPY CLAUDE.md         /app/CLAUDE.md
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
