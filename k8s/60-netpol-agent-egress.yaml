@@ -53,14 +53,17 @@ spec:
         - { protocol: TCP, port: 53 }
     # OneCLI Pod (in-cluster) — GKE Dataplane V2 (Cilium) では `ipBlock: 0.0.0.0/0`
     # は cluster 外 IP のみに評価され、Pod-to-Pod は届かない。同 namespace の
-    # OneCLI Pod を podSelector で明示許可する (M2 Phase 1 verify §8 で実測検出)。
+    # OneCLI 受け口 Pod を podSelector で明示許可する (M2 Phase 1 verify §8 で実測検出)。
+    # M2 PRD A Phase 3: OneCLI を orchestrator Pod の Native sidecar に統合したため、
+    # 旧 `component: onecli` → `component: orchestrator` に変更 (= agent → orchestrator
+    # Pod 10254/10255 の egress を許可、Service `biblio-onecli` が orchestrator に向く)。
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: biblio-claw
           podSelector:
             matchLabels:
-              app.kubernetes.io/component: onecli
+              app.kubernetes.io/component: orchestrator
       ports:
         - { protocol: TCP, port: 10254 }
         - { protocol: TCP, port: 10255 }

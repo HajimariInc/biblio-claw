@@ -1,6 +1,14 @@
 # OneCLI への in-cluster アクセス用 ClusterIP Service。
 # gateway (REST/Dashboard) 10254 / proxy (MITM) 10255 を expose。
-# orchestrator は環境変数 ONECLI_URL でこの Service の gateway port に到達する。
+# M2 PRD A Phase 3: OneCLI を orchestrator Pod の Native sidecar に統合したため、
+# Service の selector は `component: onecli` → `component: orchestrator` に変更した。
+# Service 自体は **agent Pod 経路** のために残す:
+#   - orchestrator 本体は同 Pod 内 localhost (= http://localhost:10254) で OneCLI に到達
+#   - agent Pod は依然 cluster-internal Service DNS で OneCLI に到達
+#     (`src/adapters/container/k8s.ts:434` の env rewrite が `biblio-onecli.biblio-claw.svc.cluster.local`
+#     に rewrite するため、Service 名/port を変えないことで agent 側コード変更を avoid)
+# Service の負荷分散は実質意味なし (orchestrator は replicas=1) だが、Service DNS で
+# Pod IP の変更を吸収できる利点を温存。
 apiVersion: v1
 kind: Service
 metadata:
@@ -13,7 +21,7 @@ spec:
   type: ClusterIP
   selector:
     app.kubernetes.io/name: biblio-claw
-    app.kubernetes.io/component: onecli
+    app.kubernetes.io/component: orchestrator
   ports:
     - name: gateway
       port: 10254

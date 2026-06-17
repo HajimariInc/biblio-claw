@@ -6,6 +6,14 @@
 #   envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN を受け取れば別 Pod 不要。
 # - agent コンテナは CONTAINER_PROVIDER=k8s で K8s Job として spawn
 #   (k8s/02-orchestrator-rbac.yaml の RBAC が前提)。
+# - M2 PRD A Phase 3: OneCLI gateway / GH App token rotator / Vertex Bearer
+#   token rotator を本 Pod の Native sidecar (K8s 1.28+ initContainers +
+#   restartPolicy: Always pattern) として統合した。これにより
+#     * 旧 `biblio-onecli` Deployment は廃止 (本 Pod の onecli sidecar に統合)
+#     * 旧 `biblio-sidecar` CronJob は廃止 (本 Pod の gh-token-rotator sidecar に統合)
+#     * `k8s/onecli-ca-secret.md` の手動 CA 投入手順は廃止 (orchestrator 本体
+#       内の ca-secret-sync が emptyDir 経由で読んだ CA を K8s Secret に自動 upsert)
+#   詳細は PRD A Phase 3 plan / CLAUDE.md §シークレット を参照。
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -28,12 +36,105 @@ spec:
         app.kubernetes.io/component: orchestrator
     spec:
       serviceAccountName: biblio-orchestrator-ksa
+      # ===========================================================================
+      # initContainers (Phase 3): 1 本物 init + 2 Native sidecar
+      # - fetch-pem        — 本物 init (restartPolicy なし、run-to-completion)
+      # - cloud-sql-proxy  — Native sidecar (restartPolicy: Always、後続を起動 gate)
+      # - onecli           — Native sidecar (restartPolicy: Always、CA bundle を共有)
+      # ===========================================================================
+      initContainers:
+        # 1. fetch-pem (本物 init): WI 経由で Secret Manager から GH App PEM を取得し
+        #    tmpfs emptyDir に置く。書き終えたら chmod 0400 + Pod 終了で揮発。
+        - name: fetch-pem
+          image: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              gcloud secrets versions access latest \
+                --secret=biblio-gh-app-pem \
+                --project=hajimari-ai-hackathon-2026 \
+                > /pem/key.pem
+              chmod 0400 /pem/key.pem
+          volumeMounts:
+            - { name: pem, mountPath: /pem }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+
+        # 2. cloud-sql-proxy (Native sidecar、旧 20-onecli-deployment.yaml から移管):
+        #    WI で IAM 認証して 127.0.0.1:5432 に Cloud SQL を proxy。後続 onecli の
+        #    DB 接続 (DATABASE_URL=localhost:5432) を成立させる。
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.16.0
+          restartPolicy: Always
+          args:
+            - '--auto-iam-authn'
+            - '--private-ip'
+            - '--port=5432'
+            - 'hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql'
+          # startupProbe は付けない:
+          #  - cloud-sql-proxy v2 image は distroless で sh/nc を持たず exec probe 不可
+          #  - cloud-sql-proxy は 127.0.0.1:5432 のみ listen するため、tcpSocket probe
+          #    (Pod IP 経由) は connection refused になる
+          # Native sidecar はプロセス起動で started 扱いになり後続 (onecli) が起動するが、
+          # onecli (Prisma migrate) は DB 接続をリトライするため gate 不要 (旧 Deployment も
+          # cloud-sql-proxy に probe なしで稼働していた)。同 Pod 内なので onecli からは
+          # localhost:5432 で正常に見える。
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+
+        # 3. onecli (Native sidecar、旧 20-onecli-deployment.yaml から移管):
+        #    OneCLI gateway。10254 (REST) / 10255 (MITM proxy) を listen。
+        #    `/app/data/gateway` を emptyDir `onecli-ca` 経由で同 Pod 内 orchestrator
+        #    と共有し、起動時に生成する CA bundle (`ca.pem` / `ca.key`) を orchestrator
+        #    の `/etc/ssl/certs/onecli/` に届ける。orchestrator 本体内の ca-secret-sync
+        #    がここから K8s Secret `biblio-onecli-ca` に upsert する。
+        - name: onecli
+          image: ghcr.io/onecli/onecli:1.30.0
+          restartPolicy: Always
+          env:
+            - name: AUTH_MODE
+              value: 'local'
+            # IAM 認証 = password 不要。username = "biblio-orchestrator@<project>.iam"。
+            # URL 内の `@` は user に含まれるため %40 でエンコード。Phase 3 で
+            # KSA を統合した結果、cloud-sql-proxy も orchestrator GSA で認証する
+            # ため username が変わる (旧 biblio-onecli@... → biblio-orchestrator@...)。
+            - name: DATABASE_URL
+              value: 'postgresql://biblio-orchestrator%40hajimari-ai-hackathon-2026.iam@127.0.0.1:5432/biblio_onecli?sslmode=disable'
+            - { name: APP_URL, value: 'http://localhost:10254' }
+            - { name: GATEWAY_API_URL, value: 'http://localhost:10255' }
+          ports:
+            - { name: gateway, containerPort: 10254 }
+            - { name: proxy, containerPort: 10255 }
+          volumeMounts:
+            - { name: onecli-ca, mountPath: /app/data/gateway }
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: 10254
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+
+      # ===========================================================================
+      # containers: orchestrator 本体 + 2 rotator (gh / vertex)
+      # ===========================================================================
       containers:
         - name: orchestrator
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
+          # M2 PRD A Phase 3 で src/index.ts + src/sidecar/ca-secret-sync.ts を
+          # 追加したため m1-p1 → m2-p3 に bump (ca-secret-sync コードを焼き込む)。
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m2-p3
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -62,11 +163,18 @@ spec:
             # /data/groups/ に置く。src/config.ts:GROUPS_DIR が env override 対応済。
             - { name: GROUPS_DIR, value: /data/groups }
             # agent Pod 用 PVC + Secret 名 (M2 PRD A Phase 2.5)。
-            # 詳細・投入手順・TODO(phase-2.6) は k8s/onecli-ca-secret.md を参照。
+            # Phase 3 から CA Secret は orchestrator 内 ca-secret-sync が
+            # emptyDir 経由で読んで自動 upsert する (手動投入は廃止)。
             - { name: AGENT_PVC_NAME, value: data-biblio-orchestrator-0 }
             - { name: ONECLI_CA_SECRET_NAME, value: biblio-onecli-ca }
-            # === OneCLI gateway (in-cluster ClusterIP) ===
-            - { name: ONECLI_URL, value: 'http://biblio-onecli.biblio-claw.svc.cluster.local:10254' }
+            # === OneCLI gateway (Phase 3 で localhost 経由に変更) ===
+            # 旧: biblio-onecli.biblio-claw.svc.cluster.local:10254
+            # 新: 同 Pod 内の onecli sidecar = http://localhost:10254
+            - { name: ONECLI_URL, value: 'http://localhost:10254' }
+            # === orchestrator 本体が OneCLI MITM 経由で外部 API を呼ぶ際の
+            #     TLS trust anchor。emptyDir 経由で onecli sidecar が生成する ca.pem
+            #     を /etc/ssl/certs/onecli/ca.pem として参照する ===
+            - { name: NODE_EXTRA_CA_CERTS, value: /etc/ssl/certs/onecli/ca.pem }
             # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
@@ -81,11 +189,78 @@ spec:
                 optional: true
           volumeMounts:
             - { name: data, mountPath: /data }
+            # OneCLI sidecar が生成する CA bundle を共有 emptyDir 経由で readOnly mount。
+            # ca-secret-sync が `/etc/ssl/certs/onecli/ca.pem` を読んで K8s Secret に upsert する。
+            - { name: onecli-ca, mountPath: /etc/ssl/certs/onecli, readOnly: true }
           resources:
             # GKE Autopilot 用に requests のみ指定 (Autopilot が limits を同値に補完)
             requests:
               cpu: 500m
               memory: 1Gi
+
+        # ---- gh-token-rotator sidecar (Phase 3、案 1A: 既存 1-shot script を loop wrap) ----
+        # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
+        # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
+        - name: gh-token-rotator
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m2-p3
+          command: ['bash', '/scripts/gh-rotate.sh']
+          env:
+            - { name: ONECLI_URL, value: 'http://localhost:10254' }
+            - { name: GH_APP_PEM_PATH, value: /pem/key.pem }
+            - { name: GH_API_HOST, value: api.github.com }
+            - { name: GH_SECRET_NAME, value: biblio-claw-gh-token }
+            - { name: GH_SECRET_HEADER, value: authorization }
+            - { name: GH_SECRET_VALUE_FORMAT, value: 'Bearer {value}' }
+            - { name: JWT_EXP_SECONDS, value: '540' }
+            - { name: ROTATE_INTERVAL_SEC, value: '3000' }
+            - name: GH_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: biblio-gh-app
+                  key: app-id
+            - name: GH_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: biblio-gh-app
+                  key: installation-id
+          volumeMounts:
+            - { name: pem, mountPath: /pem, readOnly: true }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+        # ---- vertex-token-rotator sidecar (Phase 3、案 1A: 既存 1-shot script を loop wrap) ----
+        # 50min 周期で onecli-vertex-secret.sh を呼んで ADC token を OneCLI に投入。
+        # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA
+        # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
+        # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
+        - name: vertex-token-rotator
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m2-p3
+          command: ['bash', '/scripts/vertex-rotate.sh']
+          env:
+            - { name: ONECLI_URL, value: 'http://localhost:10254' }
+            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
+            - { name: CLOUD_ML_REGION, value: global }
+            - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
+            - { name: ROTATE_INTERVAL_SEC, value: '3000' }
+            - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+
+      volumes:
+        # OneCLI sidecar が生成する CA bundle を本体と共有する emptyDir。
+        # OneCLI 側: /app/data/gateway/{ca.pem, ca.key} を生成
+        # orchestrator 側: /etc/ssl/certs/onecli/ca.pem を NODE_EXTRA_CA_CERTS で参照
+        - name: onecli-ca
+          emptyDir: {}
+        # GH App PEM 用 tmpfs。fetch-pem init が gcloud で書き、gh-token-rotator が読む。
+        # ディスク非書き込み、Pod 終了で揮発、PEM の露出窓を最小化。
+        - name: pem
+          emptyDir:
+            medium: Memory
   volumeClaimTemplates:
     - metadata:
         name: data
