@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { coreApi, kubeConfigCtor, fsReadFile, warnCalls, infoCalls } = vi.hoisted(() => {
+const { coreApi, kubeConfigCtor, fsReadFile, schedulerStart, schedulerStop, warnCalls, infoCalls } = vi.hoisted(() => {
   const coreApi = {
     readNamespacedSecret: vi.fn(),
     createNamespacedSecret: vi.fn().mockResolvedValue({}),
@@ -15,6 +15,8 @@ const { coreApi, kubeConfigCtor, fsReadFile, warnCalls, infoCalls } = vi.hoisted
     coreApi,
     kubeConfigCtor,
     fsReadFile: vi.fn(),
+    schedulerStart: vi.fn(),
+    schedulerStop: vi.fn(),
     warnCalls: [] as unknown[],
     infoCalls: [] as unknown[],
   };
@@ -27,6 +29,12 @@ vi.mock('@kubernetes/client-node', () => ({
 
 vi.mock('fs', () => ({
   promises: { readFile: fsReadFile },
+}));
+
+// scheduler をモックして start に渡されるコールバックをキャプチャ可能にする
+// (= startCaSecretSync が syncOnce を scheduler に渡しているかを検証するため)。
+vi.mock('../../adapters/scheduler/index.js', () => ({
+  getSchedulerProvider: () => ({ name: 'mock', start: schedulerStart, stop: schedulerStop }),
 }));
 
 vi.mock('../../log.js', () => ({
@@ -84,6 +92,8 @@ beforeEach(() => {
   coreApi.createNamespacedSecret.mockReset().mockResolvedValue({});
   coreApi.replaceNamespacedSecret.mockReset().mockResolvedValue({});
   fsReadFile.mockReset();
+  schedulerStart.mockReset();
+  schedulerStop.mockReset();
   warnCalls.length = 0;
   infoCalls.length = 0;
 });
@@ -232,6 +242,35 @@ describe('ca-secret-sync syncOnce', () => {
     expect(warnCalls).toHaveLength(1);
     expect(coreApi.readNamespacedSecret).not.toHaveBeenCalled();
   });
+
+  it('source file が空 (空白のみ) なら warn + API を呼ばない (空 base64 上書き防止)', async () => {
+    fsReadFile.mockResolvedValueOnce(Buffer.from('   \n\t', 'utf8'));
+
+    const rt = makeRuntime();
+    await syncOnce(rt as unknown as Parameters<typeof syncOnce>[0]);
+
+    // 空ファイルは null 扱い → readSecret 以降に進まない (有効 Secret を空で潰さない)
+    expect(coreApi.readNamespacedSecret).not.toHaveBeenCalled();
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled();
+    expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled();
+    expect(warnCalls).toHaveLength(1);
+    // 空ファイルは ENOENT とは別扱い: streak は増やさない
+    expect(rt.enoentStreak).toBe(0);
+  });
+
+  it('replaceNamespacedSecret が 503 で失敗しても例外を投げず warn (create 409 と対称)', async () => {
+    fsReadFile.mockResolvedValueOnce(CA_BUFFER);
+    coreApi.readNamespacedSecret.mockResolvedValueOnce({
+      metadata: { name: 'biblio-onecli-ca', namespace: 'biblio-claw', resourceVersion: '99' },
+      type: 'Opaque',
+      data: { 'onecli-proxy-ca.pem': 'stale', 'onecli-combined-ca.pem': 'stale' },
+    });
+    coreApi.replaceNamespacedSecret.mockRejectedValueOnce(makeApiError(503));
+
+    const rt = makeRuntime();
+    await expect(syncOnce(rt as unknown as Parameters<typeof syncOnce>[0])).resolves.toBeUndefined();
+    expect(warnCalls).toHaveLength(1);
+  });
 });
 
 describe('ca-secret-sync helpers', () => {
@@ -310,5 +349,23 @@ describe('ca-secret-sync lifecycle', () => {
     await startCaSecretSync();
     expect(warnCalls).toHaveLength(1);
     stopCaSecretSync();
+  });
+
+  it('scheduler.start に渡したコールバックが syncOnce を発火する (最重要副作用の検証)', async () => {
+    fsReadFile.mockResolvedValueOnce(CA_BUFFER);
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(makeApiError(404));
+
+    await startCaSecretSync();
+    expect(schedulerStart).toHaveBeenCalledTimes(1);
+
+    // scheduler に渡されたコールバックを手動発火 → syncOnce が走り K8s API に到達する。
+    // これが無音で no-op に置き換わると CA bundle が更新されず agent TLS が静かに壊れるため、
+    // 「コールバック = syncOnce」の契約を明示的に検証する。
+    const cb = schedulerStart.mock.calls[0][0] as () => Promise<void>;
+    await cb();
+    expect(coreApi.createNamespacedSecret).toHaveBeenCalledTimes(1);
+
+    stopCaSecretSync();
+    expect(schedulerStop).toHaveBeenCalledTimes(1);
   });
 });

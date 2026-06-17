@@ -28,7 +28,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NS="biblio-claw"
 ORCH_POD="biblio-orchestrator-0"
 SECRET_NAME="biblio-onecli-ca"
-CA_WAIT_SEC="${CA_WAIT_SEC:-90}"  # orchestrator 再起動後の ca-secret-sync 初回 sweep 待ち
+# §1 で orchestrator の readyReplicas=1 を確認した後に §2 で待つため、この時点で
+# onecli init container (startupProbe /v1/health、最大 120s) は通過済 = ca.pem は
+# emptyDir に存在し、ca-secret-sync の初回 sweep は orchestrator 起動直後に走る。
+# よって 90s は「初回 sweep + K8s upsert 反映」のマージンで足り、onecli startupProbe
+# の最大待ち時間を内包する必要はない。長引く環境では CA_WAIT_SEC=180 等で上書き可。
+CA_WAIT_SEC="${CA_WAIT_SEC:-90}"
 
 # shellcheck source=scripts/onecli-lib.sh
 . "${ROOT}/scripts/onecli-lib.sh"

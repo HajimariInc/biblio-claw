@@ -31,16 +31,24 @@ WORKER="${SCRIPTS_DIR}/onecli-vertex-secret.sh"
 
 log() { printf '[vertex-rotate] %s\n' "$*" >&2; }
 
-[ -x "$WORKER" ] || [ -r "$WORKER" ] || { log "FAIL: worker script not found at $WORKER"; exit 1; }
+# bash で実行するので実行ビットは不要、存在確認で十分。
+[ -f "$WORKER" ] || { log "FAIL: worker script not found at $WORKER"; exit 1; }
 
+# OneCLI 起動待ち。満了を warn で可視化 (gh-rotate.sh と同じ理由)。
 log "wait for OneCLI ready (${ONECLI_URL})"
+ready=false
 for _ in $(seq 1 "$ROTATE_READY_RETRIES"); do
   if curl -fsS "${ONECLI_URL%/}/v1/secrets" >/dev/null 2>&1; then
-    log "OneCLI ready"
+    ready=true
     break
   fi
   sleep "$ROTATE_READY_INTERVAL_SEC"
 done
+if [ "$ready" = true ]; then
+  log "OneCLI ready"
+else
+  log "WARN: OneCLI not ready after ${ROTATE_READY_RETRIES} retries — entering rotation loop anyway"
+fi
 
 while true; do
   log "rotation cycle start"

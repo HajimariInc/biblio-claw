@@ -2,7 +2,7 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: M1 Phase 2 (Prod デプロイ) 完了 — GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet + OneCLI Deployment (cloud-sql-proxy sidecar 同居) + Sidecar CronJob (`*/30` で GH installation token を OneCLI へ自動投入) が稼働、Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-2-wiring.sh exit 0` で全項目 OK)。配線済の bot に DM して会話成立させる初期化 (init-first-agent 相当) は M2 スコープ。
+> **ステータス**: M2 PRD A Phase 3 完了 — GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet が **Native sidecar 多コンテナ Pod** (initContainers: `fetch-pem` + `cloud-sql-proxy` + `onecli` / containers: `orchestrator` + `gh-token-rotator` + `vertex-token-rotator`) として稼働。OneCLI gateway / GH installation token / Vertex Bearer token / CA bundle はすべて Pod 内 sidecar + `ca-secret-sync` で自動投入され、起動コマンドは `kubectl apply -f k8s/` のみで完結する (旧 OneCLI Deployment + Sidecar CronJob `*/30` は Phase 3 で廃止)。Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)、agent は K8s Job として spawn され NetworkPolicy で egress 制限される。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-m2-3.sh exit 0` で全項目 OK)。
 
 ## クイックスタート (biblio-claw, local)
 
@@ -28,13 +28,18 @@ pnpm run chat "hello"                     # CLI から司書と会話 (smoke 用
 
 ### Cloud SQL `postgres` user パスワード変更 (初回 Bootstrap GRANT)
 
-Phase 2 では Cloud SQL `biblio-pgsql` を **IAM 認証 + Private IP only** (`--no-assign-ip` + `cloudsql.iam_authentication=on`) で運用するため、組み込み管理者 (`postgres` user) は通常パスワード未設定状態で放置する。
+Cloud SQL `biblio-pgsql` を **IAM 認証 + Private IP only** (`--no-assign-ip` + `cloudsql.iam_authentication=on`) で運用するため、組み込み管理者 (`postgres` user) は通常パスワード未設定状態で放置する。
 
-ただし PostgreSQL 15+ の `public` schema は新規 DB 作成直後の状態で IAM user (`biblio-onecli@hajimari-ai-hackathon-2026.iam`) が CREATE 権限を持たない (`pg_database_owner` 所有)。OneCLI 起動時の Prisma migrate が `ERROR: permission denied for schema public` で失敗するため、**初回デプロイ時に `postgres` user 経由で 1 回だけ GRANT を発行する**必要がある (Bootstrap GRANT)。
+ただし PostgreSQL 15+ の `public` schema は新規 DB 作成直後の状態で IAM user (M2 PRD A Phase 3 以降は `biblio-orchestrator@hajimari-ai-hackathon-2026.iam`) が CREATE 権限を持たない (`pg_database_owner` 所有)。OneCLI 起動時の Prisma migrate が `ERROR: permission denied for schema public` で失敗するため、**初回デプロイ時に `postgres` user 経由で 1 回だけ GRANT を発行する**必要がある (Bootstrap GRANT)。
 
 実行が必要なタイミング:
-- 初回 GKE デプロイ (`scripts/teardown-phase-2.sh` で削除した後の再構築含む)
+- 初回 GKE デプロイ (teardown 後の再構築含む)
 - M5 提出後の本番再開時
+
+> **前提 (Phase 3 で GSA を集約した実機検証で判明)**: OneCLI sidecar が cloud-sql-proxy の `--auto-iam-authn` で DB に IAM ログインするには、GSA `biblio-orchestrator@...` 側に次が揃っている必要がある。Bootstrap GRANT より**先に**済ませること:
+> 1. `k8s/01-ksa.yaml` を apply して KSA `biblio-orchestrator-ksa` に WI annotation を付与 (これが無いと proxy が GSA 認証できず `cloudsql.instances.get 403` で GRANT が silent fail する)
+> 2. GSA に `roles/cloudsql.client` **+ `roles/cloudsql.instanceUser`** の両方 (後者は IAM DB authn の **ログイン** に必須。`client` だけでは `Cloud SQL IAM service account authentication failed`)
+> 3. Cloud SQL に IAM user 登録: `gcloud sql users create biblio-orchestrator@hajimari-ai-hackathon-2026.iam --instance=biblio-pgsql --type=CLOUD_IAM_SERVICE_ACCOUNT --project=hajimari-ai-hackathon-2026`
 
 #### 手順
 
@@ -46,7 +51,7 @@ gcloud sql users set-password postgres \
   --project=hajimari-ai-hackathon-2026
 
 # 2. 短命 Bootstrap Pod (psql + cloud-sql-proxy) を立てて GRANT 実行
-#    Pod 内 env として PG_TEMP_PASS を注入、Pod 終了で消える
+#    proxy は --auto-iam-authn で biblio-orchestrator GSA を使う (KSA annotation 経由)
 cat <<YAML | kubectl apply -f -
 apiVersion: v1
 kind: Pod
@@ -54,28 +59,28 @@ metadata:
   name: db-grant-bootstrap
   namespace: biblio-claw
 spec:
-  serviceAccountName: biblio-onecli-ksa
+  serviceAccountName: biblio-orchestrator-ksa
   restartPolicy: Never
   containers:
     - name: psql
       image: postgres:18-alpine
       command:
         - sh
-        - -c
+        - -ec
         - |
-          for i in 1 2 3 4 5; do nc -z 127.0.0.1 5432 && break; sleep 2; done
+          for i in 1 2 3 4 5 6 7 8 9 10; do nc -z 127.0.0.1 5432 && break; sleep 2; done
           PGPASSWORD="\$PG_TEMP_PASS" psql -h 127.0.0.1 -U postgres -d biblio_onecli \
-            -c 'GRANT CREATE, USAGE ON SCHEMA public TO "biblio-onecli@hajimari-ai-hackathon-2026.iam";'
-          echo DONE; sleep 3
+            -c 'GRANT CREATE, USAGE ON SCHEMA public TO "biblio-orchestrator@hajimari-ai-hackathon-2026.iam";'
+          echo GRANT_OK
       env:
         - name: PG_TEMP_PASS
           value: "$PG_TEMP_PASS"
     - name: cloud-sql-proxy
       image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.16.0
-      args: ["--private-ip", "--port=5432", "hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql"]
+      args: ["--auto-iam-authn", "--private-ip", "--port=5432", "hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql"]
 YAML
 
-# 3. 完了確認 + Pod 削除
+# 3. 完了確認 (GRANT + GRANT_OK の 2 行) + Pod 削除
 kubectl wait pod/db-grant-bootstrap -n biblio-claw \
   --for=jsonpath='{.status.containerStatuses[?(@.name=="psql")].state.terminated.exitCode}'=0 \
   --timeout=120s
@@ -89,19 +94,25 @@ gcloud sql users set-password postgres \
   --project=hajimari-ai-hackathon-2026
 unset PG_TEMP_PASS
 
-# 5. OneCLI Deployment を rollout restart → Prisma migrate deploy 成功を確認
-kubectl rollout restart deployment/biblio-onecli -n biblio-claw
-kubectl rollout status deployment/biblio-onecli -n biblio-claw --timeout=180s
-kubectl logs deployment/biblio-onecli -n biblio-claw -c onecli --tail=30 \
-  | grep -E "(All migrations|gateway ready|Ready in)"
+# 5. orchestrator StatefulSet を rollout → onecli sidecar の Prisma migrate 成功を確認
+#    (Phase 3 で OneCLI は orchestrator Pod の Native sidecar に統合された)
+kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s
+kubectl logs biblio-orchestrator-0 -n biblio-claw -c onecli --tail=30 \
+  | grep -E "(No pending migrations|gateway ready|Ready in)"
 ```
+
+> **既存 DB を新 GSA で引き継ぐ場合 (= Phase 3 移行のような、空でない DB に GSA を切り替えるケース)**: 上記 schema GRANT だけでは既存テーブル (`_prisma_migrations` 等、旧 `biblio-onecli` 所有) にアクセスできず migrate が `permission denied for table _prisma_migrations` で落ちる。Step 2 の psql に次の role membership 継承も追加する (新 user が旧 user の全資産を継承):
+> ```sql
+> GRANT "biblio-onecli@hajimari-ai-hackathon-2026.iam" TO "biblio-orchestrator@hajimari-ai-hackathon-2026.iam";
+> ```
+> teardown 後の**完全再構築 (空 DB)** では全テーブルを `biblio-orchestrator` が新規作成するため、この role membership は不要。
 
 #### security 上の注意
 
 - 一時パスワードは「生成 → 使用 → 別ランダム値で上書き」の流れで運用者の手元にも残さない設計 (Step 1 → Step 4)
 - Step 4 の overwrite で実質的に `postgres` user は無効化される (運用は IAM 認証経路のみ)
 - `gcloud sql users delete postgres` は built-in 制約で削除不可、上書きで対処
-- teardown 時は Cloud SQL インスタンスごと削除されるため別途 cleanup 不要 (`scripts/teardown-phase-2.sh` 参照)
+- teardown 時は Cloud SQL インスタンスごと削除されるため別途 cleanup 不要
 - 本手順で発行する一時パスワードは Cloud SQL に対する administrator credentials なので、実行ログ・shell 履歴・スクリーンショット等への流出に注意
 
 > **以下は NanoClaw 上流 README を継承する**。biblio-claw のために書き換えていない部分が多く含まれる。本リポジトリ向けの公式手順は上記「クイックスタート」と `CLAUDE.md` を優先すること。

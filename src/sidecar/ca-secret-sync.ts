@@ -152,6 +152,16 @@ export async function syncOnce(rt: Runtime): Promise<void> {
 async function readCaFile(rt: Runtime): Promise<string | null> {
   try {
     const buf = await fs.readFile(rt.config.sourcePath);
+    const content = buf.toString('utf8');
+    // OneCLI が CA を生成する truncate→write の window では空ファイルが読める。
+    // ここで空を弾かないと encodeSecretData('') → 空 base64 が既存の有効 Secret を
+    // 上書きし、agent Pod の TLS が無音で壊れる。null を返して次 tick で retry。
+    if (content.trim() === '') {
+      log.warn('ca-secret-sync source file is empty — skipping upsert (OneCLI may be mid-write)', {
+        source: rt.config.sourcePath,
+      });
+      return null;
+    }
     if (rt.enoentStreak > 0) {
       log.info('ca-secret-sync source file appeared', {
         source: rt.config.sourcePath,
@@ -160,7 +170,7 @@ async function readCaFile(rt: Runtime): Promise<string | null> {
     }
     rt.enoentStreak = 0;
     rt.enoentWarned = false;
-    return buf.toString('utf8');
+    return content;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
@@ -193,11 +203,8 @@ function sameSecretData(actual: Record<string, string>, desired: Record<string, 
   const actualKeys = Object.keys(actual).sort();
   const desiredKeys = Object.keys(desired).sort();
   if (actualKeys.length !== desiredKeys.length) return false;
-  for (let i = 0; i < actualKeys.length; i++) {
-    if (actualKeys[i] !== desiredKeys[i]) return false;
-    if (actual[actualKeys[i]] !== desired[desiredKeys[i]]) return false;
-  }
-  return true;
+  // ソート済みキーを同インデックスで照合: キー一致 + 値一致を 1 ループで判定。
+  return actualKeys.every((k, i) => k === desiredKeys[i] && actual[k] === desired[k]);
 }
 
 type ReadSecretResult = k8s.V1Secret | 'not-found' | 'error';
@@ -294,6 +301,10 @@ function isHttpStatus(err: unknown, status: number): boolean {
   return false;
 }
 
+// テスト側が `syncOnce` の引数型を取得するための type-only export。
+// 値は公開しない (実装の公開にはならない)。
+export type { Runtime };
+
 // テスト用の内部 export。production からは触らない。
 export const __testing = {
   loadConfig,
@@ -305,5 +316,4 @@ export const __testing = {
   createSecret,
   replaceSecret,
   ENOENT_WARN_THRESHOLD,
-  type: undefined as unknown as Runtime,
 };
