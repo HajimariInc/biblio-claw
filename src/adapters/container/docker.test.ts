@@ -21,6 +21,7 @@ vi.mock('../../config.js', () => ({
 }));
 
 import { DockerContainerRuntimeProvider } from './docker.js';
+import { log } from '../../log.js';
 import type { AgentSpawnSpec } from './types.js';
 
 function makeChild(): EventEmitter & { stderr: EventEmitter; stdout: EventEmitter; kill: (sig: string) => void } {
@@ -105,6 +106,31 @@ describe('DockerContainerRuntimeProvider.cleanupOrphans', () => {
     });
     const p = new DockerContainerRuntimeProvider();
     await expect(p.cleanupOrphans()).resolves.toBeUndefined();
+  });
+
+  it('stays quiet when a stop fails with "No such container" (already gone)', async () => {
+    execSyncMock
+      .mockReturnValueOnce('orphan-a\n') // ps
+      .mockImplementationOnce(() => {
+        throw new Error('Error response from daemon: No such container: orphan-a');
+      });
+    const p = new DockerContainerRuntimeProvider();
+    await p.cleanupOrphans();
+    expect(vi.mocked(log.warn)).not.toHaveBeenCalled();
+  });
+
+  it('warns (does not swallow) when a stop fails for another reason', async () => {
+    execSyncMock
+      .mockReturnValueOnce('orphan-a\n') // ps
+      .mockImplementationOnce(() => {
+        throw new Error('permission denied while talking to docker daemon');
+      });
+    const p = new DockerContainerRuntimeProvider();
+    await p.cleanupOrphans();
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'docker stop failed during orphan cleanup',
+      expect.objectContaining({ containerName: 'orphan-a' }),
+    );
   });
 });
 

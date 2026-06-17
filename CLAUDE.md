@@ -317,8 +317,8 @@ DEN さんが手動で `kubectl create secret` する手順は不要 (= Phase 2.
 
 ロジックの所在:
 - emptyDir 共有: `k8s/10-orchestrator-statefulset.yaml` の `volumes.onecli-ca` (OneCLI sidecar: `/app/data/gateway` / orchestrator: `/etc/ssl/certs/onecli` readOnly)
-- 自動 upsert ループ: `src/sidecar/ca-secret-sync.ts` (起動 + 60s 周期、ENOENT は silent retry + 5min 連続で warn)
-- agent Pod 用 Secret mount: `src/adapters/container/k8s.ts:357-371` (温存)
+- 自動 upsert ループ: `src/sidecar/ca-secret-sync.ts` (起動 + 60s 周期、ENOENT は silent retry + 5min ごとに warn 再発火)
+- agent Pod 用 Secret mount: `K8sJobContainerRuntimeProvider.translateSpec` の OneCLI CA Secret volume / volumeMount (`src/adapters/container/k8s.ts`、温存)
 
 ### GKE 側 OneCLI への secret 投入時の `.env` 上書き罠 (ローカル経路のみ)
 
@@ -474,7 +474,7 @@ agent コンテナは **Bun** 上で動き、host は **Node**(pnpm)上で動く
 - **コンテナで新しい named パラメータの SQL insert/update を書く** → SQL と JS キーの両方で `$name` を使う: `.run({ $id: msg.id })`。`bun:sqlite` は host 側の `better-sqlite3` のようにプレフィックスを自動で剥がさない。位置パラメータ `?` は通常通り動く。
 - **`container/agent-runner/src/` にテストを追加する** → `vitest` ではなく `bun:test` から import する。Vitest は Node 上で動き、`bun:sqlite` をロードできない。`vitest.config.ts` はこのツリーを除外している。
 - **agent がランタイムで呼び出す Node CLI を追加する**(`agent-browser`、`claude-code`、`vercel` のようなもの) → Dockerfile の pnpm グローバルインストールブロックに置き、新しい `ARG` で exact バージョンに pin する。`bun install -g` は使わない — それは pnpm の supply-chain ポリシーをバイパスする。
-- **Dockerfile の entrypoint または動的 spawn コマンドを変更する**(`src/container-runner.ts` の line ~301)→ `exec bun ...` を維持してシグナルがクリーンに転送されるようにする。イメージには `/app/dist` がない。tsc ビルドステップを再導入しないこと。
+- **Dockerfile の entrypoint または動的 spawn コマンドを変更する**(spawn 機構は `src/adapters/container/{docker,k8s}.ts`、agent の起動コマンド文字列は `src/container-runner.ts` の `command: ['-c', 'exec bun run ...']` 付近)→ `exec bun ...` を維持してシグナルがクリーンに転送されるようにする。イメージには `/app/dist` がない。tsc ビルドステップを再導入しないこと。
 - **セッション DB の pragma を変更する**(`container/agent-runner/src/db/connection.ts`)→ `journal_mode=DELETE` はクロスマウント可視性に必須である。先頭のコメントブロックを先に読むこと。
 
 ## CJK フォントサポート

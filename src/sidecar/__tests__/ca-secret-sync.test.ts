@@ -57,7 +57,6 @@ interface TestRuntime {
   config: { namespace: string; secretName: string; sourcePath: string };
   scheduler: { name: string; start: () => void; stop: () => void };
   enoentStreak: number;
-  enoentWarned: boolean;
 }
 
 function makeRuntime(overrides: Partial<TestRuntime> = {}): TestRuntime {
@@ -70,7 +69,6 @@ function makeRuntime(overrides: Partial<TestRuntime> = {}): TestRuntime {
     },
     scheduler: { name: 'noop', start: vi.fn(), stop: vi.fn() },
     enoentStreak: 0,
-    enoentWarned: false,
     ...overrides,
   };
 }
@@ -172,33 +170,40 @@ describe('ca-secret-sync syncOnce', () => {
     expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled();
     expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled();
     expect(rt.enoentStreak).toBe(1);
-    expect(rt.enoentWarned).toBe(false);
     // streak 1 では warn しない (閾値 5 まで silent)
     expect(warnCalls).toHaveLength(0);
   });
 
-  it('ENOENT が閾値 (5) 連続で warn 1 回、解消で streak リセット', async () => {
+  it('ENOENT が閾値 (5) 連続で warn、閾値の倍数ごとに再 warn、解消で streak リセット', async () => {
     const rt = makeRuntime();
+    const threshold = __testing.ENOENT_WARN_THRESHOLD;
 
-    for (let i = 0; i < __testing.ENOENT_WARN_THRESHOLD; i++) {
+    // 閾値 (5) 連続で warn 1 回目
+    for (let i = 0; i < threshold; i++) {
       fsReadFile.mockRejectedValueOnce(makeEnoent());
       await syncOnce(rt as unknown as Parameters<typeof syncOnce>[0]);
     }
-    expect(rt.enoentStreak).toBe(__testing.ENOENT_WARN_THRESHOLD);
-    expect(rt.enoentWarned).toBe(true);
+    expect(rt.enoentStreak).toBe(threshold);
     expect(warnCalls).toHaveLength(1);
 
-    // 6 回目も ENOENT だが warn は重複しない
+    // 閾値の間 (6〜9 回目) は再 warn しない
+    for (let i = threshold + 1; i < threshold * 2; i++) {
+      fsReadFile.mockRejectedValueOnce(makeEnoent());
+      await syncOnce(rt as unknown as Parameters<typeof syncOnce>[0]);
+    }
+    expect(warnCalls).toHaveLength(1);
+
+    // 閾値の倍数 (10 回目) で再 warn — 長期欠落が沈黙しない
     fsReadFile.mockRejectedValueOnce(makeEnoent());
     await syncOnce(rt as unknown as Parameters<typeof syncOnce>[0]);
-    expect(warnCalls).toHaveLength(1);
+    expect(rt.enoentStreak).toBe(threshold * 2);
+    expect(warnCalls).toHaveLength(2);
 
     // 解消すると streak リセット + 復旧 info ログ
     fsReadFile.mockResolvedValueOnce(CA_BUFFER);
     coreApi.readNamespacedSecret.mockRejectedValueOnce(makeApiError(404));
     await syncOnce(rt as unknown as Parameters<typeof syncOnce>[0]);
     expect(rt.enoentStreak).toBe(0);
-    expect(rt.enoentWarned).toBe(false);
   });
 
   it('readNamespacedSecret が一時失敗したら warn + 次 tick で retry (createNamespacedSecret は呼ばれない)', async () => {

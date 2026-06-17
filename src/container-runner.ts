@@ -542,6 +542,18 @@ async function buildContainerSpec(
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
+  // `docker build` below only exists on the Docker runtime. On K8s the
+  // orchestrator pod has no docker binary, so an install_packages self-mod
+  // would crash here with ENOENT. Fail loud and early instead — image rebuild
+  // (and thus install_packages) is not supported under the K8s provider yet.
+  const runtime = getContainerRuntimeProvider();
+  if (runtime.name !== 'docker') {
+    throw new Error(
+      `buildAgentGroupImage requires the Docker runtime (current: ${runtime.name}). ` +
+        'install_packages self-mod is not supported under the K8s provider.',
+    );
+  }
+
   const agentGroup = getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 

@@ -12,9 +12,12 @@
  *      podAffinity to the orchestrator pod (RWO PVC needs same node),
  *      securityContext lockdown.
  *   2. Translate the AgentSpawnSpec — env stays as env, `spec.mounts` under
- *      `/data` become hostPath volumes (same-node guarantee → same backing
- *      PVC). `spec.onecliApplyArgs` is parsed (`-e` / `-v` / `--add-host`)
- *      into env / hostPath volumes / hostAliases regardless of host path.
+ *      `/data` become PVC subPath volumeMounts (same-node co-tenancy via
+ *      podAffinity lets the orchestrator's RWO PVC be shared; Phase 2.5
+ *      replaced hostPath here to clear the Autopilot Warden deny).
+ *      `spec.onecliApplyArgs` is parsed: `-e` → env, `--add-host` →
+ *      hostAliases, `-v` (OneCLI host-side CA paths) are dropped — the CA is
+ *      delivered via the `biblio-onecli-ca` Secret mount instead.
  *   3. createNamespacedJob, register a deferred in `pending[jobName]`.
  *   4. Informer (one per provider instance, namespace-scoped, label-filtered)
  *      watches Job conditions; `add`/`update` resolve on `Complete`/`Failed`,
@@ -382,7 +385,17 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
       if (a === '-e' && i + 1 < spec.onecliApplyArgs.length) {
         const kv = spec.onecliApplyArgs[++i];
         const eq = kv.indexOf('=');
-        if (eq > 0) env.push({ name: kv.substring(0, eq), value: kv.substring(eq + 1) });
+        if (eq > 0) {
+          env.push({ name: kv.substring(0, eq), value: kv.substring(eq + 1) });
+        } else {
+          // Malformed `-e` (no `=`, or `=` at index 0). OneCLI shouldn't emit
+          // this, but dropping it silently would hide a future SDK format
+          // change behind an agent that can't see its env. Surface it.
+          log.warn('K8s: dropping malformed OneCLI -e arg (no "KEY=VALUE")', {
+            arg: kv,
+            agentGroup: spec.agentGroupName,
+          });
+        }
       } else if (a === '-v' && i + 1 < spec.onecliApplyArgs.length) {
         // `-v` from OneCLI's applyContainerConfig points at host-side
         // `/tmp/onecli-*.pem` paths that don't survive Warden. The Secret

@@ -28,8 +28,9 @@
  *
  * 失敗扱い:
  *   - source file ENOENT: silent retry。OneCLI sidecar が CA を生成するまで数秒
- *     〜数十秒の窓が空く。`ENOENT_WARN_THRESHOLD` (= 60s × 5 = 5 分) を超えたら
- *     1 回だけ warn (= sidecar が起動失敗している兆候)。
+ *     〜数十秒の窓が空く。`ENOENT_WARN_THRESHOLD` (= 60s × 5 = 5 分) ごとに warn
+ *     を再発火 (5/10/15 分…)。長期ダウンが最初の 1 warn で沈黙しないよう
+ *     LocalScheduler と同じ倍数エスカレーションにしてある。
  *   - K8s API 失敗 (5xx / network): log.warn + 次 tick で retry。Pod 全体を倒さ
  *     ない (silent failure 排除のため warn は出すが、process.exit はしない)。
  *   - K8s API 409 Conflict: replicas=1 なので発生しないはずだが、出たら warn +
@@ -47,16 +48,18 @@ const DEFAULT_SECRET_NAME = 'biblio-onecli-ca';
 const DEFAULT_SOURCE_PATH = '/etc/ssl/certs/onecli/ca.pem';
 
 /**
- * agent Pod 側 (`src/adapters/container/k8s.ts:357-371` + 441-443) が期待する
- * Secret data key 名。1 ファイル内容を両 key に流用する (= OneCLI gateway root CA
- * を proxy / combined 共通の trust anchor として扱う)。
+ * agent Pod 側 (`K8sJobContainerRuntimeProvider.translateSpec` の Secret mount +
+ * `rewriteOneCLIEnv` の `NODE_EXTRA_CA_CERTS` 書き換え) が期待する Secret data
+ * key 名。1 ファイル内容を両 key に流用する (= OneCLI gateway root CA を
+ * proxy / combined 共通の trust anchor として扱う)。
  */
 const SECRET_KEY_PROXY = 'onecli-proxy-ca.pem';
 const SECRET_KEY_COMBINED = 'onecli-combined-ca.pem';
 
 /**
- * ENOENT が連続して何 tick 続いたら warn を 1 回出すか。60s × 5 = 5 分。
- * sidecar が起動失敗 / OneCLI の CA 生成パスが変わった等の兆候を可視化する。
+ * ENOENT が連続して何 tick 続くごとに warn を再発火するか。60s × 5 = 5 分。
+ * この倍数 (5/10/15 分…) で warn し続けるので、sidecar 起動失敗 / OneCLI の CA
+ * 生成パス変更による長期欠落が沈黙しない。
  */
 const ENOENT_WARN_THRESHOLD = 5;
 
@@ -79,7 +82,6 @@ interface Runtime {
   config: Config;
   scheduler: SchedulerProvider;
   enoentStreak: number;
-  enoentWarned: boolean;
 }
 
 let runtime: Runtime | null = null;
@@ -101,7 +103,7 @@ export async function startCaSecretSync(): Promise<void> {
   const coreApi = kc.makeApiClient(k8s.CoreV1Api);
 
   const scheduler = getSchedulerProvider();
-  runtime = { coreApi, config, scheduler, enoentStreak: 0, enoentWarned: false };
+  runtime = { coreApi, config, scheduler, enoentStreak: 0 };
 
   log.info('ca-secret-sync started', {
     namespace: config.namespace,
@@ -169,18 +171,21 @@ async function readCaFile(rt: Runtime): Promise<string | null> {
       });
     }
     rt.enoentStreak = 0;
-    rt.enoentWarned = false;
     return content;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
       rt.enoentStreak += 1;
-      if (rt.enoentStreak >= ENOENT_WARN_THRESHOLD && !rt.enoentWarned) {
-        log.warn('ca-secret-sync source file missing for >= 5 min — OneCLI sidecar may be down', {
+      // Warn at the threshold and every multiple thereafter (5, 10, 15 … min)
+      // so a long OneCLI sidecar outage stays observable instead of going
+      // silent after a single warn — mirrors LocalScheduler's re-escalation
+      // (src/adapters/scheduler/local.ts).
+      if (rt.enoentStreak >= ENOENT_WARN_THRESHOLD && rt.enoentStreak % ENOENT_WARN_THRESHOLD === 0) {
+        log.warn('ca-secret-sync source file missing — OneCLI sidecar may be down', {
           source: rt.config.sourcePath,
           streak: rt.enoentStreak,
+          minutesMissing: rt.enoentStreak,
         });
-        rt.enoentWarned = true;
       }
       return null;
     }

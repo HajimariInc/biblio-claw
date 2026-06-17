@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { batchApi, informer, kubeConfigCtor, makeInformerFn, infoCalls } = vi.hoisted(() => {
+const { batchApi, informer, kubeConfigCtor, makeInformerFn, infoCalls, warnCalls } = vi.hoisted(() => {
   const informer = {
     on: vi.fn(),
     start: vi.fn().mockResolvedValue(undefined),
@@ -23,6 +23,7 @@ const { batchApi, informer, kubeConfigCtor, makeInformerFn, infoCalls } = vi.hoi
     kubeConfigCtor,
     makeInformerFn: vi.fn().mockReturnValue(informer),
     infoCalls: [] as unknown[],
+    warnCalls: [] as unknown[],
   };
 });
 
@@ -36,7 +37,7 @@ vi.mock('../../log.js', () => ({
   log: {
     debug: vi.fn(),
     info: (...args: unknown[]) => infoCalls.push(args),
-    warn: vi.fn(),
+    warn: (...args: unknown[]) => warnCalls.push(args),
     error: vi.fn(),
   },
 }));
@@ -103,6 +104,7 @@ beforeEach(() => {
   makeInformerFn.mockClear();
   kubeConfigCtor.mockClear();
   infoCalls.length = 0;
+  warnCalls.length = 0;
   vi.unstubAllEnvs();
 });
 
@@ -397,6 +399,40 @@ describe('K8sJobContainerRuntimeProvider.spawn — spec translation', () => {
     expect(c.args).toEqual(['-c', 'exec bun run /app/src/index.ts']);
     expect(c.imagePullPolicy).toBe('Always');
   });
+
+  it('injects HOME=/home/node when runAsUser is set (parity with the Docker path)', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec({ runAsUser: { uid: 1000, gid: 1000 } }));
+    const env = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec.containers[0].env;
+    expect(env.find((e: { name: string }) => e.name === 'HOME')?.value).toBe('/home/node');
+  });
+
+  it('warns and keeps the value when a proxy env does not carry the Docker host (SDK format drift)', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec({ onecliApplyArgs: ['-e', 'HTTPS_PROXY=http://x:tok@localhost:10255'] }));
+    const env = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec.containers[0].env;
+    const proxy = env.find((e: { name: string }) => e.name === 'HTTPS_PROXY');
+    // Not rewritten — surfaced instead of silently producing an unreachable URL.
+    expect(proxy.value).toBe('http://x:tok@localhost:10255');
+    expect(warnCalls.some((c) => String((c as unknown[])[0]).includes('proxy env value'))).toBe(true);
+  });
+
+  it('warns and drops a malformed OneCLI `-e` arg (no KEY=VALUE) instead of swallowing it', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: { name: 'biblio-agent-abc' } });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.spawn(makeSpec({ onecliApplyArgs: ['-e', 'JUST_A_FLAG'] }));
+    const env = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec.containers[0].env;
+    expect(env.find((e: { name: string }) => e.name === 'JUST_A_FLAG')).toBeUndefined();
+    expect(warnCalls.some((c) => String((c as unknown[])[0]).includes('malformed OneCLI -e'))).toBe(true);
+  });
 });
 
 describe('K8sJobContainerRuntimeProvider Informer plumbing', () => {
@@ -546,6 +582,52 @@ describe('K8sJobContainerRuntimeProvider spawn error path', () => {
     await p.ensureRuntime();
     await expect(p.spawn(makeSpec())).rejects.toThrow(/Forbidden/);
   });
+
+  it('throws when createNamespacedJob returns a body without metadata.name', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] });
+    batchApi.createNamespacedJob.mockResolvedValueOnce({ metadata: {} });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await expect(p.spawn(makeSpec())).rejects.toThrow(/missing metadata\.name/);
+  });
+});
+
+describe('K8sJobContainerRuntimeProvider.cleanupOrphans', () => {
+  it('deletes done (Complete/Failed) Jobs and leaves running ones', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] }); // ensureRuntime probe
+    batchApi.listNamespacedJob.mockResolvedValueOnce({
+      items: [
+        { metadata: { name: 'done-job' }, status: { conditions: [{ type: 'Complete', status: 'True' }] } },
+        { metadata: { name: 'running-job' }, status: { conditions: [] } },
+      ],
+    });
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await p.cleanupOrphans();
+    expect(batchApi.deleteNamespacedJob).toHaveBeenCalledTimes(1);
+    expect(batchApi.deleteNamespacedJob.mock.calls[0][0].name).toBe('done-job');
+  });
+
+  it('swallows a listNamespacedJob failure (best-effort, never throws)', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] }); // ensureRuntime probe
+    batchApi.listNamespacedJob.mockRejectedValueOnce(new Error('503 Service Unavailable'));
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await expect(p.cleanupOrphans()).resolves.toBeUndefined();
+    expect(warnCalls.some((c) => String((c as unknown[])[0]).includes('orphan cleanup'))).toBe(true);
+  });
+
+  it('warns but keeps going when an individual Job delete fails', async () => {
+    batchApi.listNamespacedJob.mockResolvedValueOnce({ items: [] }); // ensureRuntime probe
+    batchApi.listNamespacedJob.mockResolvedValueOnce({
+      items: [{ metadata: { name: 'done-job' }, status: { conditions: [{ type: 'Failed', status: 'True' }] } }],
+    });
+    batchApi.deleteNamespacedJob.mockRejectedValueOnce(new Error('404 already gone'));
+    const p = new K8sJobContainerRuntimeProvider();
+    await p.ensureRuntime();
+    await expect(p.cleanupOrphans()).resolves.toBeUndefined();
+    expect(warnCalls.some((c) => String((c as unknown[])[0]).includes('Job delete failed'))).toBe(true);
+  });
 });
 
 describe('K8sJobContainerRuntimeProvider factory env', () => {
@@ -555,6 +637,23 @@ describe('K8sJobContainerRuntimeProvider factory env', () => {
     _resetContainerRuntimeProviderForTesting();
     const p = getContainerRuntimeProvider();
     expect(p.name).toBe('k8s');
+    _resetContainerRuntimeProviderForTesting();
+  });
+
+  it('CONTAINER_PROVIDER unset defaults to the Docker provider', async () => {
+    vi.stubEnv('CONTAINER_PROVIDER', '');
+    const { _resetContainerRuntimeProviderForTesting, getContainerRuntimeProvider } = await import('./index.js');
+    _resetContainerRuntimeProviderForTesting();
+    const p = getContainerRuntimeProvider();
+    expect(p.name).toBe('docker');
+    _resetContainerRuntimeProviderForTesting();
+  });
+
+  it('CONTAINER_PROVIDER with an unknown value throws (parity with DSN/Scheduler factories)', async () => {
+    vi.stubEnv('CONTAINER_PROVIDER', 'k8s-job');
+    const { _resetContainerRuntimeProviderForTesting, getContainerRuntimeProvider } = await import('./index.js');
+    _resetContainerRuntimeProviderForTesting();
+    expect(() => getContainerRuntimeProvider()).toThrow(/Unknown CONTAINER_PROVIDER: k8s-job/);
     _resetContainerRuntimeProviderForTesting();
   });
 });

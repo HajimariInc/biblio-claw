@@ -5,32 +5,33 @@
  */
 import { DockerContainerRuntimeProvider } from './docker.js';
 import { K8sJobContainerRuntimeProvider } from './k8s.js';
-import type { ContainerRuntimeProvider } from './types.js';
+import type { ContainerProviderName, ContainerRuntimeProvider } from './types.js';
 
 export type {
   AgentExitInfo,
   AgentExitReason,
   AgentHandle,
   AgentSpawnSpec,
+  ContainerProviderName,
   ContainerRuntimeProvider,
   VolumeMount,
 } from './types.js';
 
 let instance: ContainerRuntimeProvider | null = null;
 
+const PROVIDER_FACTORIES: Record<ContainerProviderName, () => ContainerRuntimeProvider> = {
+  docker: () => new DockerContainerRuntimeProvider(),
+  k8s: () => new K8sJobContainerRuntimeProvider(),
+};
+
 export function getContainerRuntimeProvider(): ContainerRuntimeProvider {
   if (instance) return instance;
   const name = process.env.CONTAINER_PROVIDER || 'docker';
-  switch (name) {
-    case 'docker':
-      instance = new DockerContainerRuntimeProvider();
-      break;
-    case 'k8s':
-      instance = new K8sJobContainerRuntimeProvider();
-      break;
-    default:
-      throw new Error(`Unknown CONTAINER_PROVIDER: ${name}. Known: docker, k8s`);
+  const factory = PROVIDER_FACTORIES[name as ContainerProviderName];
+  if (!factory) {
+    throw new Error(`Unknown CONTAINER_PROVIDER: ${name}. Known: ${Object.keys(PROVIDER_FACTORIES).join(', ')}`);
   }
+  instance = factory();
   return instance;
 }
 

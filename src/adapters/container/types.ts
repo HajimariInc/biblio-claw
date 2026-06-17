@@ -53,9 +53,11 @@ export interface AgentSpawnSpec {
   /** Entrypoint command (shell + script). */
   command: ReadonlyArray<string>;
   /**
-   * Container name hint. Docker uses it as `--name`; K8sJobProvider ignores it
-   * and uses `metadata.generateName` instead (K8s Jobs need unique suffixes to
-   * avoid create/delete races).
+   * Container name hint. Required for Docker (used as `--name`; DockerProvider
+   * throws if absent). Ignored by K8sJobProvider, which uses
+   * `metadata.generateName` instead (K8s Jobs need unique suffixes to avoid
+   * create/delete races). Optional here because only Docker requires it;
+   * container-runner always sets it before a Docker spawn.
    */
   containerName?: string;
   /**
@@ -83,8 +85,11 @@ export interface AgentHandle {
   kill(): Promise<void>;
 }
 
+/** Selectable container runtime backends (the `CONTAINER_PROVIDER` env values). */
+export type ContainerProviderName = 'docker' | 'k8s';
+
 export interface ContainerRuntimeProvider {
-  readonly name: 'docker' | 'k8s';
+  readonly name: ContainerProviderName;
   /** Pre-flight check (docker info / k8s API reach). Throws on failure. */
   ensureRuntime(): Promise<void>;
   /** Stop orphan containers from this install. Best-effort, never throws. */

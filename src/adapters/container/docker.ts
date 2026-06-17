@@ -105,8 +105,14 @@ export class DockerContainerRuntimeProvider implements ContainerRuntimeProvider 
       for (const name of orphans) {
         try {
           stopContainer(name);
-        } catch {
-          /* already stopped */
+        } catch (err) {
+          // "No such container" = already gone (GC'd / stopped) — expected,
+          // skip quietly. Anything else (daemon perms, malformed name) gets a
+          // warn so a partial cleanup isn't mistaken for a complete one.
+          const msg = String((err as { stderr?: Buffer | string }).stderr ?? err);
+          if (!msg.includes('No such container')) {
+            log.warn('docker stop failed during orphan cleanup', { containerName: name, err });
+          }
         }
       }
       if (orphans.length > 0) {
