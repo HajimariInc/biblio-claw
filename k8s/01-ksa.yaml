@@ -1,7 +1,13 @@
-# Kubernetes ServiceAccount × 3。
-# Vault gke-iam.md §3 方針: WI が必要なのは Sidecar / OneCLI の 2 体のみ。
-# orchestrator は全外部 API を OneCLI 経由で叩く = keyless ADC 不要 → annotation なし。
-# agent KSA は本 Phase ではスコープ外 (補足: plan §補足 "A 案採用" 参照)。
+# Kubernetes ServiceAccount: orchestrator 1 体に集約 (M2 PRD A Phase 3、TBD-1 案 A)。
+#
+# Phase 3 で OneCLI Deployment + GH Sidecar CronJob を orchestrator Pod の Native
+# sidecar に統合したため、KSA も orchestrator 1 つに集約する。GSA も新 `biblio-orchestrator`
+# 1 つに統合し、WI (workload identity) / Secret Manager / Cloud SQL / Vertex AI 用の
+# role を resource レベルで bind する (= "1 workload = 1 GSA" 公式推奨パターン)。
+#
+# gcloud 側の binding は本 Phase 着手時に DEN さんが 1 回手作業で実行 (詳細は plan §Task 1)。
+# 旧 `biblio-onecli-ksa` + `biblio-sidecar-ksa` (および対応する旧 2 GSA) は本 Phase 完了
+# 確認後に削除予定 (Rollback 窓を確保するため即削除しない)。
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -10,25 +16,5 @@ metadata:
   labels:
     app.kubernetes.io/name: biblio-claw
     app.kubernetes.io/component: orchestrator
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: biblio-onecli-ksa
-  namespace: biblio-claw
-  labels:
-    app.kubernetes.io/name: biblio-claw
-    app.kubernetes.io/component: onecli
   annotations:
-    iam.gke.io/gcp-service-account: biblio-onecli@hajimari-ai-hackathon-2026.iam.gserviceaccount.com
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: biblio-sidecar-ksa
-  namespace: biblio-claw
-  labels:
-    app.kubernetes.io/name: biblio-claw
-    app.kubernetes.io/component: sidecar
-  annotations:
-    iam.gke.io/gcp-service-account: biblio-sidecar@hajimari-ai-hackathon-2026.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com

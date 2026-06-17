@@ -49,22 +49,32 @@ phase="$(kubectl get pvc data-biblio-orchestrator-0 -n "$NS" -o jsonpath='{.stat
 [ "$phase" = "Bound" ] || fail "[pvc] data-biblio-orchestrator-0 phase != Bound (actual=$phase)"
 ok "[pvc] data-biblio-orchestrator-0 Bound"
 
-# === 5. OneCLI Deployment + cloud-sql-proxy sidecar ===
-onecli_ready="$(kubectl get deployment biblio-onecli -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-[ "$onecli_ready" = "1" ] || fail "[onecli] Deployment readyReplicas != 1 (actual=$onecli_ready)"
-ok "[onecli] Deployment ready=$onecli_ready"
+# === 5. OneCLI sidecar 統合 (M2 PRD A Phase 3: 旧 OneCLI Deployment を廃止) ===
+# Phase 3 で OneCLI は orchestrator Pod の Native sidecar (initContainers の
+# `onecli` + `restartPolicy: Always`) に統合された。判定は:
+#   1. 旧 Deployment `biblio-onecli` が存在しないこと
+#   2. orchestrator Pod 内の `cloud-sql-proxy` + `onecli` initContainer の state.running が立っていること
+orch_pod="biblio-orchestrator-0"
 
-onecli_pod="$(kubectl get pod -n "$NS" -l app.kubernetes.io/component=onecli -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")"
-[ -n "$onecli_pod" ] || fail "[onecli] Pod が見つからない"
+if kubectl get deployment biblio-onecli -n "$NS" >/dev/null 2>&1; then
+  fail "[onecli] 旧 Deployment biblio-onecli が残置 — Phase 3 で廃止のはず (kubectl delete deployment biblio-onecli -n $NS)"
+fi
+ok "[onecli] 旧 Deployment biblio-onecli は削除済"
 
-container_count="$(kubectl get pod "$onecli_pod" -n "$NS" -o jsonpath='{.status.containerStatuses[?(@.ready==true)].name}' | wc -w)"
-[ "$container_count" -ge 2 ] || fail "[onecli] Pod $onecli_pod 内の Ready container 数が 2 未満 ($container_count) — onecli + cloud-sql-proxy の両方が必要"
-ok "[onecli] Pod $onecli_pod 内 $container_count container Ready"
+for c in cloud-sql-proxy onecli; do
+  state="$(kubectl get pod "$orch_pod" -n "$NS" -o jsonpath="{.status.initContainerStatuses[?(@.name=='$c')].state}" 2>/dev/null || echo '')"
+  case "$state" in
+    *running*) ok "[onecli] $c sidecar running (Native sidecar)" ;;
+    *) fail "[onecli] $c sidecar 未起動 (state=$state) — kubectl describe pod $orch_pod -n $NS で確認" ;;
+  esac
+done
 
 # === 6. OneCLI REST 疎通 (orchestrator Pod 内から in-cluster ClusterIP 経由) ===
 # image に curl / jq は焼かない方針 (Dockerfile 軽量化、Step 2.7 検証で判明)。
 # Node 22 の global fetch を使う = host プロセスと同じ runtime を再利用、追加依存なし。
-orch_pod="biblio-orchestrator-0"
+# 注: Phase 3 で OneCLI は orchestrator 同 Pod 内 localhost に居るが、Service
+# `biblio-onecli` の selector が orchestrator に向くため、cluster-internal DNS
+# 経由でも同じ経路に到達する (agent Pod 互換性のため Service は残す)。
 kubectl exec "$orch_pod" -n "$NS" -- node -e \
   "fetch('http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets').then(r => { if (!r.ok) { console.error('HTTP', r.status); process.exit(1); } }).catch(e => { console.error(e.message); process.exit(1); })" \
   || fail "[onecli] orchestrator から OneCLI REST に到達できない (in-cluster ClusterIP 経由)"
@@ -90,35 +100,39 @@ boots_after="$(read_boots)"
 [ "$boots_after" -gt "$boots_before" ] || fail "[boots] 再作成後 ($boots_after) が以前 ($boots_before) より増えていない — PVC 再 attach 失敗 or migration016 未適用"
 ok "[boots] $boots_before → $boots_after (= PVC + SQLite 永続化が機能)"
 
-# === 8. Sidecar CronJob (直近 Job 完了 + OneCLI 反映) ===
-# Sidecar の動作 = 司書 agent が GitHub に到達できる前提条件で、ここを warn にすると
-# Phase 2 verify exit 0 = M1 完成判定が「Sidecar 一度も成功せず GH token 未投入」の
-# 状態で通ってしまう (CronJob の backoffLimit=3 使い果たし silent 失敗との相乗)。
-# 必須条件として fail に格上げする。
-recent_job="$(kubectl get jobs -n "$NS" --selector=app.kubernetes.io/component=sidecar --sort-by='.status.startTime' -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || echo "")"
-if [ -z "$recent_job" ]; then
-  fail "[sidecar] 完了済 Job がまだない — CronJob 次回起動を待つか kubectl create job --from=cronjob/biblio-sidecar biblio-sidecar-init-1 -n $NS で手動初回実行"
+# === 8. gh-token-rotator sidecar (M2 PRD A Phase 3: 旧 CronJob を廃止) ===
+# Phase 3 で旧 CronJob `biblio-sidecar` は廃止され、orchestrator Pod の
+# `gh-token-rotator` container (Native sidecar、image biblio-sidecar-gh:m2-p3) の
+# 50min sleep loop に統合された。判定は:
+#   1. 旧 CronJob `biblio-sidecar` が存在しないこと
+#   2. orchestrator Pod 内の `gh-token-rotator` container の state.running が立っていること
+#   3. OneCLI に `biblio-claw-gh-token` (hostPattern=api.github.com) が反映済であること
+if kubectl get cronjob biblio-sidecar -n "$NS" >/dev/null 2>&1; then
+  fail "[sidecar] 旧 CronJob biblio-sidecar が残置 — Phase 3 で廃止のはず (kubectl delete cronjob biblio-sidecar -n $NS)"
 fi
-job_complete="$(kubectl get job "$recent_job" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}' 2>/dev/null || echo "")"
-if [ "$job_complete" != "True" ]; then
-  fail "[sidecar] 直近 Job $recent_job 未 Complete (status=$job_complete) — kubectl logs job/$recent_job -n $NS で debug"
-fi
-ok "[sidecar] 直近 Job $recent_job Completed"
+ok "[sidecar] 旧 CronJob biblio-sidecar は削除済"
+
+rotator_state="$(kubectl get pod "$orch_pod" -n "$NS" -o jsonpath="{.status.containerStatuses[?(@.name=='gh-token-rotator')].state}" 2>/dev/null || echo '')"
+case "$rotator_state" in
+  *running*) ok "[sidecar] gh-token-rotator container running" ;;
+  *) fail "[sidecar] gh-token-rotator container 未起動 (state=$rotator_state) — kubectl logs $orch_pod -c gh-token-rotator -n $NS で debug" ;;
+esac
 
 # OneCLI 側に token 反映確認 (curl/jq 非依存、node fetch を使う)。
 # 注: OneCLI は GET /v1/secrets で value を mask した形 (length=0) で返す設計のため、
 # value 長ではなく "secret の存在 + 想定 hostPattern との一致" で判定する。
-token_state="$(kubectl exec "$orch_pod" -n "$NS" -- node -e \
-  "fetch('http://biblio-onecli.${NS}.svc.cluster.local:10254/v1/secrets').then(r => r.json()).then(secrets => { const t = secrets.find(s => s.name === 'biblio-claw-gh-token'); process.stdout.write(t ? 'present:' + t.hostPattern : 'absent'); }).catch(e => { process.stdout.write('error:' + e.message); })" 2>/dev/null)"
+# orchestrator container の localhost:10254 = 同 Pod 内 onecli sidecar に直結。
+token_state="$(kubectl exec "$orch_pod" -n "$NS" -c orchestrator -- node -e \
+  "fetch('http://localhost:10254/v1/secrets').then(r => r.json()).then(secrets => { const t = secrets.find(s => s.name === 'biblio-claw-gh-token'); process.stdout.write(t ? 'present:' + t.hostPattern : 'absent'); }).catch(e => { process.stdout.write('error:' + e.message); })" 2>/dev/null)"
 case "$token_state" in
   present:api.github.com)
     ok "[sidecar] OneCLI に biblio-claw-gh-token 反映済 (hostPattern=api.github.com、value は OneCLI が mask)"
     ;;
   present:*)
-    warn "[sidecar] biblio-claw-gh-token は存在するが hostPattern が想定外 ($token_state) — Sidecar の env を確認"
+    warn "[sidecar] biblio-claw-gh-token は存在するが hostPattern が想定外 ($token_state) — gh-token-rotator の env を確認"
     ;;
   absent)
-    fail "[sidecar] OneCLI に biblio-claw-gh-token が見えない — Job logs を確認: kubectl logs job/$recent_job -n $NS"
+    fail "[sidecar] OneCLI に biblio-claw-gh-token が見えない — kubectl logs $orch_pod -c gh-token-rotator -n $NS で debug (rotator は起動直後の 1 周期目で投入)"
     ;;
   *)
     fail "[sidecar] OneCLI への secrets list 取得に失敗 ($token_state)"

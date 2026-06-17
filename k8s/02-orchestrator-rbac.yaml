@@ -8,6 +8,10 @@
 #   (list/watch) + 完了 cleanup (delete) のため
 # - pods + pods/log は debug 用 (read-only)。失敗 Job の log を kubectl logs で
 #   取得できるようにする
+# - secrets に get/list/create/update/patch を付与 — M2 PRD A Phase 3 で
+#   ca-secret-sync が OneCLI sidecar 生成 CA bundle を K8s Secret `biblio-onecli-ca`
+#   に自動 upsert するため。delete は付けない (stale Secret は手動 cleanup、
+#   orchestrator が誤って消す経路を作らない)。
 #
 # 参照: https://docs.cloud.google.com/kubernetes-engine/docs/how-to/role-based-access-control
 
@@ -29,6 +33,9 @@ rules:
   - apiGroups: ['']
     resources: ['pods/log']
     verbs: ['get']
+  - apiGroups: ['']
+    resources: ['secrets']
+    verbs: ['get', 'list', 'create', 'update', 'patch']
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

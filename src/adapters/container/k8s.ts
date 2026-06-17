@@ -45,7 +45,9 @@ const DEFAULT_AGENT_PVC_NAME = 'data-biblio-orchestrator-0';
 const SHARED_PVC_VOLUME_NAME = 'vol-shared';
 const AGENT_FS_GROUP = 1000; // node:22-slim `node` UID/GID — aligns PVC group ownership (PoC-17)
 
-// OneCLI CA Secret mount — TODO(phase-2.6): replace with sidecar + emptyDir.
+// OneCLI CA Secret mount. The Secret content is auto-upserted by the OneCLI
+// sidecar + src/sidecar/ca-secret-sync.ts (M2 PRD A Phase 3); this provider
+// only consumes it as a plain Secret volume.
 const DEFAULT_ONECLI_CA_SECRET_NAME = 'biblio-onecli-ca';
 const ONECLI_CA_VOLUME_NAME = 'onecli-ca';
 const ONECLI_CA_MOUNT_PATH = '/etc/ssl/certs/onecli';
@@ -354,10 +356,11 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
       });
     }
 
-    // OneCLI proxy CA bundle is mounted from a K8s Secret as a Phase 2.5 MVP.
-    // TODO(phase-2.6): collapse this Secret mount into an OneCLI sidecar with
-    // emptyDir sharing (PoC-5 pattern) so CA rotation is automatic. Until
-    // then, k8s/onecli-ca-secret.md documents the manual create-secret flow.
+    // OneCLI proxy CA bundle is mounted from the K8s Secret `biblio-onecli-ca`.
+    // As of M2 PRD A Phase 3 that Secret is auto-upserted at startup + every 60s
+    // by the OneCLI sidecar's emptyDir-shared CA via src/sidecar/ca-secret-sync.ts
+    // (the Phase 2.5 manual `kubectl create secret` flow is retired). The agent
+    // side stays a plain Secret mount, so this provider code is unchanged.
     // The volume is mounted regardless of whether OneCLI emitted `-v /tmp/...`
     // (we drop those above) so the agent always sees the certs at a stable path.
     volumes.push({

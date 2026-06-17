@@ -15,6 +15,7 @@ import { getContainerRuntimeProvider } from './adapters/container/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
+import { startCaSecretSync, stopCaSecretSync } from './sidecar/ca-secret-sync.js';
 import { log } from './log.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -194,6 +195,14 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
+  // 6b. Start ca-secret-sync (GKE only) — OneCLI sidecar が emptyDir 経由で生成
+  // する CA bundle を K8s Secret `biblio-onecli-ca` に自動 upsert するループ。
+  // local docker compose 経路 (DSN_PROVIDER=local) では `scripts/onecli-*-secret.sh`
+  // 手叩き経路を維持するため起動しない。M2 PRD A Phase 3 で導入 (旧 `TODO(phase-2.6)`)。
+  if (process.env.DSN_PROVIDER === 'gke') {
+    await startCaSecretSync();
+  }
+
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
@@ -212,6 +221,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  stopCaSecretSync();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
