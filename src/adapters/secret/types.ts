@@ -19,6 +19,21 @@ import type {
 export type ApprovalCallback = (request: ApprovalRequest) => Promise<'approve' | 'deny'>;
 
 /**
+ * host プロセスが OneCLI proxy 経由で外部 HTTP を叩くために必要な設定。
+ *
+ * SDK の `ContainerConfig` (コンテナ向けの全設定) をそのまま露出させず、host が
+ * 実際に使う `env` + `caCertificate` だけのドメイン型に絞る。これにより
+ * `SecretProvider` の抽象バリアの外へ SDK 型が漏れず、Phase 2 で別実装
+ * (GCP Secret Manager 等) に差し替えても呼び出し側 (`host-proxy.ts`) は無影響。
+ */
+export interface ProxyConfig {
+  /** OneCLI gateway 由来の proxy env (`HTTPS_PROXY` 等)。 */
+  env: Record<string, string>;
+  /** proxy MITM の CA bundle (PEM)。未提供なら undefined。 */
+  caCertificate?: string;
+}
+
+/**
  * SecretProvider contract.
  *
  * IMPORTANT: the process must hold a single instance. `container-runner` and
@@ -47,4 +62,18 @@ export interface SecretProvider {
 
   /** Register the manual-approval callback. Returns a handle to stop it. */
   configureManualApproval(callback: ApprovalCallback): ManualApprovalHandle;
+
+  /**
+   * Fetch the gateway proxy env + CA bundle for an agent.
+   *
+   * Unlike `applyContainerSecrets` (which mutates Docker CLI args for a spawned
+   * *container*), this returns a `ProxyConfig` so the host's OWN child processes
+   * (`git`/`gh` in `src/biblio/host-proxy.ts`) can be routed through the gateway
+   * for credential injection.
+   *
+   * `agentId` は `ensureAgent` に渡した `identifier` 値 (SDK の `getContainerConfig`
+   * は引数名 `agent` だが identifier を受ける)。SDK 型ではなくドメイン型
+   * `ProxyConfig` を返し、抽象バリア外への SDK 型漏出を避ける。
+   */
+  getProxyConfig(agentId: string): Promise<ProxyConfig>;
 }

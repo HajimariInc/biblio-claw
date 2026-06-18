@@ -60,6 +60,11 @@ import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
+// biblio delivery actions — `acquire_biblio` (仕入れ) を registerDeliveryAction で
+// 登録する side-effect import。host proxy bootstrap (initHostProxy) は main() 内で呼ぶ。
+import './biblio/acquire-action.js';
+import { initHostProxy } from './biblio/host-proxy.js';
+
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
 
@@ -98,6 +103,13 @@ async function main(): Promise<void> {
 
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
+
+  // 1d. host proxy bootstrap — host を OneCLI agent 登録し、`git`/`gh` 子プロセス用の
+  // proxy env (HTTPS_PROXY + CA) を解決する (M2 PRD B Phase 1 仕入れの基盤)。
+  // fail-open: OneCLI 未到達でも起動は止めず、仕入れ実行時に失敗を検知する。
+  // agent spawn より前に host agent を登録しておくことで、後続の
+  // `scripts/onecli-gh-secret.sh` の mode=all 昇格が host agent にも効く。
+  await initHostProxy();
 
   // 2. Container runtime — provider-selected via CONTAINER_PROVIDER env
   // (`docker` for local dev, `k8s` for GKE). Pre-flight check (docker info /
