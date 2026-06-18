@@ -10,10 +10,13 @@
 import type {
   ApplyContainerConfigOptions,
   ApprovalRequest,
+  ContainerConfig,
   CreateAgentInput,
   EnsureAgentResponse,
   ManualApprovalHandle,
 } from '@onecli-sh/sdk';
+
+export type { ContainerConfig } from '@onecli-sh/sdk';
 
 /** Manual-approval callback — mirrors OneCLI's ManualApprovalCallback. */
 export type ApprovalCallback = (request: ApprovalRequest) => Promise<'approve' | 'deny'>;
@@ -47,4 +50,16 @@ export interface SecretProvider {
 
   /** Register the manual-approval callback. Returns a handle to stop it. */
   configureManualApproval(callback: ApprovalCallback): ManualApprovalHandle;
+
+  /**
+   * Fetch the gateway proxy env + CA bundle for an agent identifier.
+   *
+   * Unlike `applyContainerSecrets` (which mutates Docker CLI args for a spawned
+   * *container*), this returns the raw `{ env, caCertificate }` so the host's
+   * OWN child processes (`git`/`gh` in `src/biblio/host-proxy.ts`) can be
+   * routed through the gateway for credential injection. Wraps the SDK's
+   * `getContainerConfig(agent)` (which `SecretProvider` previously didn't
+   * expose).
+   */
+  getProxyConfig(agentId: string): Promise<ContainerConfig>;
 }

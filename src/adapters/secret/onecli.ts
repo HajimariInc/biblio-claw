@@ -1,6 +1,7 @@
 import { OneCLI } from '@onecli-sh/sdk';
 import type {
   ApplyContainerConfigOptions,
+  ContainerConfig,
   CreateAgentInput,
   EnsureAgentResponse,
   ManualApprovalHandle,
@@ -28,5 +29,9 @@ export class OneCLISecretProvider implements SecretProvider {
 
   configureManualApproval(callback: ApprovalCallback): ManualApprovalHandle {
     return this.client.configureManualApproval(callback);
+  }
+
+  getProxyConfig(agentId: string): Promise<ContainerConfig> {
+    return this.client.getContainerConfig(agentId);
   }
 }
