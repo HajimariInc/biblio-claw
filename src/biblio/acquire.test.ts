@@ -37,6 +37,7 @@ vi.mock('../adapters/secret/index.js', () => ({
 vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }));
 
 import { spawnSync } from 'node:child_process';
+import { log } from '../log.js';
 import { normalizeRepo, acquire } from './acquire.js';
 import { getChildProcEnv, initHostProxy, _resetHostProxyForTesting } from './host-proxy.js';
 
@@ -209,5 +210,33 @@ describe('getChildProcEnv / initHostProxy', () => {
     mockEnsureAgent.mockRejectedValue(new Error('ECONNREFUSED'));
     await expect(initHostProxy()).resolves.toBeUndefined();
     expect(getChildProcEnv().HTTPS_PROXY).toBeUndefined();
+  });
+
+  it('CA なし (proxy のみ) なら GIT_SSL_CAINFO / SSL_CERT_FILE を設定しない', async () => {
+    mockEnsureAgent.mockResolvedValue({ created: true });
+    mockGetProxyConfig.mockResolvedValue({
+      env: { HTTPS_PROXY: 'http://tok@host.docker.internal:10255' },
+      caCertificate: undefined,
+    });
+    await initHostProxy();
+    const env = getChildProcEnv();
+    expect(env.HTTPS_PROXY).toBe('http://tok@127.0.0.1:10255');
+    expect(env.GIT_SSL_CAINFO).toBeUndefined();
+    expect(env.SSL_CERT_FILE).toBeUndefined();
+    expect(fs.existsSync(path.join(TEST_DIR, '.onecli-host-ca.pem'))).toBe(false);
+  });
+
+  it('想定外 proxy ホスト形式 (host.docker.internal 不在) はそのまま素通しして warn する', async () => {
+    mockEnsureAgent.mockResolvedValue({ created: true });
+    mockGetProxyConfig.mockResolvedValue({
+      env: { HTTPS_PROXY: 'http://127.0.0.1:10255' }, // SDK が将来 localhost を返す想定
+      caCertificate: undefined,
+    });
+    await initHostProxy();
+    expect(getChildProcEnv().HTTPS_PROXY).toBe('http://127.0.0.1:10255'); // 素通し
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('unexpected proxy host format'),
+      expect.objectContaining({ value: 'http://127.0.0.1:10255' }),
+    );
   });
 });

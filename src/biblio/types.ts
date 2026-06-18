@@ -23,7 +23,7 @@ export interface NormalizedRepo {
 export type AcquireFailureReason =
   /** 入力が owner/repo にも URL にも解釈できない。 */
   | 'invalid_input'
-  /** repo が存在しない / 非公開 (gh api 404)。 */
+  /** gh api が非 0 (404 等)。不在も非公開も GitHub は 404 を返す。timeout もここに含む。 */
   | 'not_found'
   /** clone は成功したが marketplace.json も SKILL.md も無い (biblio ではない)。 */
   | 'manifest_missing'

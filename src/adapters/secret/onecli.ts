@@ -1,14 +1,13 @@
 import { OneCLI } from '@onecli-sh/sdk';
 import type {
   ApplyContainerConfigOptions,
-  ContainerConfig,
   CreateAgentInput,
   EnsureAgentResponse,
   ManualApprovalHandle,
 } from '@onecli-sh/sdk';
 
 import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
-import type { ApprovalCallback, SecretProvider } from './types.js';
+import type { ApprovalCallback, ProxyConfig, SecretProvider } from './types.js';
 
 /**
  * OneCLI-backed SecretProvider. Holds the single OneCLI client (previously
@@ -31,7 +30,9 @@ export class OneCLISecretProvider implements SecretProvider {
     return this.client.configureManualApproval(callback);
   }
 
-  getProxyConfig(agentId: string): Promise<ContainerConfig> {
-    return this.client.getContainerConfig(agentId);
+  async getProxyConfig(agentId: string): Promise<ProxyConfig> {
+    // SDK の ContainerConfig から host が使う 2 フィールドだけ取り出す (型漏出を防ぐ)。
+    const cfg = await this.client.getContainerConfig(agentId);
+    return { env: cfg.env, caCertificate: cfg.caCertificate };
   }
 }

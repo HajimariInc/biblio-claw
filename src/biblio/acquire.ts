@@ -28,6 +28,28 @@ const QUARANTINE_DIR = path.join(DATA_DIR, 'quarantine');
 const MANIFEST_SCAN_MAX_DEPTH = 6;
 
 /**
+ * 子プロセスの timeout (ms)。OneCLI proxy が応答しない / 遅い経路 (GKE sidecar の
+ * cold start, 低速ネットワーク) で `spawnSync` が無期限ブロックし host の delivery
+ * poll を止めるのを防ぐ。timeout 時は SIGTERM kill され `status=null` + `signal` が立つ。
+ */
+const GH_TIMEOUT_MS = 30_000; // proxy 往復を考慮した存在確認の上限
+const CLONE_TIMEOUT_MS = 120_000; // shallow clone でも大きめ repo を考慮
+
+/**
+ * `spawnSync` の結果から人間可読な失敗 detail を組む。
+ * signal kill (timeout 含む) は `status=null` になり `gh exited null` だと無意味なため、
+ * signal を優先して明示する (silent failure 防止 / デバッグ可能性)。
+ */
+function spawnDetail(
+  result: { status: number | null; signal: NodeJS.Signals | null; stderr: string | Buffer | null; error?: Error },
+  cmd: string,
+): string {
+  if (result.signal) return `${cmd} がタイムアウト/中断されました (signal ${result.signal})`;
+  const stderr = result.stderr ? String(result.stderr).trim() : '';
+  return stderr || result.error?.message || `${cmd} exited ${result.status}`;
+}
+
+/**
  * 生入力を `{ owner, name, cloneUrl }` に正規化する。
  * 受理: `owner/repo` 短縮形 / `https://github.com/owner/repo(.git)` URL /
  *       末尾 `.git`・`/` の揺れ。解釈不能は `null`。
@@ -110,33 +132,48 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
 
   const { owner, name, cloneUrl } = normalized;
   const env = getChildProcEnv();
+  const baseSpawn = { env, stdio: 'pipe' as const, encoding: 'utf-8' as const };
 
-  // 1. 存在確認 (gh api)。404 / 非 0 は not_found。
+  // 1. 存在確認 (gh api)。gh が非 0 (404 等、timeout 含む) は not_found に分類。
+  //    private/不在いずれも GitHub は 404 を返す。timeout は detail に明示される。
   const ghCheck = spawnSync('gh', ['api', `repos/${owner}/${name}`, '--silent'], {
-    env,
-    stdio: 'pipe',
-    encoding: 'utf-8',
+    ...baseSpawn,
+    timeout: GH_TIMEOUT_MS,
   });
   if (ghCheck.status !== 0) {
-    const detail = (ghCheck.stderr || ghCheck.error?.message || `gh exited ${ghCheck.status}`).trim();
+    const detail = spawnDetail(ghCheck, 'gh');
     log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'not_found', detail });
     return { ok: false, reason: 'not_found', detail: `repo が見つかりません: ${owner}/${name} (${detail})` };
   }
 
-  // 2. quarantine 配置先。biblioName は repo 名 (owner--repo の dedup key は Phase 3)。
+  // 2. quarantine 配置先 (biblioName = repo 名)。
+  // TODO(Phase 3): owner 違いの同名 repo 衝突を避けるため owner--repo 形式の dedup key にする。
   const biblioName = name;
   const quarantinePath = path.join(QUARANTINE_DIR, biblioName);
-  fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'clone_failed', detail });
+    return { ok: false, reason: 'clone_failed', detail: `quarantine ディレクトリを作成できません: ${detail}` };
+  }
+  // Phase 3 の dedup key 導入までは別 owner の同名 repo が無警告上書きされうるため可視化する。
+  if (fs.existsSync(quarantinePath)) {
+    log.warn('acquire: overwriting existing quarantine (name collision risk until Phase 3 dedup key)', {
+      quarantinePath,
+      owner,
+      name,
+    });
+  }
   removeQuarantine(quarantinePath); // 冪等上書き
 
   // 3. git clone (HTTPS / proxy 経由 / shallow)。
   const clone = spawnSync('git', ['clone', '--depth', '1', cloneUrl, quarantinePath], {
-    env,
-    stdio: 'pipe',
-    encoding: 'utf-8',
+    ...baseSpawn,
+    timeout: CLONE_TIMEOUT_MS,
   });
   if (clone.status !== 0) {
-    const detail = (clone.stderr || clone.error?.message || `git exited ${clone.status}`).trim();
+    const detail = spawnDetail(clone, 'git');
     removeQuarantine(quarantinePath);
     log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'clone_failed', detail });
     return { ok: false, reason: 'clone_failed', detail: `clone に失敗しました: ${owner}/${name} (${detail})` };

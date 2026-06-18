@@ -12,11 +12,11 @@
  * (Node `fetch` の proxy 化) は不要 (= Phase 2 検品で host から LLM を叩く際に導入)。
  *
  * 環境非依存: host プロセスは local (docker compose の公開ポート) でも GKE
- * (同一 Pod の OneCLI Native sidecar) でも proxy を `127.0.0.1:10255` で叩く。
- * SDK の `getContainerConfig` は agent コンテナ向けの Docker 値
- * (`...@host.docker.internal:10255`) を返すため、host 用に `127.0.0.1` へ
- * 一律 rewrite する (k8s.ts の rewriteOneCLIEnv が agent Pod 用に
- * cluster DNS へ rewrite するのと対になる host 版)。
+ * (同一 Pod の OneCLI Native sidecar) でも proxy を `127.0.0.1` (= localhost) で叩く。
+ * SDK の `getContainerConfig` は agent コンテナ向けの Docker ホスト
+ * (`host.docker.internal`) を含む proxy URL を返すため、ホスト部だけを `127.0.0.1`
+ * へ rewrite する (port や認証部分はそのまま — k8s.ts の rewriteOneCLIEnv が
+ * agent Pod 用に cluster DNS へ rewrite するのと対になる host 版)。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -55,7 +55,7 @@ function rewriteProxyHost(value: string | undefined): string | undefined {
     log.warn('host proxy: unexpected proxy host format — not rewriting', { value, expected: ONECLI_DOCKER_HOST });
     return value;
   }
-  return value.split(ONECLI_DOCKER_HOST).join(HOST_PROXY_HOST);
+  return value.replaceAll(ONECLI_DOCKER_HOST, HOST_PROXY_HOST);
 }
 
 /**
@@ -74,6 +74,8 @@ export async function initHostProxy(): Promise<void> {
     const cfg = await secret.getProxyConfig(HOST_AGENT_ID);
 
     const httpsProxy = rewriteProxyHost(cfg.env.HTTPS_PROXY ?? cfg.env.https_proxy);
+    // OneCLI proxy が HTTP_PROXY を返さない構成 (docker compose は gateway のみ公開) では
+    // httpsProxy にフォールバックする — http/https 両方を同一 proxy に向ける。
     const httpProxy = rewriteProxyHost(cfg.env.HTTP_PROXY ?? cfg.env.http_proxy) ?? httpsProxy;
 
     let caPath: string | undefined;

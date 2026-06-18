@@ -16,16 +16,19 @@ import { initHostProxy } from '../src/biblio/host-proxy.js';
 async function main(): Promise<number> {
   const arg = process.argv[2];
 
+  // 引数チェックを先に行い、無効な呼び出しで OneCLI 接続を試みない。
+  if (!arg) {
+    process.stderr.write('usage: biblio-acquire.ts <owner/repo|url> | --register-only\n');
+    return 2;
+  }
+
   // host agent 登録 + proxy 解決 (mode=all 昇格を効かせるため acquire 前に必須)。
+  // --register-only もこの ensureAgent を踏む。
   await initHostProxy();
 
   if (arg === '--register-only') {
     process.stdout.write(`RESULT=${JSON.stringify({ ok: true, registered: true })}\n`);
     return 0;
-  }
-  if (!arg) {
-    process.stderr.write('usage: biblio-acquire.ts <owner/repo|url> | --register-only\n');
-    return 2;
   }
 
   const result = await acquire({ repo: arg });

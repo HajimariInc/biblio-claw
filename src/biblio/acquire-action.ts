@@ -25,20 +25,28 @@ function resultText(repo: string, result: AcquireResult): string {
   return `仕入れエラー (${result.reason}): ${result.detail}`;
 }
 
-/** chat メッセージを inbound.db に書き戻し agent を起こす (返信は session の既定ルーティング)。 */
+/**
+ * chat メッセージを inbound.db に書き戻し agent を起こす (返信は session の既定ルーティング)。
+ * DB 書き込み失敗 (SQLITE_BUSY 等) を握って log.error に出し、絶対に throw しない —
+ * 呼び出し元 (repo 欠落パス / 想定外例外 catch の両方) で再 throw されないことを保証する。
+ */
 function writeBack(inDb: Database.Database, text: string): void {
-  insertMessage(inDb, {
-    id: `acquire-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: null,
-    channelType: null,
-    threadId: null,
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-    processAfter: null,
-    recurrence: null,
-    // trigger は既定 1 = agent を起こす (patron に応答させる)。
-  });
+  try {
+    insertMessage(inDb, {
+      id: `acquire-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
+      processAfter: null,
+      recurrence: null,
+      trigger: 1, // agent を起こして patron に応答させる (明示)。
+    });
+  } catch (err) {
+    log.error('acquire_biblio writeBack failed', { err });
+  }
 }
 
 registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
