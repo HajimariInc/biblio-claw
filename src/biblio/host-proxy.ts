@@ -114,15 +114,16 @@ export function getChildProcEnv(): NodeJS.ProcessEnv {
 }
 
 /**
- * 解決済みの host proxy 状態を返す (Phase 2 検品の host fetch 用)。
+ * 解決済みの host proxy 状態 (proxy URL + CA file path) を返す。
  *
- * Phase 1 までは `getChildProcEnv()` が `git`/`gh` 子プロセス向けに env を組んでいたが、
- * Phase 2 で host から Node `fetch` (= undici) で Vertex に直接到達するため、proxy URL と
- * CA file path を生で取り出せる窓口が要る。読み込みは呼び出し側 (vertex-client) が
- * `fs.readFileSync(caPath)` で行う (薄い getter に徹し動的解決ラッパーは入れない)。
+ * `getChildProcEnv()` が `git`/`gh` 子プロセス向けに env を組むのに対し、本 getter は
+ * host 内 Node `fetch` (= undici ProxyAgent) や任意の HTTP クライアントが proxy + CA を
+ * 動的に効かせるための値を生で取り出せる窓口 (薄い getter に徹し動的解決ラッパーは
+ * 入れない)。Phase 2 検品の Vertex 直接呼び出しが初のクライアントだが、用途は限定しない。
+ * CA の読み込みは呼び出し側が `fs.readFileSync(caPath)` で行う。
  *
  * fail-open: `initHostProxy()` で proxy 未解決の場合は両方 `undefined`。
- * vertex-client は proxy なしで fetch して Vertex 到達失敗を fetch エラーとして検知する。
+ * 呼び出し側は proxy なしで fetch し、TLS / 認可で失敗を検知する設計を取る。
  */
 export function getProxyState(): { httpsProxy?: string; caPath?: string } {
   return { httpsProxy: state.httpsProxy, caPath: state.caPath };

@@ -82,6 +82,26 @@ describe('inspect — schema 軸', () => {
     expect(mockLlm).not.toHaveBeenCalled();
   });
 
+  it('plugin.name が非 string (数値) で REJECT/schema_invalid を返す (LLM 呼ばない)', async () => {
+    // typeof plugin.name !== 'string' ガードが正しく動くことを表明。
+    // 悪意ある biblio が { name: 0 } 等で schema 突破を試みる経路を封じる。
+    const dir = path.join(TEST_DIR, 'numeric-name');
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 123, license: 'MIT' }));
+    const result = await inspect({ biblioName: 'numeric-name' }, { quarantineRoot: TEST_DIR });
+    expect(result).toMatchObject({ verdict: 'REJECT', reason: 'schema_invalid' });
+    expect(mockLlm).not.toHaveBeenCalled();
+  });
+
+  it('plugin.name が null で REJECT/schema_invalid を返す', async () => {
+    const dir = path.join(TEST_DIR, 'null-name');
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: null, license: 'MIT' }));
+    const result = await inspect({ biblioName: 'null-name' }, { quarantineRoot: TEST_DIR });
+    expect(result).toMatchObject({ verdict: 'REJECT', reason: 'schema_invalid' });
+    expect(mockLlm).not.toHaveBeenCalled();
+  });
+
   it('plugin.json が不正 JSON で REJECT/schema_invalid を返す', async () => {
     const dir = path.join(TEST_DIR, 'broken');
     fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
@@ -237,6 +257,21 @@ describe('inspect — dangerous 軸 (LLM mock)', () => {
       verdict: 'HOLD',
       reason: 'inspect_error',
       detail: expect.stringContaining('判別不能'),
+    });
+  });
+
+  it('VERDICT 行が大文字でないと HOLD/inspect_error を返す (大文字厳格仕様の表明)', async () => {
+    // プロンプトで `「VERDICT: DANGEROUS」または「VERDICT: CLEAN」` を明示しているため、
+    // 小文字混在 ("Verdict: CLEAN") は startsWith('VERDICT:') にマッチせず、VERDICT 行
+    // なしとして HOLD/inspect_error に倒れる。Gemini の実応答 (verify Level 4 で 12 試行
+    // 全一致) では発生していないが、仕様の表明として固定する (リファクタで `toUpperCase`
+    // 化されたら test が壊れる方が安全側)。
+    mockLlm.mockResolvedValue('Verdict: CLEAN');
+    const result = await inspect({ biblioName: 'clean-biblio' }, { quarantineRoot: FIXTURES_ROOT });
+    expect(result).toMatchObject({
+      verdict: 'HOLD',
+      reason: 'inspect_error',
+      detail: expect.stringContaining('VERDICT'),
     });
   });
 

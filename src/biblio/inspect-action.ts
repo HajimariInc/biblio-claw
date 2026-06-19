@@ -99,17 +99,16 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
     await writeBack(inDb, `検品エラー (invalid_input): name に無効な文字が含まれています: "${rawName}"`);
     return;
   }
-  const biblioName = rawName;
 
-  log.info('inspect_biblio from agent', { biblioName, sessionId: session.id });
+  log.info('inspect_biblio from agent', { biblioName: rawName, sessionId: session.id });
 
   try {
-    const result = await inspect({ biblioName });
-    await writeBack(inDb, resultText(biblioName, result));
-    log.info('inspect_biblio done', { biblioName, verdict: result.verdict, sessionId: session.id });
+    const result = await inspect({ biblioName: rawName });
+    await writeBack(inDb, resultText(rawName, result));
+    log.info('inspect_biblio done', { biblioName: rawName, verdict: result.verdict, sessionId: session.id });
   } catch (err) {
     // inspect() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('inspect_biblio threw', { biblioName, sessionId: session.id, err });
+    log.error('inspect_biblio threw', { biblioName: rawName, sessionId: session.id, err });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBack(inDb, `検品エラー (internal): 予期しない失敗 — ${detail}`);
   }

@@ -143,7 +143,10 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
     throw new Error('vertex-client: ANTHROPIC_VERTEX_PROJECT_ID is not set (.env / process.env both empty)');
   }
   const region = env.CLOUD_ML_REGION || DEFAULT_REGION;
-  const modelId = args.modelId ?? env.INSPECT_DANGEROUS_MODEL;
+  // `||` は空文字も falsy = env にフォールバックさせる。`??` だと `modelId: ''` が
+  // env を無視して空文字のまま Vertex に送られ 4xx → HOLD に倒れるが、起動時の
+  // env 必須チェック (`if (!modelId)`) で fail-fast にした方が debug 性が高い。
+  const modelId = args.modelId || env.INSPECT_DANGEROUS_MODEL;
   if (!modelId) {
     throw new Error('vertex-client: INSPECT_DANGEROUS_MODEL is not set (.env / process.env both empty)');
   }

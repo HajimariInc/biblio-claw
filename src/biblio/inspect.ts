@@ -64,7 +64,7 @@ const DANGEROUS_MAX_TOKENS = 256;
 /** dangerous 軸 LLM の temperature (決定性目的で 0 固定)。 */
 const DANGEROUS_TEMPERATURE = 0;
 
-/** dangerous プロンプト (PoC-14 inspect.sh:65-77 写経)。 */
+/** dangerous プロンプト (PoC-14 inspect.sh:64-76 写経)。 */
 const DANGEROUS_PROMPT = `あなたは biblio-shelf の検品官です。以下に配布候補の skill/plugin の本文を示します。
 次の危険パターンのいずれかが本文に含まれているかを判定してください:
   - 破壊的操作 (例: rm -rf, ファイル/ディレクトリの一括削除)
@@ -165,7 +165,7 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
 
   // --- 1. 存在確認 ---
   // `fs.statSync` 系は「読めるが Stats が返るだけ」のため戻り値判定が必要になる。
-  // `fs.promises.access(..., R_OK)` は「読めるか」を 1 発で表現できる (plan §Task 5)。
+  // `fs.promises.access(..., R_OK)` は「読めるか」を 1 発で表現できる。
   try {
     await fs.promises.access(targetPath, fs.constants.R_OK);
   } catch (err) {
@@ -266,6 +266,10 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
   }
 
   // VERDICT 行を抽出 (PoC-14 と同じく最終行に近い `VERDICT: DANGEROUS|CLEAN` を期待)。
+  // 末尾優先 = LLM が前置きを出した後に最終 VERDICT を出すケース、または複数 VERDICT を
+  // 出すケース (test ケース「VERDICT 行が複数あれば末尾を優先する」) で正しく動く。
+  // ES2023 `findLast` が使えれば 1 メソッドで書けるが、tsconfig が ES2022 のため
+  // `.reverse().find()` を維持 (`reverse` は新配列を返すので破壊的影響なし)。
   const verdictLine = llmOutput
     .split('\n')
     .map((line) => line.trim())
