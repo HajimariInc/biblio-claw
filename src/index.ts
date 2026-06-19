@@ -60,10 +60,13 @@ import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
-// biblio delivery actions — `acquire_biblio` (仕入れ) を registerDeliveryAction で
-// 登録する side-effect import。host proxy bootstrap (initHostProxy) は main() 内で呼ぶ。
+// biblio delivery actions — `acquire_biblio` (仕入れ) / `inspect_biblio` (検品) を
+// registerDeliveryAction で登録する side-effect import。host proxy bootstrap
+// (initHostProxy) と Vertex ProxyAgent インストール (setupVertexProxy) は main() 内で呼ぶ。
 import './biblio/acquire-action.js';
+import './biblio/inspect-action.js';
 import { initHostProxy } from './biblio/host-proxy.js';
+import { setupVertexProxy } from './biblio/vertex-client.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
@@ -110,6 +113,13 @@ async function main(): Promise<void> {
   // agent spawn より前に host agent を登録しておくことで、後続の
   // `scripts/onecli-gh-secret.sh` の mode=all 昇格が host agent にも効く。
   await initHostProxy();
+
+  // 1e. Vertex 用 ProxyAgent (undici) を global dispatcher に登録 (M2 PRD B Phase 2 検品の基盤)。
+  // initHostProxy() で解決した proxy URL + CA を host 側 fetch (= 検品 dangerous 軸の
+  // Vertex × Claude haiku 呼び出し) に効かせる。proxy 未解決でも warn のみで起動は継続
+  // (vertex-client.callVertexClaude が呼ばれた時点で fetch エラー → inspect() が
+  // fail-closed で HOLD に倒す)。
+  setupVertexProxy();
 
   // 2. Container runtime — provider-selected via CONTAINER_PROVIDER env
   // (`docker` for local dev, `k8s` for GKE). Pre-flight check (docker info /

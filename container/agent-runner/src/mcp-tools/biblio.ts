@@ -1,10 +1,11 @@
 /**
- * biblio MCP tools — acquire_biblio (仕入れ).
+ * biblio MCP tools — acquire_biblio (仕入れ) / inspect_biblio (検品).
  *
- * patron の「仕入れて owner/repo」依頼を捉え、outbound.db に system action を
- * 書いて即返す (fire-and-forget)。実際の取得 (gh / git clone / quarantine 配置) は
- * host 側 (`src/biblio/acquire.ts`) が delivery action `acquire_biblio` で実行し、
- * 結果を inbound.db に書き戻す。agent はそのメッセージで起こされ patron に応答する。
+ * patron の「仕入れて owner/repo」/「検品して」依頼を捉え、outbound.db に system action
+ * を書いて即返す (fire-and-forget)。実際の処理 (acquire は gh/git clone + quarantine 配置 /
+ * inspect は 3 軸判定) は host 側 (`src/biblio/acquire.ts` / `src/biblio/inspect.ts`) が
+ * delivery action で実行し、結果を inbound.db に書き戻す。agent はそのメッセージで
+ * 起こされ patron に応答する。
  *
  * = install_packages (self-mod.ts) と同じ「ツールは意図を outbound に書くだけ」パターン。
  */
@@ -60,4 +61,36 @@ export const acquireBiblio: McpToolDefinition = {
   },
 };
 
-registerTools([acquireBiblio]);
+export const inspectBiblio: McpToolDefinition = {
+  tool: {
+    name: 'inspect_biblio',
+    description:
+      'quarantine に置かれた biblio を 3 軸 (schema → license → dangerous) で検品する。`name` に acquire_biblio が返した biblio 名 (= 通常は repo の name セグメント) を渡す。fire-and-forget — 判定結果 (ACCEPT / HOLD / REJECT + 理由) は後続のメッセージで通知されるので、それを受けて patron に報告すること。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: {
+          type: 'string',
+          description: '検品対象の biblio 名 (`/data/quarantine/<name>/` 配下に存在すること)。',
+        },
+      },
+      required: ['name'],
+    },
+  },
+  async handler(args) {
+    const name = ((args.name as string) || '').trim();
+    if (!name) return err('name を指定してください (検品対象の biblio 名)。');
+
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'inspect_biblio', name }),
+    });
+
+    log(`inspect_biblio: ${requestId} → ${name}`);
+    return ok(`検品リクエストを受け付けました: ${name}。判定が完了したら結果を通知します。`);
+  },
+};
+
+registerTools([acquireBiblio, inspectBiblio]);

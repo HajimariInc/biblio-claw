@@ -1,0 +1,10 @@
+{
+  "name": "no-modify-license",
+  "description": "改変不可ライセンス (NoDerivatives) の預かり判定テスト用 biblio",
+  "version": "0.1.0",
+  "author": {
+    "name": "WForest",
+    "email": "claude@wforest.jp"
+  },
+  "license": "CC-BY-ND-4.0"
+}
