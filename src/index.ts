@@ -116,9 +116,9 @@ async function main(): Promise<void> {
 
   // 1e. Vertex 用 ProxyAgent (undici) を global dispatcher に登録 (M2 PRD B Phase 2 検品の基盤)。
   // initHostProxy() で解決した proxy URL + CA を host 側 fetch (= 検品 dangerous 軸の
-  // Vertex × Claude haiku 呼び出し) に効かせる。proxy 未解決でも warn のみで起動は継続
-  // (vertex-client.callVertexClaude が呼ばれた時点で fetch エラー → inspect() が
-  // fail-closed で HOLD に倒す)。
+  // Vertex × Gemini 呼び出し、モデルは `INSPECT_DANGEROUS_MODEL` env で指定) に効かせる。
+  // proxy 未解決でも warn のみで起動は継続 (vertex-client.callVertexGemini が呼ばれた時点で
+  // fetch エラー or AbortSignal.timeout(60s) → inspect() が fail-closed で HOLD に倒す)。
   setupVertexProxy();
 
   // 2. Container runtime — provider-selected via CONTAINER_PROVIDER env

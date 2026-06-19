@@ -57,7 +57,7 @@ export type InspectFailureReason =
   | 'license_denied'
   /** license フィールド不在 / allow リスト外 → HOLD。 */
   | 'license_unknown'
-  /** LLM (Claude haiku via Vertex) が DANGEROUS 判定 → REJECT。 */
+  /** Vertex × Gemini (`INSPECT_DANGEROUS_MODEL`、既定 `gemini-2.5-flash`) が DANGEROUS 判定 → REJECT。 */
   | 'dangerous_code'
   /** quarantine 不在 / LLM 呼び出し失敗 / parse 失敗 → HOLD (fail-closed)。 */
   | 'inspect_error';

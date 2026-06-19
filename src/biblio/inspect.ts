@@ -98,7 +98,12 @@ function collectScanTargets(root: string): string[] {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
+    } catch (err) {
+      // EACCES / ENOENT (symlink 切れ) / EMFILE (FD 枯渇) などの I/O 障害を silent
+      // skip するとスキャンが部分的に縮退し、危険コードを見落とした ACCEPT に
+      // 倒れる経路を作る。inspect() 側で「targets 数」と「読み成功本文の長さ」で
+      // fail-closed に倒すが、検知の根拠としてここで必ず可視化する (silent failure 防止)。
+      log.warn('inspect: directory unreadable during scan', { dir, depth, err });
       return;
     }
     for (const entry of entries) {
@@ -117,9 +122,14 @@ function collectScanTargets(root: string): string[] {
   return out.sort();
 }
 
-/** dangerous 軸の本文を `----- FILE: <path> -----` 区切りで連結する。 */
-function buildBody(root: string): string {
-  const targets = collectScanTargets(root);
+/**
+ * dangerous 軸の本文を `----- FILE: <path> -----` 区切りで連結する。
+ * `targets` は呼び出し側 (`inspect()`) で先に取得し、`targets.length === 0` を
+ * inspect() で fail-closed に倒すため、ここでは 0 件入力時も `''` を返すだけ。
+ * 個別ファイル読み失敗は WARN ログを出して skip し、本文には混ぜない (silent skip
+ * しない: collectScanTargets と同じ silent failure 防止)。
+ */
+function buildBody(targets: string[], root: string): string {
   if (targets.length === 0) return '';
   const chunks: string[] = [];
   for (const file of targets) {
@@ -127,7 +137,6 @@ function buildBody(root: string): string {
     try {
       content = fs.readFileSync(file, 'utf-8');
     } catch (err) {
-      // 個別ファイル読み失敗は WARN に留め、本文は ----- FILE 行だけ残してスキップする。
       log.warn('inspect: file unreadable, skipping', { file, err });
       continue;
     }
@@ -209,7 +218,38 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
   }
 
   // --- 4. dangerous 軸 (LLM) ---
-  const body = buildBody(targetPath);
+  //
+  // 4a. スキャン対象 0 件 = SKILL.md / *.sh / *.py / *.js を一切持たない biblio。
+  //     LLM に空入力を渡せば「危険パターンなし → CLEAN → ACCEPT」と返るが、それは
+  //     「検品官が中身を見ずに ACCEPT を返した」silent failure。安全側で HOLD に倒す
+  //     (= LLM 呼び出しコストもゼロ + fail-closed 維持)。
+  const targets = collectScanTargets(targetPath);
+  if (targets.length === 0) {
+    log.warn('inspect: no scan targets — fail-closed → HOLD', { biblioName });
+    return fail(
+      'HOLD',
+      biblioName,
+      'inspect_error',
+      'dangerous 軸: スキャン対象ファイル (SKILL.md / *.sh / *.py / *.js) が存在しません',
+    );
+  }
+
+  // 4b. スキャン対象は見つかったが全件読み失敗 (EACCES / EMFILE 等) = LLM に渡せる
+  //     本文がない → CLEAN 返却で ACCEPT に倒れる経路を塞ぐため fail-closed → HOLD。
+  const body = buildBody(targets, targetPath);
+  if (body.length === 0) {
+    log.warn('inspect: all scan targets unreadable — fail-closed → HOLD', {
+      biblioName,
+      targetCount: targets.length,
+    });
+    return fail(
+      'HOLD',
+      biblioName,
+      'inspect_error',
+      `dangerous 軸: スキャン対象 ${targets.length} 件すべてが読めませんでした`,
+    );
+  }
+
   const prompt = `${DANGEROUS_PROMPT}\n${body}\n----- 検品対象本文ここまで -----`;
   let llmOutput: string;
   try {

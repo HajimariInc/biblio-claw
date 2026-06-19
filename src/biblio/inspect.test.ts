@@ -2,7 +2,7 @@
  * 検品 (inspect) の決定的ロジックのユニットテスト。
  *
  * - 4 fixture (`__fixtures__/`) を `quarantineRoot` で直指して読ませる
- * - vertex-client は `vi.mock` で callVertexClaude を mock (実 LLM は verify で確認)
+ * - vertex-client は `vi.mock` で callVertexGemini を mock (実 LLM は verify で確認)
  * - schema (name 欠落 / 不正 JSON / 不在 / plugin.json 無し)
  * - license (deny / allow / 欠落 / 不明) を 4 fixture + tmpfs で網羅
  * - dangerous (DANGEROUS → REJECT / CLEAN → ACCEPT / fetch throw → HOLD / 出力崩れ → HOLD)
@@ -160,6 +160,30 @@ describe('inspect — license 軸', () => {
     const result = await inspect({ biblioName: 'prop' }, { quarantineRoot: TEST_DIR });
     expect(result).toMatchObject({ verdict: 'HOLD', reason: 'license_denied' });
   });
+
+  it('MIT が deny パターン (-ND/NoDerivatives/Proprietary) に部分一致しないこと (擬陽性なし)', async () => {
+    // clean-biblio fixture は plugin.json で license: MIT。deny 判定されないことを
+    // 通過 → dangerous 軸到達 → mockClean ACCEPT までで確認 (= license が deny でない証明)。
+    mockClean();
+    const result = await inspect({ biblioName: 'clean-biblio' }, { quarantineRoot: FIXTURES_ROOT });
+    expect(result).toEqual({ verdict: 'ACCEPT', biblioName: 'clean-biblio' });
+  });
+
+  it('deny-first 評価順: allow っぽい "MIT-ND" 仮想ライセンスでも HOLD/license_denied になる', async () => {
+    // 実在しないライセンス名だが「allow リスト風 + ND サフィックス」の組み合わせで
+    // deny-first 評価順 (deny 検出 → allow チェック より前) を仕様としてロックする。
+    // 評価順をリファクタで逆転 (allow-first) すると、改変不可ライセンスを ACCEPT に
+    // 倒してしまう危険があるため、この test が壊れる側に倒したい。
+    const dir = path.join(TEST_DIR, 'ambig');
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'ambig', license: 'MIT-ND' }),
+    );
+    const result = await inspect({ biblioName: 'ambig' }, { quarantineRoot: TEST_DIR });
+    expect(result).toMatchObject({ verdict: 'HOLD', reason: 'license_denied' });
+    expect(mockLlm).not.toHaveBeenCalled();
+  });
 });
 
 describe('inspect — dangerous 軸 (LLM mock)', () => {
@@ -220,5 +244,62 @@ describe('inspect — dangerous 軸 (LLM mock)', () => {
     mockLlm.mockResolvedValue('VERDICT: CLEAN\nもう一度書きます\nVERDICT: DANGEROUS');
     const result = await inspect({ biblioName: 'clean-biblio' }, { quarantineRoot: FIXTURES_ROOT });
     expect(result).toMatchObject({ verdict: 'REJECT', reason: 'dangerous_code' });
+  });
+
+  it('スキャン対象ファイル (SKILL.md/*.sh/*.py/*.js) が 0 件で HOLD/inspect_error を返す (LLM 呼ばない)', async () => {
+    // plugin.json は schema-valid + license MIT (allow) だが、collectScanTargets が拾える
+    // ファイル (SKILL.md/*.sh/*.py/*.js) を一切持たない biblio。
+    // = LLM に空入力を渡すと「危険パターンなし → CLEAN → ACCEPT」になる silent failure 経路。
+    // この test がそれを塞ぐ (= fail-closed で HOLD/inspect_error を強制)。
+    const dir = path.join(TEST_DIR, 'no-scannable');
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'no-scannable', license: 'MIT' }),
+    );
+    // README.md は collectScanTargets の対象外なので targets 0 件のまま
+    fs.writeFileSync(path.join(dir, 'README.md'), '# nothing executable');
+    const result = await inspect({ biblioName: 'no-scannable' }, { quarantineRoot: TEST_DIR });
+    expect(result).toMatchObject({
+      verdict: 'HOLD',
+      reason: 'inspect_error',
+      detail: expect.stringContaining('スキャン対象ファイル'),
+    });
+    expect(mockLlm).not.toHaveBeenCalled();
+  });
+
+  it('スキャン対象は見つかるが全部読み失敗 (EACCES) で HOLD/inspect_error を返す (LLM 呼ばない)', async () => {
+    // SKILL.md が collectScanTargets で見つかるが、buildBody の readFileSync が
+    // EACCES で全 throw する状況を模擬。LLM に空 body を送って CLEAN を引き出す
+    // silent failure 経路を塞ぐ (fail-closed)。
+    const dir = path.join(TEST_DIR, 'unreadable');
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    const pluginJsonPath = path.join(dir, '.claude-plugin', 'plugin.json');
+    fs.writeFileSync(pluginJsonPath, JSON.stringify({ name: 'unreadable', license: 'MIT' }));
+    const skillPath = path.join(dir, 'SKILL.md');
+    fs.writeFileSync(skillPath, '# whatever');
+
+    // readFileSync を SKILL.md でだけ throw させる (plugin.json は通常通り読ませる)。
+    const realReadFileSync = fs.readFileSync.bind(fs);
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((p: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+      if (typeof p === 'string' && p === skillPath) {
+        const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return (realReadFileSync as (...a: unknown[]) => unknown)(p, ...args);
+    }) as typeof fs.readFileSync);
+
+    try {
+      const result = await inspect({ biblioName: 'unreadable' }, { quarantineRoot: TEST_DIR });
+      expect(result).toMatchObject({
+        verdict: 'HOLD',
+        reason: 'inspect_error',
+        detail: expect.stringContaining('読めません'),
+      });
+      expect(mockLlm).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

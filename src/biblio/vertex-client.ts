@@ -32,8 +32,21 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { getProxyState } from './host-proxy.js';
 
-/** region 既定値 — providers/claude.ts:39 に揃える (CLOUD_ML_REGION 未設定なら global)。 */
+/** region 既定値 — providers/claude.ts と同値 (CLOUD_ML_REGION 未設定なら global)。 */
 const DEFAULT_REGION = 'global';
+
+/**
+ * Vertex × Gemini 呼び出しのハードタイムアウト (ms)。
+ *
+ * acquire.ts の GH_TIMEOUT_MS = 30s / CLONE_TIMEOUT_MS = 120s と同じ思想で、
+ * OneCLI proxy のコールドスタート (GKE Native sidecar 起動遅延) や proxy ハング時に
+ * delivery poll thread を無期限ブロックさせないために必須。`AbortSignal.timeout()` 経由で
+ * fetch を `AbortError` で reject させ、`inspect()` の catch が HOLD/inspect_error に倒す。
+ *
+ * 60s は検品 1 件の患者向け応答 (Slack) の体感上限。Vertex × Gemini Flash の通常応答
+ * (= 数百 ms) の数十倍の余裕。
+ */
+const VERTEX_TIMEOUT_MS = 60_000;
 
 /** Vertex `:generateContent` 呼び出しの host (region によって変わる)。 */
 function vertexHost(region: string): string {
@@ -56,7 +69,9 @@ function vertexUrl(project: string, region: string, modelId: string): string {
  * - `NODE_EXTRA_CA_CERTS` は undici ProxyAgent の TLS には**効かない**ため、PEM を
  *   `requestTls.ca` + `proxyTls.ca` に明示的に渡す必要がある (plan GOTCHA)。
  * - proxy 未解決 (fail-open) はスキップ — fetch は直接 Vertex に向かい、TLS / 認可で
- *   失敗して呼び出し側で fail-closed に倒れる (ハングしない)。
+ *   失敗 (もしくは `VERTEX_TIMEOUT_MS` で AbortError) して呼び出し側で fail-closed に倒れる。
+ *   timeout なしだと TCP 接続成立後の応答待ちで delivery poll thread が無期限ブロック
+ *   する経路があったため、`callVertexGemini` 側で `AbortSignal.timeout()` を必ず付ける。
  *
  * 冪等: 多重呼び出ししても最後に設定した dispatcher が有効になるだけ。host 起動時に
  * `initHostProxy()` の直後で 1 回呼ぶ想定。
@@ -157,14 +172,21 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
       Authorization: 'Bearer placeholder',
     },
     body: JSON.stringify(body),
+    // 無期限ブロック防止 (VERTEX_TIMEOUT_MS 超過で AbortError → 呼び出し側 inspect() が HOLD)。
+    signal: AbortSignal.timeout(VERTEX_TIMEOUT_MS),
   });
 
   if (!res.ok) {
     let bodyText = '';
     try {
       bodyText = (await res.text()).slice(0, 500);
-    } catch {
-      // body 読みに失敗してもエラー生成は続ける (silent failure 防止)。
+    } catch (bodyErr) {
+      // body 読み失敗自体を握り潰すと最終 error message が "— " (空) になり debug 不能。
+      // エラー生成は続けるが、何が起きたかは warn で残す (silent failure 防止)。
+      log.warn('vertex-client: failed to read error response body', {
+        status: res.status,
+        bodyErr,
+      });
     }
     throw new Error(`vertex-client: generateContent ${res.status} ${res.statusText} — ${bodyText}`);
   }
