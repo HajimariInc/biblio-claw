@@ -37,3 +37,46 @@ export type AcquireFailureReason =
 export type AcquireResult =
   | { ok: true; biblioName: string; quarantinePath: string }
   | { ok: false; reason: AcquireFailureReason; detail: string };
+
+/**
+ * 検品 (kenpin / inspect) の型。
+ *
+ * quarantine に置かれた biblio を 3 軸 (schema → license → dangerous) で
+ * cheap-to-expensive 順に検査し、ACCEPT / HOLD / REJECT を決定的に返す。
+ * 決定的ロジックは `inspect.ts` に集約し、ここでは形だけを定義する (minimal-wrap)。
+ */
+
+/** 検品の最終判定。 */
+export type InspectVerdict = 'ACCEPT' | 'HOLD' | 'REJECT';
+
+/** 検品失敗の分類 (HOLD / REJECT に紐づく)。 */
+export type InspectFailureReason =
+  /** `.claude-plugin/plugin.json` が parse 不可 / 必須フィールド (name) 欠落 → REJECT。 */
+  | 'schema_invalid'
+  /** `-ND` / NoDerivatives / Proprietary など再配布不可ライセンス → HOLD。 */
+  | 'license_denied'
+  /** license フィールド不在 / allow リスト外 → HOLD。 */
+  | 'license_unknown'
+  /** Vertex × Gemini (`INSPECT_DANGEROUS_MODEL`、既定 `gemini-2.5-flash`) が DANGEROUS 判定 → REJECT。 */
+  | 'dangerous_code'
+  /** quarantine 不在 / LLM 呼び出し失敗 / parse 失敗 → HOLD (fail-closed)。 */
+  | 'inspect_error';
+
+/**
+ * 検品結果。discriminated union — `verdict` で分岐する。
+ * ACCEPT は biblioName のみ、HOLD/REJECT は reason + 人間可読 detail を持つ (silent failure 防止)。
+ */
+export type InspectResult =
+  | { verdict: 'ACCEPT'; biblioName: string }
+  | { verdict: 'HOLD' | 'REJECT'; biblioName: string; reason: InspectFailureReason; detail: string };
+
+/**
+ * `inspect()` のオプション。
+ *
+ * `quarantineRoot` を opts で受けるのは `vi.stubEnv('DATA_DIR', ...)` がモジュール
+ * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため (acquire.test.ts
+ * で実証済)。prod 経路では未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
+ */
+export interface InspectOptions {
+  quarantineRoot?: string;
+}

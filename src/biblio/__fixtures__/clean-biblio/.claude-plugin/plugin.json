@@ -1,0 +1,10 @@
+{
+  "name": "clean-biblio",
+  "description": "正常な検品テスト用 biblio",
+  "version": "0.1.0",
+  "author": {
+    "name": "WForest",
+    "email": "claude@wforest.jp"
+  },
+  "license": "MIT"
+}
