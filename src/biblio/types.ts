@@ -80,3 +80,59 @@ export type InspectResult =
 export interface InspectOptions {
   quarantineRoot?: string;
 }
+
+/**
+ * カテゴライズ + 陳列 (Phase 3) の型。
+ *
+ * ACCEPT 済 biblio を 4 namespace に判定し (`categorize`)、patron 承認後に
+ * 棚リポへ移動 + draft PR を作成する (`shelve`)。決定的ロジックは `categorize.ts` /
+ * `shelve.ts` に集約し、ここでは形だけ定義する (minimal-wrap)。
+ */
+
+/**
+ * 棚 namespace の確定 4 値 (PRD B §解決策の詳細 / functions §3.4 / §5.1)。
+ *
+ * - `biblio-dev`: 開発系 skill (コード生成 / refactor / 設計助言 等)
+ * - `biblio-art`: クリエイティブ系 (画像 / 文章 / 音 / 動画 等)
+ * - `biblio-bf`: バックオフィス系 (秘書 / メール / 経理 等)
+ * - `biblio-ai`: AI 運用系 (LLM オーケストレーション / プロンプト管理 等)
+ */
+export type BiblioCategory = 'biblio-dev' | 'biblio-art' | 'biblio-bf' | 'biblio-ai';
+
+/** カテゴライズ失敗の分類。 */
+export type CategoryFailureReason =
+  /** Vertex × Anthropic 呼び出しの fetch / proxy / 4xx / 5xx / response 構造崩れ。 */
+  | 'llm_error'
+  /** LLM 応答に `CATEGORY:` / `REASON:` の必須 2 行が揃わない or 空。 */
+  | 'parse_error'
+  /** `CATEGORY:` 行は取れたが BiblioCategory に含まれない値が返った (例: `biblio-other`)。 */
+  | 'invalid_category';
+
+/**
+ * カテゴライズ結果。discriminated union — `ok` で分岐する。
+ * 成功時は判定 category + 理由 1 文、失敗時は理由 + 詳細を持つ (silent failure 防止)。
+ */
+export type CategoryResult =
+  | { ok: true; biblioName: string; category: BiblioCategory; reason: string }
+  | { ok: false; biblioName: string; reason: CategoryFailureReason; detail: string };
+
+/** 陳列失敗の分類。 */
+export type ShelveFailureReason =
+  /** `marketplace.json` に同 key (`owner--repo`) の entry が既存 = 重複検知で early return。 */
+  | 'already_shelved'
+  /** quarantine 配下に biblio dir が存在しない (= acquire 未済 or 既に移動済)。 */
+  | 'quarantine_missing'
+  /** Git Data API / Pulls API の non-2xx response (step + status + body を detail に含む)。 */
+  | 'github_api_error'
+  /** quarantine → shelf の `fs.rename` 失敗 (`EXDEV` / `EACCES` / `ENOSPC` 等)。 */
+  | 'rename_error'
+  /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
+  | 'invalid_category';
+
+/**
+ * 陳列結果。discriminated union — `ok` で分岐する。
+ * 成功時は PR URL + branch、失敗時は理由 + 詳細を持つ (silent failure 防止)。
+ */
+export type ShelveResult =
+  | { ok: true; biblioName: string; category: BiblioCategory; prUrl: string; prNumber: number; branchName: string }
+  | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };

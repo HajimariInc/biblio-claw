@@ -48,16 +48,30 @@ const DEFAULT_REGION = 'global';
  */
 const VERTEX_TIMEOUT_MS = 60_000;
 
-/** Vertex `:generateContent` 呼び出しの host (region によって変わる)。 */
+/** Vertex 呼び出しの host (region によって変わる)。 */
 function vertexHost(region: string): string {
   return region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
 }
 
-/** Vertex `:generateContent` URL を組む (`publishers/google/<modelId>` = Google 1st party)。 */
-function vertexUrl(project: string, region: string, modelId: string): string {
+/**
+ * Vertex URL を組む。
+ *
+ * - `publisher='google'` + `endpoint='generateContent'` (既定) は Gemini 1st party 経路。
+ * - `publisher='anthropic'` + `endpoint='rawPredict'` は Claude on Vertex 経路 (Marketplace enable 必要)。
+ *
+ * 既定値で `callVertexGemini` の旧呼び出しを温存しつつ、Phase 3 の `callVertexAnthropic` 用に
+ * 引数化した (= 関心事分離より「最小拡張」を選ぶ。同形を 2 関数で重複コピーすると tokei が増えるだけ)。
+ */
+function vertexUrl(
+  project: string,
+  region: string,
+  modelId: string,
+  publisher: 'google' | 'anthropic' = 'google',
+  endpoint: 'generateContent' | 'rawPredict' = 'generateContent',
+): string {
   return (
     `https://${vertexHost(region)}/v1/projects/${project}/locations/${region}` +
-    `/publishers/google/models/${modelId}:generateContent`
+    `/publishers/${publisher}/models/${modelId}:${endpoint}`
   );
 }
 
@@ -150,7 +164,7 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
   if (!modelId) {
     throw new Error('vertex-client: INSPECT_DANGEROUS_MODEL is not set (.env / process.env both empty)');
   }
-  const url = vertexUrl(project, region, modelId);
+  const url = vertexUrl(project, region, modelId, 'google', 'generateContent');
 
   // Gemini 2.5 系は thinking がデフォルト ON で `thoughtsTokenCount` に予算を喰われる
   // (= maxOutputTokens を thinking が先食いし、テキスト出力が截切れる)。検品 dangerous 軸の
@@ -200,6 +214,111 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
     throw new Error(
       `vertex-client: response missing candidates[0].content.parts[0].text — ${JSON.stringify(json).slice(0, 300)}`,
     );
+  }
+  return text;
+}
+
+/** `callVertexAnthropic` の引数。 */
+export interface VertexAnthropicCallArgs {
+  /** user turn のテキスト (system 文は別フィールド)。 */
+  prompt: string;
+  /** system プロンプト (役割定義など)。null/undefined なら省略。 */
+  system?: string;
+  /** 生成上限。CATEGORY/REASON の 2 行で十分なため小さく取って良い。 */
+  maxTokens: number;
+  /** 決定性目的なら 0。カテゴライズは 0 固定で呼ぶ想定。 */
+  temperature: number;
+  /** 既定は `.env` の `CATEGORIZE_MODEL`。差し替え用 (テスト/将来別用途)。 */
+  modelId?: string;
+}
+
+/**
+ * Vertex × Anthropic on Vertex の `:rawPredict` レスポンス。
+ *
+ * Anthropic は Gemini の `candidates[].content.parts[].text` と全く異なる構造で、
+ * `content: Array<{ type: string; text?: string }>` を返す (GOTCHA-3)。`type === 'text'`
+ * の要素を見つけてその `text` を取る。`stop_reason: 'max_tokens'` は応答が切れている
+ * 兆候なので、呼び出し側で 1 行に収まっているかをチェックする (本クライアントは値を素通し)。
+ */
+interface VertexAnthropicResponse {
+  content?: Array<{ type?: string; text?: string }>;
+  stop_reason?: string;
+}
+
+/**
+ * Vertex × Anthropic on Vertex を `:rawPredict` 経路で叩いて最初のテキストを返す。
+ *
+ * `callVertexGemini` と同じく fail-closed は **呼び出し側の責務** (本関数は失敗で必ず throw する):
+ *   - `ANTHROPIC_VERTEX_PROJECT_ID` 未設定 / `CATEGORIZE_MODEL` 未設定 → 起動時に検知させる
+ *   - fetch 自体の throw (proxy 未到達 / DNS / TLS) → そのまま伝播
+ *   - `!res.ok` (4xx/5xx、特に Marketplace enable 未了の 403/404) → status + body 抜粋を message に含めて throw
+ *   - `content[]` に `type === 'text'` の要素がない (= 応答形式崩れ) → throw
+ */
+export async function callVertexAnthropic(args: VertexAnthropicCallArgs): Promise<string> {
+  const env = readEnvFile(['ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION', 'CATEGORIZE_MODEL']);
+  const project = env.ANTHROPIC_VERTEX_PROJECT_ID;
+  if (!project) {
+    throw new Error('vertex-client: ANTHROPIC_VERTEX_PROJECT_ID is not set (.env / process.env both empty)');
+  }
+  const region = env.CLOUD_ML_REGION || DEFAULT_REGION;
+  // `||` は空文字も falsy 扱い (`??` だと空文字を許容して 4xx → HOLD 経路を増やす罠) =
+  // callVertexGemini と同じ方針で fail-fast にする。
+  const modelId = args.modelId || env.CATEGORIZE_MODEL;
+  if (!modelId) {
+    throw new Error('vertex-client: CATEGORIZE_MODEL is not set (.env / process.env both empty)');
+  }
+  const url = vertexUrl(project, region, modelId, 'anthropic', 'rawPredict');
+
+  // Anthropic on Vertex の body 必須フィールド (docs.anthropic.com/en/api/claude-on-vertex-ai):
+  //   - anthropic_version: "vertex-2023-10-16" がリリース時点の固定値 (= バージョニング rail)
+  //   - messages: 通常の Anthropic Messages API と同形 (user/assistant role の turn 配列)
+  //   - system: 任意 (役割定義)。空のときは省略する (空文字を渡すと proxy 経路で 400 が出るケースあり)
+  // GOTCHA-3 で書いた通り、response 構造は Gemini と完全に別物 (`candidates[]` ではなく `content[]`)。
+  const body: Record<string, unknown> = {
+    anthropic_version: 'vertex-2023-10-16',
+    messages: [{ role: 'user', content: args.prompt }],
+    max_tokens: args.maxTokens,
+    temperature: args.temperature,
+  };
+  if (args.system) {
+    body.system = args.system;
+  }
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // OneCLI MITM が wire で本物の ADC Bearer に置き換える (callVertexGemini と同じ流儀)。
+      Authorization: 'Bearer placeholder',
+    },
+    body: JSON.stringify(body),
+    // 無期限ブロック防止 (callVertexGemini と同じ VERTEX_TIMEOUT_MS を共有)。
+    signal: AbortSignal.timeout(VERTEX_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    let bodyText = '';
+    try {
+      bodyText = (await res.text()).slice(0, 500);
+    } catch (bodyErr) {
+      // body 読み失敗自体を握り潰さない (callVertexGemini と同じ silent failure 防止)。
+      log.warn('vertex-client: failed to read anthropic error response body', {
+        status: res.status,
+        bodyErr,
+      });
+    }
+    throw new Error(`vertex-client: rawPredict ${res.status} ${res.statusText} — ${bodyText}`);
+  }
+
+  const json = (await res.json()) as VertexAnthropicResponse;
+  // `content[].type === 'text'` の最初の要素を採用する (`tool_use` 等の非テキスト turn が
+  // 混ざる可能性に備える)。`stop_reason: 'max_tokens'` で切れているケースもここでは値を
+  // そのまま返し、呼び出し側 (categorize.ts) が CATEGORY/REASON 2 行を抽出できなかった
+  // ときに `parse_error` で fail-closed に倒す = 責務分離。
+  const textBlock = json.content?.find((c) => c?.type === 'text');
+  const text = textBlock?.text;
+  if (typeof text !== 'string' || text.length === 0) {
+    throw new Error(`vertex-client: response missing content[type=text].text — ${JSON.stringify(json).slice(0, 300)}`);
   }
   return text;
 }
