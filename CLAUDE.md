@@ -306,22 +306,22 @@ biblio-claw は `src/biblio/host-proxy.ts:initHostProxy()` で **OneCLI CA + Nod
 
 OneCLI secret は **`hostPattern` + `pathPattern` の 2 軸** で injection 対象を決定する (`pathPattern: null` = host 全パス inject = 最小権限原則違反)。biblio-claw では:
 
-- **棚 / 司書本体** (`HajimariInc/biblio-{shelf,claw}`) への operation → `hostPattern=api.github.com` + `pathPattern=/repos/HajimariInc/*` で GH App auth inject
+- **棚 / 司書本体** (`HajimariInc/biblio-{shelf,claw}`) への operation → `hostPattern=api.github.com` + `pathPattern=/repos/${SHELF_REPO_OWNER}/*` (= `.env` 由来で動的生成、既定 `HajimariInc`) で GH App auth inject
 - **外部 public biblio の仕入れ** (`/repos/<外部>/*`) → path match 外で素通し、無認証で 200
 - **private repo / 認証必要な外部 access が出てきたら DEN さん事前相談** (= 新規 hostPattern + pathPattern で別 secret を追加、scope を最小に保つ)
 
-glob `*` は複数 segment マッチ (実機検証済、`/repos/HajimariInc/biblio-shelf/git/blobs` まで届く)。OneCLI `PATCH /v1/secrets/<id>` の partial update では `pathPattern` は保持される (= token refresh 時に消えない) が、**初回 POST 時に `pathPattern` を含めないと null = 全パス inject** になる罠が残る。`scripts/onecli-gh-secret.sh` への永続化または `init-project.md` の手続き化で対処予定 (M2 PRD B Phase 3 PR #8 で確立、永続化は別タスク)。
+glob `*` は複数 segment マッチ (実機検証済、`/repos/HajimariInc/biblio-shelf/git/blobs` まで届く)。`scripts/onecli-gh-secret.sh` が POST 経路 (= 初回作成) でも PATCH 経路 (= token refresh) でも `pathPattern=/repos/${SHELF_REPO_OWNER}/*` を投入するため、新規 setup でも refresh 後でも `pathPattern` は effective に保たれる (= null = 全パス inject の罠なし)。OneCLI `PATCH /v1/secrets/<id>` の partial update では `value` + `pathPattern` 以外のフィールド (`hostPattern`, `injectionConfig` 等) は OneCLI 側で保持される (M2 PRD B Phase 3 PR #8 で設計確立、PR #10 で `scripts/onecli-gh-secret.sh` への永続化完了)。
 
 ### GH installation token (GitHub App Sidecar 経路)
 
 司書 agent が `gh` で GitHub REST API に到達するための認可は、GitHub App PEM → RS256 JWT → installation access token を発行して OneCLI に投入する経路で行う。
 
-- **Local (docker compose 経路)**: `scripts/onecli-gh-secret.sh` を host OS 上のシェルスクリプトとして実行する。PEM はローカルファイル (`GH_APP_PEM_PATH`、`*.pem` で gitignore 済) から読む。同スクリプトは `scripts/sign_jwt.cjs` (Node 組み込み crypto / 依存ゼロ) を内部で呼ぶため、両ファイルは常にペアで存在する必要がある。token 有効期限は **~60min** なので、期限切れ時に同スクリプトを再実行すると `PATCH /v1/secrets/:id` で value 単独更新 (id 保持、200) される。
+- **Local (docker compose 経路)**: `scripts/onecli-gh-secret.sh` を host OS 上のシェルスクリプトとして実行する。PEM はローカルファイル (`GH_APP_PEM_PATH`、`*.pem` で gitignore 済) から読む。同スクリプトは `scripts/sign_jwt.cjs` (Node 組み込み crypto / 依存ゼロ) を内部で呼ぶため、両ファイルは常にペアで存在する必要がある。token 有効期限は **~60min** なので、期限切れ時に同スクリプトを再実行すると `PATCH /v1/secrets/:id` で `value` + `pathPattern` partial update (id 保持、200) される (= token と最小権限経路 pathPattern が同時更新)。
 - **GKE 経路 (M2 PRD A Phase 3 以降)**: orchestrator Pod 内の `gh-token-rotator` Native sidecar (image `biblio-sidecar-gh:m2-p3`) が `scripts/gh-rotate.sh` (= `scripts/onecli-gh-secret.sh` を `ROTATE_INTERVAL_SEC=3000` (= 50min) の sleep loop で wrap) を実行し、自動再投入する。PEM は別の `fetch-pem` initContainer が WI 経由 (orchestrator KSA → `biblio-orchestrator` GSA, `roles/secretmanager.secretAccessor` on `biblio-gh-app-pem`) で Secret Manager から取得し、tmpfs emptyDir (`medium: Memory`) に書き出して rotator container に読み取り専用 mount する。旧 `k8s/30-sidecar-cronjob.yaml` (`biblio-sidecar` CronJob `*/30`) は本 Phase で **廃止** された。
 
 ```bash
 # Local 経路 (docker compose):
-# 前提: .env に GH_APP_ID / GH_INSTALLATION_ID / GH_APP_PEM_PATH を設定 + docker compose up -d --wait 済
+# 前提: .env に GH_APP_ID / GH_INSTALLATION_ID / GH_APP_PEM_PATH / SHELF_REPO_OWNER を設定 + docker compose up -d --wait 済
 bash scripts/onecli-gh-secret.sh
 ```
 
