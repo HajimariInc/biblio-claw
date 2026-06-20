@@ -222,7 +222,12 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
 export interface VertexAnthropicCallArgs {
   /** user turn のテキスト (system 文は別フィールド)。 */
   prompt: string;
-  /** system プロンプト (役割定義など)。null/undefined なら省略。 */
+  /**
+   * system プロンプト (役割定義など)。null / undefined / 空文字 はいずれも body から
+   * `system` フィールドを省く扱い (= 「空 system を渡すと proxy 経路で 400 が出るケースあり」
+   * 対策)。「明示的に system を空にする」意味論は想定外なので、必要なら呼び出し側で
+   * 非空 system を必ず渡すこと。
+   */
   system?: string;
   /** 生成上限。CATEGORY/REASON の 2 行で十分なため小さく取って良い。 */
   maxTokens: number;

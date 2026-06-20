@@ -1,6 +1,6 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-06-17
+最終更新:2026-06-20
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
 
@@ -199,7 +199,7 @@ GIT_SSL_NO_VERIFY=true git clone --depth 1 https://github.com/<owner>/<repo>.git
 - **proxy URL に `aoc_<token>` を含めずに叩くと OneCLI は agent 識別失敗で `mode=tunnel` に倒れる**。デバッグ用に直接 `curl -x http://127.0.0.1:10255` で叩くときは MITM にならないので注意(本物の biblio-claw 経路は SDK が token 入り URL を組むので問題ない)。
 - OneCLI container を `docker restart` しても **CA は永続化されている**(`/app/data/gateway/ca.pem`)ので `data/.onecli-host-ca.pem` の再生成は不要。MITM が tunnel に倒れている場合の対処は cert 問題ではなく secret/agent 設定問題。
 - system CA bundle のパスは環境依存(Debian=`/etc/ssl/certs/ca-certificates.crt` / RHEL=`/etc/pki/tls/certs/ca-bundle.crt`)。`tls.rootCertificates` を使えば OS 依存しない。
-- 検品(Vertex × Gemini)と陳列(GitHub Git Data API)はどちらも `api.github.com` 系 host pattern マッチなので MITM 経路で動く。`git clone`(`github.com`)だけが tunnel 経路。
+- 検品(Vertex × Gemini)は `aiplatform.googleapis.com` の secret に、陳列(GitHub Git Data API)は `api.github.com` の secret にそれぞれ hostPattern マッチして MITM 経路で動く。`git clone`(`github.com`)だけが secret 不在で tunnel 経路。外部 public biblio の `gh api`(`api.github.com/repos/<外部>/...`)は GH secret の `pathPattern=/repos/HajimariInc/*` で injection 対象外となり、無認証で素通しする (= 棚 / 司書本体への operation のみ GH App auth が乗る設計、PR #8 で確立)。
 
 ---
 
@@ -234,7 +234,7 @@ EXPECTED_CATEGORY=biblio-ai bash scripts/verify-m2.sh nanocoai/some-skill
 ### 後始末(verify 中断時)
 
 - **draft PR が残った**: `gh pr list --repo HajimariInc/biblio-shelf --state open --search 'in:title shelve(biblio-' | head -20` で `shelve(biblio-*): ...` 形式のタイトルを目視 → `gh pr close --repo HajimariInc/biblio-shelf --delete-branch <PR#>` で個別 close
-- **shelf 内の biblio が残った**: `ls .data/shelf/` で確認 → 不要なら `rm -rf .data/shelf/<category>/<owner--name>`
+- **shelf 内の biblio が残った**: `ls data/shelf/` で確認 → 不要なら `rm -rf data/shelf/<category>/<owner--name>`(= `DATA_DIR` 既定値 `./data` 配下、`.env` で `DATA_DIR=` を上書きしている場合はそのパス)
 - **`marketplace.json` への entry は draft PR を close = branch 削除すれば消える**(main は更新されていない)
 
 ### GKE 経路で実行する場合(将来運用、現状は local のみ)
