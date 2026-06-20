@@ -60,6 +60,19 @@ import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
+// biblio delivery actions — `acquire_biblio` (仕入れ) / `inspect_biblio` (検品) /
+// `categorize_biblio` (カテゴライズ) / `shelve_biblio` (陳列) を registerDeliveryAction で
+// 登録する side-effect import。host proxy bootstrap (initHostProxy) と Vertex ProxyAgent
+// インストール (setupVertexProxy) は main() 内で呼ぶ — Phase 3 の陳列も GitHub Git Data API
+// を OneCLI MITM proxy 経由で叩くため、Vertex 用に設定する ProxyAgent (= global dispatcher)
+// を共用する。
+import './biblio/acquire-action.js';
+import './biblio/inspect-action.js';
+import './biblio/categorize-action.js';
+import './biblio/shelve-action.js';
+import { initHostProxy } from './biblio/host-proxy.js';
+import { setupVertexProxy } from './biblio/vertex-client.js';
+
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
 
@@ -98,6 +111,20 @@ async function main(): Promise<void> {
 
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
+
+  // 1d. host proxy bootstrap — host を OneCLI agent 登録し、`git`/`gh` 子プロセス用の
+  // proxy env (HTTPS_PROXY + CA) を解決する (M2 PRD B Phase 1 仕入れの基盤)。
+  // fail-open: OneCLI 未到達でも起動は止めず、仕入れ実行時に失敗を検知する。
+  // agent spawn より前に host agent を登録しておくことで、後続の
+  // `scripts/onecli-gh-secret.sh` の mode=all 昇格が host agent にも効く。
+  await initHostProxy();
+
+  // 1e. Vertex 用 ProxyAgent (undici) を global dispatcher に登録 (M2 PRD B Phase 2 検品の基盤)。
+  // initHostProxy() で解決した proxy URL + CA を host 側 fetch (= 検品 dangerous 軸の
+  // Vertex × Gemini 呼び出し、モデルは `INSPECT_DANGEROUS_MODEL` env で指定) に効かせる。
+  // proxy 未解決でも warn のみで起動は継続 (vertex-client.callVertexGemini が呼ばれた時点で
+  // fetch エラー or AbortSignal.timeout(60s) → inspect() が fail-closed で HOLD に倒す)。
+  setupVertexProxy();
 
   // 2. Container runtime — provider-selected via CONTAINER_PROVIDER env
   // (`docker` for local dev, `k8s` for GKE). Pre-flight check (docker info /

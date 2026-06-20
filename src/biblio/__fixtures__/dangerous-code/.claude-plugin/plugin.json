@@ -1,0 +1,10 @@
+{
+  "name": "dangerous-code",
+  "description": "危険コード検出テスト用 biblio (スキーマは正常・本文のみ危険)",
+  "version": "0.1.0",
+  "author": {
+    "name": "WForest",
+    "email": "claude@wforest.jp"
+  },
+  "license": "MIT"
+}

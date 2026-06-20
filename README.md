@@ -2,7 +2,10 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: M2 PRD A Phase 3 完了 — GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet が **Native sidecar 多コンテナ Pod** (initContainers: `fetch-pem` + `cloud-sql-proxy` + `onecli` / containers: `orchestrator` + `gh-token-rotator` + `vertex-token-rotator`) として稼働。OneCLI gateway / GH installation token / Vertex Bearer token / CA bundle はすべて Pod 内 sidecar + `ca-secret-sync` で自動投入され、起動コマンドは `kubectl apply -f k8s/` のみで完結する (旧 OneCLI Deployment + Sidecar CronJob `*/30` は Phase 3 で廃止)。Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)、agent は K8s Job として spawn され NetworkPolicy で egress 制限される。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-m2-3.sh exit 0` で全項目 OK)。
+> **ステータス**: M2 PRD B Phase 3 完了 — **M2 北極星到達** (= patron 1 通の依頼で外部 biblio を棚に並べる経路が動く)。
+>
+> - **PRD A 基盤**: GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet が **Native sidecar 多コンテナ Pod** (initContainers: `fetch-pem` + `cloud-sql-proxy` + `onecli` / containers: `orchestrator` + `gh-token-rotator` + `vertex-token-rotator`) として稼働。OneCLI gateway / GH installation token / Vertex Bearer token / CA bundle はすべて Pod 内 sidecar + `ca-secret-sync` で自動投入され、起動コマンドは `kubectl apply -f k8s/` のみで完結する。Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)、agent は K8s Job として spawn され NetworkPolicy で egress 制限される。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-m2-3.sh exit 0`)。
+> - **PRD B marketplace**: 仕入れ → 検品 → カテゴライズ (Vertex × Claude Sonnet-4.6) → 棚リポへの draft PR 作成 までの E2E が完成。M2 完成判定 verify (`scripts/verify-m2.sh <owner/repo>`) で **M2 PASS** を取得。OneCLI secret の `pathPattern=/repos/HajimariInc/*` で「棚 / 司書本体への operation のみ GH App auth が乗る、外部 public biblio の仕入れは無認証素通し」という最小権限経路を確立。
 
 ## クイックスタート (biblio-claw, local)
 
@@ -20,11 +23,11 @@ pnpm run dev &                            # host を起動
 pnpm run chat "hello"                     # CLI から司書と会話 (smoke 用)
 ```
 
-詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。
+詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。日常運用は [`docs/operations-runbook.md`](docs/operations-runbook.md) (local / GCP の orchestrator・agent・OneCLI 早見表 + M2 verify 前提セットアップ)、Slack 2 環境分離 (本番 ws / 開発 ws) は [`docs/slack-environments-setup.md`](docs/slack-environments-setup.md) を参照。
 
 ## GKE 運用メモ (デプロイ後の bootstrap / メンテ)
 
-> ⚠️ **暫定セクション** — 今後本格的な運用マニュアル (将来の `docs/operations.md` 等) を立てる予定。手順が枯れてきたら本セクションを最小化し、詳細は専用マニュアルに転記する。それまでは初回デプロイ + 再構築の手順帳として本セクションを参照する。
+> ⚠️ **暫定セクション** — 日常運用の早見表は [`docs/operations-runbook.md`](docs/operations-runbook.md) に集約済。本セクションは初回デプロイ + 再構築時に **1 回だけ走らせる Bootstrap 手順** に絞って残置している。手順が枯れたら本セクションを最小化し詳細は runbook に転記する。
 
 ### Cloud SQL `postgres` user パスワード変更 (初回 Bootstrap GRANT)
 

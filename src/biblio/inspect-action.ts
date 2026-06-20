@@ -1,0 +1,64 @@
+/**
+ * Delivery action handler — `inspect_biblio`.
+ *
+ * agent (Claude) が `inspect_biblio` MCP ツールで outbound.db に system action を
+ * 書く → delivery poll がここを呼ぶ → host で `inspect()` を実行 → 判定 + 理由を
+ * inbound.db に chat メッセージで書き戻し (`trigger:1` = agent を起こす) → agent が
+ * patron に Slack 応答する、という acquire_biblio と同じ system-action 経路。
+ *
+ * handler 内例外は host を巻き込むため try/catch で握り、失敗も必ず inbound に
+ * 書き戻す (silent failure 禁止 — patron に必ず可視化する。`acquire-action.ts` と同形)。
+ */
+import { registerDeliveryAction } from '../delivery.js';
+import { log } from '../log.js';
+import { inspect } from './inspect.js';
+import { BIBLIO_NAME_RE, writeBackMessage } from './action-helpers.js';
+import type { InspectResult } from './types.js';
+
+/** inspect 結果を patron 向けの 1 行 (HOLD/REJECT は 2 行) テキストに整形する。 */
+function resultText(biblioName: string, result: InspectResult): string {
+  if (result.verdict === 'ACCEPT') {
+    return `検品 ACCEPT: ${biblioName} は棚に上げられます (3 軸全通過)。次は categorize_biblio でカテゴライズできます。`;
+  }
+  const tail = 'quarantine に残置しました。';
+  return `検品 ${result.verdict} (${result.reason}): ${biblioName} — ${result.detail}。${tail}`;
+}
+
+registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
+  const rawName = typeof content.name === 'string' ? content.name.trim() : '';
+  if (!rawName) {
+    log.warn('inspect_biblio missing name', { sessionId: session.id });
+    await writeBackMessage(
+      inDb,
+      '検品エラー (invalid_input): name が指定されていません。',
+      'inspect-resp',
+      'inspect_biblio',
+    );
+    return;
+  }
+  // path traversal 防御 + `owner--name` 形式の強制 (= inspect.ts が `quarantineRoot/biblioName`
+  // を path.join するため、不正な値は弾く)。
+  if (!BIBLIO_NAME_RE.test(rawName)) {
+    log.warn('inspect_biblio invalid name', { biblioName: rawName, sessionId: session.id });
+    await writeBackMessage(
+      inDb,
+      `検品エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
+      'inspect-resp',
+      'inspect_biblio',
+    );
+    return;
+  }
+
+  log.info('inspect_biblio from agent', { biblioName: rawName, sessionId: session.id });
+
+  try {
+    const result = await inspect({ biblioName: rawName });
+    await writeBackMessage(inDb, resultText(rawName, result), 'inspect-resp', 'inspect_biblio');
+    log.info('inspect_biblio done', { biblioName: rawName, verdict: result.verdict, sessionId: session.id });
+  } catch (err) {
+    // inspect() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+    log.error('inspect_biblio threw', { biblioName: rawName, sessionId: session.id, err });
+    const detail = err instanceof Error ? err.message : String(err);
+    await writeBackMessage(inDb, `検品エラー (internal): 予期しない失敗 — ${detail}`, 'inspect-resp', 'inspect_biblio');
+  }
+});
