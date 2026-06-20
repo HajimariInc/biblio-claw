@@ -9,21 +9,23 @@
 
 ## クイックスタート (biblio-claw, local)
 
+**前提**:
+- Node.js 22+ / pnpm / bun
+- Docker Desktop または Docker Engine
+- gcloud CLI + ADC ログイン済 (`gcloud auth application-default login --project hajimari-ai-hackathon-2026`)
+- `.env` 投入 — `.env.example` を雛形に `ANTHROPIC_VERTEX_PROJECT_ID` / `GH_APP_ID` / `GH_INSTALLATION_ID` / `GH_APP_PEM_PATH` / `SLACK_BOT_TOKEN` / `SHELF_REPO_OWNER` 等を手動で埋める
+
+**setup + 起動**:
+
 ```bash
-cp .env.example .env
-# .env に Vertex project / Slack token / GitHub App (App ID + Installation ID + PEM パス) を埋める
-gcloud auth application-default login --project hajimari-ai-hackathon-2026
-docker compose up -d --wait
-bash scripts/onecli-vertex-secret.sh     # ADC token を OneCLI に投入
-bash scripts/onecli-gh-secret.sh         # GitHub installation token を OneCLI に投入 (.env に GH_APP_* 設定済の場合)
-pnpm install
-./container/build.sh                      # agent コンテナをビルド (初回のみ)
-pnpm exec tsx scripts/init-cli-agent.ts --display-name <name> --agent-name <agent>
-pnpm run dev &                            # host を起動
-pnpm run chat "hello"                     # CLI から司書と会話 (smoke 用)
+cp .env.example .env       # 既存があれば skip、値は手動で埋める
+# claude code から /init-project を実行 (= 新規 setup、`.env` 準備 → docker compose →
+# deps install → host agent 登録 → token 投入 → コンテナ build → スモーク verify までを 1 連で実行)
+pnpm run dev               # host process を起動 (foreground、Slack adapter 接続)
+pnpm run chat "hello"      # smoke 用 CLI から司書と会話
 ```
 
-詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。日常運用は [`docs/operations-runbook.md`](docs/operations-runbook.md) (local / GCP の orchestrator・agent・OneCLI 早見表 + M2 verify 前提セットアップ)、Slack 2 環境分離 (本番 ws / 開発 ws) は [`docs/slack-environments-setup.md`](docs/slack-environments-setup.md) を参照。
+詳細手順 / トラブルシューティング / サブコマンド (`up` / `reset` / `refresh` / `verify`) は `.claude/commands/init-project.md` を参照。日常運用は [`docs/operations-runbook.md`](docs/operations-runbook.md) (local / GCP の orchestrator・agent・OneCLI 早見表 + M2 verify 前提セットアップ)、Slack 2 環境分離 (本番 ws / 開発 ws) は [`docs/slack-environments-setup.md`](docs/slack-environments-setup.md) を参照。
 
 ## GKE 運用メモ (デプロイ後の bootstrap / メンテ)
 
