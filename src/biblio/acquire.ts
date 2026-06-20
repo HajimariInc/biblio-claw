@@ -146,9 +146,14 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
     return { ok: false, reason: 'not_found', detail: `repo が見つかりません: ${owner}/${name} (${detail})` };
   }
 
-  // 2. quarantine 配置先 (biblioName = repo 名)。
-  // TODO(Phase 3): owner 違いの同名 repo 衝突を避けるため owner--repo 形式の dedup key にする。
-  const biblioName = name;
+  // 2. quarantine 配置先 (biblioName = `<owner>--<name>` の dedup key)。
+  //
+  // Phase 1 では `biblioName = name` だったが、別 owner の同名 repo が同じ
+  // quarantine dir を奪い合う silent failure を産んでいた (= Phase 3 で陳列が
+  // 別ownerの同名 biblio をすり替えるリスク)。GitHub 規約上 `/` は owner/repo に
+  // 含まれず、`--` は通常 repo 名に出現しない (= 衝突可能性は実務上ゼロ) ため、
+  // dedup key かつ shelf entry name として安全に使える形式 (PRD B Phase 3 §補足)。
+  const biblioName = `${owner}--${name}`;
   const quarantinePath = path.join(QUARANTINE_DIR, biblioName);
   try {
     fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
@@ -157,9 +162,9 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
     log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'clone_failed', detail });
     return { ok: false, reason: 'clone_failed', detail: `quarantine ディレクトリを作成できません: ${detail}` };
   }
-  // Phase 3 の dedup key 導入までは別 owner の同名 repo が無警告上書きされうるため可視化する。
+  // 既存上書きを silent にしない (= 同じ biblio の再仕入れ意図か事故か区別できるよう warn を残す)。
   if (fs.existsSync(quarantinePath)) {
-    log.warn('acquire: overwriting existing quarantine (name collision risk until Phase 3 dedup key)', {
+    log.warn('acquire: overwriting existing quarantine for same dedup key', {
       quarantinePath,
       owner,
       name,

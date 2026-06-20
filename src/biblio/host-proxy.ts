@@ -8,8 +8,9 @@
  *
  * そこで host を OneCLI の 1 agent として登録し、gateway proxy 設定
  * (`HTTPS_PROXY` + CA bundle) を取得して、`git`/`gh` 子プロセスの env に注入する。
- * CLI は `HTTPS_PROXY` を尊重するので、Phase 1 では `undici.ProxyAgent`
- * (Node `fetch` の proxy 化) は不要 (= Phase 2 検品で host から LLM を叩く際に導入)。
+ * CLI は `HTTPS_PROXY` を尊重するので子プロセスには `undici.ProxyAgent` 不要。一方
+ * host 自身の `fetch` (Node) は `setupVertexProxy()` 経由で `undici.ProxyAgent` を
+ * global dispatcher に登録する経路で別途配線する (= 検品 / 陳列の host fetch はこちら)。
  *
  * 環境非依存: host プロセスは local (docker compose の公開ポート) でも GKE
  * (同一 Pod の OneCLI Native sidecar) でも proxy を `127.0.0.1` (= localhost) で叩く。
@@ -20,6 +21,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import tls from 'node:tls';
 
 import { getSecretProvider } from '../adapters/secret/index.js';
 import { DATA_DIR } from '../config.js';
@@ -81,7 +83,22 @@ export async function initHostProxy(): Promise<void> {
     let caPath: string | undefined;
     if (cfg.caCertificate) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(CA_FILE, cfg.caCertificate);
+      // OneCLI MITM CA + Mozilla root CA bundle を連結して書き出す。
+      //
+      // 背景: OneCLI proxy は secret の hostPattern にマッチしない host を `mode=tunnel`
+      // で素通しする (= MITM しない)。tunnel 経路では client が **本物の TLS cert** を
+      // 受け取るため、OneCLI CA だけでは trust chain が完成しない (例: `git clone https://github.com/...`
+      // の host = `github.com` には api.github.com 用 secret しかなくマッチせず tunnel に倒れる)。
+      //
+      // 対策: `tls.rootCertificates` (Node.js v12.3+ 組み込み Mozilla root CA bundle) を
+      // OneCLI CA に append した combined bundle を書き出すことで、MITM 経路でも tunnel 経路でも
+      // どちらの cert chain も成立させる。Mozilla root のみで trust が完結する素の HTTPS 経路
+      // (proxy 無し fallback) にも効く。
+      //
+      // 環境非依存: `/etc/ssl/certs/ca-certificates.crt` (Debian) や `/etc/pki/tls/certs/ca-bundle.crt`
+      // (RHEL) などの OS バンドルに依存しない。
+      const combinedCa = `${cfg.caCertificate.trim()}\n${tls.rootCertificates.join('\n')}\n`;
+      fs.writeFileSync(CA_FILE, combinedCa);
       caPath = CA_FILE;
     }
 
@@ -98,7 +115,8 @@ export async function initHostProxy(): Promise<void> {
  * `git`/`gh` 子プロセス用の env を返す。
  *
  * proxy が解決済みなら `HTTPS_PROXY`/`HTTP_PROXY` + CA 経路
- * (`GIT_SSL_CAINFO`=git, `SSL_CERT_FILE`=gh) を注入する。未解決なら素の
+ * (`GIT_SSL_CAINFO`=git curl backend, `SSL_CERT_FILE`=gh Go SDK,
+ * `NODE_EXTRA_CA_CERTS`=Node fetch) を注入する。未解決なら素の
  * `process.env` のコピーを返す (取得は失敗するが host 自身の env は汚さない)。
  */
 export function getChildProcEnv(): NodeJS.ProcessEnv {

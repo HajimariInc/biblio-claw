@@ -123,7 +123,7 @@ describe('acquire', () => {
     mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : 128, cmd === 'git' ? 'fatal: clone' : ''));
     const result = await acquire({ repo: 'octocat/hello' });
     expect(result).toMatchObject({ ok: false, reason: 'clone_failed' });
-    expect(fs.existsSync(path.join(QUARANTINE, 'hello'))).toBe(false);
+    expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello'))).toBe(false);
   });
 
   it('clone 成功だが manifest 不在で manifest_missing を返し quarantine を削除する', async () => {
@@ -137,7 +137,7 @@ describe('acquire', () => {
     });
     const result = await acquire({ repo: 'octocat/hello' });
     expect(result).toMatchObject({ ok: false, reason: 'manifest_missing' });
-    expect(fs.existsSync(path.join(QUARANTINE, 'hello'))).toBe(false);
+    expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello'))).toBe(false);
   });
 
   it('marketplace.json 有りで成功する', async () => {
@@ -149,8 +149,12 @@ describe('acquire', () => {
       return spawnResult(0);
     });
     const result = await acquire({ repo: 'octocat/hello' });
-    expect(result).toEqual({ ok: true, biblioName: 'hello', quarantinePath: path.join(QUARANTINE, 'hello') });
-    expect(fs.existsSync(path.join(QUARANTINE, 'hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
+    expect(result).toEqual({
+      ok: true,
+      biblioName: 'octocat--hello',
+      quarantinePath: path.join(QUARANTINE, 'octocat--hello'),
+    });
+    expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
   });
 
   it('ネストした SKILL.md だけでも成功する', async () => {
@@ -163,11 +167,11 @@ describe('acquire', () => {
       return spawnResult(0);
     });
     const result = await acquire({ repo: 'octocat/hello' });
-    expect(result).toMatchObject({ ok: true, biblioName: 'hello' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'octocat--hello' });
   });
 
   it('既存 quarantine を冪等に上書きする (再取得)', async () => {
-    const dest = path.join(QUARANTINE, 'hello');
+    const dest = path.join(QUARANTINE, 'octocat--hello');
     fs.mkdirSync(dest, { recursive: true });
     fs.writeFileSync(path.join(dest, 'stale.txt'), 'old');
     mockSpawn.mockImplementation((cmd, args) => {

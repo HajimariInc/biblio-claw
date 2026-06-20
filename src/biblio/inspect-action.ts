@@ -20,14 +20,16 @@ import { inspect } from './inspect.js';
 import type { InspectResult } from './types.js';
 
 /**
- * `biblioName` の許容文字 — `acquire.ts:SEGMENT_RE` と同値の安全側集合。
- * agent が任意の文字列を `inspect_biblio` 経由で送れるため、`path.join` する前に検証
- * しないと `../../tmp/evil` 形式でパストラバーサルが成立し、quarantine 外を LLM
- * プロンプトに埋め込む経路が生まれる (code-review #7 指摘)。`acquire` 経路の biblio 名は
- * normalizeRepo で検証済なので、本検証は agent 直接呼び (誤動作 / プロンプトインジェクション)
- * に対する防御線。
+ * Phase 3 以降の biblioName 形式 (`<owner>--<name>`)。Phase 3 PR #8 の commit
+ * `refactor(m2-b-p1)` で acquire.ts が dedup key 化された結果、すべての経路で
+ * `owner--name` 形式が前提となる。古い形式 (`<name>` 単体) は明示的に拒否する
+ * (= 別経路で混入した古い biblio を黙って受け付けない silent failure 防御)。
+ *
+ * agent が任意の文字列を `inspect_biblio` 経由で送れるため、`path.join` する前の
+ * パストラバーサル防御 (= `../../tmp/evil` 形式の拒否) も兼ねる。categorize-action.ts /
+ * shelve-action.ts の BIBLIO_NAME_RE と同値。
  */
-const BIBLIO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const BIBLIO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*--[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** writeBack の SQLITE_BUSY 等への小規模リトライ回数 (1 + 2 = 計 3 attempts)。 */
 const WRITEBACK_MAX_RETRIES = 2;
@@ -96,7 +98,7 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
   // SEGMENT_RE と同値の安全側集合。
   if (!BIBLIO_NAME_RE.test(rawName)) {
     log.warn('inspect_biblio invalid name', { biblioName: rawName, sessionId: session.id });
-    await writeBack(inDb, `検品エラー (invalid_input): name に無効な文字が含まれています: "${rawName}"`);
+    await writeBack(inDb, `検品エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`);
     return;
   }
 

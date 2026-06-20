@@ -60,11 +60,16 @@ import './cli/commands/index.js';
 import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
-// biblio delivery actions — `acquire_biblio` (仕入れ) / `inspect_biblio` (検品) を
-// registerDeliveryAction で登録する side-effect import。host proxy bootstrap
-// (initHostProxy) と Vertex ProxyAgent インストール (setupVertexProxy) は main() 内で呼ぶ。
+// biblio delivery actions — `acquire_biblio` (仕入れ) / `inspect_biblio` (検品) /
+// `categorize_biblio` (カテゴライズ) / `shelve_biblio` (陳列) を registerDeliveryAction で
+// 登録する side-effect import。host proxy bootstrap (initHostProxy) と Vertex ProxyAgent
+// インストール (setupVertexProxy) は main() 内で呼ぶ — Phase 3 の陳列も GitHub Git Data API
+// を OneCLI MITM proxy 経由で叩くため、Vertex 用に設定する ProxyAgent (= global dispatcher)
+// を共用する。
 import './biblio/acquire-action.js';
 import './biblio/inspect-action.js';
+import './biblio/categorize-action.js';
+import './biblio/shelve-action.js';
 import { initHostProxy } from './biblio/host-proxy.js';
 import { setupVertexProxy } from './biblio/vertex-client.js';
 
