@@ -26,7 +26,7 @@
  */
 import fs from 'node:fs';
 
-import { ProxyAgent, fetch, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, fetch, setGlobalDispatcher } from 'undici';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -79,13 +79,21 @@ function vertexUrl(
  * host からの fetch を OneCLI MITM proxy + 自前 CA 経由にする。
  *
  * - `getProxyState()` から proxy URL と CA path を取り、両方解決済みなら
- *   `ProxyAgent({ uri, requestTls: { ca }, proxyTls: { ca } })` を global dispatcher に。
+ *   `EnvHttpProxyAgent({ httpsProxy, noProxy, requestTls: { ca }, proxyTls: { ca } })` を global dispatcher に。
  * - `NODE_EXTRA_CA_CERTS` は undici ProxyAgent の TLS には**効かない**ため、PEM を
  *   `requestTls.ca` + `proxyTls.ca` に明示的に渡す必要がある (plan GOTCHA)。
  * - proxy 未解決 (fail-open) はスキップ — fetch は直接 Vertex に向かい、TLS / 認可で
  *   失敗 (もしくは `VERTEX_TIMEOUT_MS` で AbortError) して呼び出し側で fail-closed に倒れる。
  *   timeout なしだと TCP 接続成立後の応答待ちで delivery poll thread が無期限ブロック
  *   する経路があったため、`callVertexGemini` 側で `AbortSignal.timeout()` を必ず付ける。
+ *
+ * **localhost bypass (= noProxy)**: OneCLI 管理 API (`127.0.0.1:10254`) への fetch は
+ * proxy (`:10255`) を **必ず bypass** する必要がある。OneCLI SDK の `AgentsClient.createAgent`
+ * が agent コンテナ spawn 時に内部 fetch で OneCLI REST を叩くが、global dispatcher が
+ * proxy 経由にすると proxy → OneCLI 管理 API への自己ループで `fetch failed` になり、
+ * agent コンテナが永久に spawn されなくなる (2026-06-20 Slack 経由動作確認で発覚)。
+ * `EnvHttpProxyAgent` の `noProxy` で `127.0.0.1,localhost` を明示的に除外し、
+ * 既存 `NO_PROXY` 環境変数があれば union を取る (GKE で K8s 内部 DNS bypass を入れているケース等)。
  *
  * 冪等: 多重呼び出ししても最後に設定した dispatcher が有効になるだけ。host 起動時に
  * `initHostProxy()` の直後で 1 回呼ぶ想定。
@@ -107,13 +115,24 @@ export function setupVertexProxy(): void {
     log.warn('vertex-client: CA file unreadable — skipping ProxyAgent setup', { caPath, err });
     return;
   }
-  const dispatcher = new ProxyAgent({
-    uri: httpsProxy,
+  const noProxyParts = new Set<string>(['127.0.0.1', 'localhost']);
+  for (const part of (process.env.NO_PROXY || process.env.no_proxy || '').split(',')) {
+    const trimmed = part.trim();
+    if (trimmed) noProxyParts.add(trimmed);
+  }
+  const noProxy = [...noProxyParts].join(',');
+  const dispatcher = new EnvHttpProxyAgent({
+    httpsProxy,
+    noProxy,
     requestTls: { ca },
     proxyTls: { ca },
   });
   setGlobalDispatcher(dispatcher);
-  log.info('vertex-client: ProxyAgent installed as global dispatcher', { httpsProxy, caPath });
+  log.info('vertex-client: EnvHttpProxyAgent installed as global dispatcher (localhost bypass)', {
+    httpsProxy,
+    caPath,
+    noProxy,
+  });
 }
 
 /** `callVertexGemini` の引数。 */
