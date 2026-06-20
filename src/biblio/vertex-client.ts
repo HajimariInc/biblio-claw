@@ -90,13 +90,19 @@ function vertexUrl(
  * **localhost bypass (= noProxy)**: OneCLI 管理 API (`127.0.0.1:10254`) への fetch は
  * proxy (`:10255`) を **必ず bypass** する必要がある。OneCLI SDK の `AgentsClient.createAgent`
  * が agent コンテナ spawn 時に内部 fetch で OneCLI REST を叩くが、global dispatcher が
- * proxy 経由にすると proxy → OneCLI 管理 API への自己ループで `fetch failed` になり、
- * agent コンテナが永久に spawn されなくなる (2026-06-20 Slack 経由動作確認で発覚)。
+ * proxy 経由にすると proxy (`:10255`) が管理 API (`:10254`) に到達できず `fetch failed` で
+ * 戻り、agent コンテナが永久に spawn されなくなる経路があった (= proxy 自身は管理 API への
+ * forwarding 経路を持たない設計のため、self-target host への request は接続失敗で倒れる)。
  * `EnvHttpProxyAgent` の `noProxy` で `127.0.0.1,localhost` を明示的に除外し、
  * 既存 `NO_PROXY` 環境変数があれば union を取る (GKE で K8s 内部 DNS bypass を入れているケース等)。
+ * undici の `noProxy` parser は `,` だけでなく空白でも split する (= `env-http-proxy-agent.js`
+ * 内部 `#parseNoProxy` が `/[,\s]/` 正規表現を使う) ため、`NO_PROXY` が空白区切りで設定された
+ * 環境でも union 動作は壊れない。
  *
  * 冪等: 多重呼び出ししても最後に設定した dispatcher が有効になるだけ。host 起動時に
- * `initHostProxy()` の直後で 1 回呼ぶ想定。
+ * `initHostProxy()` の直後で 1 回呼ぶ想定 (= `opts.noProxy` を渡しているため、undici は
+ * dispatcher 生成後の `NO_PROXY` env 変化を追跡しない設計。複数回呼ぶ経路を将来作る場合は
+ * 起動時固定で問題ない用途かを確認すること)。
  */
 export function setupVertexProxy(): void {
   const { httpsProxy, caPath } = getProxyState();
