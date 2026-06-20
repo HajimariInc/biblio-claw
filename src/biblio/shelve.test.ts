@@ -268,3 +268,89 @@ describe('shelve — PAT fallback', () => {
     expect(result).toMatchObject({ ok: false, reason: 'github_api_error' });
   });
 });
+
+describe('shelve — 後半 API step non-2xx (rename 完了後の中断、PR #8 レビュー pr-test-analyzer 改善 1)', () => {
+  it('POST git/blobs が 500 を返すと github_api_error (rename 完了後なので shelf に残骸が残る)', async () => {
+    setupQuarantine('owner--repo');
+    let blobCalled = false;
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+        return res(404, { message: 'Not Found' });
+      }
+      if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+      if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+        return res(200, { tree: { sha: 'base-tree-sha' } });
+      if (url.endsWith('/git/blobs') && init?.method === 'POST') {
+        blobCalled = true;
+        return res(500, 'internal server error');
+      }
+      throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+    });
+    const result = await shelve(
+      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(blobCalled).toBe(true);
+    expect(result).toMatchObject({ ok: false, reason: 'github_api_error' });
+    // rename 完了後の失敗 = shelf に残骸が残り、quarantine からは消える
+    // (= 次回 acquire で quarantine_missing に倒れるリスクを warn ログで可視化する流儀)
+    expect(fs.existsSync(path.join(TEST_DIR, 'shelf', 'biblio-dev', 'owner--repo'))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', 'owner--repo'))).toBe(false);
+  });
+});
+
+describe('shelve — marketplace.json invalid JSON (PR #8 レビュー pr-test-analyzer 改善 2)', () => {
+  it('既存 marketplace.json が壊れた JSON だと github_api_error + quarantine 残置', async () => {
+    setupQuarantine('owner--repo');
+    fetchMock.mockImplementationOnce(async () =>
+      res(200, {
+        content: Buffer.from('{"plugins": [BROKEN', 'utf-8').toString('base64'),
+        encoding: 'base64',
+        sha: 'mp-sha',
+      }),
+    );
+    const result = await shelve(
+      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'github_api_error',
+      detail: expect.stringContaining('invalid JSON'),
+    });
+    // 重複検知フェーズで失敗 → rename 未達なので quarantine は残る
+    expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', 'owner--repo'))).toBe(true);
+  });
+});
+
+describe('shelve — バイナリ fail-closed (PR #8 レビュー silent-failure-hunter Important 2)', () => {
+  it('shelf 内に NULL byte を含むファイルがあると github_api_error で中断 (silent 文字化け回避)', async () => {
+    const dir = setupQuarantine('owner--repo');
+    // NULL byte を含む binary ファイルを混ぜる (= SKILL.md / plugin.json と同じ階層)
+    fs.writeFileSync(path.join(dir, 'binary.dat'), Buffer.from([0xff, 0x00, 0xab, 0xcd]));
+    // 他のテキストファイルは blob 作成を成功させ、binary.dat に到達したときに detection で中断する経路を確認
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+        return res(404, { message: 'Not Found' });
+      }
+      if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+      if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+        return res(200, { tree: { sha: 'base-tree-sha' } });
+      if (url.endsWith('/git/blobs') && init?.method === 'POST') {
+        // SKILL.md / plugin.json の blob は 201 で受ける。binary.dat は ghFetch に届く前に
+        // shelve.ts の NULL byte detection で throw されるため、ここには到達しない。
+        return res(201, { sha: `blob-text-${Math.random()}` });
+      }
+      throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+    });
+    const result = await shelve(
+      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'github_api_error',
+      detail: expect.stringContaining('binary'),
+    });
+  });
+});

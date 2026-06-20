@@ -8,14 +8,17 @@
  *      - その他 (4xx/5xx) → github_api_error
  *   2. 物理移動 — fs.promises.rename(quarantine, shelf/<category>/<biblioName>)
  *      - 親 dir は mkdir -p、quarantine 不在は quarantine_missing、rename throw は rename_error
- *   3. GitHub Git Data API + Pulls API — fetch 直叩き (ProxyAgent 経由、OneCLI MITM が Authorization 注入)
+ *   3. shelf 内ファイル列挙 + marketplace.json entry 追記 (= GitHub API 送信前の準備)
+ *      - MAX_BLOBS_PER_PR 超過 / shelf 内 0 ファイル / バイナリ検出 → github_api_error (fail-closed)
+ *   4. GitHub Git Data API + Pulls API — fetch 直叩き (ProxyAgent 経由、OneCLI MITM が Authorization 注入)
  *      (a) GET /git/ref/heads/main + GET /git/commits/{sha} → base commit / tree sha
  *      (b) POST /git/blobs (per file) → 全 shelf ファイル + 更新後 marketplace.json
  *      (c) POST /git/trees { base_tree, tree: [{path, mode:100644, type:blob, sha}] }
  *      (d) POST /git/commits { message, tree, parents, author, committer }
  *      (e) POST /git/refs { ref: refs/heads/shelve/<cat>--<biblio>, sha }
  *      (f) POST /pulls { title, head, base: main, body, draft: true }
- *   4. 失敗分類 (silent failure 禁止) — non-2xx は step + status + body 抜粋を detail に含めて返す
+ *   5. 失敗分類 (silent failure 禁止) — catch 内で non-2xx を step + status + body 抜粋に再構成、
+ *      rename 完了後 (= step 4 内) の失敗時は shelf 残骸の存在を warn で必ず可視化する
  *
  * GOTCHA (plan §Must-Reads):
  *   - GOTCHA-3 は Anthropic response 構造、本ファイルでは GitHub API なので無関係
@@ -86,7 +89,7 @@ interface ShelveEnv {
   fallbackAuthor: { name: string; email: string } | null;
 }
 
-/** Phase 3 必須 env を読み、未設定はその場で throw (起動時に問題を即可視化)。 */
+/** shelve に必要な env (棚リポ + author 情報) を読み、未設定はその場で throw (起動時に問題を即可視化)。 */
 function readShelveEnv(): ShelveEnv {
   const env = readEnvFile([
     'SHELF_REPO_OWNER',
@@ -450,7 +453,18 @@ export async function shelve(
     const treeEntries: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string }> = [];
     for (const f of files) {
       // バイナリ非対応 (= UTF-8 のみ)。バイナリは Out of Scope (M3 で再判断)。
-      const content = fs.readFileSync(f.abs, 'utf-8');
+      // NULL byte 検出で binary を fail-closed に倒す (= 旧実装は文字化けで silent に
+      // 棚 PR を作る経路があった、PR #8 レビュー silent-failure-hunter Important 2)。
+      // Buffer で読んで NULL byte 含むなら GhHttpError で中断 → catch で github_api_error に。
+      const rawBuffer = fs.readFileSync(f.abs);
+      if (rawBuffer.includes(0)) {
+        throw new GhHttpError(
+          'POST git/blobs (binary detected)',
+          0,
+          `binary file detected (NULL byte): ${f.rel}. ` + `M3 で binary 対応予定、現状は手動除外してください。`,
+        );
+      }
+      const content = rawBuffer.toString('utf-8');
       const blobData = (await ghFetch(
         'POST git/blobs',
         `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/blobs`,
@@ -573,6 +587,16 @@ export async function shelve(
       branchName,
     };
   } catch (err) {
+    // rename (step 2) 完了後の失敗は shelf に残骸が残る (= 次回 acquire 時の
+    // quarantine_missing 経由で patron が混乱する経路を防ぐため、必ず警告ログを残す)。
+    // PR #8 レビュー silent-failure-hunter Important 1 の指摘対応。
+    if (fs.existsSync(shelfPath)) {
+      log.warn('shelve: shelf 残骸残置 (= 次回 acquire 前に手動除外を)', {
+        biblioName,
+        shelfPath,
+        hint: `rm -rf "${shelfPath}" で削除可、または棚リポへの draft PR を patron が手動 close`,
+      });
+    }
     if (err instanceof GhHttpError) {
       log.warn('shelve: github api step failed', { biblioName, step: err.step, status: err.status });
       return fail(

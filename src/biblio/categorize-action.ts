@@ -20,9 +20,10 @@ import { categorize } from './categorize.js';
 import type { CategoryResult } from './types.js';
 
 /**
- * Phase 3 以降の biblioName 形式 (`<owner>--<name>`)。Phase 1/2 の旧形式 (`<name>` 単体) は
- * Task 8 (acquire.ts) の dedup key 化で全経路が新形式に統一される。古い形式を受け取った
- * 場合は明示的に拒否 (= 別経路で混入した古い biblio を黙って受け付けない silent failure 防御)。
+ * biblioName 形式 (`<owner>--<name>`)。Phase 3 PR #8 の `refactor(m2-b-p1)` で acquire.ts が
+ * dedup key 化された結果、すべての経路で `owner--name` 形式が前提となる。古い形式
+ * (`<name>` 単体) は明示的に拒否 (= 別経路で混入した古い biblio を黙って受け付けない
+ * silent failure 防御)。inspect-action.ts / shelve-action.ts と同値。
  */
 const BIBLIO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*--[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
