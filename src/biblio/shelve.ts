@@ -45,8 +45,19 @@ const GITHUB_API = 'https://api.github.com';
 /** 各 fetch のハードタイムアウト (ms)。Vertex 経路と同じ思想で無期限ブロックを防ぐ。 */
 const GH_FETCH_TIMEOUT_MS = 30_000;
 
-/** rate limit (secondary) 防御 — blob 作成 1 件ごとの sleep。5 req/s 上限に対して安全側 (200ms = 5req/s 上限ぎり)。 */
-const GH_BLOB_SLEEP_MS = 200;
+/**
+ * rate limit (secondary) 防御 — blob 作成 1 件ごとの sleep。
+ *
+ * GitHub secondary rate limit: content-generating 系エンドポイント (= `POST /git/blobs` 等)
+ * は **80 req/min** が上限 (= 理論最小 750ms/req)。1000ms (= 60 req/min) で上限の 25% 未満
+ * に収め、MAX_BLOBS_PER_PR=100 の場合でも約 100 秒で完了する余裕を持つ。
+ *
+ * 旧 200ms (= 300 req/min) は 80 req/min を 3.75 倍超過する設定で、実 biblio (数十ファイル)
+ * で本番 429 を踏むリスクがあったため Phase 3 PR レビューで訂正済 (2026-06-20)。
+ *
+ * 参考: docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api §「Secondary rate limits」
+ */
+const GH_BLOB_SLEEP_MS = 1_000;
 
 /** shelf 内の再帰列挙の上限 (acquire/inspect/categorize と同値、暴走防止)。 */
 const SHELF_SCAN_MAX_DEPTH = 6;
@@ -457,7 +468,8 @@ export async function shelve(
         type: 'blob',
         sha: blobData.sha,
       });
-      // secondary rate limit (content-generating 系 80 req/min) への配慮 (= 5req/s ぎりぎり超えない)。
+      // secondary rate limit (content-generating 系 80 req/min) を超えないための間隔。
+      // GH_BLOB_SLEEP_MS = 1000ms = 60 req/min で上限の 25% 未満に収める (詳細は定数定義参照)。
       await sleep(GH_BLOB_SLEEP_MS);
     }
     // marketplace.json も blob として送る (= 重複検知後の更新版を 1 つだけ)。
