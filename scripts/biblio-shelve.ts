@@ -24,9 +24,9 @@
 import { initHostProxy } from '../src/biblio/host-proxy.js';
 import { shelve } from '../src/biblio/shelve.js';
 import { setupVertexProxy } from '../src/biblio/vertex-client.js';
-import type { BiblioCategory } from '../src/biblio/types.js';
+import { BIBLIO_CATEGORIES, type BiblioCategory } from '../src/biblio/types.js';
 
-const VALID_CATEGORIES: readonly BiblioCategory[] = ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'];
+const VALID_CATEGORIES: readonly BiblioCategory[] = BIBLIO_CATEGORIES;
 
 async function main(): Promise<number> {
   const biblioName = process.argv[2];

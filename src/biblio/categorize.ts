@@ -21,7 +21,8 @@ import path from 'node:path';
 import { readEnvFile } from '../env.js';
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
-import type { BiblioCategory, CategoryFailureReason, CategoryResult, InspectOptions } from './types.js';
+import type { CategoryFailureReason, CategoryResult, InspectOptions } from './types.js';
+import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
 import { callVertexAnthropic } from './vertex-client.js';
 
 /** 入力本文の上限 (バイト)。Sonnet-4.6 の context は十分広いが、コスト + プロンプト揺れを抑制する。 */
@@ -37,7 +38,7 @@ const CATEGORIZE_MAX_TOKENS = 256;
 const CATEGORIZE_TEMPERATURE = 0;
 
 /** プロンプト中で使う合法 category の集合 (== BiblioCategory)。`Set` は parse 後の validate にも使う。 */
-const VALID_CATEGORIES = new Set<BiblioCategory>(['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai']);
+const VALID_CATEGORIES = new Set<BiblioCategory>(BIBLIO_CATEGORIES);
 
 /** system プロンプト — biblio 司書としての役割を固定する。 */
 const SYSTEM_PROMPT = `あなたは biblio-shelf (Claude Code plugin の棚) の司書です。
@@ -182,7 +183,7 @@ export async function categorize(req: { biblioName: string }, opts: InspectOptio
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
     log.warn('categorize: quarantine not accessible', { biblioName, targetPath, code });
-    return fail(biblioName, 'llm_error', `quarantine path not accessible: ${code} (${targetPath})`);
+    return fail(biblioName, 'quarantine_missing', `quarantine path not accessible: ${code} (${targetPath})`);
   }
 
   // 2. 本文収集 (plugin.json description / README / SKILL.md)

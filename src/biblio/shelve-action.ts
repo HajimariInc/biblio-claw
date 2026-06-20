@@ -17,13 +17,13 @@ import { registerDeliveryAction } from '../delivery.js';
 import { insertMessage } from '../db/session-db.js';
 import { log } from '../log.js';
 import { shelve } from './shelve.js';
-import type { BiblioCategory, ShelveResult } from './types.js';
+import { BIBLIO_CATEGORIES, type BiblioCategory, type ShelveResult } from './types.js';
 
 /** Phase 3 以降の biblioName 形式 (`<owner>--<name>`)。categorize-action.ts と同値。 */
 const BIBLIO_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*--[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** category の合法集合 (= BiblioCategory)。`includes` で `category as BiblioCategory` を validate。 */
-const VALID_CATEGORIES: readonly BiblioCategory[] = ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'];
+const VALID_CATEGORIES: readonly BiblioCategory[] = BIBLIO_CATEGORIES;
 
 /** writeBack の SQLITE_BUSY 等への小規模リトライ回数 (1 + 2 = 計 3 attempts、inspect-action.ts と同値)。 */
 const WRITEBACK_MAX_RETRIES = 2;

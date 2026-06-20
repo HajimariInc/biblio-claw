@@ -101,10 +101,10 @@ describe('categorize — 4 namespace 判定', () => {
 });
 
 describe('categorize — fail-closed 経路', () => {
-  it('quarantine 不在で ok=false / llm_error', async () => {
+  it('quarantine 不在で ok=false / quarantine_missing', async () => {
     const result = await categorize({ biblioName: 'missing' }, { quarantineRoot: TEST_DIR });
-    expect(result).toMatchObject({ ok: false, reason: 'llm_error' });
-    // ヘルパは llm_error に倒すが LLM 自体は呼ばれない (= 存在確認で fail-fast)。
+    expect(result).toMatchObject({ ok: false, reason: 'quarantine_missing' });
+    // LLM 自体は呼ばれない (= 存在確認で fail-fast)。
     expect(mockLlm).not.toHaveBeenCalled();
   });
 

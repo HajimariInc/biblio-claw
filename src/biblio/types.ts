@@ -96,11 +96,17 @@ export interface InspectOptions {
  * - `biblio-art`: クリエイティブ系 (画像 / 文章 / 音 / 動画 等)
  * - `biblio-bf`: バックオフィス系 (秘書 / メール / 経理 等)
  * - `biblio-ai`: AI 運用系 (LLM オーケストレーション / プロンプト管理 等)
+ *
+ * 配列とリテラルの整合性を `as const` で型 → 配列の単一 source of truth として担保する
+ * (= ランタイム validate 用の `VALID_CATEGORIES` は本配列を直接参照、3 箇所複製しない)。
  */
-export type BiblioCategory = 'biblio-dev' | 'biblio-art' | 'biblio-bf' | 'biblio-ai';
+export const BIBLIO_CATEGORIES = ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'] as const;
+export type BiblioCategory = (typeof BIBLIO_CATEGORIES)[number];
 
 /** カテゴライズ失敗の分類。 */
 export type CategoryFailureReason =
+  /** quarantine 配下に biblio dir が存在しない / 読めない (= LLM 呼び前の入力検証エラー)。 */
+  | 'quarantine_missing'
   /** Vertex × Anthropic 呼び出しの fetch / proxy / 4xx / 5xx / response 構造崩れ。 */
   | 'llm_error'
   /** LLM 応答に `CATEGORY:` / `REASON:` の必須 2 行が揃わない or 空。 */
