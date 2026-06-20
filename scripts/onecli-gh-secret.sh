@@ -153,38 +153,47 @@ upsert_gh_secret() {
   local id
   id="$(secret_id)"
   if [ -z "$id" ] || [ "$id" = "null" ]; then
-    info "[secret] 未存在 → POST /v1/secrets で作成 (name=$GH_SECRET_NAME / host=$GH_API_HOST / header=$GH_SECRET_HEADER)"
+    info "[secret] 未存在 → POST /v1/secrets で作成 (name=$GH_SECRET_NAME / host=$GH_API_HOST / path=$GH_SECRET_PATH_PATTERN / header=$GH_SECRET_HEADER)"
     ( set -o pipefail
       SECRET_TOKEN="$SIDECAR_GH_TOKEN" jq -n \
           --arg name "$GH_SECRET_NAME" --arg host "$GH_API_HOST" \
+          --arg ppath "$GH_SECRET_PATH_PATTERN" \
           --arg header "$GH_SECRET_HEADER" --arg vfmt "$GH_SECRET_VALUE_FORMAT" \
           '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
+            pathPattern:$ppath,
             injectionConfig:{headerName:$header, valueFormat:$vfmt}}' \
         | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 投入 (POST /v1/secrets) に失敗"
     SECRET_OP="post"
   else
-    info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value 単独更新"
+    info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value+pathPattern partial update (path=$GH_SECRET_PATH_PATTERN)"
     ( set -o pipefail
       SECRET_TOKEN="$SIDECAR_GH_TOKEN" jq -n \
-          '{value:env.SECRET_TOKEN}' \
+          --arg ppath "$GH_SECRET_PATH_PATTERN" \
+          '{value:env.SECRET_TOKEN, pathPattern:$ppath}' \
         | curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
     SECRET_OP="patch"
   fi
   unset SECRET_TOKEN
-  ok "[secret] $SECRET_OP 完了 (name=${GH_SECRET_NAME} / host=${GH_API_HOST} / valueFormat=${GH_SECRET_VALUE_FORMAT} / 値はマスク)"
+  ok "[secret] $SECRET_OP 完了 (name=${GH_SECRET_NAME} / host=${GH_API_HOST} / path=${GH_SECRET_PATH_PATTERN} / valueFormat=${GH_SECRET_VALUE_FORMAT} / 値はマスク)"
 }
 
 # set_all_agents_mode_all は scripts/onecli-lib.sh で定義済み。
 
 main() {
-  info "OneCLI REST=${ONECLI_API} / GH App=${GH_APP_ID:-(未設定)} / Installation=${GH_INSTALLATION_ID:-(未設定)}"
+  info "OneCLI REST=${ONECLI_API} / GH App=${GH_APP_ID:-(未設定)} / Installation=${GH_INSTALLATION_ID:-(未設定)} / pathPattern=/repos/${SHELF_REPO_OWNER:-(未設定)}/*"
   need GH_APP_ID
   need GH_INSTALLATION_ID
   need GH_APP_PEM_PATH
+  need SHELF_REPO_OWNER
+  # SHELF_REPO_OWNER に基づき pathPattern を export (= upsert_gh_secret() の subshell で
+  # env 経由参照、env-driven スタイルで関数間引き継ぎ)。SHELF_REPO_OWNER のデフォルトは
+  # 置かない (.env.example 既定値 HajimariInc は fork / 別案件で変わる可能性、必須 env 化で
+  # silent 罠を回避)。
+  export GH_SECRET_PATH_PATTERN="/repos/${SHELF_REPO_OWNER}/*"
   [ -r "$GH_APP_PEM_PATH" ] || fail "PEM ファイルが読めない: $GH_APP_PEM_PATH"
   # stderr を捨てない — curl の接続エラー (DNS / TLS / 接続拒否のメッセージ) が
   # 「到達できない」だけだと debug 不能になるため、curl 自身のエラーは端末に流す。
