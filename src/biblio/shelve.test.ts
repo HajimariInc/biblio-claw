@@ -354,3 +354,106 @@ describe('shelve — バイナリ fail-closed (PR #8 レビュー silent-failure
     });
   });
 });
+
+/**
+ * 後半 API (= rename + blob + tree + commit 完了後の branch / PR 作成段) の失敗テスト。
+ *
+ * verify-m2.sh の 6/6 (再 shelve) は branch 既存 422 を実機で踏むが、unit でも分類網羅
+ * (= github_api_error への確実な倒し込み) を固定する。残骸 shelf も assert することで
+ * silent-failure-hunter で対応した「rename 後失敗 = shelf 残骸 warn」経路が回帰しないよう守る。
+ */
+describe('shelve — branch / PR 作成失敗 (rename + blob/tree/commit 完了後)', () => {
+  it('POST git/refs が 422 (Reference already exists) を返すと github_api_error + shelf 残骸', async () => {
+    setupQuarantine('owner--repo');
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+        return res(404, { message: 'Not Found' });
+      }
+      if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+      if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+        return res(200, { tree: { sha: 'base-tree-sha' } });
+      if (url.endsWith('/git/blobs') && init?.method === 'POST') return res(201, { sha: 'blob-x' });
+      if (url.endsWith('/git/trees') && init?.method === 'POST') return res(201, { sha: 'new-tree-sha' });
+      if (url.endsWith('/git/commits') && init?.method === 'POST') return res(201, { sha: 'new-commit-sha' });
+      if (url.endsWith('/git/refs') && init?.method === 'POST') {
+        return res(422, { message: 'Reference already exists' });
+      }
+      throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+    });
+    const result = await shelve(
+      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'github_api_error',
+      detail: expect.stringContaining('status=422'),
+    });
+    // rename + blob/tree/commit 完了済 = shelf に残骸が残る
+    expect(fs.existsSync(path.join(TEST_DIR, 'shelf', 'biblio-dev', 'owner--repo'))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', 'owner--repo'))).toBe(false);
+  });
+
+  it('POST pulls が 422 (Validation Failed) を返すと github_api_error', async () => {
+    setupQuarantine('owner--repo');
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+        return res(404, { message: 'Not Found' });
+      }
+      if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+      if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+        return res(200, { tree: { sha: 'base-tree-sha' } });
+      if (url.endsWith('/git/blobs') && init?.method === 'POST') return res(201, { sha: 'blob-x' });
+      if (url.endsWith('/git/trees') && init?.method === 'POST') return res(201, { sha: 'new-tree-sha' });
+      if (url.endsWith('/git/commits') && init?.method === 'POST') return res(201, { sha: 'new-commit-sha' });
+      if (url.endsWith('/git/refs') && init?.method === 'POST') return res(201, { ref: 'refs/heads/...' });
+      if (url.endsWith('/pulls') && init?.method === 'POST') {
+        return res(422, { message: 'Validation Failed' });
+      }
+      throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+    });
+    const result = await shelve(
+      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'github_api_error',
+      detail: expect.stringContaining('status=422'),
+    });
+  });
+});
+
+/**
+ * `rename_error` 分類の到達テスト。
+ *
+ * `ShelveFailureReason` に定義されているのに既存テストで到達経路が未カバー = 死に分岐
+ * になっていた。`fs.promises.rename` を spy で reject させて分類を固定する。将来 rename
+ * 周辺をリファクタしてもこの分岐が消えたことを CI で検知できる。
+ */
+describe('shelve — rename_error (fs.promises.rename 失敗)', () => {
+  it('rename が EACCES で reject すると rename_error 分類で返る (= 重複検知通過後、blob 走査前)', async () => {
+    setupQuarantine('owner--repo');
+    // 重複検知は通る (marketplace 404)、その後 rename で reject させる
+    fetchMock.mockImplementationOnce(async () => res(404, { message: 'Not Found' }));
+    const renameSpy = vi
+      .spyOn(fs.promises, 'rename')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('EACCES: permission denied, rename to shelf'), { code: 'EACCES' }),
+      );
+    const result = await shelve(
+      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(renameSpy).toHaveBeenCalled();
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'rename_error',
+      detail: expect.stringContaining('EACCES'),
+    });
+    // rename 失敗 = quarantine は残り、shelf は作られない
+    expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', 'owner--repo'))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_DIR, 'shelf', 'biblio-dev', 'owner--repo'))).toBe(false);
+    renameSpy.mockRestore();
+  });
+});

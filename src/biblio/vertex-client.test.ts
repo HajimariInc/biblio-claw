@@ -46,6 +46,7 @@ vi.mock('../env.js', () => ({
     ANTHROPIC_VERTEX_PROJECT_ID: 'test-project',
     CLOUD_ML_REGION: 'global',
     CATEGORIZE_MODEL: 'claude-sonnet-4-6',
+    INSPECT_DANGEROUS_MODEL: 'gemini-2.5-flash',
   })),
 }));
 
@@ -57,7 +58,7 @@ vi.mock('node:fs', () => ({
   default: { readFileSync: readFileSyncMock },
 }));
 
-import { callVertexAnthropic, setupVertexProxy } from './vertex-client.js';
+import { callVertexAnthropic, callVertexGemini, setupVertexProxy } from './vertex-client.js';
 
 /** 簡易 Response モック (ok / status / json / text)。 */
 function res(
@@ -140,6 +141,60 @@ describe('callVertexAnthropic — 4xx/5xx', () => {
   it('403 (project enable 未了) を status 付きで throw する', async () => {
     fetchMock.mockResolvedValue(res(403, 'Publisher Model not found or access denied'));
     await expect(callVertexAnthropic({ prompt: 'x', maxTokens: 32, temperature: 0 })).rejects.toThrow(/403/);
+  });
+});
+
+/**
+ * `callVertexGemini` の回帰テスト。
+ *
+ * dangerous 軸の唯一の経路 (`inspect.ts` から呼ばれる) で、API 仕様適合性 (request body の
+ * `contents[].parts[].text` 形式 / response の `candidates[0].content.parts[0].text` 取り出し /
+ * 4xx/5xx の status 付き throw) を unit で固定する。Gemini モデル更新時のサイレント回帰を防ぐ。
+ */
+describe('callVertexGemini — request body 構造', () => {
+  it('contents[].parts[].text 形式で POST し generationConfig (thinkingBudget=0) を載せる', async () => {
+    fetchMock.mockResolvedValue(res(200, { candidates: [{ content: { parts: [{ text: 'VERDICT: CLEAN' }] } }] }));
+    await callVertexGemini({ prompt: 'judge this', maxOutputTokens: 256, temperature: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0];
+    const url = call[0] as string;
+    const init = call[1] as { method?: string; body?: string };
+    // URL は publishers/google/.../generateContent 経路 (Gemini 1st party)
+    expect(url).toContain('/publishers/google/models/gemini-2.5-flash:generateContent');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string);
+    expect(body.contents).toEqual([{ role: 'user', parts: [{ text: 'judge this' }] }]);
+    expect(body.generationConfig.maxOutputTokens).toBe(256);
+    expect(body.generationConfig.temperature).toBe(0);
+    // thinking OFF (= thoughtsTokenCount に予算を喰われるのを防ぐ Gemini 2.5 固有対策)
+    expect(body.generationConfig.thinkingConfig.thinkingBudget).toBe(0);
+    expect(body.generationConfig.responseMimeType).toBe('text/plain');
+  });
+});
+
+describe('callVertexGemini — response parse', () => {
+  it('candidates[0].content.parts[0].text を取り出して返す', async () => {
+    fetchMock.mockResolvedValue(
+      res(200, {
+        candidates: [{ content: { parts: [{ text: 'VERDICT: DANGEROUS\nREASON: shell exec' }] } }],
+      }),
+    );
+    const text = await callVertexGemini({ prompt: 'x', maxOutputTokens: 32, temperature: 0 });
+    expect(text).toBe('VERDICT: DANGEROUS\nREASON: shell exec');
+  });
+
+  it('candidates が空配列なら throw する (応答崩れ防御)', async () => {
+    fetchMock.mockResolvedValue(res(200, { candidates: [] }));
+    await expect(callVertexGemini({ prompt: 'x', maxOutputTokens: 32, temperature: 0 })).rejects.toThrow(
+      /candidates\[0\]\.content\.parts\[0\]\.text/,
+    );
+  });
+});
+
+describe('callVertexGemini — 4xx/5xx', () => {
+  it('503 (Vertex 一時的失敗) を status 付きで throw する', async () => {
+    fetchMock.mockResolvedValue(res(503, 'service temporarily unavailable'));
+    await expect(callVertexGemini({ prompt: 'x', maxOutputTokens: 32, temperature: 0 })).rejects.toThrow(/503/);
   });
 });
 

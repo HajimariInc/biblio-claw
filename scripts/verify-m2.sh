@@ -58,12 +58,31 @@ if [ -z "$TARGET_REPO" ]; then
 fi
 EXPECTED_CATEGORY="${EXPECTED_CATEGORY:-biblio-dev}"
 
-# .env を読んで SHELF_REPO_OWNER/NAME を取り出す (auto-close で使う)。
+# --- pre-flight ---
+# 失敗を fail-slow (= LLM 401 retry を 3-5 分待ってから判定不能で死ぬ) ではなく fail-fast に
+# 倒すための前提検証。token 期限切れ / OneCLI 未起動 / 必須 env 未設定をここで止めるだけで
+# 体感の debug 時間が数分 → 数秒に縮む。
+[ -f .env ] || fail ".env が見つかりません — repo root で実行してください (現在地: $PWD)。手順は docs/operations-runbook.md §「M2 完成判定 verify」を参照。"
+
 set -a
 . .env
 set +a
-: "${SHELF_REPO_OWNER:?SHELF_REPO_OWNER must be set in .env (Phase 3)}"
-: "${SHELF_REPO_NAME:?SHELF_REPO_NAME must be set in .env (Phase 3)}"
+
+# 必須 env の存在確認。SHELF_REPO_* は auto-close で使い、それ以外は各 harness 内部で参照する。
+# ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION は categorize.ts / vertex-client.ts が読む。
+: "${SHELF_REPO_OWNER:?SHELF_REPO_OWNER must be set in .env}"
+: "${SHELF_REPO_NAME:?SHELF_REPO_NAME must be set in .env}"
+: "${ANTHROPIC_VERTEX_PROJECT_ID:?ANTHROPIC_VERTEX_PROJECT_ID must be set in .env}"
+: "${INSPECT_DANGEROUS_MODEL:?INSPECT_DANGEROUS_MODEL must be set in .env}"
+: "${CATEGORIZE_MODEL:?CATEGORIZE_MODEL must be set in .env}"
+
+# OneCLI proxy の起動確認 (= docker compose up + 健康な状態であることを管理 API で確認)。
+# token 期限切れの fail-slow 防止: secret 投入忘れの状態で 3-5 分待つのを避ける。
+ONECLI_URL_CHECK="${ONECLI_URL:-http://localhost:10254}"
+if ! curl -fsS --max-time 5 "${ONECLI_URL_CHECK}/v1/agents" >/dev/null 2>&1; then
+  fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。\
+  対処: docker compose up -d --wait で起動確認 + scripts/onecli-{vertex,gh}-secret.sh で secret 投入"
+fi
 
 # --- 一時ディレクトリ + trap ---
 # TMP_DATA_DIR を DATA_DIR として使い、その配下に quarantine/ と shelf/ を作らせる。

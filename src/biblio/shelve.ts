@@ -252,29 +252,43 @@ function readPluginMeta(shelfPath: string): { description: string; version: stri
   };
 }
 
-/** shelf dir 配下の全ファイルを `<rel>` 相対パスで列挙する (`.git` 除外、深さ制限)。 */
-function listShelfFiles(shelfPath: string, depth = 0, prefix = ''): Array<{ rel: string; abs: string }> {
-  if (depth > SHELF_SCAN_MAX_DEPTH) return [];
+/**
+ * shelf dir 配下の全ファイルを `<rel>` 相対パスで列挙する (`.git` 除外、深さ制限)。
+ *
+ * 戻り値の `ioErrorCount` は読み取り失敗 (EACCES / EMFILE 等) を集計する。サブ dir 1 つだけが
+ * EACCES でも `files` は他のサブ dir 由来で **非ゼロのまま縮退する** = 「ファイルセット
+ * 欠落でも長さが 0 にならない」silent skip を防ぐため、呼び出し側で `ioErrorCount > 0` の
+ * 時点で fail-closed に倒す前提。
+ */
+function listShelfFiles(
+  shelfPath: string,
+  depth = 0,
+  prefix = '',
+): { files: Array<{ rel: string; abs: string }>; ioErrorCount: number } {
+  if (depth > SHELF_SCAN_MAX_DEPTH) return { files: [], ioErrorCount: 0 };
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(shelfPath, { withFileTypes: true });
   } catch (err) {
     log.warn('shelve: directory unreadable during list', { shelfPath, depth, err });
-    return [];
+    return { files: [], ioErrorCount: 1 };
   }
-  const out: Array<{ rel: string; abs: string }> = [];
+  const files: Array<{ rel: string; abs: string }> = [];
+  let ioErrorCount = 0;
   for (const entry of entries) {
     if (entry.isDirectory()) {
       if (entry.name === '.git' || entry.name === 'node_modules') continue;
       const nextAbs = path.join(shelfPath, entry.name);
       const nextRel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      out.push(...listShelfFiles(nextAbs, depth + 1, nextRel));
+      const sub = listShelfFiles(nextAbs, depth + 1, nextRel);
+      files.push(...sub.files);
+      ioErrorCount += sub.ioErrorCount;
     } else if (entry.isFile()) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      out.push({ rel, abs: path.join(shelfPath, entry.name) });
+      files.push({ rel, abs: path.join(shelfPath, entry.name) });
     }
   }
-  return out;
+  return { files, ioErrorCount };
 }
 
 /** commit message を組む (GOTCHA-7: 本文 → 空行 → Co-Authored-By)。 */
@@ -411,13 +425,28 @@ export async function shelve(
   }
 
   // 3. shelf 内ファイル列挙 + marketplace entry 追記
-  const files = listShelfFiles(shelfPath);
+  const { files, ioErrorCount } = listShelfFiles(shelfPath);
+  if (ioErrorCount > 0) {
+    // サブ dir 1 つでも読めない = ファイルセットが silent に欠落した状態で棚 PR を作る危険。
+    // listShelfFiles 内で warn 済だが、ここで fail-closed に倒して draft PR が無音で作られる
+    // 経路を遮断する (PR #8 レビュー silent-failure-hunter Important #2 対応)。
+    log.warn('shelve: shelf dir scan had I/O errors — fail-closed', { biblioName, shelfPath, ioErrorCount });
+    return fail(
+      biblioName,
+      'github_api_error',
+      `shelf dir 走査中に ${ioErrorCount} 件の読み取りエラー (権限 / FD 枯渇) が発生したため陳列を中止しました。shelfPath=${shelfPath}`,
+    );
+  }
   if (files.length === 0) {
     log.warn('shelve: shelf dir has no files after rename — fail-closed', { biblioName, shelfPath });
     return fail(biblioName, 'github_api_error', `shelf dir 内にファイルが一切ありません: ${shelfPath}`);
   }
   if (files.length > MAX_BLOBS_PER_PR) {
-    log.warn('shelve: too many files in shelf dir (M3 で再判断)', { biblioName, count: files.length });
+    log.warn('shelve: too many files in shelf dir — exceeds MAX_BLOBS_PER_PR limit', {
+      biblioName,
+      count: files.length,
+      limit: MAX_BLOBS_PER_PR,
+    });
     return fail(
       biblioName,
       'github_api_error',

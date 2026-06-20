@@ -23,11 +23,11 @@ pnpm run dev &                            # host を起動
 pnpm run chat "hello"                     # CLI から司書と会話 (smoke 用)
 ```
 
-詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。
+詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。日常運用は [`docs/operations-runbook.md`](docs/operations-runbook.md) (local / GCP の orchestrator・agent・OneCLI 早見表 + M2 verify 前提セットアップ)、Slack 2 環境分離 (本番 ws / 開発 ws) は [`docs/slack-environments-setup.md`](docs/slack-environments-setup.md) を参照。
 
 ## GKE 運用メモ (デプロイ後の bootstrap / メンテ)
 
-> ⚠️ **暫定セクション** — 今後本格的な運用マニュアル (将来の `docs/operations.md` 等) を立てる予定。手順が枯れてきたら本セクションを最小化し、詳細は専用マニュアルに転記する。それまでは初回デプロイ + 再構築の手順帳として本セクションを参照する。
+> ⚠️ **暫定セクション** — 日常運用の早見表は [`docs/operations-runbook.md`](docs/operations-runbook.md) に集約済。本セクションは初回デプロイ + 再構築時に **1 回だけ走らせる Bootstrap 手順** に絞って残置している。手順が枯れたら本セクションを最小化し詳細は runbook に転記する。
 
 ### Cloud SQL `postgres` user パスワード変更 (初回 Bootstrap GRANT)
 

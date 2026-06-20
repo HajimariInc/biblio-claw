@@ -97,19 +97,32 @@ function findRootReadme(root: string): string | null {
   return null;
 }
 
-/** plugin.json の description を読む (失敗時 null = 無視)。 */
+/**
+ * plugin.json の description を読む。
+ *
+ * 失敗時 (= ENOENT / JSON 不正) は null を返して LLM 入力から外し、README / SKILL.md のみで
+ * カテゴリ判定を続行する縮退設計。ただし plugin.json は categorize の **判定根拠として最も
+ * 信頼性の高い情報源** (= 開発者が明示的に書いた biblio の役割記述) なので、欠落は warn で
+ * 必ず可視化する (silent skip 禁止)。
+ */
 function readPluginDescription(root: string): string | null {
   const p = path.join(root, '.claude-plugin', 'plugin.json');
   let raw: string;
   try {
     raw = fs.readFileSync(p, 'utf-8');
-  } catch {
+  } catch (err) {
+    // ENOENT は biblio によっては自然 (= description なし)。それ以外は I/O 障害の可能性。
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code !== 'ENOENT') {
+      log.warn('categorize: plugin.json unreadable (using README/SKILL.md only)', { p, code, err });
+    }
     return null;
   }
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (err) {
+    log.warn('categorize: plugin.json invalid JSON (using README/SKILL.md only)', { p, err });
     return null;
   }
   const desc = parsed.description;
@@ -199,6 +212,8 @@ export async function categorize(req: { biblioName: string }, opts: InspectOptio
   }
 
   // 3. LLM 呼び出し (Vertex × Sonnet-4.6)
+  // modelId は callVertexAnthropic に明示的に渡す (= 内部の env 再読 fallback には依存しない、
+  // 将来 callVertexAnthropic 側で env 解決を除去するリファクタが入ってもサイレント回帰しない)。
   const env = readEnvFile(['CATEGORIZE_MODEL']);
   const modelId = env.CATEGORIZE_MODEL;
   let llmOutput: string;
@@ -208,6 +223,7 @@ export async function categorize(req: { biblioName: string }, opts: InspectOptio
       prompt: `${body}\n\n----- 本文ここまで -----\n\n${OUTPUT_INSTRUCTION}`,
       maxTokens: CATEGORIZE_MAX_TOKENS,
       temperature: CATEGORIZE_TEMPERATURE,
+      modelId: modelId ?? undefined,
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
