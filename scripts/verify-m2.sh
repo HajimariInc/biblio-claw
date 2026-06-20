@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # biblio-claw: M2 完成判定 verify (MVP E2E 6 assertion)
 #
-# Slack 入力 → 仕入れ → 検品 → カテゴライズ → 陳列 (棚リポ draft PR 作成) → 重複検知
+# Slack 入力 → 仕入れ → 検品 → カテゴライズ → 陳列 (棚リポ draft PR 作成) → 再 shelve graceful 失敗
 # の 6 ステップを 1 度に流し、各段の RESULT を assert する。Phase 1+2 の Phase 単独
 # verify を「順次連結」した構造 — 各 CLI ハーネス (`biblio-{acquire,inspect,categorize,shelve}.ts`)
 # が `RESULT=<json>` を吐く流儀を踏襲。
@@ -18,12 +18,20 @@
 #   EXPECTED_CATEGORY env: 期待カテゴリ (既定 biblio-dev、判定が一致しなくても warn のみで fail にはしない)
 #
 # 後始末 (trap cleanup):
-#   - 一時 quarantine dir (TMP_QUARANTINE) を rm -rf
-#   - 一時 shelf dir (TMP_SHELF) を rm -rf
+#   - 一時 DATA_DIR (TMP_DATA_DIR、配下に quarantine/ + shelf/) を rm -rf
 #   - 作成した draft PR (CREATED_PR_NUMBER) を `gh pr close --delete-branch` で auto-close
 #     (CREATED_PR_NUMBER が空 = PR 作成前に失敗 した場合は no-op)
+#   - 各 harness の stderr を STDERR_DIR にキャプチャ、assert 失敗時に直近 1 つ分を表示
 #
 # 各 assert 失敗で exit 1。全通過で "M2 PASS" を出して exit 0。
+#
+# 6/6 assertion について (= 「重複検知」ではなく「再 shelve の graceful 失敗」):
+#   verify は draft PR を main に merge しないため、棚リポ main の marketplace.json は
+#   更新されない → 重複検知 (= shelve.ts:fetchMarketplace の plugins[].name 照合) は
+#   常に「entry なし」と判定し、2 回目の shelve は重複として弾かれない。代わりに branch
+#   作成で 422 (Reference already exists) で graceful に失敗する。verify はこの 2 経路の
+#   どちらでも 「再 shelve が安全に止まる」ことを assertion 6 で確認する (= 重複検知機能の
+#   完全な検証は marketplace.json が merge 後の状態でのみ可能、それは別途実機運用で確認)。
 
 set -euo pipefail
 
@@ -32,13 +40,21 @@ cd "$ROOT"
 
 info() { printf '[INFO] %s\n' "$*" >&2; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
+fail() {
+  printf '[FAIL] %s\n' "$*" >&2
+  # 直近 harness の stderr があれば表示 (デバッグ支援)。
+  if [ -n "${LAST_HARNESS_STDERR:-}" ] && [ -s "$LAST_HARNESS_STDERR" ]; then
+    printf '[FAIL] 直近 harness の stderr (デバッグ用):\n' >&2
+    sed 's/^/    /' "$LAST_HARNESS_STDERR" >&2
+  fi
+  exit 1
+}
 
 # --- 引数チェック ---
 TARGET_REPO="${1:-}"
 if [ -z "$TARGET_REPO" ]; then
   fail "usage: verify-m2.sh <owner/repo> [EXPECTED_CATEGORY=biblio-dev]
-  例:  bash scripts/verify-m2.sh HajimariInc/biblio-shelf"
+  例:  bash scripts/verify-m2.sh example-org/test-biblio-minimal"
 fi
 EXPECTED_CATEGORY="${EXPECTED_CATEGORY:-biblio-dev}"
 
@@ -50,8 +66,12 @@ set +a
 : "${SHELF_REPO_NAME:?SHELF_REPO_NAME must be set in .env (Phase 3)}"
 
 # --- 一時ディレクトリ + trap ---
-TMP_QUARANTINE="$(mktemp -d -t biblio-m2-verify-q-XXXXXX)"
-TMP_SHELF="$(mktemp -d -t biblio-m2-verify-s-XXXXXX)"
+# TMP_DATA_DIR を DATA_DIR として使い、その配下に quarantine/ と shelf/ を作らせる。
+# (acquire.ts は `path.join(DATA_DIR, 'quarantine')` で組むため、DATA_DIR の親ではなく
+#  DATA_DIR 自体を mktemp の dir に向ける)
+TMP_DATA_DIR="$(mktemp -d -t biblio-m2-verify-XXXXXX)"
+STDERR_DIR="$(mktemp -d -t biblio-m2-stderr-XXXXXX)"
+LAST_HARNESS_STDERR=""
 CREATED_PR_NUMBER=""
 CREATED_BRANCH=""
 
@@ -63,7 +83,7 @@ cleanup() {
       warn "draft PR close 失敗 (gh CLI 未認証 / 未インストール?): #$CREATED_PR_NUMBER。手動で close してください。"
     fi
   fi
-  rm -rf "$TMP_QUARANTINE" "$TMP_SHELF"
+  rm -rf "$TMP_DATA_DIR" "$STDERR_DIR"
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
@@ -72,6 +92,9 @@ ACQUIRE="pnpm exec tsx scripts/biblio-acquire.ts"
 INSPECT="pnpm exec tsx scripts/biblio-inspect.ts"
 CATEGORIZE="pnpm exec tsx scripts/biblio-categorize.ts"
 SHELVE="pnpm exec tsx scripts/biblio-shelve.ts"
+
+ACQUIRE_QUARANTINE="$TMP_DATA_DIR/quarantine"
+ACQUIRE_SHELF="$TMP_DATA_DIR/shelf"
 
 # RESULT=<json> を取り出すヘルパ (verify-m2-b-phase-2.sh と同形)。
 extract_result() {
@@ -98,35 +121,18 @@ process.stdin.on('end', () => {
 " -- "$key"
 }
 
-# Phase 3 仕入れ経路 = acquire は .env DATA_DIR を直接見るのではなく、quarantine 上書きを
-# サポートしていないため、DATA_DIR を一時 dir に rewrite して呼ぶ (process env で上書き)。
-acquire_with_tmpdata() {
-  local repo="$1"
-  DATA_DIR="$TMP_QUARANTINE/.." $ACQUIRE "$repo" 2>/dev/null | extract_result
+# harness 呼び出しヘルパ — stderr を STDERR_DIR に取り込み、assert 失敗時に表示できるよう保持する。
+# stdout から RESULT=<json> 行のみ抽出。引数: $1=label (debug 用), $2-=実行コマンド
+run_harness() {
+  local label="$1"
+  shift
+  LAST_HARNESS_STDERR="$STDERR_DIR/$label.stderr"
+  DATA_DIR="$TMP_DATA_DIR" "$@" 2>"$LAST_HARNESS_STDERR" | extract_result || true
 }
-# とは言え DATA_DIR は config.ts 起動時 const なので、tsx で別プロセスごと再起動する必要あり。
-# (= tsx は process.env を毎回読み直すので問題なし)。
-#
-# ただし、acquire.ts は `path.join(DATA_DIR, 'quarantine')` で quarantine 親 dir を組む。
-# つまり TMP_QUARANTINE 自体を渡す形にはできない (= TMP_QUARANTINE の親 dir が QUARANTINE_DIR の親)。
-# 簡易化のため、acquire 用の DATA_DIR は TMP_QUARANTINE の親に、その配下 'quarantine' を
-# 一時 quarantine として扱う。verify では TMP_QUARANTINE を作り、その親を DATA_DIR にして
-# 'quarantine' という名のサブディレクトリを生成させる流れで運用する。
-#
-# シンプル化: TMP_QUARANTINE を mktemp で作っていたが、これを `mktemp -d` の親を DATA_DIR に
-# し、その配下に "quarantine" dir を強制する形に変える。
-TMP_DATA_DIR="$TMP_QUARANTINE"
-rm -rf "$TMP_DATA_DIR"
-mkdir -p "$TMP_DATA_DIR"
-# acquire が見る dir = $TMP_DATA_DIR/quarantine、shelve が見る dir = $TMP_DATA_DIR/shelf
-# 上の関数 acquire_with_tmpdata は使わず、直接 DATA_DIR を上書きしてハーネスを呼ぶ。
-
-ACQUIRE_QUARANTINE="$TMP_DATA_DIR/quarantine"
-ACQUIRE_SHELF="$TMP_DATA_DIR/shelf"
 
 # 1. 仕入れ (acquire)
 info "1/6: acquire $TARGET_REPO → $ACQUIRE_QUARANTINE"
-ACQUIRE_JSON="$(DATA_DIR="$TMP_DATA_DIR" $ACQUIRE "$TARGET_REPO" 2>/dev/null | extract_result || true)"
+ACQUIRE_JSON="$(run_harness 'acquire-1' $ACQUIRE "$TARGET_REPO")"
 [ -n "$ACQUIRE_JSON" ] || fail "acquire harness が RESULT を出さなかった"
 ACQUIRE_OK="$(json_field "$ACQUIRE_JSON" 'ok')"
 [ "$ACQUIRE_OK" = "true" ] || fail "acquire 失敗: $ACQUIRE_JSON"
@@ -140,14 +146,14 @@ info "2/6: quarantine 配置確認: $QUARANTINE_PATH"
 
 # 3. 検品 (inspect ACCEPT 期待)
 info "3/6: inspect $BIBLIO_NAME (期待: ACCEPT)"
-INSPECT_JSON="$(DATA_DIR="$TMP_DATA_DIR" $INSPECT "$BIBLIO_NAME" "$ACQUIRE_QUARANTINE" 2>/dev/null | extract_result || true)"
+INSPECT_JSON="$(run_harness 'inspect' $INSPECT "$BIBLIO_NAME" "$ACQUIRE_QUARANTINE")"
 [ -n "$INSPECT_JSON" ] || fail "inspect harness が RESULT を出さなかった"
 INSPECT_VERDICT="$(json_field "$INSPECT_JSON" 'verdict')"
 [ "$INSPECT_VERDICT" = "ACCEPT" ] || fail "inspect が ACCEPT にならない: $INSPECT_JSON"
 
 # 4. カテゴライズ (期待 category と一致しなくても warn のみ)
 info "4/6: categorize $BIBLIO_NAME (期待: $EXPECTED_CATEGORY、不一致は warn のみ)"
-CATEGORIZE_JSON="$(DATA_DIR="$TMP_DATA_DIR" $CATEGORIZE "$BIBLIO_NAME" "$ACQUIRE_QUARANTINE" 2>/dev/null | extract_result || true)"
+CATEGORIZE_JSON="$(run_harness 'categorize' $CATEGORIZE "$BIBLIO_NAME" "$ACQUIRE_QUARANTINE")"
 [ -n "$CATEGORIZE_JSON" ] || fail "categorize harness が RESULT を出さなかった"
 CATEGORIZE_OK="$(json_field "$CATEGORIZE_JSON" 'ok')"
 [ "$CATEGORIZE_OK" = "true" ] || fail "categorize が ok:true にならない: $CATEGORIZE_JSON"
@@ -160,7 +166,7 @@ fi
 
 # 5. 陳列 (shelve = shelf 移動 + 棚リポ PR 作成)
 info "5/6: shelve $BIBLIO_NAME → $CATEGORY (= 棚リポ $SHELF_REPO_OWNER/$SHELF_REPO_NAME に draft PR 作成)"
-SHELVE_JSON="$(DATA_DIR="$TMP_DATA_DIR" $SHELVE "$BIBLIO_NAME" "$CATEGORY" "$REASON" "$ACQUIRE_QUARANTINE" "$ACQUIRE_SHELF" 2>/dev/null | extract_result || true)"
+SHELVE_JSON="$(run_harness 'shelve-1' $SHELVE "$BIBLIO_NAME" "$CATEGORY" "$REASON" "$ACQUIRE_QUARANTINE" "$ACQUIRE_SHELF")"
 [ -n "$SHELVE_JSON" ] || fail "shelve harness が RESULT を出さなかった"
 SHELVE_OK="$(json_field "$SHELVE_JSON" 'ok')"
 [ "$SHELVE_OK" = "true" ] || fail "shelve 失敗: $SHELVE_JSON"
@@ -172,32 +178,36 @@ info "  → PR URL=$SHELVE_PR_URL (branch=$CREATED_BRANCH)"
 SHELF_PATH="$ACQUIRE_SHELF/$CATEGORY/$BIBLIO_NAME"
 [ -d "$SHELF_PATH" ] || fail "shelf 物理配置が無い: $SHELF_PATH"
 
-# 6. 重複検知 (= 2 回目同じ biblio で already_shelved 期待)
-info "6/6: 重複検知 (= 同じ $BIBLIO_NAME を再 shelve → already_shelved 期待)"
-# 2 回目は shelf にもう biblio dir はあるが、quarantine は無い → quarantine_missing になる前に
-# marketplace.json への重複検知が回るかを確認する。verify は draft PR が main に merge される前なので
-# marketplace.json は更新されていない (= 既に PR は branch 上だけ) → 重複検知は **誤って false** を返す。
-# Phase 3 の重複検知は「main の marketplace.json を見て判定」する仕様 (PRD §技術リスク行 165 確定)。
-# = 2 回目は新しい branch が作成されようとして 422 (Reference already exists) になる可能性が高い。
+# 6. 再 shelve graceful 失敗 (= 重複検知 OR branch 既存 422 のどちらかで安全に止まる)
 #
-# 本検証では、quarantine が空のまま 2 回目を呼ぶと quarantine_missing になるため、acquire を
-# もう 1 回呼んで quarantine を補充してから shelve を呼ぶ。
-info "  6a: acquire を再実行して quarantine を補充"
-ACQUIRE2_JSON="$(DATA_DIR="$TMP_DATA_DIR" $ACQUIRE "$TARGET_REPO" 2>/dev/null | extract_result || true)"
+# verify は draft PR を main に merge しないため、棚リポ main の marketplace.json は
+# 更新されない → 重複検知 (= fetchMarketplace の plugins[].name 照合) では誤って「entry なし」
+# と判定される。代わりに branch 作成 (POST git/refs) で 422 (Reference already exists) が
+# 返り、graceful に shelve が止まる。**重複検知機能そのもの** の完全 verify は marketplace.json
+# が merge 後の状態でのみ可能で、本 verify のスコープ外。本 6/6 では「再 shelve が安全に止まる」
+# ことを 2 経路の OR 判定で確認する。
+info "6/6: 再 shelve が安全に止まる (already_shelved or github_api_error 422 のいずれか)"
+info "  6a: acquire を再実行して quarantine を補充 (1 回目の shelve で quarantine は消えている)"
+ACQUIRE2_JSON="$(run_harness 'acquire-2' $ACQUIRE "$TARGET_REPO")"
 [ -n "$ACQUIRE2_JSON" ] || fail "acquire (2回目) harness が RESULT を出さなかった"
 [ "$(json_field "$ACQUIRE2_JSON" 'ok')" = "true" ] || fail "acquire (2回目) 失敗: $ACQUIRE2_JSON"
-info "  6b: shelve を再実行 → already_shelved or github_api_error(422 = branch 既存) 期待"
-SHELVE_AGAIN_JSON="$(DATA_DIR="$TMP_DATA_DIR" $SHELVE "$BIBLIO_NAME" "$CATEGORY" "$REASON" "$ACQUIRE_QUARANTINE" "$ACQUIRE_SHELF" 2>/dev/null | extract_result || true)"
+info "  6b: shelve を再実行"
+SHELVE_AGAIN_JSON="$(run_harness 'shelve-2' $SHELVE "$BIBLIO_NAME" "$CATEGORY" "$REASON" "$ACQUIRE_QUARANTINE" "$ACQUIRE_SHELF")"
 [ -n "$SHELVE_AGAIN_JSON" ] || fail "shelve (2回目) harness が RESULT を出さなかった"
 SHELVE_AGAIN_REASON="$(json_field "$SHELVE_AGAIN_JSON" 'reason')"
-# 期待: already_shelved (PR が merge 済の場合) または github_api_error (branch 既存で 422)
+# 期待: already_shelved (PR merge 済の場合) または github_api_error (branch 既存で 422)
 if [ "$SHELVE_AGAIN_REASON" = "already_shelved" ]; then
-  info "  → already_shelved 確認 (= 棚リポ main の marketplace.json に entry 既存)"
+  info "  → already_shelved 確認 (= 棚リポ main の marketplace.json に entry 既存、PR が merge 済)"
 elif [ "$SHELVE_AGAIN_REASON" = "github_api_error" ]; then
-  # branch 既存で 422 = 期待された経路 (重複検知は main 側 marketplace.json でしか効かないため)
-  info "  → github_api_error (branch 既存で 422 と推定): $SHELVE_AGAIN_JSON"
+  # branch 既存で 422 (Reference already exists) を確実に判定する (= 想定経路の確認)
+  SHELVE_AGAIN_DETAIL="$(json_field "$SHELVE_AGAIN_JSON" 'detail')"
+  if printf '%s' "$SHELVE_AGAIN_DETAIL" | grep -q '422'; then
+    info "  → github_api_error (branch 既存で 422 = 想定通り): $SHELVE_AGAIN_DETAIL"
+  else
+    fail "github_api_error だが 422 (Reference already exists) ではない: $SHELVE_AGAIN_JSON"
+  fi
 else
-  fail "重複検知が想定外の reason: $SHELVE_AGAIN_REASON / $SHELVE_AGAIN_JSON"
+  fail "再 shelve が想定外の reason: $SHELVE_AGAIN_REASON / $SHELVE_AGAIN_JSON"
 fi
 
 echo "M2 PASS"
