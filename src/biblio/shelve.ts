@@ -45,8 +45,11 @@ import type { BiblioCategory, ShelveFailureReason, ShelveResult } from './types.
 /** GitHub API base (= OneCLI host pattern と一致)。proxy 配線は `setupVertexProxy` が global に設定済。 */
 const GITHUB_API = 'https://api.github.com';
 
-/** 各 fetch のハードタイムアウト (ms)。Vertex 経路と同じ思想で無期限ブロックを防ぐ。 */
-const GH_FETCH_TIMEOUT_MS = 30_000;
+/**
+ * 各 fetch のハードタイムアウト (ms)。Vertex 経路と同じ思想で無期限ブロックを防ぐ。
+ * Phase 2 で `acquire.ts:countSkillsInRepo` からも同 timeout で再利用するため export。
+ */
+export const GH_FETCH_TIMEOUT_MS = 30_000;
 
 /**
  * rate limit (secondary) 防御 — blob 作成 1 件ごとの sleep。
@@ -130,8 +133,10 @@ function fail(biblioName: string, reason: ShelveFailureReason, detail: string): 
 /**
  * 4xx/5xx の HTTP エラーを呼び出し側で識別するための例外型。
  * step 名 + status + body 抜粋を持ち、`github_api_error` の detail に再構成する。
+ * Phase 2 で `acquire.ts:countSkillsInRepo` の 404 fallback 判定 (`err.status === 404`) からも
+ * 参照するため export。
  */
-class GhHttpError extends Error {
+export class GhHttpError extends Error {
   constructor(
     public step: string,
     public status: number,
@@ -150,7 +155,7 @@ class GhHttpError extends Error {
  */
 type UndiciRequestInit = NonNullable<Parameters<typeof fetch>[1]>;
 
-async function ghFetch(step: string, url: string, init: UndiciRequestInit = {}): Promise<unknown> {
+export async function ghFetch(step: string, url: string, init: UndiciRequestInit = {}): Promise<unknown> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
