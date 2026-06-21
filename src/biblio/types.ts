@@ -9,6 +9,12 @@
 /** patron からの生入力 (`owner/repo` 短縮形 or GitHub URL)。 */
 export interface AcquireRequest {
   repo: string;
+  /**
+   * 個別 skill 仕入れ指定 (任意、Phase 1 で追加)。
+   * MCP tool `acquire_biblio` 経由で agent が `{ repo: 'owner/name', skill: '<skill>' }`
+   * の 2 arg 分離で渡したとき、または `acquire-action` 直叩き経路でここに来る。
+   */
+  skill?: string;
 }
 
 /** 正規化済みの取得対象。 */
@@ -17,6 +23,12 @@ export interface NormalizedRepo {
   name: string;
   /** HTTPS clone URL (`https://github.com/<owner>/<name>.git`)。SSH は使わない。 */
   cloneUrl: string;
+  /**
+   * 3 segments 入力 (`owner/repo/skill`) を normalizeRepo が直接受け取ったときのみ立つ。
+   * MCP tool 経由では `AcquireRequest.skill` に来るため通常未定義。
+   * `acquire()` では `req.skill ?? normalized.skill` でどちらの経路も吸収する。
+   */
+  skill?: string;
 }
 
 /** 取得失敗の分類。 */
@@ -28,7 +40,14 @@ export type AcquireFailureReason =
   /** clone は成功したが marketplace.json も SKILL.md も無い (biblio ではない)。 */
   | 'manifest_missing'
   /** git clone 自体が失敗 (network / proxy / 権限)。 */
-  | 'clone_failed';
+  | 'clone_failed'
+  /**
+   * 個別 skill 仕入れ Phase 3 未実装の受領通知 (Phase 1 で追加した transient 値)。
+   * Phase 3 (`individual-acquire`) 完了時に削除し、実 fetch ロジックに置き換える。
+   * 削除時は `acquire.ts` (early return ブロック) / `acquire-action.ts` (resultText 分岐) / 関連 test の参照箇所が
+   * 型チェック連鎖 (= 本 union から消えたリテラルへの参照は TypeScript が型エラーで検知) で必ず洗い出される。
+   */
+  | 'not_implemented';
 
 /**
  * 取得結果。discriminated union — `ok` で分岐する。

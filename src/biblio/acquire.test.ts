@@ -93,14 +93,33 @@ describe('normalizeRepo', () => {
     expect(normalizeRepo('github.com/octocat/hello')?.cloneUrl).toBe('https://github.com/octocat/hello.git');
   });
 
+  it('owner/repo/skill 3 segments を skill 付きで受理する (Phase 1 個別 skill 防御線)', () => {
+    expect(normalizeRepo('anthropics/skills/algorithmic-art')).toEqual({
+      owner: 'anthropics',
+      name: 'skills',
+      cloneUrl: 'https://github.com/anthropics/skills.git',
+      skill: 'algorithmic-art',
+    });
+  });
+
+  it('URL 形式の 3 segments も skill 付きで受理する', () => {
+    expect(normalizeRepo('https://github.com/anthropics/skills/algorithmic-art')).toEqual({
+      owner: 'anthropics',
+      name: 'skills',
+      cloneUrl: 'https://github.com/anthropics/skills.git',
+      skill: 'algorithmic-art',
+    });
+  });
+
   it.each([
     ['空文字', ''],
     ['空白のみ', '   '],
-    ['セグメント過多', 'owner/repo/extra'],
+    ['4 segments (dir+skill は標準外)', 'owner/repo/dir/skill'],
     ['セグメント不足', 'just-owner'],
     ['内部スペース', 'own er/repo'],
     ['github 以外の URL', 'https://gitlab.com/owner/repo'],
-    ['不正文字', 'owner/re;po'],
+    ['不正文字 (name)', 'owner/re;po'],
+    ['不正文字 (skill)', 'owner/repo/sk;ill'],
   ])('不正入力を null にする: %s', (_label, input) => {
     expect(normalizeRepo(input)).toBeNull();
   });
@@ -168,6 +187,36 @@ describe('acquire', () => {
     });
     const result = await acquire({ repo: 'octocat/hello' });
     expect(result).toMatchObject({ ok: true, biblioName: 'octocat--hello' });
+  });
+
+  it('skill 指定で not_implemented を返す (gh/git を呼ばない)', async () => {
+    const result = await acquire({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
+    expect(result).toEqual({
+      ok: false,
+      reason: 'not_implemented',
+      detail: '個別 skill 仕入れは Phase 3 で実装中: anthropics/skills/algorithmic-art',
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('req.skill が SEGMENT_RE 不一致 (不正文字) なら invalid_input を返す (Phase 3 fetch パス踏み抜き防衛)', async () => {
+    const result = await acquire({ repo: 'anthropics/skills', skill: 'sk;ill' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('invalid_input');
+      expect(result.detail).toContain('sk;ill');
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('3 segments 入力 (normalized.skill 経由) でも not_implemented を返す', async () => {
+    const result = await acquire({ repo: 'anthropics/skills/algorithmic-art' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('not_implemented');
+      expect(result.detail).toContain('anthropics/skills/algorithmic-art');
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   it('既存 quarantine を冪等に上書きする (再取得)', async () => {

@@ -1,6 +1,6 @@
 # biblio-claw
 
-biblio-shelf プロジェクトの **司書実装 repo**。**NanoClaw v2 (`nanocoai/nanoclaw` @ `2492259`, 2026-05-28) を fork して base 化**。M1 (司書骨格、GKE Autopilot `biblio-prod` 稼働) + M2 (marketplace 統合 = 仕入れ→検品→カテゴライズ→陳列) まで完了済、現在は M3 (装備 + 蔵書リスト) 着手前。
+biblio-shelf プロジェクトの **司書実装 repo**。**NanoClaw v2 (`nanocoai/nanoclaw` @ `2492259`, 2026-05-28) を fork して base 化**。M1 (司書骨格、GKE Autopilot `biblio-prod` 稼働) + M2 (marketplace 統合 = 仕入れ→検品→カテゴライズ→陳列) まで完了済、現在は M3 (装備 + 蔵書リスト) と独立 PRD `individual-skill-shiire` (個別 skill 仕入れ機能) が並行進行中。
 
 > **本 CLAUDE.md の構造**: 上部 = biblio-claw 固有の運用ルール (3 ロケーション / PRP / Branch 戦略 / 環境分離 / 公開ポリシー)。下部 = NanoClaw v2 上流 CLAUDE.md を継承保持 (base アーキ理解の正本)。**衝突時の優先**: 運用ルール (PRP コマンドフロー、Branch 戦略、環境分離方針、公開ポリシー) は biblio-claw 上部を優先。**アーキ理解・コード慣習** (Two-DB Session Split / Central DB / Container Config / OneCLI gateway / Bun runtime 等) は NanoClaw 下部に従う。
 
