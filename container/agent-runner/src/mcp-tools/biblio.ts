@@ -247,4 +247,38 @@ export const shokyakuBiblio: McpToolDefinition = {
   },
 };
 
-registerTools([acquireBiblio, inspectBiblio, categorizeBiblio, shelveBiblio, enkinBiblio, shokyakuBiblio]);
+export const listBiblio: McpToolDefinition = {
+  tool: {
+    name: 'list_biblio',
+    description:
+      '棚 (HajimariInc/biblio-shelf) の marketplace.json から蔵書一覧を取得する。**patron が「蔵書」「蔵書一覧」「biblio list」「棚に何が並んでる」「biblio-dev だけ教えて」等の依頼を投げたら呼ぶ**。`category` 引数で 4 namespace (biblio-dev|art|bf|ai) のいずれかに絞り込める (省略時は全件)。fire-and-forget — 蔵書一覧 + カテゴリ別カウントの整形済テキストは後続のメッセージで通知されるので、それを受けて patron に渡すこと (= host 側で整形済なので原則そのまま流せる)。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        category: {
+          type: 'string',
+          enum: ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'],
+          description: '絞り込み対象の 4 namespace のいずれか。省略時は全件を返す。',
+        },
+      },
+      required: [],
+    },
+  },
+  async handler(args) {
+    // category は optional。型ガード後にそのまま action に渡す (= 妥当性は host 側で再 validate)。
+    const category = typeof args.category === 'string' ? args.category.trim() : '';
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'list_biblio', category }),
+    });
+
+    log(`list_biblio: ${requestId} → category=${category || '(all)'}`);
+    return ok(
+      `蔵書リクエストを受け付けました${category ? ` (category=${category})` : ''}。一覧が揃ったら結果を通知します。`,
+    );
+  },
+};
+
+registerTools([acquireBiblio, inspectBiblio, categorizeBiblio, shelveBiblio, enkinBiblio, shokyakuBiblio, listBiblio]);

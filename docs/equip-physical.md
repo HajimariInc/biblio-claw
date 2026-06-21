@@ -240,7 +240,8 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
 
 - `verify-m3-phase-1.sh` + `verify-m3-phase-2.sh` + `verify-m3-phase-3.sh` の assertion を
   `verify-m3.sh` の assertion 1-4 (= 装備 + 解除 + 禁書 + 焼却) として組み込む。残り
-  (蔵書一覧 5-6) は Phase 4 完了後に統合。
+  (蔵書一覧 5-6) は Phase 4 完了済につき Phase 5 で統合する (`scripts/biblio-list.ts` が
+  CLI ハーネスとして追加済 = `RESULT=<json>` 規約で `verify-m3.sh` から consume 可能)。
 - **destructive E2E の統合**: 本 Phase 3 では `verify-m3-phase-3.sh` を **smoke (not_shelved
   経路) を default、destructive を env opt-in (`VERIFY_M3_P3_BIBLIO` + `VERIFY_M3_P3_CATEGORY`)**
   で分離。Phase 5 の `verify-m3.sh` では「shelve → enkin → shokyaku」の連続フローを

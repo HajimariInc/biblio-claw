@@ -2,10 +2,11 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: M2 PRD B Phase 3 完了 — **M2 北極星到達** (= patron 1 通の依頼で外部 biblio を棚に並べる経路が動く)。
+> **ステータス**: M3 Phase 4 (catalog-slack) 完了 — M2 北極星到達済 (patron 1 通の依頼で外部 biblio を棚に並べる経路が動く) + M3 Phase 1-4 完了 (装備機構 + 蔵書一覧 Slack feature)。
 >
 > - **PRD A 基盤**: GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet が **Native sidecar 多コンテナ Pod** (initContainers: `fetch-pem` + `cloud-sql-proxy` + `onecli` / containers: `orchestrator` + `gh-token-rotator` + `vertex-token-rotator`) として稼働。OneCLI gateway / GH installation token / Vertex Bearer token / CA bundle はすべて Pod 内 sidecar + `ca-secret-sync` で自動投入され、起動コマンドは `kubectl apply -f k8s/` のみで完結する。Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)、agent は K8s Job として spawn され NetworkPolicy で egress 制限される。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-m2-3.sh exit 0`)。
 > - **PRD B marketplace**: 仕入れ → 検品 → カテゴライズ (Vertex × Claude Sonnet-4.6) → 棚リポへの draft PR 作成 までの E2E が完成。M2 完成判定 verify (`scripts/verify-m2.sh <owner/repo>`) で **M2 PASS** を取得。OneCLI secret の `pathPattern=/repos/HajimariInc/*` で「棚 / 司書本体への operation のみ GH App auth が乗る、外部 public biblio の仕入れは無認証素通し」という最小権限経路を確立。
+> - **M3 装備機構 + 蔵書一覧**: 装備機構 (Phase 1-3 = 物理配置 / 司書自律呼び出し / 禁書・焼却の HITL 承認経路) + 蔵書一覧 Slack feature (Phase 4 = `@bot 蔵書` / `@bot 蔵書 biblio-dev` で棚の `marketplace.json` から全 / カテゴリ別 biblio 一覧を取得) まで完了。M9 (本体焼き込まない) は装備機構として継承。
 
 ## クイックスタート (biblio-claw, local)
 
