@@ -104,8 +104,10 @@ export function wakeContainer(session: Session): Promise<boolean> {
 async function spawnContainer(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
-    log.error('Agent group not found', { agentGroupId: session.agent_group_id });
-    return;
+    // throw して wakeContainer の .catch に拾わせる (= false 返却)。
+    // 旧実装は `return` で void 完了 → wakeContainer が `true` を返してしまい、
+    // caller が「コンテナ起動成功」と誤解する経路があった (M3 Phase 2 spawn-verify で表面化)。
+    throw new Error(`Agent group not found: ${session.agent_group_id}`);
   }
 
   // Refresh the destination map and default reply routing so any admin
@@ -420,8 +422,6 @@ async function buildMounts(
  * 渡される単一の真実の入口で、const 束縛された `DATA_DIR` を test で上書きする
  * フックを兼ねる。Docker は subPath を無視して bind mount、K8s は PVC subPath
  * volumeMount として projection することで両 runtime が同一抽象 spec を共有する。
- *
- * Phase 2 では `resolveEquippedBiblios` 側を DB lookup に置換するだけで signature 不変。
  */
 export async function appendEquippedBiblioMounts(
   mounts: VolumeMount[],
@@ -565,7 +565,12 @@ async function buildContainerSpec(
     mounts,
     env,
     onecliApplyArgs: onecliArgs,
-    command: ['-c', 'exec bun run /app/src/index.ts'],
+    // spawn-time biblio install を bun の前に挟む。`/app/install-biblios.sh` は
+    // image 内 wrapper (= /workspace/biblios/*/ を loop して `claude plugin
+    // marketplace add → install --scope user → enable`)。装備 0 件なら早期 exit で
+    // no-op。`exec` で bash プロセスが bun に置き換わり、bun が PID 1 として
+    // SIGTERM を直接受け取る (= `--entrypoint bash` 起動のため tini は介在しない)。
+    command: ['-c', '/app/install-biblios.sh && exec bun run /app/src/index.ts'],
     containerName,
     runAsUser,
     agentIdentifier,

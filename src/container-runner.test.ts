@@ -42,7 +42,7 @@ describe('resolveProviderName', () => {
   });
 });
 
-describe('appendEquippedBiblioMounts (M3 Phase 1)', () => {
+describe('appendEquippedBiblioMounts (M3 Phase 1/2 — env override 経路)', () => {
   const EQUIP_DIR = path.join(TEST_DIR, 'biblio-equipped');
 
   function makeSession(id = 'sess-m3'): Session {
