@@ -13,7 +13,7 @@
  *
  *   引数 2 を省略 or 空文字 → 装備リスト全解除 (= clear)。
  */
-import { DB_PATH } from '../src/config.js';
+import { getDsnProvider } from '../src/adapters/dsn/index.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { BIBLIO_NAME_RE } from '../src/biblio/action-helpers.js';
@@ -58,7 +58,8 @@ async function main(): Promise<number> {
 
   // central DB の初期化 (host TS と同じ)。test-v2-agent パターンと違い、ここでは
   // central DB が必要 (= session_equipped_biblios は v2.db に住む)。
-  const db = initDb(DB_PATH);
+  // path 解決は src/index.ts:97-99 と同じ DSN adapter 経由 (local/GKE 透過)。
+  const db = initDb(getDsnProvider().centralDbPath());
   runMigrations(db);
 
   upsertEquippedBiblios(sessionId, names);
