@@ -1,0 +1,13 @@
+{
+  "name": "biblio-hello--m3-p2",
+  "owner": {
+    "name": "biblio-claw (M3 Phase 2)"
+  },
+  "plugins": [
+    {
+      "name": "biblio-hello",
+      "source": "./plugins/biblio-hello",
+      "description": "biblio-claw M3 Phase 2 minimal biblio. Bundles the fire-marker skill that emits a deterministic marker, proving spawn-time install + SKILL fire E2E."
+    }
+  ]
+}

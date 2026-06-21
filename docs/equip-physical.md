@@ -1,9 +1,10 @@
-# 装備機構 — 物理配置 (M3 Phase 1)
+# 装備機構 — 物理配置 + 自律呼び出し (M3 Phase 1 + Phase 2)
 
 biblio-claw の装備機構 (souwa / equip) は、棚から取り出した biblio を agent-container に
 取り込んで実行する経路を構築する。本書はその中核となる **物理配置 (= ホスト側のソース
-位置と agent 側の mount 先 path 規約)** を扱う。M3 Phase 1 で確立した範囲のみを記す
-(install ライフサイクル / 解除 / 焼却は後続 Phase の申し送りとして末尾に集約)。
+位置と agent 側の mount 先 path 規約)** + **spawn-time install ライフサイクル** を扱う。
+M3 Phase 1 で物理配置を確立、M3 Phase 2 で spawn-time install + SKILL 発火経路を実装した
+(解除 / 焼却は Phase 3 の申し送りとして末尾に集約)。
 
 ## 物理配置 path 規約
 
@@ -92,38 +93,61 @@ hostPath を許さないため、K8s 経路では orchestrator StatefulSet の R
 **同一の `VolumeMount` 抽象** を受け取り、provider 側 (`src/adapters/container/docker.ts`,
 `src/adapters/container/k8s.ts`) で正しい spec に翻訳する。
 
-## install timing 判断: ephemeral spawn-time install
+## install timing 判断: ephemeral spawn-time install (Phase 2 実装済)
 
 装備された biblio を agent コンテナ内で実行できる状態にする方法には大別して 2 経路ある:
 
 | 方式 | 実行タイミング | M9 (本体に焼かない) 遵守 | 採用判断 |
 | --- | --- | --- | --- |
 | build-time install | agent image build 時に `claude plugin install` | × (装備 biblio が image に焼き込まれる) | 不採用 |
-| **ephemeral spawn-time install** | agent コンテナ spawn 時に `claude plugin install` を 1 度実行 | ◯ (コンテナ終了で消える) | **採用** |
+| **ephemeral spawn-time install** | agent コンテナ spawn 時に `claude plugin install` を 1 度実行 | ◯ (コンテナ終了で消える) | **採用、Phase 2 で `/app/install-biblios.sh` として実装** |
 
 PoC-11 (`/home/proj/wforest/repos/PoC/biblio-poc-11-biblio-sandbox-exec/agent-container/Dockerfile`) は
 build-time install を試したが、装備リスト変更ごとに image rebuild が必要 = M9 違反として
-不採用。Phase 2 で **spawn-time install** を採用する (詳細は後続 Phase の申し送り §Phase 2 参照)。
+不採用。M3 Phase 2 で **spawn-time install** を採用、`container/install-biblios.sh` という
+wrapper script を Dockerfile に COPY して image 内 `/app/install-biblios.sh` に配置、
+`src/container-runner.ts:buildContainerSpec` の `command` を
+`['-c', '/app/install-biblios.sh && exec bun run /app/src/index.ts']` に変更することで、
+agent コンテナ spawn 時に install_biblios が agent-runner より先に発火するようにした。
 
-## ephemeral 保証の境界 (Phase 1 範囲外を含む)
+install_biblios.sh の挙動:
+
+- `/workspace/biblios/*/` を loop (装備 0 件は no-op で早期 exit)
+- 各 biblio dir の `.claude-plugin/marketplace.json` を jq で読み、`name` (= marketplace name)
+  と `plugins[].name` を抽出
+- `claude plugin marketplace add <dir>` (idempotent) → `claude plugin install <plugin>@<mp-name>
+  --scope user` → `claude plugin enable <plugin>` (既 enable で fail しても `|| true` で許容)
+- log は `>&2` に流し、agent-runner の stdout を汚さない
+
+`--scope user` install は agent コンテナ内 `/home/node/.claude/plugins/` に書き込み、
+コンテナ終了で消える (= M9 遵守、§ephemeral 保証の境界参照)。
+
+## ephemeral 保証の境界 (Phase 1 + Phase 2)
 
 「装備状態を本体に焼き込まない (M9)」の保証は 2 層に分かれる:
 
 1. **コンテナ層**:
    - Docker: `docker run --rm` で container 終了時に container 層を自動削除。bind mount
      の source (`<DATA_DIR>/biblio-equipped/<name>/`) は host に残るが、これは「装備源」
-     として意図的に残置する (Phase 2 で再利用、解除/焼却で別途処理 = §Phase 3 参照)。
+     として意図的に残置する (= 次 session で再利用、解除 / 焼却は Phase 3 で扱う = §Phase 3 参照)。
    - K8s: Job の `ttlSecondsAfterFinished=120` で Pod が GC される。PVC subPath の中身は
      orchestrator PVC に残るが、これも同上の意図的残置。
-2. **装備状態層** (Phase 2 で実装):
-   - Phase 1 では `appendEquippedBiblioMounts` が **mount を貼るだけ** で、`claude plugin
-     install` 等のインストールは行わない。Phase 1 verify は `marker.txt` を読めるかだけ。
-   - Phase 2 で `handle.waitForExit().then(...)` (`src/container-runner.ts:170-190` 付近)
-     に cleanup hook を追加し、agent コンテナ内 `~/.claude/plugins/<name>/` 等の作業状態
-     (= image-layer に残る恐れがある領域) を明示的に flush する。
+2. **装備状態層** (Phase 2 で確立):
+   - `install-biblios.sh` が `--scope user` で install するので、生成される plugin state は
+     コンテナ内 `/home/node/.claude/plugins/` に書かれ、container 終了で消える
+     (= 1 で挙げた container 層の GC に依存)。**明示的な cleanup hook は不要** (Phase 2
+     設計判断、Q3 参照)。
+   - `handle.waitForExit().then(...)` (`src/container-runner.ts:170-190`) は touch しない。
+     state 消滅は container 層 GC に完全に委ね、host TS 側で「装備を解除する」操作は
+     `session_equipped_biblios` の DELETE / clear で十分。
 
-つまり Phase 1 単独では「mount された装備源を agent から読める」までで停止する設計。
-install / cleanup の lifecycle は Phase 2 で導入する。
+つまり Phase 2 完了時点で「装備 → 実行 → 解除」のサイクルは閉じる:
+- **装備**: `session_equipped_biblios` に upsert + `<DATA_DIR>/biblio-equipped/<name>/` に
+  fixture を投入 (verify-m3-phase-2.sh が事前 step として行う)
+- **実行**: spawn 時に install-biblios.sh が走り、agent-runner が起動するまでに plugin が
+  enable 済 = SKILL が claude SDK から発見可能 = patron 依頼で発火
+- **解除**: container 終了で agent 内 `/home/node/.claude/plugins/` が消滅 (= M9 遵守)、
+  装備源は意図的残置 (= 次 session で再 install されて再 enable される、冪等動作)
 
 ## Phase 1 の verify 経路
 
@@ -134,41 +158,63 @@ install / cleanup の lifecycle は Phase 2 で導入する。
 - **GKE 経路**: `kubectl exec biblio-orchestrator-0 -c orchestrator -- cat
   /data/biblio-equipped/<name>/marker.txt` で PVC subPath 経路を確認
 
-agent-container を spawn して `agent-runner` 経由で marker を読む経路は Phase 2 (装備自律
-呼び出し) で導入する。Phase 1 では「物理経路成立」 = host 側から marker が読める、で十分。
+Phase 1 では「物理経路成立」 = host 側から marker が読める、で十分。Phase 2 で agent-runner
+経由の SKILL 発火検証を追加した。
+
+## Phase 2 の verify 経路
+
+`scripts/verify-m3-phase-2.sh` が以下の流れで verify する:
+
+1. **Phase 1 regression**: `bash scripts/verify-m3-phase-1.sh` を pre-step で呼んで Phase 1
+   verify が引き続き通ることを確認 (= fixture の `marker.txt` は backward compat 残置)
+2. **Phase A (Docker local)**: fixture (= PoC-11 同形 marketplace 構造) を `<DATA_DIR>/biblio-equipped/<name>/`
+   に投入 → `scripts/biblio-equip-spawn-verify.ts` を実行 (= test agent group / session ensure →
+   装備リスト upsert → inbound 直書き → wakeContainer → outbound 60s+ poll → marker grep) →
+   marker_found を assert → host 装備源残置を assert → 2 回目 spawn-verify で install 冪等性を確認
+3. **Phase B (GKE)**: tar 経路で fixture を PVC に投入 → orchestrator Pod 内から spawn-verify
+   を実行 → marker_found assert → PVC 装備源残置 assert
 
 NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
-(`component=agent`) に対して全 Job Pod に適用済 + 外部 443/TCP 許可済のため、Phase 1 では
-拡張不要。verify では「適用済」を `kubectl get networkpolicy` で確認するだけ。
+(`component=agent`) に対して全 Job Pod に適用済 + 外部 443/TCP 許可済のため、Phase 2 では
+拡張不要。verify Phase B では「適用済」を `kubectl get networkpolicy` で確認するだけ
+(= Phase 1 regression 内で実行される)。
 
 ## 後続 Phase への申し送り
 
-### Phase 2 (equip-autonomous)
+### Phase 2 (equip-autonomous) — 実装完了
 
-- **装備リスト解決の DB 化**: `resolveEquippedBiblios(session)` の内部実装を env
-  (`BIBLIO_EQUIPPED_NAMES`) → DB lookup (新 table `session_equipped_biblios` or 既存
-  `sessions` table に JSON 列追加) に置換。signature は変えず、`buildMounts` への影響なし。
-- **install lifecycle (`claude plugin install --scope user`)**: spawn-time で
-  `<DATA_DIR>/biblio-equipped/<name>/.claude-plugin/marketplace.json` を agent コンテナ
-  起動時に register。entry point は `src/container-runner.ts:buildContainerSpec` の
-  `command` 末尾、または pre-spawn hook 経路。
-- **cleanup hook**: `handle.waitForExit().then(...)` に biblio cleanup ロジックを追加。
-  Phase 1 の物理配置 (`<DATA_DIR>/biblio-equipped/<name>/`) は **持続させ** (別 session で
-  再利用可能)、agent コンテナ内 `~/.claude/plugins/<name>/` のみ flush する。
-- **同時複数装備**: 装備リストが N 件のとき、`/workspace/biblios/<name1>/`,
-  `<name2>/`, ... と並列 mount。順序保証は `BIBLIO_EQUIPPED_NAMES` csv 順 (= Phase 1 で
-  確立済) を踏襲。Phase 2 で DB 化したあとも順序保証を `ORDER BY` で明示する。
+- ✅ **装備リスト解決の DB 化**: `resolveEquippedBiblios(session)` の内部実装を env
+  (`BIBLIO_EQUIPPED_NAMES`) → DB lookup (`session_equipped_biblios` テーブル) に置換。
+  signature は変えず、`buildMounts` への影響なし。env は test only バックドアとして残置。
+  実装は `src/biblio/equip.ts` + `src/db/session-equipped-biblios.ts` + migration 017。
+- ✅ **install lifecycle (`claude plugin install --scope user`)**: `container/install-biblios.sh`
+  wrapper script が spawn 時に `/workspace/biblios/*/` を loop して
+  `claude plugin marketplace add → install --scope user → enable` を発火。
+  entry point は `src/container-runner.ts:buildContainerSpec` の `command` 文字列
+  (= `['-c', '/app/install-biblios.sh && exec bun run /app/src/index.ts']`)。
+- ✅ **cleanup hook**: 明示的な cleanup hook は **追加しない**。`--scope user` install で
+  書かれた `/home/node/.claude/plugins/` は container 層 GC (= Docker `--rm` / K8s
+  `ttlSecondsAfterFinished`) で消える (= §ephemeral 保証の境界参照)。
+- ✅ **同時複数装備**: `session_equipped_biblios.order_index` ASC で順序保証、
+  `/workspace/biblios/<name1>/`, `<name2>/`, ... と並列 mount は Phase 1 から不変。
 
-### Phase 3 (equip-disposal)
+### Phase 3 (equip-disposal) への申し送り
 
+- **`equip_biblio` / `disequip_biblio` MCP tool**: agent → outbound system action →
+  host action handler → `upsertEquippedBiblios` / `clearEquippedBiblios` への配線。
+  装備リスト変更が現 container には反映されない (= mount は spawn 時に固定) 設計を
+  agent に伝える skill description が必要 (= 「変更は次回 spawn から効く」)。
 - **禁書** (= shelf からの除去 + 装備可残置): `<DATA_DIR>/biblio-equipped/<name>/` を
   **残置**、`shelve.ts` の PR 作成パターン (= Git Data API) を逆方向に使って shelf から
   除去する。
 - **焼却** (= shelf からの除去 + 物理削除 = 装備不可): `<DATA_DIR>/biblio-equipped/<name>/`
   を `fs.rmSync(...)` で物理削除、shelf からも除去。verify は焼却後に同 biblio を equip
   試行して `equipped biblio dir not found, skipping` warn が出る (= 物理削除済) で確認可能。
+- **HITL 経路**: 禁書 / 焼却は破壊操作なので `requestApproval` を経由
+  (= `src/modules/approvals/primitive.ts` パターン踏襲)。
 
 ### Phase 5 (m3-verify)
 
-- `verify-m3-phase-1.sh` の Phase A + Phase B assertion を `verify-m3.sh` の assertion 1-2
-  として組み込む。残り (解除 / 禁書 / 焼却 / 蔵書一覧) は Phase 2-4 完了後に統合。
+- `verify-m3-phase-1.sh` + `verify-m3-phase-2.sh` の assertion を `verify-m3.sh` の
+  assertion 1-2 として組み込む。残り (解除 / 禁書 / 焼却 / 蔵書一覧) は Phase 3-4 完了後に
+  統合。

@@ -565,7 +565,12 @@ async function buildContainerSpec(
     mounts,
     env,
     onecliApplyArgs: onecliArgs,
-    command: ['-c', 'exec bun run /app/src/index.ts'],
+    // M3 Phase 2: spawn-time biblio install を bun の前に挟む。`/app/install-biblios.sh`
+    // は image 内 wrapper (= /workspace/biblios/*/ を loop して `claude plugin
+    // marketplace add → install --scope user → enable`)。装備 0 件なら早期 exit で
+    // no-op。`exec` で bun が PID 1 (= tini child) になり、SIGTERM grace shutdown が
+    // 既存挙動と同じく動く。
+    command: ['-c', '/app/install-biblios.sh && exec bun run /app/src/index.ts'],
     containerName,
     runAsUser,
     agentIdentifier,
