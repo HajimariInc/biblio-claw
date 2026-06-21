@@ -1,6 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-import { resolveProviderName } from './container-runner.js';
+const { TEST_DIR } = vi.hoisted(() => ({ TEST_DIR: `/tmp/biblio-container-runner-test-${process.pid}` }));
+
+vi.mock('./config.js', async () => {
+  const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
+  return { ...actual, DATA_DIR: TEST_DIR };
+});
+
+vi.mock('./log.js', () => ({
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+}));
+
+import type { VolumeMount } from './providers/provider-container-registry.js';
+import type { Session } from './types.js';
+
+import { appendEquippedBiblioMounts, resolveProviderName } from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -23,5 +39,105 @@ describe('resolveProviderName', () => {
   it('treats empty string as unset (falls through)', () => {
     expect(resolveProviderName('', 'opencode')).toBe('opencode');
     expect(resolveProviderName(null, '')).toBe('claude');
+  });
+});
+
+describe('appendEquippedBiblioMounts (M3 Phase 1)', () => {
+  const EQUIP_DIR = path.join(TEST_DIR, 'biblio-equipped');
+
+  function makeSession(id = 'sess-m3'): Session {
+    return {
+      id,
+      agent_group_id: 'ag-m3',
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'idle',
+      last_active: null,
+      created_at: new Date(0).toISOString(),
+    };
+  }
+
+  function seedBiblio(name: string): void {
+    fs.mkdirSync(path.join(EQUIP_DIR, name), { recursive: true });
+    fs.writeFileSync(path.join(EQUIP_DIR, name, 'marker.txt'), `m-${name}`);
+  }
+
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    vi.unstubAllEnvs();
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    vi.unstubAllEnvs();
+  });
+
+  it('env 未設定なら mounts に何も追加しない', async () => {
+    vi.stubEnv('BIBLIO_EQUIPPED_NAMES', '');
+    const mounts: VolumeMount[] = [];
+    await appendEquippedBiblioMounts(mounts, makeSession(), TEST_DIR);
+    expect(mounts).toEqual([]);
+  });
+
+  it('1 件装備: mount 1 件が末尾に追加され、subPath / containerPath / readonly が正しい', async () => {
+    seedBiblio('octocat--hello');
+    vi.stubEnv('BIBLIO_EQUIPPED_NAMES', 'octocat--hello');
+    const mounts: VolumeMount[] = [];
+    await appendEquippedBiblioMounts(mounts, makeSession(), TEST_DIR);
+    expect(mounts).toEqual([
+      {
+        hostPath: path.join(EQUIP_DIR, 'octocat--hello'),
+        subPath: 'biblio-equipped/octocat--hello',
+        containerPath: '/workspace/biblios/octocat--hello',
+        readonly: true,
+      },
+    ]);
+  });
+
+  it('複数装備 (csv 3 件): csv 順序を維持して全て append される', async () => {
+    seedBiblio('a--one');
+    seedBiblio('b--two');
+    seedBiblio('c--three');
+    vi.stubEnv('BIBLIO_EQUIPPED_NAMES', 'c--three,a--one,b--two');
+    const mounts: VolumeMount[] = [];
+    await appendEquippedBiblioMounts(mounts, makeSession(), TEST_DIR);
+    expect(mounts.map((m) => m.containerPath)).toEqual([
+      '/workspace/biblios/c--three',
+      '/workspace/biblios/a--one',
+      '/workspace/biblios/b--two',
+    ]);
+    for (const m of mounts) {
+      expect(m.readonly).toBe(true);
+      expect(m.subPath).toMatch(/^biblio-equipped\//);
+    }
+  });
+
+  it('既存の mounts には影響を与えず末尾に追加する', async () => {
+    seedBiblio('mine--biblio');
+    vi.stubEnv('BIBLIO_EQUIPPED_NAMES', 'mine--biblio');
+    const existing: VolumeMount = {
+      hostPath: path.join(TEST_DIR, 'v2-sessions/x/y'),
+      subPath: 'v2-sessions/x/y',
+      containerPath: '/workspace',
+      readonly: false,
+    };
+    const mounts: VolumeMount[] = [existing];
+    await appendEquippedBiblioMounts(mounts, makeSession(), TEST_DIR);
+    expect(mounts.length).toBe(2);
+    expect(mounts[0]).toEqual(existing);
+    expect(mounts[1].containerPath).toBe('/workspace/biblios/mine--biblio');
+  });
+
+  it('物理 dir が無い entry は skip され mount に出ない', async () => {
+    seedBiblio('exists--ok');
+    // env 上は 2 件、片方は dir 不在
+    vi.stubEnv('BIBLIO_EQUIPPED_NAMES', 'exists--ok,missing--gone');
+    const mounts: VolumeMount[] = [];
+    await appendEquippedBiblioMounts(mounts, makeSession(), TEST_DIR);
+    expect(mounts.length).toBe(1);
+    expect(mounts[0].containerPath).toBe('/workspace/biblios/exists--ok');
   });
 });

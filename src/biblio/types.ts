@@ -74,8 +74,8 @@ export type InspectResult =
  * `inspect()` のオプション。
  *
  * `quarantineRoot` を opts で受けるのは `vi.stubEnv('DATA_DIR', ...)` がモジュール
- * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため (acquire.test.ts
- * で実証済)。prod 経路では未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
+ * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため。prod 経路では
+ * 未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
  */
 export interface InspectOptions {
   quarantineRoot?: string;
@@ -142,3 +142,21 @@ export type ShelveFailureReason =
 export type ShelveResult =
   | { ok: true; biblioName: string; category: BiblioCategory; prUrl: string; prNumber: number; branchName: string }
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
+
+/**
+ * 装備機構 (souwa / equip) の型 (M3 Phase 1)。
+ *
+ * 司書が shelf clone を agent-container に取り込み実行する「装備」の
+ * 物理配置 1 件を表す。install / cleanup ライフサイクルは Phase 2 以降。
+ * Phase 1 は env-driven な mount 配線のみ (= `equip.ts` の stub)。
+ */
+
+/** 装備済み biblio 1 件の物理配置情報。 */
+export interface EquippedBiblio {
+  /** biblio 名 (= `owner--name` 形式、`BIBLIO_NAME_RE` 通過済)。 */
+  name: string;
+  /** host 側 source path (`<DATA_DIR>/biblio-equipped/<name>/`)。 */
+  sourcePath: string;
+  /** agent コンテナ内 mount path (`/workspace/biblios/<name>/`)。 */
+  mountPath: string;
+}

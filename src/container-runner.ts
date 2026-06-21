@@ -27,6 +27,7 @@ import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { resolveEquippedBiblios } from './biblio/equip.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -126,7 +127,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+  const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -237,12 +238,12 @@ function resolveProviderContribution(
   return { provider, contribution };
 }
 
-function buildMounts(
+async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
   providerContribution: ProviderContainerContribution,
-): VolumeMount[] {
+): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
   // Per-group filesystem state lives forever after first creation. Init is
@@ -405,7 +406,38 @@ function buildMounts(
     }
   }
 
+  // M3 装備機構: buildMounts の fs 副作用 (initGroupFilesystem 等) と分離するため
+  // export 関数に委譲。テスト時の mock コストを最小化する。
+  await appendEquippedBiblioMounts(mounts, session, DATA_DIR);
+
   return mounts;
+}
+
+/**
+ * 装備済み biblio を `VolumeMount[]` 末尾に append する (per-biblio subPath, readonly)。
+ *
+ * `dataDir` は `resolveEquippedBiblios` の `equipmentRoot` と `subPathOf` の両方に
+ * 渡される単一の真実の入口で、const 束縛された `DATA_DIR` を test で上書きする
+ * フックを兼ねる。Docker は subPath を無視して bind mount、K8s は PVC subPath
+ * volumeMount として projection することで両 runtime が同一抽象 spec を共有する。
+ *
+ * Phase 2 では `resolveEquippedBiblios` 側を DB lookup に置換するだけで signature 不変。
+ */
+export async function appendEquippedBiblioMounts(
+  mounts: VolumeMount[],
+  session: Session,
+  dataDir: string,
+): Promise<void> {
+  const equipmentRoot = path.join(dataDir, 'biblio-equipped');
+  const equipped = await resolveEquippedBiblios(session, { equipmentRoot });
+  for (const b of equipped) {
+    mounts.push({
+      hostPath: b.sourcePath,
+      subPath: subPathOf(b.sourcePath, dataDir),
+      containerPath: b.mountPath,
+      readonly: true,
+    });
+  }
 }
 
 /**
