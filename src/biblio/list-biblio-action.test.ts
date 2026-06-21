@@ -55,6 +55,17 @@ function getWrittenText(): string | undefined {
   return (JSON.parse(msg.content) as { text: string }).text;
 }
 
+/**
+ * テスト用 counts helper — 5 keys を 0 で初期化、引数で上書きする。
+ * `list-biblio.ts` の `emptyCounts()` と同形だが、本体は export しない方針のため
+ * テストファイル内ローカルに置く (= カテゴリ追加時のメンテ負荷を集約)。
+ */
+function testCounts(
+  overrides: Partial<Record<'biblio-dev' | 'biblio-art' | 'biblio-bf' | 'biblio-ai' | 'unknown', number>> = {},
+): Record<'biblio-dev' | 'biblio-art' | 'biblio-bf' | 'biblio-ai' | 'unknown', number> {
+  return { 'biblio-dev': 0, 'biblio-art': 0, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 0, ...overrides };
+}
+
 beforeEach(() => {
   insertMessageMock.mockReset();
   listBiblioMock.mockReset();
@@ -72,7 +83,7 @@ describe('list_biblio handler', () => {
         { name: 'a--b', category: 'biblio-dev', description: '', version: '' },
         { name: 'c--d', category: 'biblio-art', description: '', version: '' },
       ],
-      counts: { 'biblio-dev': 1, 'biblio-art': 1, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 0 },
+      counts: testCounts({ 'biblio-dev': 1, 'biblio-art': 1 }),
       total: 2,
       appliedFilter: null,
     });
@@ -92,7 +103,7 @@ describe('list_biblio handler', () => {
     listBiblioMock.mockResolvedValue({
       ok: true,
       items: [{ name: 'a--b', category: 'biblio-dev', description: '', version: '' }],
-      counts: { 'biblio-dev': 1, 'biblio-art': 1, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 0 },
+      counts: testCounts({ 'biblio-dev': 1, 'biblio-art': 1 }),
       total: 2,
       appliedFilter: 'biblio-dev',
     });
@@ -108,7 +119,7 @@ describe('list_biblio handler', () => {
     listBiblioMock.mockResolvedValue({
       ok: true,
       items: [{ name: 'a--b', category: 'biblio-dev', description: '', version: '' }],
-      counts: { 'biblio-dev': 1, 'biblio-art': 0, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 0 },
+      counts: testCounts({ 'biblio-dev': 1 }),
       total: 1,
       appliedFilter: null,
     });
@@ -138,7 +149,7 @@ describe('list_biblio handler', () => {
         { name: 'a--b', category: 'biblio-dev', description: '', version: '' },
         { name: 'x--y', category: 'unknown', description: '', version: '' },
       ],
-      counts: { 'biblio-dev': 1, 'biblio-art': 0, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 1 },
+      counts: testCounts({ 'biblio-dev': 1, unknown: 1 }),
       total: 2,
       appliedFilter: null,
     });
@@ -152,7 +163,7 @@ describe('list_biblio handler', () => {
     listBiblioMock.mockResolvedValue({
       ok: true,
       items: [],
-      counts: { 'biblio-dev': 0, 'biblio-art': 0, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 0 },
+      counts: testCounts(),
       total: 0,
       appliedFilter: null,
     });

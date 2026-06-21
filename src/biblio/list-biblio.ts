@@ -62,6 +62,9 @@ function projectItem(plugin: Record<string, unknown>): ListBiblioItem {
  *                       (= フィルタ前の俯瞰を patron が見たいケースがある)。`items` のみフィルタ適用。
  */
 export async function listBiblio(params: ListBiblioParams): Promise<ListBiblioResult> {
+  // 404 経路と通常経路の両方で同じ値を返すため、関数先頭で 1 度だけ計算する
+  // (= 2 つの return が同一式を重複記述するのを避ける)。
+  const appliedFilter = params.category ?? null;
   const env = readShelveEnv();
   const { raw } = await fetchMarketplace(env);
   if (raw === null) {
@@ -71,7 +74,7 @@ export async function listBiblio(params: ListBiblioParams): Promise<ListBiblioRe
       items: [],
       counts: emptyCounts(),
       total: 0,
-      appliedFilter: params.category ?? null,
+      appliedFilter,
     };
   }
   const plugins = pluginsOf(raw);
@@ -95,6 +98,6 @@ export async function listBiblio(params: ListBiblioParams): Promise<ListBiblioRe
     items,
     counts,
     total: allItems.length,
-    appliedFilter: params.category ?? null,
+    appliedFilter,
   };
 }
