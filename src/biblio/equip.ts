@@ -23,8 +23,10 @@ import { BIBLIO_NAME_RE } from './action-helpers.js';
 import type { EquippedBiblio } from './types.js';
 
 /**
- * テスト override 用の env 名。明示的にセットされている場合のみ csv 経路を取る
- * (= 空文字や未定義なら DB lookup へフォールスルー)。
+ * テスト override 用の env 名。`undefined` のみ DB lookup へフォールスルーする
+ * (= 空文字セット時は env 経路に入り csv 解析で 0 件評価 = 結果的に DB を bypass)。
+ * 「未定義」と「空文字」を意図的に区別する設計で、テストは vi.stubEnv('', '') で
+ * 「env を空にしたい (= DB を読まない)」ケースを表現できる。
  */
 const ENV_NAME = 'BIBLIO_EQUIPPED_NAMES';
 

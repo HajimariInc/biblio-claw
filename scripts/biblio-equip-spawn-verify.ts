@@ -199,18 +199,22 @@ async function main(): Promise<number> {
         const rows = outDb.prepare('SELECT content FROM messages_out').all() as Array<{ content: string }>;
         outDb.close();
         for (const row of rows) {
-          const idx = row.content.indexOf(MARKER_PREFIX);
-          if (idx >= 0) {
-            // marker prefix から alphanumeric が続く範囲を切り出す
-            const tail = row.content.slice(idx);
-            const match = tail.match(/BIBLIO_EQUIP_M3_P2_MARKER_[A-Za-z0-9_]+/);
-            foundMarker = match ? match[0] : tail.slice(0, MARKER_PREFIX.length + 8);
+          const match = row.content.match(/BIBLIO_EQUIP_M3_P2_MARKER_[A-Za-z0-9_]+/);
+          if (match) {
+            foundMarker = match[0];
             break;
           }
         }
       }
-    } catch {
-      // DB lock 等は無視して retry
+    } catch (err) {
+      // SQLITE_LOCKED / SQLITE_BUSY は writer (agent-runner) との競合で expected
+      // = silent retry。それ以外 (SQLITE_CORRUPT / NOTADB / テーブル欠落 等) は
+      // 永続的なので stderr に出して可視化 (poll loop は継続するが timeout 後に
+      // 「marker not found」だけ出るのを避ける)。
+      const code = (err as NodeJS.ErrnoException & { code?: string })?.code ?? '';
+      if (code !== 'SQLITE_LOCKED' && code !== 'SQLITE_BUSY') {
+        process.stderr.write(`[spawn-verify] outbound.db read error (code=${code || 'unknown'}): ${String(err)}\n`);
+      }
     }
     if (foundMarker) break;
     const elapsedSec = Math.floor((Date.now() - start) / 1000);

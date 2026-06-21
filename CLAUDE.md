@@ -1,6 +1,6 @@
 # biblio-claw
 
-biblio-shelf プロジェクトの **司書実装 repo**。**NanoClaw v2 (`nanocoai/nanoclaw` @ `2492259`, 2026-05-28) を fork して base 化**。M1 (司書骨格、GKE Autopilot `biblio-prod` 稼働) + M2 (marketplace 統合 = 仕入れ→検品→カテゴライズ→陳列) まで完了済、現在は M3 (装備 + 蔵書リスト) 着手中 (Phase 1 equip-physical 完了)。
+biblio-shelf プロジェクトの **司書実装 repo**。**NanoClaw v2 (`nanocoai/nanoclaw` @ `2492259`, 2026-05-28) を fork して base 化**。M1 (司書骨格、GKE Autopilot `biblio-prod` 稼働) + M2 (marketplace 統合 = 仕入れ→検品→カテゴライズ→陳列) まで完了済、現在は M3 (装備 + 蔵書リスト) 着手中 (Phase 1 equip-physical + Phase 2 equip-autonomous 完了)。
 
 > **本 CLAUDE.md の構造**: 上部 = biblio-claw 固有の運用ルール (3 ロケーション / PRP / Branch 戦略 / 環境分離 / 公開ポリシー)。下部 = NanoClaw v2 上流 CLAUDE.md を継承保持 (base アーキ理解の正本)。**衝突時の優先**: 運用ルール (PRP コマンドフロー、Branch 戦略、環境分離方針、公開ポリシー) は biblio-claw 上部を優先。**アーキ理解・コード慣習** (Two-DB Session Split / Central DB / Container Config / OneCLI gateway / Bun runtime 等) は NanoClaw 下部に従う。
 
@@ -481,7 +481,7 @@ systemctl --user start|stop|restart nanoclaw
 | [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 のアーキテクチャ差分 — v1 のものが v2 のどこへ移ったかの語彙 |
 | [docs/migration-dev.md](docs/migration-dev.md) | マイグレーション開発ガイド — テスト、デバッグ、開発ループ |
 | [docs/operations-runbook.md](docs/operations-runbook.md) | **biblio-claw 運用早見表** (local / GCP)。orchestrator / agent / OneCLI の起動・ログ所在・M2 verify 前提セットアップ表 + OneCLI tunnel 罠の対処 |
-| [docs/equip-physical.md](docs/equip-physical.md) | 装備機構の物理配置規約 / mount トポロジ / Docker+K8s 両 runtime 透過の仕組み / Phase 2-3-5 申し送り (M3 Phase 1) |
+| [docs/equip-physical.md](docs/equip-physical.md) | 装備機構の物理配置規約 / mount トポロジ / Docker+K8s 両 runtime 透過の仕組み / spawn-time install lifecycle / Phase 3-5 申し送り (M3 Phase 1 + Phase 2) |
 | [docs/slack-environments-setup.md](docs/slack-environments-setup.md) | Slack 2 環境分離 (GCP=本番 ws / local=開発 ws) の App セットアップ手順 |
 
 ## コンテナビルドキャッシュ

@@ -5,11 +5,12 @@
 # ephemeral 解除) を乗せたサイクル全体を E2E で検証する。
 #
 # 流れ:
-#   1. Phase 1 regression を呼ぶ (= verify-m3-phase-1.sh)
+#   1. Phase 1 regression を呼ぶ (= verify-m3-phase-1.sh、引数透過)
 #   2. Phase 2 Phase A (Docker local): fixture 投入 → spawn-verify ハーネス →
 #      marker 検出 → 装備源残置確認 → 2 回目 spawn-verify で install 冪等確認
-#   3. Phase 2 Phase B (GKE): kubectl cp で PVC fixture 投入 → orchestrator Pod 内で
-#      spawn-verify ハーネス → marker 検出 (Phase 5 で統合 verify に組み込まれる予定)
+#   3. Phase 2 Phase B (GKE): tar 経由 (symlink / 実行権保持のため kubectl cp ではない) で
+#      PVC fixture 投入 → orchestrator Pod 内で spawn-verify ハーネス → marker 検出
+#      (Phase 5 で統合 verify に組み込まれる予定)
 #
 # 引数:
 #   --local-only   Docker local 経路のみ実行
@@ -104,12 +105,9 @@ process.stdin.on('end', () => {
 }
 
 # --- Phase 1 regression ---
+# 引数を透過転送 (= 冒頭の case で検証済の --local-only / --gke-only / 空 を渡す)。
 info '=== Phase 1 regression (verify-m3-phase-1.sh) ==='
-case "${1:-}" in
-  --local-only) bash scripts/verify-m3-phase-1.sh --local-only ;;
-  --gke-only)   bash scripts/verify-m3-phase-1.sh --gke-only ;;
-  '')           bash scripts/verify-m3-phase-1.sh ;;
-esac
+bash scripts/verify-m3-phase-1.sh "${@}"
 
 # --- Phase A: Docker local 経路 ---
 run_local() {
@@ -222,7 +220,7 @@ run_gke() {
   local raw
   raw="$(kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
     pnpm exec tsx scripts/biblio-equip-spawn-verify.ts "${BIBLIO_NAME}" 2>"$LAST_HARNESS_STDERR")" \
-    || fail 'orchestrator Pod 内で spawn-verify ハーネス実行に失敗'
+    || fail "orchestrator Pod 内で spawn-verify ハーネス実行に失敗 (kubectl exit $?)"
   local result_json
   result_json="$(printf '%s' "${raw}" | extract_result)"
   [ -n "${result_json}" ] || fail 'spawn-verify ハーネス (GKE) が RESULT を出さなかった'

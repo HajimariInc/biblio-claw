@@ -27,19 +27,22 @@ export function getEquippedBibliosBySession(sessionId: string): EquippedBiblioRo
  * 既存行を DELETE してから新しい `biblioNames` を `order_index` 0, 1, 2, ... で
  * INSERT する。空配列を渡せば全解除と同義。トランザクションで包むので中途半端な
  * 状態は残らない。
+ *
+ * 入力に重複した biblio_name が含まれていても PK violation で throw せず、
+ * 先着順で dedupe して INSERT する (= 呼び出し元に余計な責任を持たせない設計)。
  */
 export function upsertEquippedBiblios(sessionId: string, biblioNames: string[]): void {
+  const uniqueNames = [...new Set(biblioNames)];
   const db = getDb();
   const now = new Date().toISOString();
-  const tx = db.transaction(() => {
+  db.transaction(() => {
     db.prepare('DELETE FROM session_equipped_biblios WHERE session_id = ?').run(sessionId);
     const ins = db.prepare(
       `INSERT INTO session_equipped_biblios (session_id, biblio_name, order_index, equipped_at)
        VALUES (?, ?, ?, ?)`,
     );
-    biblioNames.forEach((name, i) => ins.run(sessionId, name, i, now));
-  });
-  tx();
+    for (const [i, name] of uniqueNames.entries()) ins.run(sessionId, name, i, now);
+  })();
 }
 
 /** session の装備リストを全削除。`upsertEquippedBiblios(sessionId, [])` と等価。 */

@@ -114,4 +114,14 @@ describe('session_equipped_biblios CRUD', () => {
     deleteSession('sess-cascade');
     expect(getEquippedBibliosBySession('sess-cascade')).toEqual([]);
   });
+
+  it('upsert 入力に重複した biblio_name があっても先着順で dedupe して INSERT する', () => {
+    createSession(makeSession('sess-dup'));
+    // 重複 'a--one' を含む配列 → 先着順 dedup で [a--one, b--two] になり、
+    // PK violation (= UNIQUE constraint failed) で throw しない
+    upsertEquippedBiblios('sess-dup', ['a--one', 'b--two', 'a--one', 'c--three', 'b--two']);
+    const rows = getEquippedBibliosBySession('sess-dup');
+    expect(rows.map((r) => r.biblio_name)).toEqual(['a--one', 'b--two', 'c--three']);
+    expect(rows.map((r) => r.order_index)).toEqual([0, 1, 2]);
+  });
 });
