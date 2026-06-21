@@ -81,6 +81,12 @@ describe('shokyaku_biblio handler — 入口 validate', () => {
     expect(getWrittenText()).toContain('`owner--name` 形式ではありません');
   });
 
+  it('category 欠落 → 「category が指定されていません」', async () => {
+    await handler({ name: 'owner--repo' }, dummySession, dummyDb);
+    expect(requestApprovalMock).not.toHaveBeenCalled();
+    expect(getWrittenText()).toContain('category が指定されていません');
+  });
+
   it('category 不正値 → invalid_category', async () => {
     await handler({ name: 'owner--repo', category: 'biblio-zzz' }, dummySession, dummyDb);
     expect(requestApprovalMock).not.toHaveBeenCalled();
@@ -98,10 +104,17 @@ describe('shokyaku_biblio handler — HITL 経路', () => {
     expect(opts.title).toBe('焼却の承認');
     expect(getWrittenText()).toContain('焼却承認を申請しました');
   });
+
+  it('requestApproval が throw すると writeBack で internal 失敗を通知', async () => {
+    requestApprovalMock.mockRejectedValueOnce(new Error('delivery down'));
+    await handler({ name: 'owner--repo', category: 'biblio-dev' }, dummySession, dummyDb);
+    expect(getWrittenText()).toContain('焼却エラー (internal)');
+    expect(getWrittenText()).toContain('delivery down');
+  });
 });
 
 describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
-  it('shokyaku() ok=true → notify に PR URL + 「再装備不可」', async () => {
+  it('shokyaku() ok=true (cleanup 成功) → notify に PR URL + 「再装備不可」', async () => {
     shokyakuMock.mockResolvedValue({
       ok: true,
       biblioName: 'owner--repo',
@@ -122,6 +135,34 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     expect(notifiedText).toContain('焼却完了');
     expect(notifiedText).toContain('https://github.com/HajimariInc/biblio-shelf/pull/88');
     expect(notifiedText).toContain('再装備不可');
+    expect(notifiedText).not.toContain('装備源の物理削除に失敗');
+  });
+
+  it('shokyaku() ok=true (cleanupWarning あり) → notify に 「装備源の物理削除に失敗」 が含まれる (silent failure 防止)', async () => {
+    shokyakuMock.mockResolvedValue({
+      ok: true,
+      biblioName: 'owner--repo',
+      category: 'biblio-ai',
+      prUrl: 'https://github.com/HajimariInc/biblio-shelf/pull/88',
+      prNumber: 88,
+      branchName: 'shokyaku/biblio-ai--owner--repo-2026-06-21T20-00-00',
+      cleanupWarning: '装備源 dir の物理削除に失敗 (/data/biblio-equipped/owner--repo): EACCES',
+    });
+    const notifyMock = vi.fn();
+    await approvalHandler({
+      session: { id: 'sess-x' } as never,
+      payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
+      userId: 'slack:U-DEN',
+      notify: notifyMock,
+    });
+    const notifiedText = notifyMock.mock.calls[0][0] as string;
+    expect(notifiedText).toContain('焼却完了');
+    expect(notifiedText).toContain('https://github.com/HajimariInc/biblio-shelf/pull/88');
+    // cleanup 失敗を patron に明示 (= 「物理削除しました」と無条件通知しない)
+    expect(notifiedText).toContain('装備源の物理削除に失敗');
+    expect(notifiedText).toContain('EACCES');
+    // 「再装備不可」は false の状態なので含まれない
+    expect(notifiedText).not.toContain('= 再装備不可)');
   });
 
   it('shokyaku() ok=false → notify に reason + detail', async () => {

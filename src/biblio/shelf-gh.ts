@@ -16,7 +16,14 @@ import { fetch } from 'undici';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 
-/** GitHub API base (= OneCLI host pattern と一致)。proxy 配線は `initHostProxy` が global に設定済。 */
+/**
+ * GitHub API base (= OneCLI host pattern と一致)。
+ *
+ * proxy 配線は `initHostProxy` が global undici dispatcher (= `setGlobalDispatcher`) に設定する
+ * ProxyAgent で行う。`setupVertexProxy` も同 dispatcher を経由するため、CLI ハーネスでは
+ * `initHostProxy()` + `setupVertexProxy()` の両方を起動時に呼んで GitHub fetch と Vertex
+ * 呼び出しの両方を OneCLI MITM 経由にする (= `scripts/biblio-shelve.ts` 等と同パターン)。
+ */
 export const GITHUB_API = 'https://api.github.com';
 
 /** 各 fetch のハードタイムアウト (ms)。無期限ブロックを防ぐ。 */

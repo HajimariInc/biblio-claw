@@ -16,7 +16,7 @@ import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import { enkin } from './enkin.js';
-import { BIBLIO_NAME_RE, writeBackMessage } from './action-helpers.js';
+import { BIBLIO_NAME_RE, safeNotify, writeBackMessage } from './action-helpers.js';
 import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
 
 /** category の合法集合。 */
@@ -32,26 +32,37 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     typeof payload.category === 'string' ? (payload.category as BiblioCategory) : ('biblio-dev' as BiblioCategory);
   if (!biblioName || !VALID_CATEGORIES.includes(category)) {
     log.error('enkin_confirm: invalid payload', { payload });
-    notify(`禁書エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`);
+    safeNotify(notify, `禁書エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`, {
+      action: APPROVAL_ACTION,
+      biblioName,
+    });
     return;
   }
   try {
     const result = await enkin({ biblioName, category });
     if (result.ok) {
-      notify(
+      safeNotify(
+        notify,
         `禁書完了: PR URL = ${result.prUrl} (branch: \`${result.branchName}\`)\n` +
           `${biblioName} を棚から除去する draft PR を立てました。装備源は残置 (= 再装備可)。手動 merge をお願いします。`,
+        { action: APPROVAL_ACTION, biblioName },
       );
       log.info('enkin_confirm: ok', { biblioName, category, prUrl: result.prUrl });
     } else {
-      notify(`禁書失敗 (${result.reason}): ${biblioName} — ${result.detail}`);
+      safeNotify(notify, `禁書失敗 (${result.reason}): ${biblioName} — ${result.detail}`, {
+        action: APPROVAL_ACTION,
+        biblioName,
+      });
       log.warn('enkin_confirm: enkin returned not ok', { biblioName, category, reason: result.reason });
     }
   } catch (err) {
     // enkin() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
     log.error('enkin_confirm threw', { biblioName, category, err });
     const detail = err instanceof Error ? err.message : String(err);
-    notify(`禁書エラー (internal): 予期しない失敗 — ${detail}`);
+    safeNotify(notify, `禁書エラー (internal): 予期しない失敗 — ${detail}`, {
+      action: APPROVAL_ACTION,
+      biblioName,
+    });
   }
 });
 

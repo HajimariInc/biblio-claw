@@ -16,7 +16,7 @@ import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import { shokyaku } from './shokyaku.js';
-import { BIBLIO_NAME_RE, writeBackMessage } from './action-helpers.js';
+import { BIBLIO_NAME_RE, safeNotify, writeBackMessage } from './action-helpers.js';
 import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
 
 const VALID_CATEGORIES: readonly BiblioCategory[] = BIBLIO_CATEGORIES;
@@ -29,25 +29,45 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     typeof payload.category === 'string' ? (payload.category as BiblioCategory) : ('biblio-dev' as BiblioCategory);
   if (!biblioName || !VALID_CATEGORIES.includes(category)) {
     log.error('shokyaku_confirm: invalid payload', { payload });
-    notify(`焼却エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`);
+    safeNotify(notify, `焼却エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`, {
+      action: APPROVAL_ACTION,
+      biblioName,
+    });
     return;
   }
   try {
     const result = await shokyaku({ biblioName, category });
     if (result.ok) {
-      notify(
-        `焼却完了: PR URL = ${result.prUrl} (branch: \`${result.branchName}\`)\n` +
-          `${biblioName} を棚から除去する draft PR を立て、装備源を物理削除しました (= 再装備不可)。手動 merge をお願いします。`,
-      );
-      log.info('shokyaku_confirm: ok', { biblioName, category, prUrl: result.prUrl });
+      // cleanup 成否で通知文言を切替 (= 「物理削除しました」と無条件通知で焼却の意味を誤認させない、
+      // PR #15 silent-failure-hunter HIGH 2 対応)。
+      const cleanupLine = result.cleanupWarning
+        ? `${biblioName} を棚から除去する draft PR を立てましたが、**装備源の物理削除に失敗しました** ` +
+          `(ログ確認要): ${result.cleanupWarning}。手動 merge + 装備源 dir の手動削除をお願いします。`
+        : `${biblioName} を棚から除去する draft PR を立て、装備源を物理削除しました (= 再装備不可)。手動 merge をお願いします。`;
+      safeNotify(notify, `焼却完了: PR URL = ${result.prUrl} (branch: \`${result.branchName}\`)\n${cleanupLine}`, {
+        action: APPROVAL_ACTION,
+        biblioName,
+      });
+      log.info('shokyaku_confirm: ok', {
+        biblioName,
+        category,
+        prUrl: result.prUrl,
+        cleanupWarning: result.cleanupWarning ?? null,
+      });
     } else {
-      notify(`焼却失敗 (${result.reason}): ${biblioName} — ${result.detail}`);
+      safeNotify(notify, `焼却失敗 (${result.reason}): ${biblioName} — ${result.detail}`, {
+        action: APPROVAL_ACTION,
+        biblioName,
+      });
       log.warn('shokyaku_confirm: shokyaku returned not ok', { biblioName, category, reason: result.reason });
     }
   } catch (err) {
     log.error('shokyaku_confirm threw', { biblioName, category, err });
     const detail = err instanceof Error ? err.message : String(err);
-    notify(`焼却エラー (internal): 予期しない失敗 — ${detail}`);
+    safeNotify(notify, `焼却エラー (internal): 予期しない失敗 — ${detail}`, {
+      action: APPROVAL_ACTION,
+      biblioName,
+    });
   }
 });
 

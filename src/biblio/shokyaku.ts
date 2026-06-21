@@ -3,17 +3,19 @@
  *
  * `unshelve()` で shelf PR を作った後、`<DATA_DIR>/biblio-equipped/<biblioName>/` を `fs.rmSync` で
  * 物理削除し、`session_equipped_biblios` から該当 biblio を **全 session** で個別削除する
- * (= `equip.ts` の skip warn が次回 spawn 以降に再発しないようにする)。
+ * (= `equip.ts` の `equipped biblio dir not found, skipping` warn が次回 spawn 以降に再発しないようにする)。
  *
  * 設計方針:
  *   - shelf PR 作成 (= unshelve) が成功すれば、後続の host 側 cleanup (= rmSync + DB delete) が
- *     失敗しても `ok=true` を返す (= patron への通知は PR URL を優先、cleanup 失敗は log.warn で
- *     可視化のみ)。理由: PR が立った時点で patron 側の意思決定 (= merge) が走るため、host 側の
+ *     失敗しても `ok=true` を返す (= patron への通知は PR URL を優先、cleanup 失敗は warn のみで
+ *     可視化)。理由: PR が立った時点で patron 側の意思決定 (= merge) が走るため、host 側の
  *     後処理失敗を ok=false に倒すと patron 体験が「禁書/焼却の区別が曖昧」になる。
- *   - `BIBLIO_NAME_RE` 通過済の `biblioName` を使う以上 path traversal は成立しない
- *     (= `/` を含めないため `path.join(equipRoot, name)` は equipRoot の prefix 内で確定)。
- *     paranoid な `path.resolve(equipDir).startsWith(path.resolve(equipRoot))` の追加 assert
- *     は **入れない** (= 既存パターン非対応 + 余剰防御で過剰抽象、memory feedback 整合)。
+ *   - **ただし cleanup 失敗を patron に隠さない**: `ShokyakuResult.cleanupWarning` に失敗内容を
+ *     立てて action handler 側で通知文言を切替える (= 「物理削除しました」と無条件通知すると
+ *     焼却の意味 = 再装備不可 を誤認させるため。PR #15 silent-failure-hunter HIGH 2 対応)。
+ *   - `BIBLIO_NAME_RE` 通過済の `biblioName` は `/` を含まないため `path.join(equipRoot, name)` は
+ *     equipRoot の prefix 内で確定する。paranoid な startsWith assert は入れない
+ *     (= 既存コードとの整合性 + 同じ正規表現防御が他箇所でも採用されているため余剰防御になる)。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,20 +32,25 @@ export interface ShokyakuRequest {
   category: BiblioCategory;
 }
 
-/** テスト用フック: const 束縛された DATA_DIR を上書きするために root path を渡す。 */
+/** テスト用フック: 装備源 dir の root を差し替える (= const 束縛された DATA_DIR 依存を回避)。 */
 export interface ShokyakuOptions {
-  /** `<root>/<biblioName>/` を `fs.rmSync` する。既定 `${DATA_DIR}/biblio-equipped`。 */
+  /** 装備源 dir の root (`<root>/<biblioName>/` が削除対象)。省略時は `${DATA_DIR}/biblio-equipped`。 */
   equipmentRoot?: string;
 }
 
-/** 装備源 dir を冪等に削除 (= force:true で不在でも no-op、try/catch + warn で続行)。 */
-function removeEquipDir(equipDir: string, biblioName: string): boolean {
+/**
+ * 装備源 dir を冪等に削除 (= force:true で不在でも no-op、try/catch + warn で続行)。
+ *
+ * 戻り値は失敗時の警告文 (= action handler が patron 通知に含めるため)。成功時は null。
+ */
+function removeEquipDir(equipDir: string, biblioName: string): string | null {
   try {
     fs.rmSync(equipDir, { recursive: true, force: true });
-    return true;
+    return null;
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     log.warn('shokyaku: equip dir cleanup failed', { biblioName, equipDir, err });
-    return false;
+    return `装備源 dir の物理削除に失敗 (${equipDir}): ${detail}`;
   }
 }
 
@@ -51,8 +58,10 @@ function removeEquipDir(equipDir: string, biblioName: string): boolean {
  * 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName`。
  *
  * 1. `unshelve()` で shelf PR を作る (= 失敗なら早期 return、host 側 cleanup は走らない)
- * 2. 装備源 dir を物理削除 (= 失敗しても warn のみで続行)
- * 3. 全 session の装備リストから該当 biblio を消す (= equip.ts の skip warn ノイズ抑制)
+ * 2. 装備源 dir を物理削除 (= 失敗しても warn のみで続行、`cleanupWarning` に蓄積)
+ * 3. 全 session の装備リストから該当 biblio を消す (= equip.ts skip warn ノイズ抑制、失敗時は `cleanupWarning` に追記)
+ *
+ * 2-3 の失敗は ok=true を維持しつつ `cleanupWarning` で patron に伝える。
  */
 export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Promise<ShokyakuResult> {
   const { biblioName, category } = req;
@@ -68,22 +77,36 @@ export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Pr
     return unshelveResult;
   }
 
-  // 装備源物理削除 (= 失敗しても warn のみで続行、shelf PR は既に立っている)
+  const warnings: string[] = [];
+
+  // 装備源物理削除 (= 失敗しても shelf PR は既に立っているため ok=true 維持、cleanupWarning に蓄積)
   const equipDir = path.join(equipmentRoot, biblioName);
-  const removed = removeEquipDir(equipDir, biblioName);
-  if (removed) {
+  const equipWarning = removeEquipDir(equipDir, biblioName);
+  if (equipWarning) {
+    warnings.push(equipWarning);
+  } else {
     log.info('shokyaku: equip dir removed', { biblioName, equipDir });
   }
 
-  // 全 session の装備リストから個別削除 (= equip.ts:79 skip warn のノイズ抑制)
+  // 全 session の装備リストから個別削除 (= equip.ts の skip warn ノイズ抑制)
   try {
     const changes = deleteEquippedBiblioByName(biblioName);
     if (changes > 0) {
       log.info('shokyaku: removed from N session equip lists', { biblioName, changes });
     }
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     log.warn('shokyaku: DB delete from session_equipped_biblios failed', { biblioName, err });
+    warnings.push(`装備リスト DB の個別削除に失敗: ${detail}`);
   }
 
-  return unshelveResult;
+  return {
+    ok: true,
+    biblioName: unshelveResult.biblioName,
+    category: unshelveResult.category,
+    prUrl: unshelveResult.prUrl,
+    prNumber: unshelveResult.prNumber,
+    branchName: unshelveResult.branchName,
+    ...(warnings.length > 0 ? { cleanupWarning: warnings.join(' / ') } : {}),
+  };
 }

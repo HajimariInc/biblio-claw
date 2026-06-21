@@ -30,6 +30,13 @@
 #   - 本実装は plan Risk #5 (draft PR ごみ問題) と「destructive には main merged な biblio が必要 =
 #     verify 自己完結化が困難」を踏まえ、smoke を default、destructive を env opt-in に分離
 #   - unit test (= unshelve.test.ts) が destructive ロジックを完全に網羅、smoke は CLI wiring 確認に特化
+#
+# destructive E2E の後始末 (= draft PR cleanup):
+#   destructive モード実行後、shelf repo に draft PR が enkin/shokyaku 用に各 1 件残る (= 命名規約は
+#   `enkin/<cat>--<name>-<ts>` / `shokyaku/<cat>--<name>-<ts>`)。手動 cleanup:
+#     gh pr list --repo HajimariInc/biblio-shelf --search 'in:title enkin OR in:title shokyaku' --state open
+#     gh pr close --repo HajimariInc/biblio-shelf --delete-branch <PR#>
+#   Phase 5 (`verify-m3.sh`) で「shelve → enkin → shokyaku」連続フローでの cleanup 自動化を検討中。
 
 set -euo pipefail
 
@@ -164,6 +171,13 @@ run_smoke() {
 
 # --- Phase 3 destructive (env opt-in、実 shelf に PR を立てる) ---
 run_destructive() {
+  # 片方だけ設定されている場合は warn を出して silent skip を防ぐ (= 操作者が「動いている」と
+  # 誤認するのを防止、PR #15 silent-failure MEDIUM 対応)。
+  if [ -n "${VERIFY_M3_P3_BIBLIO:-}" ] && [ -z "${VERIFY_M3_P3_CATEGORY:-}" ]; then
+    warn 'VERIFY_M3_P3_BIBLIO は設定されていますが VERIFY_M3_P3_CATEGORY が未設定です — destructive skip'
+  elif [ -z "${VERIFY_M3_P3_BIBLIO:-}" ] && [ -n "${VERIFY_M3_P3_CATEGORY:-}" ]; then
+    warn 'VERIFY_M3_P3_CATEGORY は設定されていますが VERIFY_M3_P3_BIBLIO が未設定です — destructive skip'
+  fi
   if [ -z "${VERIFY_M3_P3_BIBLIO:-}" ] || [ -z "${VERIFY_M3_P3_CATEGORY:-}" ]; then
     info '=== Phase 3 destructive (skipped: VERIFY_M3_P3_BIBLIO / VERIFY_M3_P3_CATEGORY 未設定) ==='
     info '  destructive E2E を実行するには、shelf main に merge 済の biblio を指して:'
@@ -205,9 +219,12 @@ run_destructive() {
   [ -d "${equip_dir}" ] || fail "禁書後に装備源 dir が消えた (= 禁書 vs 焼却の区別が壊れている): ${equip_dir}"
 
   # 2. shokyaku: ok=true + prUrl + 装備源物理削除
-  # ※ enkin で marketplace.json から entry が消えた状態 (PR draft なので main は未変更) のため、
-  #    shokyaku は最初 not_shelved に倒れる可能性あり = この場合は SKIP を表示して PASS 扱い
-  info '  - shokyaku (destructive、ok=true OR not_shelved 許容)'
+  # ※ enkin は draft PR を作るが main へ merge しないため main の marketplace.json には entry が残る。
+  #    `fetchMarketplace()` は default branch (= main) の HEAD を参照するため、直後に shokyaku を
+  #    実行すると entry が見つかり通常 ok=true になる。ただし shelf 側の状態が予期せず変化している
+  #    場合 (= 別経路で手動 merge 済 / enkin PR を即 merge した等) は not_shelved になる可能性が
+  #    あるため、その場合は warn して PASS 扱いとする。
+  info '  - shokyaku (destructive、ok=true 期待、not_shelved も許容)'
   LAST_HARNESS_STDERR="$STDERR_DIR/shokyaku-destructive.stderr"
   local shokyaku_result
   shokyaku_result="$(pnpm exec tsx scripts/biblio-shokyaku.ts "${VERIFY_M3_P3_BIBLIO}" "${VERIFY_M3_P3_CATEGORY}" \

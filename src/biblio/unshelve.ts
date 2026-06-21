@@ -4,20 +4,27 @@
  * 削除する draft PR を作る。`shelve()` と対称、throw しない (= 失敗は `UnshelveResult.ok=false` で返す)。
  *
  * 経路 (Phase 3 Task 2、PRD §3.4.4 「禁書 = clone 残置 / 焼却 = clone 物理削除」を実現):
- *   1. marketplace.json 取得 → 404 / plugins[] に entry なし → `not_shelved` で早期 return
- *   2. GET /git/ref/heads/main → baseCommitSha → GET /git/commits/{sha} → baseTreeSha
- *   3. GET /git/trees/{baseTreeSha} (root) → `<category>` entry の sha を取得
- *   4. GET /git/trees/{categoryTreeSha} → `<biblioName>` entry の sha を取得 (= biblio dir tree)
- *   5. GET /git/trees/{biblioDirTreeSha}?recursive=1 → 配下全 blob path を列挙
- *   6. POST /git/blobs (= entry 除去版 marketplace.json) → newMarketplaceBlobSha
- *   7. POST /git/trees { base_tree: baseTreeSha, tree: [..sha:null × N, marketplace blob] } → newTreeSha
- *   8. POST /git/commits → newCommitSha (PAT fallback 対応)
- *   9. POST /git/refs { ref: refs/heads/<prefix>/<cat>--<name>-<ts>, sha }
- *  10. POST /pulls { draft: true } → prUrl + prNumber
+ *
+ * **HTTP API 呼び出しは計 11 本** (= 早期 return 判定 1 本 + ステップ 2 で ref/commit を 2 本束ねる
+ * 構成で論理 10 ステップ表記)。
+ *
+ *   1.  marketplace.json (contents API) → 404 / plugins[] に entry なし → `not_shelved` 早期 return
+ *   2a. GET /git/ref/heads/main → baseCommitSha
+ *   2b. GET /git/commits/{baseCommitSha} → baseTreeSha
+ *   3.  GET /git/trees/{baseTreeSha} (root) → `<category>` entry の sha を取得
+ *   4.  GET /git/trees/{categoryTreeSha} → `<biblioName>` entry の sha を取得 (= biblio dir tree)
+ *   5.  GET /git/trees/{biblioDirTreeSha}?recursive=1 → 配下全 blob path を列挙
+ *   6.  POST /git/blobs (= entry 除去版 marketplace.json) → newMarketplaceBlobSha
+ *   7.  POST /git/trees { base_tree: baseTreeSha, tree: [..sha:null × N, marketplace blob] } → newTreeSha
+ *   8.  POST /git/commits → newCommitSha (PAT fallback 対応)
+ *   9.  POST /git/refs { ref: refs/heads/<prefix>/<cat>--<name>-<ts>, sha }
+ *  10.  POST /pulls { draft: true } → prUrl + prNumber
  *
  * GOTCHA (web-researcher 調査結果、plan Must-Reads):
  *   - `base_tree` を **絶対に省かない** (= GitHub Community Discussion #24420、省くと全消し semantics)
- *   - `sha: null` の path は tree fetch で **存在する** path のみ並べる (存在しない path は 400)
+ *   - `sha: null` は **`blob` 型として実在する** path のみ並べる。tree (dir) 型 entry は base_tree
+ *     から自動的に消える (= 配下 blob を全削除すれば dir も消える) ため除外不要、余分に渡すと 422。
+ *     存在しない path を sha:null で渡すと 400。
  *   - GET trees の `truncated: true` 応答は biblio dir 単位なら実務上不発、念のため warn のみで継続
  *   - branch ref は `refs/heads/` プレフィックス必須 (= shelve.ts GOTCHA-5 と同じ)
  *
@@ -39,7 +46,10 @@ import {
 } from './shelf-gh.js';
 import type { BiblioCategory, UnshelveFailureReason, UnshelveResult } from './types.js';
 
-/** rate limit (secondary) 防御 — 4 連続 GET (ref/commit/root/category/dir) 間の小休止。1 PR 1 blob しか作らないので shelve より緩い。 */
+/**
+ * rate limit (secondary) 防御 — 連続 GET 5 本 (ref/commit/root/category/dir) の間に 3 箇所スリープを挟む。
+ * 1 PR 1 blob しか作らないので shelve (GH_BLOB_SLEEP_MS=1000ms × N blob) より緩い。
+ */
 const GH_GET_SLEEP_MS = 100;
 
 export interface UnshelveRequest {

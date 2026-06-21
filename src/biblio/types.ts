@@ -171,8 +171,28 @@ export type UnshelveResult =
 /** 禁書 = `unshelve()` 薄ラッパ。挙動は完全に同じ shape。 */
 export type EnkinResult = UnshelveResult;
 
-/** 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName`。shape は `UnshelveResult` と同じ (cleanup 失敗は warn のみ)。 */
-export type ShokyakuResult = UnshelveResult;
+/**
+ * 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName`。
+ *
+ * `UnshelveResult` の ok=true に **`cleanupWarning?: string` を追加** した独立 type。
+ * 焼却特有の host 側 cleanup (= 装備源 dir 削除 + 全 session DB 個別削除) は shelf PR
+ * 作成が成功した後の付随処理で、失敗しても `ok=true` を維持する設計だが、patron に
+ * 「物理削除しました」と無条件通知すると焼却の意味 (= 再装備不可) を誤認させるため、
+ * 失敗内容を `cleanupWarning` で持ち上げて action handler 側で通知文言を切替える
+ * (= silent failure 防止、PR #15 silent-failure-hunter HIGH 2 対応)。
+ */
+export type ShokyakuResult =
+  | {
+      ok: true;
+      biblioName: string;
+      category: BiblioCategory;
+      prUrl: string;
+      prNumber: number;
+      branchName: string;
+      /** host 側 cleanup (rmSync / DB delete) が失敗した場合の警告文。成功時は undefined。 */
+      cleanupWarning?: string;
+    }
+  | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
 
 /**
  * 装備機構 (souwa / equip) の型 (M3 Phase 1)。

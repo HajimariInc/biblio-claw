@@ -4,9 +4,9 @@
  * 装備リストは session 単位で永続化し、`order_index` ASC で順序を保つ。
  * 更新は全置換 semantics (= `upsertEquippedBiblios` は DELETE + INSERT トランザクション)
  * に固定する。部分更新 = `deleteEquippedBiblioByName` (Phase 3、焼却で全 session から個別行を消す
- * = `equip.ts:79` の `fs.existsSync` skip 経路で warn が残るノイズを抑制)。1 件追加 / 1 件解除
- * の MCP tool (`equip_biblio` / `disequip_biblio`) は Phase 3.5 で `addEquippedBiblio` /
- * `removeEquippedBiblio` を別途足す。
+ * = `equip.ts` の `equipped biblio dir not found, skipping` warn が次回 spawn 以降に残るノイズを
+ * 抑制)。1 件追加 / 1 件解除の MCP tool (`equip_biblio` / `disequip_biblio`) は Phase 3.5 で
+ * `addEquippedBiblio` / `removeEquippedBiblio` を別途足す。
  */
 import { getDb } from './connection.js';
 
