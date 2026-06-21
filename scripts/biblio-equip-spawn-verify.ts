@@ -32,7 +32,8 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { DB_PATH, DATA_DIR } from '../src/config.js';
+import { DATA_DIR } from '../src/config.js';
+import { getDsnProvider } from '../src/adapters/dsn/index.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup, getAgentGroup } from '../src/db/agent-groups.js';
@@ -134,8 +135,8 @@ async function main(): Promise<number> {
     );
   }
 
-  // 1. central DB init
-  const db = initDb(DB_PATH);
+  // 1. central DB init (= src/index.ts:97-99 と同じ DSN adapter 経由で path 解決、local/GKE 透過)
+  const db = initDb(getDsnProvider().centralDbPath());
   runMigrations(db);
   process.stderr.write('[spawn-verify] central DB initialized\n');
 
