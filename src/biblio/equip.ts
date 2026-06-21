@@ -75,7 +75,10 @@ export async function resolveEquippedBiblios(
       });
       continue;
     }
-    const sourcePath = path.join(root, name);
+    // path.resolve() で絶対パス保証: root が相対 (= test override で `./data` 等が来る) でも
+    // 後段の docker run -v が「相対 = local volume 名」と解釈して exit 125 を返す罠を回避。
+    // 上流 (src/config.ts DATA_DIR) でも絶対化済みだが、test override 経路への二重防御。
+    const sourcePath = path.resolve(root, name);
     if (!fs.existsSync(sourcePath)) {
       log.warn('equip: equipped biblio dir not found, skipping', {
         sessionId: session.id,

@@ -29,6 +29,7 @@
  *   - container image (nanoclaw-agent:latest) が build 済 = jq + install-biblios.sh 入り
  */
 import Database from 'better-sqlite3';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -98,7 +99,12 @@ function ensureTestAgentGroup(): void {
 
   ensureContainerConfig(AG_ID);
   // provider=claude を明示 (= test-v2-host と同じ)。既存 row があれば idempotent に上書き。
-  updateContainerConfigScalars(AG_ID, { provider: 'claude' });
+  // model も明示指定: 未指定だと claude CLI のデフォルト (= claude-sonnet-4-5@20250929) が
+  // 使われ、Vertex deployment に enable されていない project では「model is not available」
+  // で agent-runner が無限 retry する (= 2026-06-22 M3 verify Manual run で発覚)。.env の
+  // CATEGORIZE_MODEL と同じ値を default にし、BIBLIO_VERIFY_MODEL で override 可能。
+  const model = process.env.BIBLIO_VERIFY_MODEL || process.env.CATEGORIZE_MODEL || 'claude-sonnet-4-6';
+  updateContainerConfigScalars(AG_ID, { provider: 'claude', model });
 }
 
 async function main(): Promise<number> {
@@ -189,20 +195,37 @@ async function main(): Promise<number> {
     );
   }
 
-  // 8. outbound.db を poll
+  // 8. marker を poll
+  //
+  // 2 経路を並列確認:
+  //   (a) outbound.db の messages_out (= 正規経路、destination 経由で agent が返答した場合)
+  //   (b) docker logs の container 標準出力 (= scratchpad 経路、agent が `<message to="...">`
+  //       で wrap しなかった場合でも poll-loop が scratchpad として stdout に出力するため
+  //       grep で marker を確実に捕捉できる)
+  //
+  // 旧実装は (a) のみで、verify session には agent_destinations が登録されていないため
+  // agent が `<message to="...">` で wrap できず poll-loop が `WARNING: agent output had
+  // no <message to="..."> blocks — nothing was sent` で drop して outbound 空、永遠に
+  // marker not found に倒れていた (= 2026-06-22 M3 verify Manual run で発覚)。本実装の
+  // (b) は SKILL 自体の発火確認には十分 (= MARKER の決定的検出が目的)。destination 経路
+  // 自体の verify は将来の Phase で別途。
   const outDbPath = path.join(DATA_DIR, 'v2-sessions', AG_ID, session.id, 'outbound.db');
+  const MARKER_RE = /BIBLIO_EQUIP_M3_P2_MARKER_[A-Za-z0-9_]+/;
   const start = Date.now();
   let foundMarker: string | undefined;
+  let foundSource: 'outbound.db' | 'docker-logs' | undefined;
   while (Date.now() - start < POLL_TIMEOUT_MS) {
+    // (a) outbound.db (= 正規経路)
     try {
       if (fs.existsSync(outDbPath)) {
         const outDb = new Database(outDbPath, { readonly: true });
         const rows = outDb.prepare('SELECT content FROM messages_out').all() as Array<{ content: string }>;
         outDb.close();
         for (const row of rows) {
-          const match = row.content.match(/BIBLIO_EQUIP_M3_P2_MARKER_[A-Za-z0-9_]+/);
+          const match = row.content.match(MARKER_RE);
           if (match) {
             foundMarker = match[0];
+            foundSource = 'outbound.db';
             break;
           }
         }
@@ -210,19 +233,53 @@ async function main(): Promise<number> {
     } catch (err) {
       // SQLITE_LOCKED / SQLITE_BUSY は writer (agent-runner) との競合で expected
       // = silent retry。それ以外 (SQLITE_CORRUPT / NOTADB / テーブル欠落 等) は
-      // 永続的なので stderr に出して可視化 (poll loop は継続するが timeout 後に
-      // 「marker not found」だけ出るのを避ける)。
+      // 永続的なので stderr に出して可視化。
       const code = (err as NodeJS.ErrnoException & { code?: string })?.code ?? '';
       if (code !== 'SQLITE_LOCKED' && code !== 'SQLITE_BUSY') {
         process.stderr.write(`[spawn-verify] outbound.db read error (code=${code || 'unknown'}): ${String(err)}\n`);
       }
     }
     if (foundMarker) break;
+
+    // (b) docker logs (= scratchpad 経路、container 名は spawn 時点で `nanoclaw-v2-biblio-equip-verify-<ts>`)。
+    // docker ps -a で `--rm` 直前 + running 両方を拾えるよう -a で検索。複数 match は
+    // 直近 (= 最新 ts 接尾辞、awk sort 不要、docker ps は新しい順) の 1 件のみ確認。
+    try {
+      const namesRaw = execSync(
+        "docker ps -a --filter name=nanoclaw-v2-biblio-equip-verify --format {{.Names}}",
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+      ).trim();
+      const names = namesRaw ? namesRaw.split('\n').filter(Boolean) : [];
+      if (names.length > 0) {
+        const containerName = names[0] as string;
+        const logs = execSync(`docker logs ${containerName} 2>&1`, {
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        const match = logs.match(MARKER_RE);
+        if (match) {
+          foundMarker = match[0];
+          foundSource = 'docker-logs';
+        }
+      }
+    } catch (err) {
+      // docker CLI 未到達 / container 不在 / 権限不足 等は debug log のみ (= 大半は
+      // polling の前半で「まだ container ない」だけのケース、毎回 stderr noise にしない)。
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/no such container|No such image|name|cannot connect|Cannot connect/i.test(msg)) {
+        process.stderr.write(`[spawn-verify] docker logs error: ${msg}\n`);
+      }
+    }
+    if (foundMarker) break;
+
     const elapsedSec = Math.floor((Date.now() - start) / 1000);
     if (elapsedSec > 0 && elapsedSec % 10 === 0) {
       process.stderr.write(`[spawn-verify] polling ${elapsedSec}s...\n`);
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  if (foundMarker) {
+    process.stderr.write(`[spawn-verify] marker detected via ${foundSource}: ${foundMarker}\n`);
   }
 
   const pollSec = Math.floor((Date.now() - start) / 1000);

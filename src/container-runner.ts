@@ -428,7 +428,8 @@ export async function appendEquippedBiblioMounts(
   session: Session,
   dataDir: string,
 ): Promise<void> {
-  const equipmentRoot = path.join(dataDir, 'biblio-equipped');
+  // path.resolve() で絶対パス保証 (= src/config.ts DATA_DIR の二重防御、equip.ts L78 と同じ理由)。
+  const equipmentRoot = path.resolve(dataDir, 'biblio-equipped');
   const equipped = await resolveEquippedBiblios(session, { equipmentRoot });
   for (const b of equipped) {
     mounts.push({
