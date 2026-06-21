@@ -15,16 +15,29 @@ import { acquire } from './acquire.js';
 import { writeBackMessage } from './action-helpers.js';
 import type { AcquireResult } from './types.js';
 
-/** acquire 結果を patron 向けの 1 行テキストに整形する。 */
-function resultText(repo: string, result: AcquireResult): string {
+/**
+ * acquire 結果を patron 向けの 1 行テキストに整形する。
+ *
+ * `not_implemented` は Phase 1 個別 skill 仕入れ受領通知 (= Phase 3 未実装)。
+ * 「エラー」表記を避け「受領通知」として整形する (= patron UX を成功っぽく見せず、
+ *  かつ「エラー」感も出さないバランス。Phase 3 完了時に本分岐は削除予定)。
+ */
+function resultText(repo: string, skill: string | undefined, result: AcquireResult): string {
   if (result.ok) {
     return `仕入れ完了: ${repo} を quarantine に配置しました (${result.quarantinePath})。次は inspect_biblio で検品できます。`;
+  }
+  if (result.reason === 'not_implemented') {
+    const target = skill ? `${repo}/${skill}` : repo;
+    return `個別 skill 仕入れリクエストを受領しました (${target})。実 fetch は Phase 3 で実装中、現時点では受領通知のみ返します。`;
   }
   return `仕入れエラー (${result.reason}): ${result.detail}`;
 }
 
 registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   const repo = typeof content.repo === 'string' ? content.repo : '';
+  // 空文字 / 空白のみは undefined に倒し、`acquire()` には skill キーごと渡さない
+  // (= 既存 2 segments 経路と完全互換、`content.skill: ''` を「全体仕入れ」と解釈する)。
+  const skill = typeof content.skill === 'string' && content.skill.trim() !== '' ? content.skill.trim() : undefined;
   if (!repo) {
     log.warn('acquire_biblio missing repo', { sessionId: session.id });
     await writeBackMessage(
@@ -36,15 +49,15 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
     return;
   }
 
-  log.info('acquire_biblio from agent', { repo, sessionId: session.id });
+  log.info('acquire_biblio from agent', { repo, skill, sessionId: session.id });
 
   try {
-    const result = await acquire({ repo });
-    await writeBackMessage(inDb, resultText(repo, result), 'acquire-resp', 'acquire_biblio');
-    log.info('acquire_biblio done', { repo, ok: result.ok, sessionId: session.id });
+    const result = await acquire({ repo, ...(skill ? { skill } : {}) });
+    await writeBackMessage(inDb, resultText(repo, skill, result), 'acquire-resp', 'acquire_biblio');
+    log.info('acquire_biblio done', { repo, skill, ok: result.ok, sessionId: session.id });
   } catch (err) {
     // 想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('acquire_biblio threw', { repo, sessionId: session.id, err });
+    log.error('acquire_biblio threw', { repo, skill, sessionId: session.id, err });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(
       inDb,

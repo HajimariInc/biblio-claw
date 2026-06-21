@@ -72,12 +72,20 @@ export function normalizeRepo(input: string): NormalizedRepo | null {
   pathPart = pathPart.replace(/\/+$/, '').replace(/\.git$/i, '');
 
   const segments = pathPart.split('/');
-  if (segments.length !== 2) return null;
+  // 2 segments: `owner/repo` (= 既存) / 3 segments: `owner/repo/skill` (= Phase 1 個別 skill 仕入れ防御線)。
+  // 4+ segments は公式 marketplace のフラット 1 階層構造 (`skills/<skill-name>/SKILL.md`) に該当せず不正入力。
+  if (segments.length !== 2 && segments.length !== 3) return null;
 
-  const [owner, name] = segments;
+  const [owner, name, skill] = segments;
   if (!SEGMENT_RE.test(owner) || !SEGMENT_RE.test(name)) return null;
+  if (skill !== undefined && !SEGMENT_RE.test(skill)) return null;
 
-  return { owner, name, cloneUrl: `https://github.com/${owner}/${name}.git` };
+  return {
+    owner,
+    name,
+    cloneUrl: `https://github.com/${owner}/${name}.git`,
+    ...(skill !== undefined ? { skill } : {}),
+  };
 }
 
 /** `<dir>` 配下を深さ制限付きで走査し、指定ファイル名が存在するか判定する (`.git` は除外)。 */
@@ -126,8 +134,25 @@ function removeQuarantine(quarantinePath: string): void {
 export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
   const normalized = normalizeRepo(req.repo);
   if (!normalized) {
-    log.warn('acquire failed', { repo: req.repo, reason: 'invalid_input' });
+    log.warn('acquire failed', { repo: req.repo, skill: req.skill, reason: 'invalid_input' });
     return { ok: false, reason: 'invalid_input', detail: `owner/repo か GitHub URL を指定してください: "${req.repo}"` };
+  }
+
+  // Phase 1: 個別 skill 仕入れ (req.skill or normalized.skill のいずれか) は受領通知のみ返す。
+  // 実 fetch は Phase 3 (`individual-acquire`) で実装し、本ブロックを差し替える。
+  const skill = req.skill ?? normalized.skill;
+  if (skill !== undefined) {
+    log.info('acquire skipped (skill requested, Phase 3 pending)', {
+      repo: req.repo,
+      skill,
+      owner: normalized.owner,
+      name: normalized.name,
+    });
+    return {
+      ok: false,
+      reason: 'not_implemented',
+      detail: `個別 skill 仕入れは Phase 3 で実装中: ${normalized.owner}/${normalized.name}/${skill}`,
+    };
   }
 
   const { owner, name, cloneUrl } = normalized;
