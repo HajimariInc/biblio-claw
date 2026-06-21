@@ -19,8 +19,9 @@ import type { AcquireResult } from './types.js';
  * acquire 結果を patron 向けの 1 行テキストに整形する。
  *
  * `not_implemented` は Phase 1 個別 skill 仕入れ受領通知 (= Phase 3 未実装)。
- * 「エラー」表記を避け「受領通知」として整形する (= patron UX を成功っぽく見せず、
- *  かつ「エラー」感も出さないバランス。Phase 3 完了時に本分岐は削除予定)。
+ * `threshold_exceeded` は Phase 2 閾値超過 promote (= clone 前 early return)。
+ * いずれも「エラー」表記を避け、patron が次の手 (= 個別指定) に進める文言に倒す
+ * (Phase 3 完了時に `not_implemented` 分岐は削除予定)。
  */
 function resultText(repo: string, skill: string | undefined, result: AcquireResult): string {
   if (result.ok) {
@@ -29,6 +30,12 @@ function resultText(repo: string, skill: string | undefined, result: AcquireResu
   if (result.reason === 'not_implemented') {
     const target = skill ? `${repo}/${skill}` : repo;
     return `個別 skill 仕入れリクエストを受領しました (${target})。実 fetch は Phase 3 で実装中、現時点では受領通知のみ返します。`;
+  }
+  if (result.reason === 'threshold_exceeded') {
+    // 動的 promote 文言 (count + 上限 + 個別指定例 + ブラウザ確認案内) は acquire.ts 側で
+    // detail に組み済み。素通しすることで Slack 上の UX が「個別に指定してください」の親切な
+    // 案内になる (= patron は次の手 = シナリオ B = `@bot 仕入れて <owner>/<repo>/<skill>` に進める)。
+    return result.detail;
   }
   return `仕入れエラー (${result.reason}): ${result.detail}`;
 }

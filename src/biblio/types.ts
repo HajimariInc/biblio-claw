@@ -43,11 +43,21 @@ export type AcquireFailureReason =
   | 'clone_failed'
   /**
    * 個別 skill 仕入れ Phase 3 未実装の受領通知 (Phase 1 で追加した transient 値)。
-   * Phase 3 (`individual-acquire`) 完了時に削除し、実 fetch ロジックに置き換える。
+   * individual-skill-shiire PRD Phase 3 (`individual-acquire`) 完了時に削除し、実 fetch ロジックに置き換える。
    * 削除時は `acquire.ts` (early return ブロック) / `acquire-action.ts` (resultText 分岐) / 関連 test の参照箇所が
    * 型チェック連鎖 (= 本 union から消えたリテラルへの参照は TypeScript が型エラーで検知) で必ず洗い出される。
    */
-  | 'not_implemented';
+  | 'not_implemented'
+  /**
+   * 仕入先 repo 内の skill 数が `ACQUIRE_SKILL_THRESHOLD` (既定 10) を超過 (Phase 2)。
+   * 全体仕入れすると後段 (`MAX_BLOBS_PER_PR=100`) で確実に拒否されるため、clone 前に
+   * early return する (= patron への promote 文言は `detail` に動的生成、
+   * `acquire-action.ts:resultText` がそのまま素通しで Slack に流す)。
+   * skill 数 count が unknown (= API 失敗 / Git Trees truncated) の repo は閾値判定を
+   * skip して clone 経路に倒すため、本理由で early return するのは「count に成功し
+   * かつ閾値超過」が確定したケースのみ。
+   */
+  | 'threshold_exceeded';
 
 /**
  * 取得結果。discriminated union — `ok` で分岐する。

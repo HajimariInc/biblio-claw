@@ -14,8 +14,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR } from '../config.js';
+import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { getChildProcEnv } from './host-proxy.js';
+import { ghFetch, GhHttpError } from './shelve.js';
 import type { AcquireRequest, AcquireResult, NormalizedRepo } from './types.js';
 
 /** owner / repo セグメントの許容文字 (GitHub の命名規則に準拠した安全側)。 */
@@ -34,6 +36,16 @@ const MANIFEST_SCAN_MAX_DEPTH = 6;
  */
 const GH_TIMEOUT_MS = 30_000; // proxy 往復を考慮した存在確認の上限
 const CLONE_TIMEOUT_MS = 120_000; // shallow clone でも大きめ repo を考慮
+
+/**
+ * skill 数の閾値 (既定値、Phase 2)。env `ACQUIRE_SKILL_THRESHOLD` で上書き可能。
+ * 仕入先 repo の skill 数がこの値を超えたら全体仕入れを止めて patron に個別指定を促す。
+ * 既定 10 の根拠: `MAX_BLOBS_PER_PR=100` を割って 1 skill あたり平均 10 ファイル以下なら通る目安。
+ */
+const DEFAULT_ACQUIRE_SKILL_THRESHOLD = 10;
+
+/** GitHub REST API base — `shelve.ts:GITHUB_API` と同値だが、本ファイルから直接参照する用に再定義。 */
+const GITHUB_API = 'https://api.github.com';
 
 /**
  * `spawnSync` の結果から人間可読な失敗 detail を組む。
@@ -128,6 +140,146 @@ function removeQuarantine(quarantinePath: string): void {
 }
 
 /**
+ * `ACQUIRE_SKILL_THRESHOLD` を env から解決する (Phase 2)。
+ *
+ * - 未設定 → `DEFAULT_ACQUIRE_SKILL_THRESHOLD` (= 10)
+ * - 解釈不能 / 0 以下 → default に倒し warn ログ (= silent failure 防止)
+ *
+ * `readEnvFile` 都度読み (= `categorize.ts:CATEGORIZE_MODEL` 等と同じ慣習) のため、
+ * individual-skill-shiire PRD Phase 5 (`dynamic-config` = DB プロパティ + Slack コマンド経路) と
+ * 接続するときも本関数を touch しないで済む構造。
+ */
+function resolveSkillThreshold(): number {
+  const raw = readEnvFile(['ACQUIRE_SKILL_THRESHOLD']).ACQUIRE_SKILL_THRESHOLD;
+  if (!raw) return DEFAULT_ACQUIRE_SKILL_THRESHOLD;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    log.warn('invalid ACQUIRE_SKILL_THRESHOLD, using default', {
+      raw,
+      default: DEFAULT_ACQUIRE_SKILL_THRESHOLD,
+    });
+    return DEFAULT_ACQUIRE_SKILL_THRESHOLD;
+  }
+  return parsed;
+}
+
+/**
+ * 仕入先 repo の skill 数を count する (Phase 2)。
+ *
+ * 2 段アプローチ:
+ *   (1) `.claude-plugin/marketplace.json` を fetch → `plugins[]` を集計
+ *       - `plugins[].skills: string[]` 形式 (= anthropics/skills 型) → array length 合計
+ *       - `plugins[]` 直配列 (= claude-plugins-official 型、`skills` 無し) →
+ *         各 plugin につき 1 を加算 (= 全 plugin が `skills` 無しなら結果は `plugins.length` と一致、
+ *         混在 array では「`skills` あり = 配列長、`skills` 無し = 1」の reduce 集計になる)
+ *   (2) (1) が 404 = marketplace.json 不在なら Git Trees API recursive で `SKILL.md` を count
+ *       (main → master の順に試行、両 404 / truncated は unknown)
+ *
+ * 戻り値:
+ *   `{ ok: true, count }`           — count に成功 (本数値で閾値判定)
+ *   `{ ok: false, reason: 'unknown' }` — API 失敗 / truncated / parse 失敗 (= 閾値判定を
+ *     skip して全体仕入れに進む degraded 挙動。エラーで未知の repo を全て拒否するより、
+ *     後段の `MAX_BLOBS_PER_PR=100` fail-closed に倒す方が UX 影響が小さい)
+ *
+ * GitHub API call は最大 3 回 (= marketplace.json + git/trees/main + git/trees/master)。
+ * 認証あり rate limit (5000 req/h) に対して余裕十分。`ghFetch` は OneCLI MITM 経由で
+ * Authorization: Bearer placeholder を wire で本物 token に置換する (= `shelve.ts` と同経路)。
+ */
+async function countSkillsInRepo(
+  owner: string,
+  name: string,
+): Promise<{ ok: true; count: number } | { ok: false; reason: 'unknown' }> {
+  // 段 (1): marketplace.json 経路 — `noAuth: true` で Authorization 省略 (= 外部 repo は
+  // OneCLI secret の pathPattern `/repos/HajimariInc/*` に match しないため、`Bearer placeholder`
+  // を素通しすると GitHub が invalid token として 401 を返す → 無認証で public API 200 を取る)。
+  try {
+    const url = `${GITHUB_API}/repos/${owner}/${name}/contents/.claude-plugin/marketplace.json`;
+    const data = (await ghFetch('GET contents/marketplace.json (acquire)', url, {}, { noAuth: true })) as {
+      content?: string;
+      encoding?: string;
+    };
+    if (typeof data.content === 'string' && data.encoding === 'base64') {
+      const decoded = Buffer.from(data.content, 'base64').toString('utf-8');
+      let parsed: { plugins?: Array<{ skills?: unknown }> };
+      try {
+        parsed = JSON.parse(decoded) as { plugins?: Array<{ skills?: unknown }> };
+      } catch (err) {
+        log.warn('countSkillsInRepo: marketplace.json invalid JSON', { owner, name, err });
+        return { ok: false, reason: 'unknown' };
+      }
+      if (Array.isArray(parsed.plugins)) {
+        // 2 schema 形式に両対応:
+        // - plugins[].skills が array → array length 合計 (anthropics/skills 型)
+        // - plugins[].skills が無い → 1 plugin = 1 skill 扱い (claude-plugins-official 型)
+        const count = parsed.plugins.reduce<number>(
+          (acc, p) => acc + (Array.isArray(p.skills) ? p.skills.length : 1),
+          0,
+        );
+        log.info('countSkillsInRepo: marketplace.json found', { owner, name, count });
+        return { ok: true, count };
+      }
+      // plugins 配列が欠落 / 不正型 → unknown (= 「marketplace ではない」可能性)
+      log.warn('countSkillsInRepo: marketplace.json has no plugins[]', { owner, name });
+      return { ok: false, reason: 'unknown' };
+    }
+    // content/encoding が想定外 → unknown
+    log.warn('countSkillsInRepo: marketplace.json response missing content/encoding', { owner, name });
+    return { ok: false, reason: 'unknown' };
+  } catch (err) {
+    if (err instanceof GhHttpError && err.status === 404) {
+      // marketplace.json 不在 → 段 (2) に fallback
+    } else {
+      log.warn('countSkillsInRepo: marketplace.json fetch failed, skipping threshold', {
+        owner,
+        name,
+        err,
+      });
+      return { ok: false, reason: 'unknown' };
+    }
+  }
+
+  // 段 (2): Git Trees fallback — SKILL.md を recursive で count
+  // default branch を main → master の順に試行 (= 2020 年以降 main 推奨だが master 残置 repo もあるため)
+  const tryBranches = ['main', 'master'] as const;
+  for (const branch of tryBranches) {
+    try {
+      const url = `${GITHUB_API}/repos/${owner}/${name}/git/trees/${branch}?recursive=1`;
+      // `noAuth: true` の理由は段 (1) と同じ (= 外部 repo の pathPattern miss 対策)。
+      const data = (await ghFetch('GET git/trees (acquire)', url, {}, { noAuth: true })) as {
+        truncated?: boolean;
+        tree?: Array<{ path?: string; type?: string }>;
+      };
+      if (data.truncated) {
+        // 100k entries / 7MB 超で truncated。count 不確実なら無条件で promote しない (= 既存挙動維持)
+        log.warn('countSkillsInRepo: git tree truncated, skipping threshold', { owner, name, branch });
+        return { ok: false, reason: 'unknown' };
+      }
+      if (!Array.isArray(data.tree)) {
+        log.warn('countSkillsInRepo: git tree response missing tree[]', { owner, name, branch });
+        return { ok: false, reason: 'unknown' };
+      }
+      // 1 skill = 1 SKILL.md (agentskills.io spec) を踏襲、blob のみ対象 (= type='tree' を除外)
+      const count = data.tree.filter(
+        (e) => typeof e.path === 'string' && e.type === 'blob' && e.path.endsWith('/SKILL.md'),
+      ).length;
+      log.info('countSkillsInRepo: git trees fallback', { owner, name, branch, count });
+      return { ok: true, count };
+    } catch (err) {
+      if (err instanceof GhHttpError && err.status === 404) continue; // 次の branch を試す
+      log.warn('countSkillsInRepo: git trees fetch failed, skipping threshold', {
+        owner,
+        name,
+        branch,
+        err,
+      });
+      return { ok: false, reason: 'unknown' };
+    }
+  }
+  log.warn('countSkillsInRepo: no main/master branch found, skipping threshold', { owner, name });
+  return { ok: false, reason: 'unknown' };
+}
+
+/**
  * 外部 biblio を取得して quarantine に配置する。
  * 失敗は全て `{ ok:false, reason, detail }` で返す (throw しない / silent failure なし)。
  */
@@ -181,6 +333,39 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
     const detail = spawnDetail(ghCheck, 'gh');
     log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'not_found', detail });
     return { ok: false, reason: 'not_found', detail: `repo が見つかりません: ${owner}/${name} (${detail})` };
+  }
+
+  // Phase 2: 閾値チェック — repo の skill 数が `ACQUIRE_SKILL_THRESHOLD` を超えるなら
+  // git clone する前に early return し、patron に個別指定 (`<owner>/<repo>/<skill>`) を促す。
+  // `countSkillsInRepo` が unknown (= API 失敗 / Git Trees truncated) を返した場合は判定を
+  // skip して全体仕入れに進む (= 既存挙動の維持。後段 `MAX_BLOBS_PER_PR=100` fail-closed が
+  // backup として効くため、未知の repo を意図せず狭めるより保守的)。
+  const threshold = resolveSkillThreshold();
+  const countResult = await countSkillsInRepo(owner, name);
+  if (!countResult.ok) {
+    // `countSkillsInRepo` 内で warn は出ているが、acquire() 側でも skip 事実を記録する。
+    // 「閾値判定なしで clone に進んだ仕入れ」を後段の `biblio acquired` log line から
+    // reverse-trace するときの audit 連鎖を切らないため (silent-failure-hunter HIGH 1)。
+    log.warn('acquire: skill count failed, skipping threshold check', {
+      repo: `${owner}/${name}`,
+      reason: countResult.reason,
+    });
+  }
+  if (countResult.ok && countResult.count > threshold) {
+    log.info('acquire blocked by threshold', {
+      repo: `${owner}/${name}`,
+      count: countResult.count,
+      threshold,
+    });
+    return {
+      ok: false,
+      reason: 'threshold_exceeded',
+      detail: [
+        `仕入れる数が多い (${countResult.count} 個、上限 ${threshold} 個) ため、欲しい skill を個別に指定してください。`,
+        `例: \`@bot 仕入れて ${owner}/${name}/<skill-name>\``,
+        `※ skill 一覧は仕入先 repo (https://github.com/${owner}/${name}) をブラウザでご確認ください。`,
+      ].join('\n'),
+    };
   }
 
   // 2. quarantine 配置先 (biblioName = `<owner>--<name>` の dedup key)。

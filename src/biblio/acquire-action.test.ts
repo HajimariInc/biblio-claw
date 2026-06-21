@@ -4,12 +4,16 @@
  * action handler は `writeBackMessage` で patron に応答する形式。
  * `registerDeliveryAction` を mock して module load 時の handler を抜き、直接呼ぶ。
  *
- * カバレッジ (Phase 1):
+ * カバレッジ:
+ *  (Phase 1)
  *  - 入口 validate (repo 空)
  *  - 既存経路: repo 単独 (skill 未指定) で acquire を `{ repo }` だけで呼ぶ
  *  - 新規経路 (Phase 1): skill 指定で acquire を `{ repo, skill }` で呼び、受領通知文言を返す
  *  - 空文字 skill は undefined 扱い (= 全体仕入れに退化)
  *  - acquire 自体の throw を握って internal エラー文言で writeBack (host を落とさない)
+ *  (Phase 2)
+ *  - threshold_exceeded: detail (動的 promote 文言) を素通しで patron に返す
+ *    (count + 上限 + 個別指定例 + ブラウザ確認案内が届く、「仕入れエラー」表記混入なし)
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -122,5 +126,29 @@ describe('acquire_biblio handler — 例外を握って writeBack に倒す', ()
     const text = getWrittenText() ?? '';
     expect(text).toContain('仕入れエラー (internal)');
     expect(text).toContain('boom');
+  });
+});
+
+describe('acquire_biblio handler — Phase 2 閾値超過 promote', () => {
+  it('threshold_exceeded — detail (動的 promote 文言) を素通しで patron に返す', async () => {
+    const promoteDetail = [
+      '仕入れる数が多い (17 個、上限 10 個) ため、欲しい skill を個別に指定してください。',
+      '例: `@bot 仕入れて large/repo/<skill-name>`',
+      '※ skill 一覧は仕入先 repo (https://github.com/large/repo) をブラウザでご確認ください。',
+    ].join('\n');
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'threshold_exceeded',
+      detail: promoteDetail,
+    });
+    await handler({ repo: 'large/repo' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    // detail の核要素 (count + 上限 + 個別指定例 + ブラウザ確認案内) がそのまま patron に届く
+    expect(text).toContain('17 個');
+    expect(text).toContain('上限 10 個');
+    expect(text).toContain('large/repo/<skill-name>');
+    expect(text).toContain('skill 一覧は仕入先 repo');
+    // 「エラー」表記が混入しない (= UX 上「素のエラー」感を出さず、誘導文言に倒す設計判断)
+    expect(text).not.toContain('仕入れエラー');
   });
 });

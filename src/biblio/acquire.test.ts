@@ -36,6 +36,31 @@ vi.mock('../adapters/secret/index.js', () => ({
 // child_process.spawnSync を mock。テストごとに mockImplementation を差し替える。
 vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }));
 
+// Phase 2: readEnvFile を mock — `vi.stubEnv` は `.env` ファイル読み取りに効かない (key が `.env`
+// に書かれていると process.env fallback がスキップされる) ため、確実性のため readEnvFile 自体を
+// 差し替える。デフォルトは空 object (= ACQUIRE_SKILL_THRESHOLD 未設定 = default 10)。
+// `vi.mock` は import より前に hoist されるため、receiver は `vi.hoisted` 経由で初期化する
+// (= TEST_DIR と同じパターン)。
+const { mockReadEnvFile } = vi.hoisted(() => {
+  // 空 object を返す default を hoist 時に立てる。`src/config.ts` はモジュール load 時に
+  // `readEnvFile([...]).ASSISTANT_NAME` 等を呼ぶため、戻り値が undefined だと TypeError で死ぬ。
+  const fn = vi.fn<(keys: string[]) => Record<string, string>>();
+  fn.mockReturnValue({});
+  return { mockReadEnvFile: fn };
+});
+vi.mock('../env.js', () => ({
+  readEnvFile: (keys: string[]) => mockReadEnvFile(keys),
+}));
+
+// Phase 2: undici.fetch を mock — shelve.ts は `import { fetch } from 'undici'` で named import
+// しているため、`vi.stubGlobal('fetch', ...)` (globalThis.fetch 差し替え) は効かない。undici
+// モジュール自体を mock し、他の export (Agent / EnvHttpProxyAgent 等) は実体を保つ。
+const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
+vi.mock('undici', async () => {
+  const actual = await vi.importActual<typeof import('undici')>('undici');
+  return { ...actual, fetch: (...args: unknown[]) => fetchMock(...args) };
+});
+
 import { spawnSync } from 'node:child_process';
 import { log } from '../log.js';
 import { normalizeRepo, acquire } from './acquire.js';
@@ -49,6 +74,14 @@ function spawnResult(status: number, stderr = ''): ReturnType<typeof spawnSync> 
   return { status, stdout: '', stderr, pid: 1, output: [], signal: null } as unknown as ReturnType<typeof spawnSync>;
 }
 
+// Phase 2: 既存テストへの影響を抑えるため、fetch を default で 404 にする。countSkillsInRepo は
+// marketplace 404 → git trees main 404 → master 404 → unknown となり閾値判定が skip され、
+// 後続の clone 経路 (= 既存挙動) に進む。Phase 2 テストは `fetchMock.mockResolvedValueOnce(...)`
+// で個別 response を上書きする。
+function mock404(): Response {
+  return { ok: false, status: 404, text: async () => 'not found' } as Response;
+}
+
 beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -56,6 +89,10 @@ beforeEach(() => {
   mockEnsureAgent.mockReset();
   mockGetProxyConfig.mockReset();
   _resetHostProxyForTesting();
+  mockReadEnvFile.mockReset();
+  mockReadEnvFile.mockReturnValue({});
+  fetchMock.mockReset();
+  fetchMock.mockResolvedValue(mock404());
 });
 
 afterEach(() => {
@@ -234,6 +271,262 @@ describe('acquire', () => {
     expect(result).toMatchObject({ ok: true });
     // 旧ファイルは消えている (上書き前に削除された)
     expect(fs.existsSync(path.join(dest, 'stale.txt'))).toBe(false);
+  });
+});
+
+describe('acquire — Phase 2 threshold-promote', () => {
+  /** marketplace.json fetch response を組む (= base64 + encoding)。 */
+  function mockMarketplaceResponse(plugins: unknown): Response {
+    const json = JSON.stringify({ plugins });
+    return {
+      ok: true,
+      json: async () => ({
+        content: Buffer.from(json).toString('base64'),
+        encoding: 'base64',
+        sha: 'mocksha',
+      }),
+    } as Response;
+  }
+
+  /** Git Trees API response を組む (= path 配列、blob 限定)。 */
+  function mockGitTreesResponse(paths: string[], truncated = false): Response {
+    return {
+      ok: true,
+      json: async () => ({
+        truncated,
+        tree: paths.map((p) => ({ path: p, type: 'blob' as const })),
+      }),
+    } as Response;
+  }
+
+  /** 仕入れ成功用の spawnSync mock (gh 0 + git clone でマニフェスト作成)。 */
+  function setupCloneSuccess(): void {
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'gh') return spawnResult(0);
+      const dest = (args as string[])[4];
+      fs.mkdirSync(path.join(dest, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(path.join(dest, '.claude-plugin', 'marketplace.json'), '{}');
+      return spawnResult(0);
+    });
+  }
+
+  it('marketplace.json 経路 — 閾値以内 (5 skill) なら clone 経路に進む', async () => {
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(mockMarketplaceResponse([{ skills: ['./a', './b', './c', './d', './e'] }]));
+    const result = await acquire({ repo: 'small/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'small--repo' });
+    // git clone が呼ばれている (= 閾値判定後に clone 経路に進んだ証拠)
+    const gitCalls = mockSpawn.mock.calls.filter((c) => c[0] === 'git');
+    expect(gitCalls.length).toBe(1);
+  });
+
+  it('marketplace.json 経路 — 閾値超過 (17 skill) で early return、clone 呼ばれない', async () => {
+    // gh は OK、git は呼ばれない想定
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 17 }, (_, i) => `./skill-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'large/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('17 個');
+    expect(result.detail).toContain('上限 10 個');
+    expect(result.detail).toContain('large/repo/<skill-name>');
+    expect(result.detail).toContain('https://github.com/large/repo');
+    // git clone が呼ばれていない (= early return が効いた証拠)
+    const gitCalls = mockSpawn.mock.calls.filter((c) => c[0] === 'git');
+    expect(gitCalls.length).toBe(0);
+  });
+
+  it('marketplace.json 不在 → Git Trees fallback (main) で閾値超過', async () => {
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(mock404()) // marketplace.json: 404 → fallback
+      .mockResolvedValueOnce(
+        mockGitTreesResponse(
+          Array.from({ length: 15 }, (_, i) => `skill-${i}/SKILL.md`).concat(['README.md', 'LICENSE']),
+        ),
+      );
+    const result = await acquire({ repo: 'no-marketplace/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('15 個');
+  });
+
+  it('Git Trees truncated → unknown → 閾値判定 skip → clone 経路に進む (既存挙動維持)', async () => {
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(mock404()).mockResolvedValueOnce(mockGitTreesResponse(['skill-1/SKILL.md'], true));
+    const result = await acquire({ repo: 'huge/repo' });
+    // threshold_exceeded ではなく clone 経路 (= ok:true) に進んだ
+    expect(result).toMatchObject({ ok: true, biblioName: 'huge--repo' });
+  });
+
+  it('env ACQUIRE_SKILL_THRESHOLD=20 オーバーライド — 17 skill は通る', async () => {
+    setupCloneSuccess();
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '20' });
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 17 }, (_, i) => `./skill-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'medium/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'medium--repo' });
+  });
+
+  it('env ACQUIRE_SKILL_THRESHOLD=-5 (不正値) → default 10 に倒れ warn ログ', async () => {
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '-5' });
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 11 }, (_, i) => `./skill-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'mid/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('上限 10 個'); // default に倒れたことの証拠
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD, using default',
+      expect.objectContaining({ raw: '-5', default: 10 }),
+    );
+  });
+
+  it('plugins[] 直配列 (claude-plugins-official 型) — 1 plugin = 1 skill で count', async () => {
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    fetchMock.mockReset();
+    // skills フィールド無し → 各 plugin を 1 skill として count
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse(Array.from({ length: 12 }, (_, i) => ({ name: `plugin-${i}` }))),
+    );
+    const result = await acquire({ repo: 'official/style' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('12 個');
+  });
+
+  // ===== レビュー指摘対応 (PR #19) — 境界値 + degraded 経路カバレッジ =====
+
+  it('境界値 — ちょうど閾値 (10 skill) なら clone 経路に進む (> は exclusive)', async () => {
+    // `count > threshold` 判定の境界仕様の明示化 (= 10 ちょうどは通る、11 で promote)。
+    // 仕様変更時 (> → >=) の回帰を 1 件で検知する。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 10 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'boundary/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'boundary--repo' });
+  });
+
+  it('marketplace.json 500 エラー → unknown → clone 経路に進む (degraded 保護)', async () => {
+    // rate limit / GitHub server error 時に閾値判定を skip して既存挙動を維持することを確認。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => 'internal server error',
+    } as Response);
+    const result = await acquire({ repo: 'flaky/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'flaky--repo' });
+  });
+
+  it('marketplace.json に plugins[] なし → unknown → clone 経路に進む', async () => {
+    // marketplace.json は存在するが plugins フィールド欠落 (= biblio 仕様外形式) の防御確認。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    const malformedJson = JSON.stringify({ version: '1.0' }); // plugins キーなし
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: Buffer.from(malformedJson).toString('base64'),
+        encoding: 'base64',
+      }),
+    } as Response);
+    const result = await acquire({ repo: 'no-plugins/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'no-plugins--repo' });
+  });
+
+  it('marketplace.json が不正 JSON → unknown → clone 経路 + warn ログ', async () => {
+    // base64 decode 後の文字列が JSON parse 失敗するケース。silent failure 防止の確認。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: Buffer.from('{ invalid json }').toString('base64'),
+        encoding: 'base64',
+      }),
+    } as Response);
+    const result = await acquire({ repo: 'malformed/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'malformed--repo' });
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'countSkillsInRepo: marketplace.json invalid JSON',
+      expect.objectContaining({ owner: 'malformed', name: 'repo' }),
+    );
+  });
+
+  it('Git Trees fallback — main 404 → master 200 で閾値超過', async () => {
+    // tryBranches ループの continue 経路 (= main を試した後 master に進む) の直接検証。
+    // 既存テストは「main 200」または「main + master の両方 404 / truncated」しかカバーしていない。
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(mock404()) // marketplace.json: 404
+      .mockResolvedValueOnce(mock404()) // git/trees/main: 404
+      .mockResolvedValueOnce(mockGitTreesResponse(Array.from({ length: 12 }, (_, i) => `skill-${i}/SKILL.md`))); // git/trees/master: 12 SKILL.md
+    const result = await acquire({ repo: 'legacy/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('12 個');
+  });
+
+  it('countSkillsInRepo は外部 repo に noAuth: true で fetch する (= Authorization ヘッダなし)', async () => {
+    // OneCLI secret の pathPattern (`/repos/HajimariInc/*`) miss で `Bearer placeholder` を素通しすると
+    // GitHub が invalid token として 401 を返す問題への対策。外部 repo (anthropics/skills 等) を呼ぶ
+    // countSkillsInRepo は ghFetch を `noAuth: true` で呼び出し、Authorization ヘッダを省略する。
+    // 本テストは fetchMock の引数を直接見て Authorization が含まれないことを assert する。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(mockMarketplaceResponse([{ skills: ['./a', './b'] }]));
+    await acquire({ repo: 'small/repo' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toContain('/repos/small/repo/contents/.claude-plugin/marketplace.json');
+    const headers = (calledInit as { headers?: Record<string, string> }).headers ?? {};
+    expect(headers).not.toHaveProperty('Authorization');
+    // Accept / X-GitHub-Api-Version は載っていることを確認 (= ghFetch の通常 header は維持)
+    expect(headers).toMatchObject({
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    });
+  });
+
+  it('env ACQUIRE_SKILL_THRESHOLD="abc" (非数値) → default 10 に倒れ warn ログ', async () => {
+    // `-5` は `< 1` 分岐で弾かれるが、`"abc"` は `parseInt → NaN` → `!Number.isFinite(NaN)`
+    // 分岐で弾かれる別経路。両方の防御パスをカバーする。
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: 'abc' });
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 11 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'nan/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('上限 10 個');
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD, using default',
+      expect.objectContaining({ raw: 'abc', default: 10 }),
+    );
   });
 });
 
