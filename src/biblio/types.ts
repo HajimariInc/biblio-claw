@@ -142,3 +142,21 @@ export type ShelveFailureReason =
 export type ShelveResult =
   | { ok: true; biblioName: string; category: BiblioCategory; prUrl: string; prNumber: number; branchName: string }
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
+
+/**
+ * 装備機構 (souwa / equip) の型 (M3 Phase 1)。
+ *
+ * 司書が shelf clone を agent-container に取り込み実行する「装備」の
+ * 物理配置 1 件を表す。install / cleanup ライフサイクルは Phase 2 以降。
+ * Phase 1 は env-driven な mount 配線のみ (= `equip.ts` の stub)。
+ */
+
+/** 装備済み biblio 1 件の物理配置情報。 */
+export interface EquippedBiblio {
+  /** biblio 名 (= `owner--name` 形式、`BIBLIO_NAME_RE` 通過済)。 */
+  name: string;
+  /** host 側 source path (`<DATA_DIR>/biblio-equipped/<name>/`)。 */
+  sourcePath: string;
+  /** agent コンテナ内 mount path (`/workspace/biblios/<name>/`)。 */
+  mountPath: string;
+}
