@@ -236,19 +236,22 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
 - 本 Phase 3 で導入した `deleteEquippedBiblioByName` は **全 session 横断削除** であり、
   Phase 3.5 の **session 単位の部分操作** とは semantics が異なる (= 同居可、別 API)。
 
-### Phase 5 (m3-verify) への申し送り
+### Phase 5 (m3-verify) 完了
 
-- `verify-m3-phase-1.sh` + `verify-m3-phase-2.sh` + `verify-m3-phase-3.sh` の assertion を
-  `verify-m3.sh` の assertion 1-4 (= 装備 + 解除 + 禁書 + 焼却) として組み込む。残り
-  (蔵書一覧 5-6) は Phase 4 完了済につき Phase 5 で統合する (`scripts/biblio-list.ts` が
-  CLI ハーネスとして追加済 = `RESULT=<json>` 規約で `verify-m3.sh` から consume 可能)。
-- **destructive E2E の統合**: 本 Phase 3 では `verify-m3-phase-3.sh` を **smoke (not_shelved
-  経路) を default、destructive を env opt-in (`VERIFY_M3_P3_BIBLIO` + `VERIFY_M3_P3_CATEGORY`)**
-  で分離。Phase 5 の `verify-m3.sh` では「shelve → enkin → shokyaku」の連続フローを
-  単一 verify で完結させる構造を検討 (= verify 自己完結 = main merged な test biblio を
-  動的に作って消す経路)。
-- **draft PR cleanup**: Phase 5 で `gh pr close --delete-branch` を verify-m3.sh 末尾に
-  追加する案を検討 (= 本 Phase 3 では手動 cleanup 運用)。
+`scripts/verify-m3.sh` で次の 3 項目を消化済 (= 本 Phase 3 で残した申し送りを Phase 5 で実装完結):
+
+- **assertion 1-4 (装備 + 解除 + 禁書 + 焼却)**: `bash scripts/verify-m3-phase-3.sh "${@}"` を
+  regression chain として呼び出す構造 (= verify-m3.sh:128 付近)。Phase 1-3 の個別 verify を
+  「単独叩き可」のまま温存しつつ、Phase 5 では 1 度に消化する。
+- **assertion 5-6 (蔵書一覧)**: `scripts/biblio-list.ts` を CLI 直叩きで `RESULT=<json>` 消費
+  (Slack adapter / MCP tool は通さない純粋関数経路、verify-m3.sh:139-200 付近)。
+- **destructive E2E 必須化**: pre-flight で `${VERIFY_M3_P3_BIBLIO:?...}` / `${VERIFY_M3_P3_CATEGORY:?...}`
+  を fail-fast 必須化 (= verify-m3.sh:78-79)、Phase 3 の skip 経路には倒れず必ず enkin/shokyaku が走る。
+- **draft PR cleanup 自動化**: trap で `gh pr list --search 'is:pr is:open draft:true (head:enkin/ OR head:shokyaku/)'`
+  + `gh pr close --delete-branch` を実行 (verify-m3.sh:96-118 の `cleanup_destructive_prs`)。
+  本 Phase 3 の「手動 cleanup 運用」を巻き取り、verify 失敗 / Ctrl+C 経由でも draft PR が残らない。
+
+詳細: `scripts/verify-m3.sh` 冒頭コメント + plan `.claude/PRPs/plans/completed/m3/phase-5-m3-verify.plan.md`。
 
 ### Phase 3 完成判定の流れ
 
