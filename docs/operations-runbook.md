@@ -1,6 +1,6 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-06-20
+最終更新:2026-06-22
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
 
@@ -246,6 +246,72 @@ orchestrator Pod 内から実行する。GKE では sidecar が GH/Vertex token 
 ```bash
 kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- \
   sh -c 'cd /app && bash scripts/verify-m2.sh HajimariInc/biblio-shelf'
+```
+
+---
+
+## M3 完成判定 verify(`scripts/verify-m3.sh`)
+
+M3 Phase 5 で導入した E2E 検証スクリプト。装備機構 + 蔵書一覧の **6 assertion** を 1 度に流す:
+
+| # | assertion | 担当 phase |
+| :---: | :--- | :--- |
+| 1 | 装備マーカー検出 | Phase 2 (= `spawn-verify` で SKILL `fire-marker` 発火) |
+| 2 | ephemeral 解除(装備源残置) | Phase 2 |
+| 3 | 禁書(clone 残置で再装備可) | Phase 3 destructive |
+| 4 | 焼却(clone 物理削除で装備不可) | Phase 3 destructive |
+| 5 | 全件 list-biblio | Phase 5 新規 |
+| 6 | カテゴリ別 list-biblio(shelve 済 only) | Phase 5 新規 |
+
+内部は `verify-m3-phase-3.sh "${@}"` を **regression chain** として呼び出し、その後 `biblio-list.ts` CLI を直接叩いて assertion 5/6 を上乗せする構造。Phase 3 destructive で残る draft PR は `trap` で自動 close(= 旧 `verify-m3-phase-3.sh` の手動 cleanup 負荷を巻き取り)。
+
+### 前提セットアップ
+
+M2 verify の前提セットアップ(上記 1-7)に加えて:
+
+| # | 項目 | コマンド/確認 |
+| :---: | :--- | :--- |
+| M3-a | `nanoclaw-agent:latest` image が build 済 | `./container/build.sh` 実行後、`docker image inspect nanoclaw-agent:latest` で確認。`build.sh` は install-slug 付き tag(= `nanoclaw-agent-v2-<hash>:latest`)を打つため、`verify-m3-phase-2.sh` が固定参照する `nanoclaw-agent:latest` への alias 貼りが必要な場合は `docker tag <slug>:latest nanoclaw-agent:latest` |
+| M3-b | shelf に biblio が 1 件以上 main merge 済 | `pnpm exec tsx scripts/biblio-list.ts` で `total > 0` を確認。0 件の場合は `acquire → inspect → categorize → shelve` の 4 段 CLI で 1 件投入 → GitHub UI で draft PR を merge(= verify-m2 の auto-cleanup を経ない経路、verify-m3 では destructive 経路の対象 biblio が必要なため) |
+| M3-c | OneCLI token が両方フレッシュ | `bash scripts/onecli-vertex-secret.sh && bash scripts/onecli-gh-secret.sh`(= verify-m3 は Vertex(spawn-verify が container 内で claude CLI 経由)+ GitHub(fetchMarketplace / unshelve PR 作成)の両方を叩く。token 失効 ~60min で `401 Bad credentials` / `model not available` に倒れるため、verify-m3 実行直前に refresh するのが安全) |
+
+### 実行
+
+```bash
+# 必須 env: destructive E2E 対象 biblio(= main merged + category 指定)
+VERIFY_M3_P3_BIBLIO=example-org--test-biblio-minimal \
+VERIFY_M3_P3_CATEGORY=biblio-ai \
+  bash scripts/verify-m3.sh --local-only
+
+# 引数省略 = both(local + GKE)、--gke-only = GKE 経路のみ。ただし assertion 5/6(list-biblio)
+# は常に local 実行のため、`M3 PASS (gke)` は「Phase 2 GKE assertion 通過 + assertion 5/6 が
+# local で通った」を意味する。完全 GKE-native 検証は将来 phase で別途。
+```
+
+全 6 assertion 緑 → `M3 PASS (local|gke|both)` を stdout に出して exit 0。実時間 ~36 秒(= 全段順次)。`trap cleanup EXIT INT TERM` で:
+
+- enkin/shokyaku draft PR を `gh pr list --search 'is:pr is:open draft:true (head:enkin/ OR head:shokyaku/)'` で検索 → `gh pr close --delete-branch` で auto-close
+- `$STDERR_DIR` を rm -rf
+
+### 後始末(verify 中断時)
+
+- **draft PR が残った(= trap 走らず)**: `gh pr list --repo HajimariInc/biblio-shelf --state open --search 'in:title enkin OR in:title shokyaku' | head -10` で目視 → `gh pr close --repo HajimariInc/biblio-shelf --delete-branch <PR#>` で個別 close
+- **shelve 済 biblio が消えた(= destructive 経路で焼却された)**: 次回 verify-m3.sh 実行前に同 biblio を再 shelve + main merge(= 連続 run の `not_shelved` 連鎖の救済は `verify-m3-phase-3.sh:247-255` で吸収されるが、`total > 0` を維持するため次回前に投入推奨)
+- **agent_shared session の cross-run 干渉**: `pnpm exec tsx scripts/q.ts data/v2.db "DELETE FROM sessions WHERE agent_group_id = 'ag-biblio-equip-verify'; DELETE FROM agent_groups WHERE id = 'ag-biblio-equip-verify';"` + `rm -rf data/v2-sessions/ag-biblio-equip-verify groups/biblio-equip-verify` + container 残存があれば `docker ps -a --filter 'name=nanoclaw-v2-biblio-equip-verify' --format '{{.ID}}' | xargs -r docker rm -f`
+
+### トラブルシューティング
+
+- **`exit 125 / Container exited unexpectedly`(host log)**: docker run の引数 reject。PR #20 以降は `DockerAgentHandle` が exit !=0 / signal 終了時に stderr buffer(64 KiB tail)を warn で吐くため、host stderr に root cause が出る(= `LOG_LEVEL=debug` で line-by-line tail も得られる)
+- **`401 Bad credentials`(verify 中の `enkin smoke`)**: GH installation token 期限切れ → `bash scripts/onecli-gh-secret.sh` で再投入(~60min ごと)
+- **`marker not found in outbound.db within 120s`**: spawn-verify が outbound.db + docker logs の 2 経路で marker を polling、両方で見つからない場合は container 内で SKILL が fire していない可能性 → `docker logs $(docker ps --filter 'name=nanoclaw-v2-biblio-equip-verify' --format '{{.Names}}' | head -1)` で内部状態確認(= `model is not available` 等の Vertex 側 enable 漏れが典型)
+
+### GKE 経路で実行する場合(将来運用、現状は local のみ)
+
+orchestrator Pod 内から実行する。GKE では sidecar が GH/Vertex token を自動 rotate するため、ステップ M3-c は不要。`/data/biblio-equipped/` の fixture 投入は別途 PVC 経由(= `verify-m3-phase-2.sh` の Phase B 参照)。
+
+```bash
+kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- \
+  sh -c 'cd /app && VERIFY_M3_P3_BIBLIO=<owner>--<name> VERIFY_M3_P3_CATEGORY=biblio-ai bash scripts/verify-m3.sh --gke-only'
 ```
 
 ---

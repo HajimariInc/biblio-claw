@@ -11,7 +11,9 @@
 #
 # 引数:
 #   --local-only   Docker local 経路のみ (Phase 1-2 regression に透過、Phase 3+5 本体は常に local)
-#   --gke-only     GKE 経路のみ (同上)
+#   --gke-only     GKE 経路のみ (同上。assertion 5/6 (= list-biblio) は常に local 実行のため、
+#                  `M3 PASS (gke)` は「Phase 2 GKE assertion が通った + assertion 5/6 が local
+#                  で通った」を意味する。完全 GKE-native 検証は将来 phase で別途)
 #   (省略)         両方
 #
 # 環境変数 (必須、未設定で fail-fast = Phase 5 は M3 完成判定 skip 不可):
@@ -19,7 +21,7 @@
 #   SHELF_PR_AUTHOR_NAME / SHELF_PR_AUTHOR_EMAIL  readShelveEnv() が要求 (shelve/unshelve commit author)
 #   ANTHROPIC_VERTEX_PROJECT_ID                    host-proxy 経由の Vertex 接続
 #   VERIFY_M3_P3_BIBLIO                            destructive E2E 対象 biblio (`<owner>--<name>` 形式、main merged 必須)
-#   VERIFY_M3_P3_CATEGORY                          上記 biblio の category (biblio-dev|art|bf|ai)
+#   VERIFY_M3_P3_CATEGORY                          上記 biblio の category (biblio-dev|biblio-art|biblio-bf|biblio-ai)
 #
 # 前提 (local 経路):
 #   - docker compose up -d --wait (= OneCLI gateway 起動 + 健康)
@@ -99,10 +101,18 @@ LAST_HARNESS_STDERR=''
 cleanup_destructive_prs() {
   # `enkin/<cat>--<name>-<ts>` / `shokyaku/<cat>--<name>-<ts>` branch 命名 (verify-m3-phase-3.sh:36-39)。
   # `head:enkin/` の prefix match で他用途の branch を誤って close しないよう絞る。
+  # `gh pr list` 失敗 (= 認証切れ / network 障害 / repo 未存在) は cleanup ベストエフォート
+  # 設計につき verify 結果には影響させないが、stderr を STDERR_DIR に取り込み warn で可視化
+  # する (旧実装は `2>/dev/null || true` で失敗理由が完全に見えず、手動 cleanup 時に
+  # 気づくしかなかった silent fail)。
   local prs
+  local pr_list_err="$STDERR_DIR/cleanup-gh-pr-list.stderr"
   prs="$(gh pr list --repo "$SHELF_REPO_OWNER/$SHELF_REPO_NAME" \
     --search 'is:pr is:open draft:true (head:enkin/ OR head:shokyaku/)' \
-    --json number --jq '.[].number' 2>/dev/null || true)"
+    --json number --jq '.[].number' 2>"$pr_list_err" || true)"
+  if [ -s "$pr_list_err" ]; then
+    warn "cleanup: gh pr list 失敗 (draft PR cleanup スキップの可能性、手動で gh pr list --repo $SHELF_REPO_OWNER/$SHELF_REPO_NAME --state open --search 'in:title enkin OR in:title shokyaku' を確認): $(tr '\n' ' ' < "$pr_list_err")"
+  fi
   if [ -z "$prs" ]; then
     return
   fi
@@ -145,6 +155,24 @@ process.stdin.on('end', () => {
 " -- "$key"
 }
 
+# JSON 配列フィールドの長さ取り出し (= [5/6] と [6/6] で同一 inline node スニペットの重複
+# を解消、将来の修正点を 1 箇所に集約)。dot-path 解決で深いキーも辿れる。配列でない値が
+# 来たら `<not-array>` の sentinel で返す (= integer 比較で噛み合わず可視化される)。
+json_array_length() {
+  local json="$1" key="$2"
+  printf '%s' "$json" | node -e "
+let d='';
+process.stdin.on('data', c => d += c);
+process.stdin.on('end', () => {
+  try {
+    const j = JSON.parse(d);
+    const arr = process.argv[1].split('.').reduce((acc, p) => acc?.[p], j);
+    process.stdout.write(Array.isArray(arr) ? String(arr.length) : '<not-array>');
+  } catch (e) { process.stdout.write('<parse-error>'); }
+});
+" -- "$key"
+}
+
 # --- [1-4/6] Phase 1-3 regression chain ---
 # verify-m3-phase-3.sh が verify-m3-phase-2.sh → verify-m3-phase-1.sh の chain を内側で持つ。
 # 引数透過で --local-only / --gke-only / 空 が Phase 1-2 まで届く。Phase 3 destructive は
@@ -174,9 +202,7 @@ list_all_total="$(json_field "$list_all_result" 'total')"
 [ "$list_all_total" -gt 0 ] 2>/dev/null \
   || fail "list-biblio total<=0 (= shelf に biblio 0 件、bash scripts/biblio-shelve.ts ... で 1 件以上 seed してください): $list_all_result"
 
-list_all_items_len="$(printf '%s' "$list_all_result" | node -e "
-let d=''; process.stdin.on('data',c=>d+=c);
-process.stdin.on('end',()=>process.stdout.write(String(JSON.parse(d).items.length)));")"
+list_all_items_len="$(json_array_length "$list_all_result" 'items')"
 [ "$list_all_items_len" = "$list_all_total" ] \
   || fail "list-biblio items.length($list_all_items_len) != total($list_all_total): $list_all_result"
 info "  → 全件 $list_all_total 件取得 OK"
@@ -189,7 +215,10 @@ info '=== [6/6] list-biblio (カテゴリ別、shelve 済 only) ==='
 asserted_count=0
 for cat in biblio-dev biblio-art biblio-bf biblio-ai; do
   cat_count="$(json_field "$list_all_result" "counts.$cat")"
-  # `<missing>` (= JSON に無い) または 0 以下なら skip (= shelf に該当カテゴリ 0 件)。
+  # cat_count が '<missing>' (JSON キー欠落) または <=0 (0 件) なら skip。
+  # `-le` の前に文字列比較を先行させないと `<missing>` が数値比較に流れ込んで stderr に
+  # warning が出るため `2>/dev/null` で抑止 (= 抑止対象は integer parse の warning のみ、
+  # 本物のエラーは fail() 側で表示)。
   if [ "$cat_count" = '<missing>' ] || [ "$cat_count" -le 0 ] 2>/dev/null; then
     warn "  → $cat: shelf に 0 件、assertion skip"
     continue
@@ -202,9 +231,7 @@ for cat in biblio-dev biblio-art biblio-bf biblio-ai; do
 
   cat_ok="$(json_field "$cat_result" 'ok')"
   cat_applied="$(json_field "$cat_result" 'appliedFilter')"
-  cat_items_len="$(printf '%s' "$cat_result" | node -e "
-let d=''; process.stdin.on('data',c=>d+=c);
-process.stdin.on('end',()=>process.stdout.write(String(JSON.parse(d).items.length)));")"
+  cat_items_len="$(json_array_length "$cat_result" 'items')"
 
   [ "$cat_ok" = 'true' ] || fail "list-biblio($cat) ok!=true: $cat_result"
   [ "$cat_applied" = "$cat" ] || fail "list-biblio($cat) appliedFilter!=$cat: $cat_result"

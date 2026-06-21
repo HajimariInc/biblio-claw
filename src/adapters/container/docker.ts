@@ -53,9 +53,10 @@ class DockerAgentHandle implements AgentHandle {
       const text = typeof chunk === 'string' ? chunk : chunk.toString();
       this.stderrTail.push(text);
       this.stderrTailSize += text.length;
+      // while の length>0 条件で shift() の戻りが string と保証されるため、! で意図を明示
+      // (旧 `?.length ?? 0` は防衛的すぎて null 握り潰しのように読める)。
       while (this.stderrTailSize > STDERR_TAIL_MAX_BYTES && this.stderrTail.length > 0) {
-        const dropped = this.stderrTail.shift();
-        this.stderrTailSize -= dropped?.length ?? 0;
+        this.stderrTailSize -= this.stderrTail.shift()!.length;
       }
       for (const line of text.trim().split('\n')) {
         if (line) log.debug(line, { container: agentGroupFolder ?? containerName });
@@ -65,14 +66,27 @@ class DockerAgentHandle implements AgentHandle {
     this.exitPromise = new Promise<AgentExitInfo>((resolve) => {
       child.once('close', (code) => {
         const reason: AgentExitInfo['reason'] = this.killed ? 'killed' : code === 0 ? 'complete' : 'failed';
-        // 非ゼロ exit のときは stderr buffer を warn で吐き出す (= silent fail 隠蔽防止)。
-        // kill 経由の non-zero (= 通常運用) は対象外。kill されていない & code !=0 の組み合わせのみ。
-        if (!this.killed && code !== 0 && code !== null && this.stderrTail.length > 0) {
-          log.warn('Container exited with non-zero code — captured stderr:', {
-            containerName: this.id,
-            exitCode: code,
-            stderr: this.stderrTail.join('').trim(),
-          });
+        // 想定外 exit のときは warn で観測可能にする (= silent fail 隠蔽防止)。
+        // 「想定外」= kill 経由でない (= this.killed=false) かつ
+        //   - code !== 0 (= 通常の非ゼロ exit、e.g. docker run exit 125)
+        //   - code === null (= signal による強制終了、e.g. OOM killer / GKE node eviction / SIGKILL)
+        // のいずれか。stderr buffer 空のケースも区別して「no stderr captured」で警告する
+        // (= stderr 取りこぼしと exit 自体のエラーを区別)。kill 経由 (this.killed=true) は通常運用
+        // (e.g. `ncl groups restart`) なので warn しない。
+        const isUnexpectedExit = !this.killed && (code === null || code !== 0);
+        if (isUnexpectedExit) {
+          if (this.stderrTail.length > 0) {
+            log.warn('Container exited with non-zero code — captured stderr:', {
+              containerName: this.id,
+              exitCode: code,
+              stderr: this.stderrTail.join('').trim(),
+            });
+          } else {
+            log.warn('Container exited unexpectedly (no stderr captured)', {
+              containerName: this.id,
+              exitCode: code,
+            });
+          }
         }
         resolve({ code, reason });
       });

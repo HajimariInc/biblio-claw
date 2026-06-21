@@ -26,12 +26,15 @@ export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 // path.resolve() で必ず絶対パス化: env で相対パスを渡されると docker run -v が
 // `data/...` を local volume 名と解釈し `/` 含むため exit 125 で reject される
 // (= 2026-06-22 M3 verify Manual run で発覚した silent fail の根本対処)。
-export const GROUPS_DIR = path.resolve(process.env.GROUPS_DIR || path.resolve(PROJECT_ROOT, 'groups'));
+// 外側 resolve が絶対化を担うため、フォールバック側は join で十分 (役割分離 =
+// パス結合 = join / 絶対化 = resolve)。?? は unset/null 限定フォールバック
+// (= env が "" のとき path.resolve("") = process.cwd() に倒すのを意図に近づける)。
+export const GROUPS_DIR = path.resolve(process.env.GROUPS_DIR ?? path.join(PROJECT_ROOT, 'groups'));
 // Data root — overridable via DATA_DIR so Phase 2 (GKE) can point at a
 // different mount without code changes. The DSN adapter derives all DB paths
 // from this value. Resolved at process start (the real override granularity).
 // path.resolve() で必ず絶対パス化 (理由は GROUPS_DIR と同じ)。
-export const DATA_DIR = path.resolve(process.env.DATA_DIR || path.resolve(PROJECT_ROOT, 'data'));
+export const DATA_DIR = path.resolve(process.env.DATA_DIR ?? path.join(PROJECT_ROOT, 'data'));
 
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.

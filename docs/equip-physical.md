@@ -241,7 +241,7 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
 `scripts/verify-m3.sh` で次の 3 項目を消化済 (= 本 Phase 3 で残した申し送りを Phase 5 で実装完結):
 
 - **assertion 1-4 (装備 + 解除 + 禁書 + 焼却)**: `bash scripts/verify-m3-phase-3.sh "${@}"` を
-  regression chain として呼び出す構造 (= verify-m3.sh:128 付近)。Phase 1-3 の個別 verify を
+  regression chain として呼び出す構造 (= verify-m3.sh:156 付近)。Phase 1-3 の個別 verify を
   「単独叩き可」のまま温存しつつ、Phase 5 では 1 度に消化する。
 - **assertion 5-6 (蔵書一覧)**: `scripts/biblio-list.ts` を CLI 直叩きで `RESULT=<json>` 消費
   (Slack adapter / MCP tool は通さない純粋関数経路、verify-m3.sh:139-200 付近)。

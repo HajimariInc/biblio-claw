@@ -239,6 +239,78 @@ describe('DockerAgentHandle.waitForExit', () => {
   });
 });
 
+describe('DockerAgentHandle stderr capture on unexpected exit', () => {
+  // PR #20 で導入した silent fail 隠蔽解消 (= docker run の exit !=0 / signal 終了で
+  // stderr buffer を warn として吐く設計) の回帰テスト。旧実装は child stderr を
+  // log.debug にのみ流していたため LOG_LEVEL=info で完全に隠蔽されていた
+  // (docker run exit 125 の "invalid characters for local volume name" 等)。
+  it('exit !=0 かつ kill 経由でないとき、捕捉した stderr 付きで warn を吐く', async () => {
+    const child = makeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const p = new DockerContainerRuntimeProvider();
+    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-exit125' }));
+    const promise = handle.waitForExit();
+
+    child.stderr.emit('data', Buffer.from('docker: Error response from daemon: invalid volume name\n'));
+    child.emit('close', 125);
+    await promise;
+
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'Container exited with non-zero code — captured stderr:',
+      expect.objectContaining({
+        containerName: 'nanoclaw-exit125',
+        exitCode: 125,
+        stderr: expect.stringContaining('invalid volume name'),
+      }),
+    );
+  });
+
+  it('kill 経由の非ゼロ exit (= 通常運用の SIGKILL) では warn を吐かない', async () => {
+    const child = makeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const p = new DockerContainerRuntimeProvider();
+    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-killed' }));
+    const exitPromise = handle.waitForExit();
+
+    child.stderr.emit('data', Buffer.from('shutdown\n'));
+    execSyncMock.mockReturnValueOnce(''); // docker stop success
+    await handle.kill();
+    child.emit('close', 137);
+    await exitPromise;
+
+    expect(vi.mocked(log.warn)).not.toHaveBeenCalledWith(
+      'Container exited with non-zero code — captured stderr:',
+      expect.anything(),
+    );
+    expect(vi.mocked(log.warn)).not.toHaveBeenCalledWith(
+      'Container exited unexpectedly (no stderr captured)',
+      expect.anything(),
+    );
+  });
+
+  it('code === null (= signal 終了) かつ kill 経由でないとき、stderr 空でも warn を吐く', async () => {
+    // 想定経路: OOM killer / GKE node eviction / 外部 SIGKILL 等。旧実装は
+    // `code !== null` ガードでこの経路を黙っていた (silent-failure-hunter Important #3)。
+    const child = makeChild();
+    spawnMock.mockReturnValueOnce(child);
+    const p = new DockerContainerRuntimeProvider();
+    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-oom' }));
+    const promise = handle.waitForExit();
+
+    // stderr buffer 空のまま signal 終了 (code=null)
+    child.emit('close', null);
+    await promise;
+
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'Container exited unexpectedly (no stderr captured)',
+      expect.objectContaining({
+        containerName: 'nanoclaw-oom',
+        exitCode: null,
+      }),
+    );
+  });
+});
+
 describe('DockerAgentHandle.kill', () => {
   it('runs `docker stop` for the container name', async () => {
     const p = new DockerContainerRuntimeProvider();

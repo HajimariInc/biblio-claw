@@ -199,9 +199,11 @@ async function main(): Promise<number> {
   //
   // 2 経路を並列確認:
   //   (a) outbound.db の messages_out (= 正規経路、destination 経由で agent が返答した場合)
-  //   (b) docker logs の container 標準出力 (= scratchpad 経路、agent が `<message to="...">`
-  //       で wrap しなかった場合でも poll-loop が scratchpad として stdout に出力するため
-  //       grep で marker を確実に捕捉できる)
+  //   (b) docker logs の container 標準エラー出力 (= scratchpad 経路、agent が
+  //       `<message to="...">` で wrap しなかった場合でも poll-loop が scratchpad として
+  //       stderr に出力するため、`docker logs ... 2>&1` で stdout+stderr 両取得して grep
+  //       すれば marker を確実に捕捉できる。agent-runner は IPC を持たない設計で
+  //       `console.error()` で log するため scratchpad / WARNING は全て stderr に出る)
   //
   // 旧実装は (a) のみで、verify session には agent_destinations が登録されていないため
   // agent が `<message to="...">` で wrap できず poll-loop が `WARNING: agent output had
@@ -252,7 +254,10 @@ async function main(): Promise<number> {
       const names = namesRaw ? namesRaw.split('\n').filter(Boolean) : [];
       if (names.length > 0) {
         const containerName = names[0] as string;
-        const logs = execSync(`docker logs ${containerName} 2>&1`, {
+        // containerName は docker ps --filter の出力で `name=nanoclaw-v2-biblio-equip-verify-*`
+        // prefix にマッチするものだが、防御として JSON.stringify で escape (= sh -c 経由の
+        // 補間で空白 / 特殊文字を持つ name が混入した場合の injection 経路を塞ぐ)。
+        const logs = execSync(`docker logs ${JSON.stringify(containerName)} 2>&1`, {
           encoding: 'utf-8',
           stdio: ['ignore', 'pipe', 'pipe'],
         });
@@ -263,10 +268,13 @@ async function main(): Promise<number> {
         }
       }
     } catch (err) {
-      // docker CLI 未到達 / container 不在 / 権限不足 等は debug log のみ (= 大半は
-      // polling の前半で「まだ container ない」だけのケース、毎回 stderr noise にしない)。
+      // polling 序盤の「container がまだない」ケースは expected noise — 抑制する。
+      // 想定外のエラー (daemon 不到達、権限不足 等) は出力する。`|name|` 単独は汎用すぎて
+      // `invalid container name` 等の本物のエラーを silent skip するため除外、container 不在
+      // は `No such container` で十分絞れる。
       const msg = err instanceof Error ? err.message : String(err);
-      if (!/no such container|No such image|name|cannot connect|Cannot connect/i.test(msg)) {
+      const isExpectedPollingNoise = /no such container|No such image|cannot connect/i.test(msg);
+      if (!isExpectedPollingNoise) {
         process.stderr.write(`[spawn-verify] docker logs error: ${msg}\n`);
       }
     }
