@@ -189,10 +189,12 @@ async function countSkillsInRepo(
   owner: string,
   name: string,
 ): Promise<{ ok: true; count: number } | { ok: false; reason: 'unknown' }> {
-  // 段 (1): marketplace.json 経路
+  // 段 (1): marketplace.json 経路 — `noAuth: true` で Authorization 省略 (= 外部 repo は
+  // OneCLI secret の pathPattern `/repos/HajimariInc/*` に match しないため、`Bearer placeholder`
+  // を素通しすると GitHub が invalid token として 401 を返す → 無認証で public API 200 を取る)。
   try {
     const url = `${GITHUB_API}/repos/${owner}/${name}/contents/.claude-plugin/marketplace.json`;
-    const data = (await ghFetch('GET contents/marketplace.json (acquire)', url)) as {
+    const data = (await ghFetch('GET contents/marketplace.json (acquire)', url, {}, { noAuth: true })) as {
       content?: string;
       encoding?: string;
     };
@@ -242,7 +244,8 @@ async function countSkillsInRepo(
   for (const branch of tryBranches) {
     try {
       const url = `${GITHUB_API}/repos/${owner}/${name}/git/trees/${branch}?recursive=1`;
-      const data = (await ghFetch('GET git/trees (acquire)', url)) as {
+      // `noAuth: true` の理由は段 (1) と同じ (= 外部 repo の pathPattern miss 対策)。
+      const data = (await ghFetch('GET git/trees (acquire)', url, {}, { noAuth: true })) as {
         truncated?: boolean;
         tree?: Array<{ path?: string; type?: string }>;
       };

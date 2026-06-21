@@ -488,6 +488,27 @@ describe('acquire — Phase 2 threshold-promote', () => {
     expect(result.detail).toContain('12 個');
   });
 
+  it('countSkillsInRepo は外部 repo に noAuth: true で fetch する (= Authorization ヘッダなし)', async () => {
+    // OneCLI secret の pathPattern (`/repos/HajimariInc/*`) miss で `Bearer placeholder` を素通しすると
+    // GitHub が invalid token として 401 を返す問題への対策。外部 repo (anthropics/skills 等) を呼ぶ
+    // countSkillsInRepo は ghFetch を `noAuth: true` で呼び出し、Authorization ヘッダを省略する。
+    // 本テストは fetchMock の引数を直接見て Authorization が含まれないことを assert する。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(mockMarketplaceResponse([{ skills: ['./a', './b'] }]));
+    await acquire({ repo: 'small/repo' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    expect(calledUrl).toContain('/repos/small/repo/contents/.claude-plugin/marketplace.json');
+    const headers = (calledInit as { headers?: Record<string, string> }).headers ?? {};
+    expect(headers).not.toHaveProperty('Authorization');
+    // Accept / X-GitHub-Api-Version は載っていることを確認 (= ghFetch の通常 header は維持)
+    expect(headers).toMatchObject({
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    });
+  });
+
   it('env ACQUIRE_SKILL_THRESHOLD="abc" (非数値) → default 10 に倒れ warn ログ', async () => {
     // `-5` は `< 1` 分岐で弾かれるが、`"abc"` は `parseInt → NaN` → `!Number.isFinite(NaN)`
     // 分岐で弾かれる別経路。両方の防御パスをカバーする。

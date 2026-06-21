@@ -157,12 +157,33 @@ export class GhHttpError extends Error {
  */
 type UndiciRequestInit = NonNullable<Parameters<typeof fetch>[1]>;
 
-export async function ghFetch(step: string, url: string, init: UndiciRequestInit = {}): Promise<unknown> {
+/**
+ * ghFetch の拡張オプション (= UndiciRequestInit と別軸の挙動制御)。
+ *
+ * `noAuth`: Authorization ヘッダを省略する。OneCLI secret の `pathPattern`
+ * (`/repos/HajimariInc/*`) に match しない外部 repo (= biblio 仕入れ先の `anthropics/skills` 等)
+ * を fetch するときに必須。pathPattern miss 時に `Bearer placeholder` を素通しすると GitHub が
+ * invalid token として 401 を返すため (= public API は無認証で 200)、外部 repo 経路では本フラグ
+ * を立てて Authorization 自体を省略する。内部 repo (= `HajimariInc/biblio-shelf`) 操作では未指定
+ * (= 既存挙動 = MITM で token 置換) のままで OK。
+ */
+export interface GhFetchOptions {
+  noAuth?: boolean;
+}
+
+export async function ghFetch(
+  step: string,
+  url: string,
+  init: UndiciRequestInit = {},
+  opts: GhFetchOptions = {},
+): Promise<unknown> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
     // OneCLI MITM が wire で本物の installation token に置換 (acquire.ts:gh CLI と同じ経路)。
-    Authorization: 'Bearer placeholder',
+    // 外部 repo (pathPattern miss) では `opts.noAuth: true` で Authorization 自体を省略する
+    // (placeholder 素通しを防ぐ = 無認証で public API に 200 で抜ける)。
+    ...(opts.noAuth ? {} : { Authorization: 'Bearer placeholder' }),
     ...(init.headers as Record<string, string> | undefined),
   };
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
