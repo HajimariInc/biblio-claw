@@ -32,7 +32,7 @@ flowchart TB
     direction TB
     PollLoop["Poll Loop<br/>(container/agent-runner)"]
     Provider["Agent provider<br/>(claude, opencode, mock; todo: codex)"]
-    MCP["MCP ツール<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>schedule_task, create_agent,<br/>install_packages, add_mcp_server,<br/>acquire_biblio, inspect_biblio,<br/>categorize_biblio, shelve_biblio"]
+    MCP["MCP ツール<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>schedule_task, create_agent,<br/>install_packages, add_mcp_server,<br/>acquire_biblio, inspect_biblio,<br/>categorize_biblio, shelve_biblio,<br/>enkin_biblio, shokyaku_biblio"]
     Skills["コンテナ skill<br/>(container/skills/)"]
     InDB[("inbound.db<br/>host が書く<br/>偶数 seq<br/>messages_in<br/>destinations<br/>processing_ack")]
     OutDB[("outbound.db<br/>コンテナが書く<br/>奇数 seq<br/>messages_out<br/>heartbeat ファイル")]
