@@ -1,8 +1,9 @@
 /**
- * 蔵書一覧 (list-biblio) の純粋関数ロジックのユニットテスト (M3 Phase 4)。
+ * 蔵書一覧 (list-biblio) の純粋関数ロジックのユニットテスト。
  *
- * - `shelf-gh.ts` を vi.mock で差し替え、`fetchMarketplace` の戻り値を制御
- * - `pluginsOf` は実装のまま委譲 (= raw plugins を返すだけの単純なヘルパ、border 維持)
+ * - `shelf-gh.ts` の `fetchMarketplace` + `readShelveEnv` のみを vi.mock で差し替え
+ * - `pluginsOf` は **`vi.importActual` で本物を取り込む** (= shelf-gh.ts の実装変更に追従、
+ *   インライン再実装によるコピー乖離リスクを除去、code-reviewer PR #17 指摘)
  * - 6 ケースで分岐を網羅: 404 / 全件 / category フィルタ / 不正 source / name 空 skip / plugins 非配列
  *
  * 実 GitHub への到達は scripts/biblio-list.ts (CLI ハーネス) + Phase 5 verify-m3.sh
@@ -10,19 +11,22 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// shelf-gh をモック化 — fetchMarketplace は test ごとに mockResolvedValue で制御、
-// pluginsOf は本物の挙動 (= raw.plugins が Array なら返す、それ以外は空配列) を維持する。
-vi.mock('./shelf-gh.js', () => ({
-  readShelveEnv: vi.fn(() => ({
-    shelfOwner: 'HajimariInc',
-    shelfRepo: 'biblio-shelf',
-    authorName: 'biblio-claw[bot]',
-    authorEmail: 'biblio-claw@example.com',
-    fallbackAuthor: null,
-  })),
-  fetchMarketplace: vi.fn(),
-  pluginsOf: (m: Record<string, unknown>) => (Array.isArray(m.plugins) ? m.plugins : []),
-}));
+// shelf-gh を partial mock — fetchMarketplace + readShelveEnv のみ差し替え、
+// pluginsOf は本物 (= shelf-gh.ts の実装) をそのまま委譲する。
+vi.mock('./shelf-gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./shelf-gh.js')>();
+  return {
+    ...actual,
+    readShelveEnv: vi.fn(() => ({
+      shelfOwner: 'HajimariInc',
+      shelfRepo: 'biblio-shelf',
+      authorName: 'biblio-claw[bot]',
+      authorEmail: 'biblio-claw@example.com',
+      fallbackAuthor: null,
+    })),
+    fetchMarketplace: vi.fn(),
+  };
+});
 
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },

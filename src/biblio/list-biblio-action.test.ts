@@ -1,5 +1,5 @@
 /**
- * list_biblio delivery handler のユニットテスト (M3 Phase 4)。
+ * list_biblio delivery handler のユニットテスト。
  *
  * shelve-action.test.ts と同形 — registerDeliveryAction の handler を抜いて直呼びする。
  * `insertMessage` を mock して writeBackMessage の本物経路を維持しつつ、最終的に
@@ -12,6 +12,7 @@
  *  - 不正 category は silent fallback で全件 + 注記 (= patron が略記しても落ちない)
  *  - listBiblio が throw しても writeBack に internal エラーを書く (host 巻き込まない)
  *  - total=0 のとき空棚メッセージ
+ *  - unknown カテゴリ混在のとき formatResult が「source 解析不能、要確認」を含む
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -125,6 +126,26 @@ describe('list_biblio handler', () => {
     const text = getWrittenText();
     expect(text).toContain('蔵書一覧取得エラー');
     expect(text).toContain('boom');
+  });
+
+  it('unknown カテゴリが混在するとき "source 解析不能、要確認" 行が出力される', async () => {
+    // `formatResult` の `counts.unknown > 0` 分岐を action test レベルで通す。
+    // list-biblio.test.ts は projectItem の unknown bucket を検証するが、
+    // formatResult の表示分岐は本テストで担保する (pr-test-analyzer PR #17 指摘)。
+    listBiblioMock.mockResolvedValue({
+      ok: true,
+      items: [
+        { name: 'a--b', category: 'biblio-dev', description: '', version: '' },
+        { name: 'x--y', category: 'unknown', description: '', version: '' },
+      ],
+      counts: { 'biblio-dev': 1, 'biblio-art': 0, 'biblio-bf': 0, 'biblio-ai': 0, unknown: 1 },
+      total: 2,
+      appliedFilter: null,
+    });
+    await handler({ action: 'list_biblio', category: '' }, dummySession, dummyDb);
+    const text = getWrittenText();
+    expect(text).toContain('unknown (1)');
+    expect(text).toContain('source 解析不能、要確認');
   });
 
   it('total=0 のとき空棚メッセージを返す', async () => {

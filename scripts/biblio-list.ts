@@ -1,10 +1,12 @@
 /**
- * scripts/biblio-list.ts — 蔵書一覧取得 (list_biblio) の CLI ハーネス (M3 Phase 4)。
+ * scripts/biblio-list.ts — 蔵書一覧取得 (list_biblio) の CLI ハーネス。
  *
- * Phase 5 の verify-m3.sh から呼ばれ、host proxy bootstrap → listBiblio() を実行し、
- * 結果を `RESULT=<json>` 行で stdout に出す (host のログ類は stderr)。
- * listBiblio は GitHub Git Data API を OneCLI MITM 経由で叩くため、host proxy
- * 用に設定する ProxyAgent (= global dispatcher) を起動時に必ず登録する。
+ * Phase 5 で追加予定の verify-m3.sh から呼ばれる想定で、host proxy bootstrap +
+ * ProxyAgent インストール → listBiblio() を実行し、結果を `RESULT=<json>` 行で
+ * stdout に出す (host のログ類は stderr)。listBiblio は GitHub Git Data API を
+ * OneCLI MITM 経由で叩くため、host proxy + ProxyAgent (= undici global dispatcher)
+ * を起動時に必ず登録する (= `setupVertexProxy()` は名前に反して Vertex 専用ではなく
+ * undici fetch 全般の経路を設定するため、GitHub fetch にも必須)。
  *
  * exit code:
  *   0 = 結果が組み立てられた (`RESULT=` 行を 1 行出力)
@@ -20,6 +22,7 @@
 import { initHostProxy } from '../src/biblio/host-proxy.js';
 import { listBiblio } from '../src/biblio/list-biblio.js';
 import { BIBLIO_CATEGORIES, type BiblioCategory } from '../src/biblio/types.js';
+import { setupVertexProxy } from '../src/biblio/vertex-client.js';
 
 const VALID_CATEGORIES: readonly BiblioCategory[] = BIBLIO_CATEGORIES;
 
@@ -39,9 +42,13 @@ async function main(): Promise<number> {
     }
   }
 
-  // host proxy 登録 (= GitHub fetch を OneCLI MITM 経由にして installation token 注入)。
-  // これが無いと fetchMarketplace の ghFetch が直接 GitHub に出て public でも 401/rate limit に当たる。
+  // host proxy + ProxyAgent (undici global dispatcher) 登録 (= GitHub fetch を OneCLI MITM
+  // 経由にして installation token 注入)。これが無いと fetchMarketplace の ghFetch が直接
+  // GitHub に出て authenticated rate limit (5000/h) を享受できず unauthenticated (60 req/hr)
+  // に倒れる。biblio-shelf は public なので 401 にはならないが、rate limit が効くと
+  // verify-m3.sh の繰り返し実行で再現性が壊れる。
   await initHostProxy();
+  setupVertexProxy();
 
   const result = await listBiblio({ category });
   process.stdout.write(`RESULT=${JSON.stringify(result)}\n`);

@@ -104,7 +104,7 @@ export const BIBLIO_CATEGORIES = ['biblio-dev', 'biblio-art', 'biblio-bf', 'bibl
 export type BiblioCategory = (typeof BIBLIO_CATEGORIES)[number];
 
 /**
- * 蔵書一覧 (catalog) の型 (M3 Phase 4)。
+ * 蔵書一覧 (catalog) の型。
  *
  * `@bot 蔵書` で棚 (HajimariInc/biblio-shelf) の `marketplace.json` から取得した
  * plugins[] を最小投影した形。host 側 `list-biblio.ts` が `source` フィールド

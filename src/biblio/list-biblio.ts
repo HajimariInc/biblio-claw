@@ -1,16 +1,17 @@
 /**
- * 蔵書一覧 (catalog) 本体 — `@bot 蔵書` Feature の host 側ロジック (M3 Phase 4)。
+ * 蔵書一覧 (catalog) 本体 — `@bot 蔵書` Feature の host 側ロジック。
  *
  * 棚 (HajimariInc/biblio-shelf) の marketplace.json から蔵書一覧を取得する。
  * fetchMarketplace() で取得 → pluginsOf() で plugins[] を取り出し → 各エントリの
  * `source` (= `./<category>/<name>` 形式、`shelve.ts:293` 契約) を split して
  * category を抽出 → counts を集計 → category filter (引数指定時のみ) → ListBiblioResult を返す。
  *
- * `fetchMarketplace` は ~500ms で安定なので cache は持たない (= 都度 fetch、
- * PRD §未解決質問 #4 の既定方針)。404 (marketplace.json 未存在) は「棚が空」として
- * 正常応答 (ok:true / items:[] / total:0)。`source` が想定外形式 (旧形式 / 手動編集 /
- * null) のエントリは category='unknown' に振り、`log.warn` で痕跡を残す
- * (= silent drop しない方針、旧形式が固定化するのを防ぐ)。
+ * cache は持たない (= 都度 fetch、GitHub Contents API はサブ秒応答想定で patron
+ * インタラクションの遅延許容範囲内と判断。頻度が上がる場合は TTL cache を検討する
+ * こと)。404 (marketplace.json 未存在) は「棚が空」として正常応答 (ok:true / items:[] /
+ * total:0)。`source` が想定外形式 (旧形式 / 手動編集 / null) のエントリは
+ * category='unknown' に振り、`log.warn` で痕跡を残す (= silent drop しない方針、旧形式
+ * が固定化するのを防ぐ)。
  */
 import { log } from '../log.js';
 

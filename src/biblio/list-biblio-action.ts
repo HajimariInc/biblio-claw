@@ -1,5 +1,5 @@
 /**
- * Delivery action handler — `list_biblio` (M3 Phase 4).
+ * Delivery action handler — `list_biblio` (`@bot 蔵書` Feature の delivery 経路).
  *
  * agent (Claude) が `list_biblio` MCP ツールで outbound.db に system action を書く
  * (content: `{ action, category? }`) → delivery poll がここを呼ぶ → host で
@@ -9,7 +9,8 @@
  * `shelve-action.ts` と同形 (input validate / writeBack 3 retry / try-catch fail-closed)。
  * 差分は (a) `category` が optional / (b) 不正 category を `invalid_input` で蹴らず silent
  * fallback で全件 + 注記を返す (= patron が `dev` のように略記しても落ちないように) /
- * (c) 応答テキストの整形 (= 件数 + カテゴリ別内訳 + 一覧)。
+ * (c) 応答テキストの整形 (= 件数 + カテゴリ別内訳 + 一覧) / (d) `BIBLIO_NAME_RE` 不要
+ * (= 入力パラメータが name を取らないため、name validate ロジックは存在しない)。
  */
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
