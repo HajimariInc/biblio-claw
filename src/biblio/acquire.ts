@@ -142,6 +142,18 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
   // 実 fetch は Phase 3 (`individual-acquire`) で実装し、本ブロックを差し替える。
   const skill = req.skill ?? normalized.skill;
   if (skill !== undefined) {
+    // Phase 3 で skill 値を実 fetch パス (= GitHub Contents API path or sparse-checkout) に
+    // 使うことになるため、Phase 1 のうちに SEGMENT_RE 検証を入口で済ませる防衛線。
+    // 3 segments 経路 (normalized.skill) は normalizeRepo で検証済だが、MCP tool 経路 (req.skill) は
+    // ここまでトリムのみで来るため、両経路を同基準で再検証する (= 二重検証だが冪等)。
+    if (!SEGMENT_RE.test(skill)) {
+      log.warn('acquire failed', { repo: req.repo, skill, reason: 'invalid_input' });
+      return {
+        ok: false,
+        reason: 'invalid_input',
+        detail: `skill は識別子形式 ([A-Za-z0-9._-]、主に kebab-case) で指定してください: "${skill}"`,
+      };
+    }
     log.info('acquire skipped (skill requested, Phase 3 pending)', {
       repo: req.repo,
       skill,

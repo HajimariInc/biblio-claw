@@ -24,8 +24,9 @@ export interface NormalizedRepo {
   /** HTTPS clone URL (`https://github.com/<owner>/<name>.git`)。SSH は使わない。 */
   cloneUrl: string;
   /**
-   * 3 segments 入力 (`owner/repo/skill`) を normalizeRepo が直接受け取ったときのみ立つ
-   * (= MCP tool 経由は `req.skill` で来るため通常未定義)。Phase 1 防御線。
+   * 3 segments 入力 (`owner/repo/skill`) を normalizeRepo が直接受け取ったときのみ立つ。
+   * MCP tool 経由では `AcquireRequest.skill` に来るため通常未定義。
+   * `acquire()` では `req.skill ?? normalized.skill` でどちらの経路も吸収する。
    */
   skill?: string;
 }
@@ -43,6 +44,8 @@ export type AcquireFailureReason =
   /**
    * 個別 skill 仕入れ Phase 3 未実装の受領通知 (Phase 1 で追加した transient 値)。
    * Phase 3 (`individual-acquire`) 完了時に削除し、実 fetch ロジックに置き換える。
+   * 削除時は `acquire.ts` (early return ブロック) / `acquire-action.ts` (resultText 分岐) / 関連 test の参照箇所が
+   * 型チェック連鎖 (= 本 union から消えたリテラルへの参照は TypeScript が型エラーで検知) で必ず洗い出される。
    */
   | 'not_implemented';
 

@@ -199,6 +199,16 @@ describe('acquire', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('req.skill が SEGMENT_RE 不一致 (不正文字) なら invalid_input を返す (Phase 3 fetch パス踏み抜き防衛)', async () => {
+    const result = await acquire({ repo: 'anthropics/skills', skill: 'sk;ill' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('invalid_input');
+      expect(result.detail).toContain('sk;ill');
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it('3 segments 入力 (normalized.skill 経由) でも not_implemented を返す', async () => {
     const result = await acquire({ repo: 'anthropics/skills/algorithmic-art' });
     expect(result.ok).toBe(false);

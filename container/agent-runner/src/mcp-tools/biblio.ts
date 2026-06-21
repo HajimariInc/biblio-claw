@@ -44,7 +44,7 @@ export const acquireBiblio: McpToolDefinition = {
         skill: {
           type: 'string',
           description:
-            '個別 skill 仕入れ指定 (任意)。patron が "owner/repo/skill" 形式で指定した場合、skill 部分 (= kebab-case 単一識別子) を本 arg に分離して渡す。"owner/repo" 全体仕入れの場合は省略。',
+            '個別 skill 仕入れ指定 (任意)。patron が "owner/repo/skill" 形式で指定した場合、skill 部分 (= 主に kebab-case、許容文字は `[A-Za-z0-9._-]`、先頭は英数の単一識別子) を本 arg に分離して渡す。"owner/repo" 全体仕入れの場合は省略。',
         },
       },
       required: ['repo'],

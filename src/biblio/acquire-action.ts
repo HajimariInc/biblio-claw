@@ -37,7 +37,8 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   const repo = typeof content.repo === 'string' ? content.repo : '';
   // 空文字 / 空白のみは undefined に倒し、`acquire()` には skill キーごと渡さない
   // (= 既存 2 segments 経路と完全互換、`content.skill: ''` を「全体仕入れ」と解釈する)。
-  const skill = typeof content.skill === 'string' && content.skill.trim() !== '' ? content.skill.trim() : undefined;
+  // `mcp-tools/biblio.ts` と同じ `trim() || undefined` イディオムに統一。
+  const skill = typeof content.skill === 'string' ? content.skill.trim() || undefined : undefined;
   if (!repo) {
     log.warn('acquire_biblio missing repo', { sessionId: session.id });
     await writeBackMessage(
