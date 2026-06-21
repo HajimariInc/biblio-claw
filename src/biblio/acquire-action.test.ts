@@ -4,12 +4,16 @@
  * action handler は `writeBackMessage` で patron に応答する形式。
  * `registerDeliveryAction` を mock して module load 時の handler を抜き、直接呼ぶ。
  *
- * カバレッジ (Phase 1):
+ * カバレッジ:
+ *  (Phase 1)
  *  - 入口 validate (repo 空)
  *  - 既存経路: repo 単独 (skill 未指定) で acquire を `{ repo }` だけで呼ぶ
  *  - 新規経路 (Phase 1): skill 指定で acquire を `{ repo, skill }` で呼び、受領通知文言を返す
  *  - 空文字 skill は undefined 扱い (= 全体仕入れに退化)
  *  - acquire 自体の throw を握って internal エラー文言で writeBack (host を落とさない)
+ *  (Phase 2)
+ *  - threshold_exceeded: detail (動的 promote 文言) を素通しで patron に返す
+ *    (count + 上限 + 個別指定例 + ブラウザ確認案内が届く、「仕入れエラー」表記混入なし)
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 

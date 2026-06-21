@@ -47,7 +47,9 @@ const GITHUB_API = 'https://api.github.com';
 
 /**
  * 各 fetch のハードタイムアウト (ms)。Vertex 経路と同じ思想で無期限ブロックを防ぐ。
- * Phase 2 で `acquire.ts:countSkillsInRepo` からも同 timeout で再利用するため export。
+ * `ghFetch` が `AbortSignal.timeout` でこの値を使うため、`ghFetch` を import する他モジュール
+ * (`acquire.ts:countSkillsInRepo` 等) も暗黙的にこのタイムアウトの恩恵を受ける。export は
+ * ops が「ghFetch 経路の timeout 値」を外から参照したくなったとき用 (= 直接 import 必須ではない)。
  */
 export const GH_FETCH_TIMEOUT_MS = 30_000;
 

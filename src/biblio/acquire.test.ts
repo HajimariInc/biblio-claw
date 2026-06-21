@@ -409,6 +409,104 @@ describe('acquire — Phase 2 threshold-promote', () => {
     expect(result.reason).toBe('threshold_exceeded');
     expect(result.detail).toContain('12 個');
   });
+
+  // ===== レビュー指摘対応 (PR #19) — 境界値 + degraded 経路カバレッジ =====
+
+  it('境界値 — ちょうど閾値 (10 skill) なら clone 経路に進む (> は exclusive)', async () => {
+    // `count > threshold` 判定の境界仕様の明示化 (= 10 ちょうどは通る、11 で promote)。
+    // 仕様変更時 (> → >=) の回帰を 1 件で検知する。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 10 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'boundary/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'boundary--repo' });
+  });
+
+  it('marketplace.json 500 エラー → unknown → clone 経路に進む (degraded 保護)', async () => {
+    // rate limit / GitHub server error 時に閾値判定を skip して既存挙動を維持することを確認。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      text: async () => 'internal server error',
+    } as Response);
+    const result = await acquire({ repo: 'flaky/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'flaky--repo' });
+  });
+
+  it('marketplace.json に plugins[] なし → unknown → clone 経路に進む', async () => {
+    // marketplace.json は存在するが plugins フィールド欠落 (= biblio 仕様外形式) の防御確認。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    const malformedJson = JSON.stringify({ version: '1.0' }); // plugins キーなし
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: Buffer.from(malformedJson).toString('base64'),
+        encoding: 'base64',
+      }),
+    } as Response);
+    const result = await acquire({ repo: 'no-plugins/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'no-plugins--repo' });
+  });
+
+  it('marketplace.json が不正 JSON → unknown → clone 経路 + warn ログ', async () => {
+    // base64 decode 後の文字列が JSON parse 失敗するケース。silent failure 防止の確認。
+    setupCloneSuccess();
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        content: Buffer.from('{ invalid json }').toString('base64'),
+        encoding: 'base64',
+      }),
+    } as Response);
+    const result = await acquire({ repo: 'malformed/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'malformed--repo' });
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'countSkillsInRepo: marketplace.json invalid JSON',
+      expect.objectContaining({ owner: 'malformed', name: 'repo' }),
+    );
+  });
+
+  it('Git Trees fallback — main 404 → master 200 で閾値超過', async () => {
+    // tryBranches ループの continue 経路 (= main を試した後 master に進む) の直接検証。
+    // 既存テストは「main 200」または「main + master の両方 404 / truncated」しかカバーしていない。
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(mock404()) // marketplace.json: 404
+      .mockResolvedValueOnce(mock404()) // git/trees/main: 404
+      .mockResolvedValueOnce(mockGitTreesResponse(Array.from({ length: 12 }, (_, i) => `skill-${i}/SKILL.md`))); // git/trees/master: 12 SKILL.md
+    const result = await acquire({ repo: 'legacy/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('12 個');
+  });
+
+  it('env ACQUIRE_SKILL_THRESHOLD="abc" (非数値) → default 10 に倒れ warn ログ', async () => {
+    // `-5` は `< 1` 分岐で弾かれるが、`"abc"` は `parseInt → NaN` → `!Number.isFinite(NaN)`
+    // 分岐で弾かれる別経路。両方の防御パスをカバーする。
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: 'abc' });
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(
+      mockMarketplaceResponse([{ skills: Array.from({ length: 11 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'nan/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('上限 10 個');
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD, using default',
+      expect.objectContaining({ raw: 'abc', default: 10 }),
+    );
+  });
 });
 
 describe('getChildProcEnv / initHostProxy', () => {

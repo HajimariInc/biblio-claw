@@ -145,8 +145,9 @@ function removeQuarantine(quarantinePath: string): void {
  * - 未設定 → `DEFAULT_ACQUIRE_SKILL_THRESHOLD` (= 10)
  * - 解釈不能 / 0 以下 → default に倒し warn ログ (= silent failure 防止)
  *
- * `readEnvFile` 都度読み (= `categorize.ts:CATEGORIZE_MODEL` 等と同じ慣習) のため、Phase 5
- * 動的変更基盤 (DB プロパティ + Slack コマンド) と接続するときも本関数を touch しないで済む。
+ * `readEnvFile` 都度読み (= `categorize.ts:CATEGORIZE_MODEL` 等と同じ慣習) のため、
+ * individual-skill-shiire PRD Phase 5 (`dynamic-config` = DB プロパティ + Slack コマンド経路) と
+ * 接続するときも本関数を touch しないで済む構造。
  */
 function resolveSkillThreshold(): number {
   const raw = readEnvFile(['ACQUIRE_SKILL_THRESHOLD']).ACQUIRE_SKILL_THRESHOLD;
@@ -168,7 +169,9 @@ function resolveSkillThreshold(): number {
  * 2 段アプローチ:
  *   (1) `.claude-plugin/marketplace.json` を fetch → `plugins[]` を集計
  *       - `plugins[].skills: string[]` 形式 (= anthropics/skills 型) → array length 合計
- *       - `plugins[]` 直配列 (= claude-plugins-official 型、`skills` 無し) → `plugins.length`
+ *       - `plugins[]` 直配列 (= claude-plugins-official 型、`skills` 無し) →
+ *         各 plugin につき 1 を加算 (= 全 plugin が `skills` 無しなら結果は `plugins.length` と一致、
+ *         混在 array では「`skills` あり = 配列長、`skills` 無し = 1」の reduce 集計になる)
  *   (2) (1) が 404 = marketplace.json 不在なら Git Trees API recursive で `SKILL.md` を count
  *       (main → master の順に試行、両 404 / truncated は unknown)
  *
@@ -336,6 +339,15 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
   // backup として効くため、未知の repo を意図せず狭めるより保守的)。
   const threshold = resolveSkillThreshold();
   const countResult = await countSkillsInRepo(owner, name);
+  if (!countResult.ok) {
+    // `countSkillsInRepo` 内で warn は出ているが、acquire() 側でも skip 事実を記録する。
+    // 「閾値判定なしで clone に進んだ仕入れ」を後段の `biblio acquired` log line から
+    // reverse-trace するときの audit 連鎖を切らないため (silent-failure-hunter HIGH 1)。
+    log.warn('acquire: skill count failed, skipping threshold check', {
+      repo: `${owner}/${name}`,
+      reason: countResult.reason,
+    });
+  }
   if (countResult.ok && countResult.count > threshold) {
     log.info('acquire blocked by threshold', {
       repo: `${owner}/${name}`,

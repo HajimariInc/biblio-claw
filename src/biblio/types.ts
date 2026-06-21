@@ -43,7 +43,7 @@ export type AcquireFailureReason =
   | 'clone_failed'
   /**
    * 個別 skill 仕入れ Phase 3 未実装の受領通知 (Phase 1 で追加した transient 値)。
-   * Phase 3 (`individual-acquire`) 完了時に削除し、実 fetch ロジックに置き換える。
+   * individual-skill-shiire PRD Phase 3 (`individual-acquire`) 完了時に削除し、実 fetch ロジックに置き換える。
    * 削除時は `acquire.ts` (early return ブロック) / `acquire-action.ts` (resultText 分岐) / 関連 test の参照箇所が
    * 型チェック連鎖 (= 本 union から消えたリテラルへの参照は TypeScript が型エラーで検知) で必ず洗い出される。
    */
