@@ -198,23 +198,62 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
 - ✅ **同時複数装備**: `session_equipped_biblios.order_index` ASC で順序保証、
   `/workspace/biblios/<name1>/`, `<name2>/`, ... と並列 mount は Phase 1 から不変。
 
-### Phase 3 (equip-disposal) への申し送り
+### Phase 3 (equip-disposal) 完了済 ✅
 
-- **`equip_biblio` / `disequip_biblio` MCP tool**: agent → outbound system action →
-  host action handler → `upsertEquippedBiblios` / `clearEquippedBiblios` への配線。
-  装備リスト変更が現 container には反映されない (= mount は spawn 時に固定) 設計を
-  agent に伝える skill description が必要 (= 「変更は次回 spawn から効く」)。
-- **禁書** (= shelf からの除去 + 装備可残置): `<DATA_DIR>/biblio-equipped/<name>/` を
-  **残置**、`shelve.ts` の PR 作成パターン (= Git Data API) を逆方向に使って shelf から
-  除去する。
-- **焼却** (= shelf からの除去 + 物理削除 = 装備不可): `<DATA_DIR>/biblio-equipped/<name>/`
-  を `fs.rmSync(...)` で物理削除、shelf からも除去。verify は焼却後に同 biblio を equip
-  試行して `equipped biblio dir not found, skipping` warn が出る (= 物理削除済) で確認可能。
-- **HITL 経路**: 禁書 / 焼却は破壊操作なので `requestApproval` を経由
-  (= `src/modules/approvals/primitive.ts` パターン踏襲)。
+- **禁書** (= shelf 除去 + 装備可残置): `src/biblio/enkin.ts` + `src/biblio/enkin-action.ts`
+  + `scripts/biblio-enkin.ts` で実装。`<DATA_DIR>/biblio-equipped/<name>/` は **意図的に残置**
+  (= 再装備可)。
+- **焼却** (= shelf 除去 + 物理削除 = 装備不可): `src/biblio/shokyaku.ts` +
+  `src/biblio/shokyaku-action.ts` + `scripts/biblio-shokyaku.ts` で実装。`fs.rmSync(...)`
+  で装備源 dir を物理削除 + `deleteEquippedBiblioByName` で全 session の装備リストから
+  個別削除 (= 次回 spawn 以降の `equipped biblio dir not found` warn ノイズ抑制)。
+- **HITL 経路**: 禁書 / 焼却の MCP tool 発火 → `requestApproval('enkin_confirm' /
+  'shokyaku_confirm', ...)` で admin (DEN) DM カード → 承認後に `registerApprovalHandler`
+  callback が `enkin()` / `shokyaku()` を実行 → `notify()` で patron に PR URL 通知。
+  破壊操作の最終 gate を admin に集約 (= 取り違え事故防止)。
+- **shelf-gh.ts 共通化**: `shelve.ts` から `ghFetch` / `GhHttpError` / `fetchMarketplace`
+  / `pluginsOf` / `createCommit` / `readShelveEnv` を `src/biblio/shelf-gh.ts` に切り出し、
+  `shelve.ts` (追加方向) と `unshelve.ts` (削除方向 = `sha:null + base_tree`) の両方から
+  共有。GitHub Git Data API の wire 経路は 1 箇所に集約された。
+- **`UnshelveResult` + `EnkinResult` / `ShokyakuResult`**: `src/biblio/types.ts` に追加。
+  失敗分類 `UnshelveFailureReason` (`not_shelved` / `github_api_error` / `invalid_category`)
+  + 成功時 `{ ok: true, biblioName, category, prUrl, prNumber, branchName }`。enkin /
+  shokyaku は `UnshelveResult` の type alias (= 挙動が完全に同 shape)。
+- **`enkin_biblio` / `shokyaku_biblio` MCP tool** (3 段経路 = MCP tool → action handler →
+  approval handler): `container/agent-runner/src/mcp-tools/biblio.ts` に追加、`registerTools`
+  が 6 tool 体制に拡張。`category` も MCP tool input に required で、agent が categorize.ts
+  の結果を再利用して渡す前提 (= 装備機構の disposal 経路は shelf path 計算に category 必須)。
 
-### Phase 5 (m3-verify)
+### Phase 3.5 への申し送り (= 本 Phase 3 では Out of Scope)
 
-- `verify-m3-phase-1.sh` + `verify-m3-phase-2.sh` の assertion を `verify-m3.sh` の
-  assertion 1-2 として組み込む。残り (解除 / 禁書 / 焼却 / 蔵書一覧) は Phase 3-4 完了後に
-  統合。
+- **`equip_biblio` / `disequip_biblio` MCP tool**: agent が自律的に装備リスト
+  (`session_equipped_biblios`) を変更する MCP 経路。HITL 不要で即時実行。装備リスト
+  変更が現 container には反映されない (= mount は spawn 時に固定) 設計を agent に伝える
+  skill description / response text で「次回 spawn から効く」を周知。
+- 想定追加: `src/biblio/equip-action.ts` 新規 + `src/db/session-equipped-biblios.ts` に
+  `addEquippedBiblio(sessionId, biblioName)` / `removeEquippedBiblio(sessionId, biblioName)`
+  追加 + `container/agent-runner/src/mcp-tools/biblio.ts` に 2 tool 追加 (= 30KB plan 目安)。
+- 本 Phase 3 で導入した `deleteEquippedBiblioByName` は **全 session 横断削除** であり、
+  Phase 3.5 の **session 単位の部分操作** とは semantics が異なる (= 同居可、別 API)。
+
+### Phase 5 (m3-verify) への申し送り
+
+- `verify-m3-phase-1.sh` + `verify-m3-phase-2.sh` + `verify-m3-phase-3.sh` の assertion を
+  `verify-m3.sh` の assertion 1-4 (= 装備 + 解除 + 禁書 + 焼却) として組み込む。残り
+  (蔵書一覧 5-6) は Phase 4 完了後に統合。
+- **destructive E2E の統合**: 本 Phase 3 では `verify-m3-phase-3.sh` を **smoke (not_shelved
+  経路) を default、destructive を env opt-in (`VERIFY_M3_P3_BIBLIO` + `VERIFY_M3_P3_CATEGORY`)**
+  で分離。Phase 5 の `verify-m3.sh` では「shelve → enkin → shokyaku」の連続フローを
+  単一 verify で完結させる構造を検討 (= verify 自己完結 = main merged な test biblio を
+  動的に作って消す経路)。
+- **draft PR cleanup**: Phase 5 で `gh pr close --delete-branch` を verify-m3.sh 末尾に
+  追加する案を検討 (= 本 Phase 3 では手動 cleanup 運用)。
+
+### Phase 3 完成判定の流れ
+
+- 単体テスト: `pnpm test src/biblio/{unshelve,enkin-action,shokyaku-action}.test.ts`
+  (= 24 ケース、`UnshelveResult` + HITL + payload 検証を網羅)
+- Phase 1-3 連鎖 verify: `bash scripts/verify-m3-phase-3.sh` → Phase 2 regression
+  + smoke (not_shelved) で `M3 P3 PASS` 出力
+- destructive E2E (= 任意): `VERIFY_M3_P3_BIBLIO=<owner>--<name> VERIFY_M3_P3_CATEGORY=biblio-dev
+  bash scripts/verify-m3-phase-3.sh` → 実 shelf に draft PR 2 つ作成 (cleanup 手動)

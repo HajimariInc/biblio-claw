@@ -3,7 +3,10 @@
  *
  * 装備リストは session 単位で永続化し、`order_index` ASC で順序を保つ。
  * 更新は全置換 semantics (= `upsertEquippedBiblios` は DELETE + INSERT トランザクション)
- * に固定する。部分更新 (= 1 件追加 / 1 件解除) は Phase 3 で別 API を足す。
+ * に固定する。部分更新 = `deleteEquippedBiblioByName` (Phase 3、焼却で全 session から個別行を消す
+ * = `equip.ts:79` の `fs.existsSync` skip 経路で warn が残るノイズを抑制)。1 件追加 / 1 件解除
+ * の MCP tool (`equip_biblio` / `disequip_biblio`) は Phase 3.5 で `addEquippedBiblio` /
+ * `removeEquippedBiblio` を別途足す。
  */
 import { getDb } from './connection.js';
 
@@ -48,4 +51,20 @@ export function upsertEquippedBiblios(sessionId: string, biblioNames: string[]):
 /** session の装備リストを全削除。`upsertEquippedBiblios(sessionId, [])` と等価。 */
 export function clearEquippedBiblios(sessionId: string): void {
   getDb().prepare('DELETE FROM session_equipped_biblios WHERE session_id = ?').run(sessionId);
+}
+
+/**
+ * 全 session から該当 `biblio_name` の行を削除する (= 焼却で全 session の装備リストから個別除去)。
+ *
+ * `biblioName` の validate は呼び出し側 (`shokyaku.ts` で `BIBLIO_NAME_RE.test` を通過済) に
+ * 委ねる (= DB 層に validate を入れる設計を採らない、循環依存回避方針)。`order_index` の
+ * 連番は意図的に詰めない (= 1 件削除で全 reindex すると `clearEquippedBiblios` 後の再装備
+ * フローと semantics が混在するため、装備リストの順序はあくまで `upsertEquippedBiblios` の
+ * 全置換 semantics に閉じる)。
+ *
+ * @returns 削除された行数 (= 該当 biblio が装備中だった session 数)。
+ */
+export function deleteEquippedBiblioByName(biblioName: string): number {
+  const info = getDb().prepare('DELETE FROM session_equipped_biblios WHERE biblio_name = ?').run(biblioName);
+  return info.changes;
 }

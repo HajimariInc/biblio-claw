@@ -144,6 +144,37 @@ export type ShelveResult =
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
 
 /**
+ * 解除 (kaijo / unshelve) の型 (M3 Phase 3)。
+ *
+ * 棚 (shelf) から biblio を除去する draft PR を作る `unshelve()` の入出力。
+ * 禁書 (`enkin`) / 焼却 (`shokyaku`) はこの薄ラッパで、本ファイル末尾に
+ * `EnkinResult` / `ShokyakuResult` を type alias として並べる。
+ */
+
+/** 解除 (unshelve) 失敗の分類。 */
+export type UnshelveFailureReason =
+  /** marketplace.json 404 or `plugins[]` に entry がない (= 既に解除済 / 元から不在)。 */
+  | 'not_shelved'
+  /** Git Data API / Pulls API の non-2xx response (step + status + body を detail に含む)。 */
+  | 'github_api_error'
+  /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
+  | 'invalid_category';
+
+/**
+ * 解除結果。discriminated union — `ok` で分岐する。
+ * 成功時は PR URL + branch、失敗時は理由 + 詳細を持つ (silent failure 防止)。
+ */
+export type UnshelveResult =
+  | { ok: true; biblioName: string; category: BiblioCategory; prUrl: string; prNumber: number; branchName: string }
+  | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
+
+/** 禁書 = `unshelve()` 薄ラッパ。挙動は完全に同じ shape。 */
+export type EnkinResult = UnshelveResult;
+
+/** 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName`。shape は `UnshelveResult` と同じ (cleanup 失敗は warn のみ)。 */
+export type ShokyakuResult = UnshelveResult;
+
+/**
  * 装備機構 (souwa / equip) の型 (M3 Phase 1)。
  *
  * 司書が shelf clone を agent-container に取り込み実行する「装備」の
