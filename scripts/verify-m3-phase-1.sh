@@ -22,7 +22,17 @@ cd "$ROOT"
 
 info() { printf '[INFO] %s\n' "$*" >&2; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
+fail() {
+  printf '[FAIL] %s\n' "$*" >&2
+  # 直近 harness の stderr があれば表示 (= verify-m2.sh と同パターン)。
+  # tsx コンパイルエラー / kubectl 通信エラー等の根本原因を assert メッセージと
+  # 一緒に出せるよう、消費した stderr を 1 つだけ保持して fail 時に sed で展開。
+  if [ -n "${LAST_HARNESS_STDERR:-}" ] && [ -s "$LAST_HARNESS_STDERR" ]; then
+    printf '[FAIL] 直近 harness の stderr (デバッグ用):\n' >&2
+    sed 's/^/    /' "$LAST_HARNESS_STDERR" >&2
+  fi
+  exit 1
+}
 
 # --- 引数 parse ---
 RUN_LOCAL=1
@@ -49,6 +59,11 @@ EXPECTED_MARKER_PREFIX='BIBLIO_EQUIP_M3_P1_MARKER_'
 
 [ -f "${FIXTURE_DIR}/marker.txt" ] || fail "fixture が見つかりません: ${FIXTURE_DIR}/marker.txt"
 
+# 直近 harness の stderr 保持用 (verify-m2.sh パターン)。fail() で表示。
+STDERR_DIR="$(mktemp -d -t biblio-m3-stderr-XXXXXX)"
+LAST_HARNESS_STDERR=''
+trap 'rm -rf "$STDERR_DIR"' EXIT
+
 # --- Phase A: Docker local 経路 ---
 run_local() {
   info '=== Phase A: Docker local (DATA_DIR 直読み) ==='
@@ -67,37 +82,34 @@ run_local() {
   rm -rf "${equip_root}/${BIBLIO_NAME}"
   cp -r "${FIXTURE_DIR}" "${equip_root}/"
 
-  # unit test との整合確認
+  # unit test との整合確認 (stderr を保持して fail 時に表示する)
   info '  - unit test (equip.test.ts + container-runner.test.ts) 実行'
-  pnpm test src/biblio/equip.test.ts src/container-runner.test.ts >/dev/null 2>&1 \
+  LAST_HARNESS_STDERR="$STDERR_DIR/unit-test.stderr"
+  pnpm test src/biblio/equip.test.ts src/container-runner.test.ts \
+    >/dev/null 2>"$LAST_HARNESS_STDERR" \
     || fail 'unit test (equip + container-runner) が通らない — Phase 1 物理経路の前提が崩れている'
 
-  # mount-check ハーネス実行
+  # mount-check ハーネス実行 — stderr は STDERR_DIR に保持
   info "  - mount-check ハーネス: biblio=${BIBLIO_NAME}"
+  LAST_HARNESS_STDERR="$STDERR_DIR/mount-check.stderr"
   local result_json
-  result_json="$(DATA_DIR="${data_dir}" pnpm exec tsx scripts/biblio-equip-mount-check.ts "${BIBLIO_NAME}" 2>/dev/null | sed -n 's/^RESULT=//p')"
+  result_json="$(DATA_DIR="${data_dir}" pnpm exec tsx scripts/biblio-equip-mount-check.ts "${BIBLIO_NAME}" \
+    2>"$LAST_HARNESS_STDERR" | sed -n 's/^RESULT=//p')"
   [ -n "${result_json}" ] || fail 'mount-check ハーネスが RESULT を出さなかった'
 
-  # marker_found フィールドを抽出 (jq 非依存、node 経由)
-  local found
-  found="$(printf '%s' "${result_json}" | node -e "
+  # marker_found + marker を 1 度の node 呼び出しで tab 区切り取得。
+  # marker 文字列にスペースが入っても破れないよう IFS=$'\t' で受ける。
+  # node 側で末尾に '\n' を付けるのは `read` が EOF を non-zero 終了として扱い
+  # `set -e` で silent kill されるのを防ぐため (= read は newline で正常終了する)。
+  local found marker
+  IFS=$'\t' read -r found marker < <(printf '%s' "${result_json}" | node -e "
 let d='';
 process.stdin.on('data', c => d += c);
 process.stdin.on('end', () => {
   const j = JSON.parse(d);
-  process.stdout.write(String(j.marker_found));
-});")"
+  process.stdout.write(String(j.marker_found) + '\t' + (j.marker || '') + '\n');
+});")
   [ "${found}" = 'true' ] || fail "marker_found が true にならない: ${result_json}"
-
-  # marker prefix 一致確認
-  local marker
-  marker="$(printf '%s' "${result_json}" | node -e "
-let d='';
-process.stdin.on('data', c => d += c);
-process.stdin.on('end', () => {
-  const j = JSON.parse(d);
-  process.stdout.write(j.marker || '');
-});")"
   case "${marker}" in
     "${EXPECTED_MARKER_PREFIX}"*) info "  → marker 検出: ${marker}" ;;
     *) fail "marker prefix が想定外: ${marker}" ;;
@@ -127,31 +139,41 @@ run_gke() {
   [ "${phase}" = 'Running' ] || fail "orchestrator Pod ${pod} が Running でない (現在: ${phase:-不明})"
 
   # PVC に fixture 投入: orchestrator container 側で mkdir → kubectl cp
+  # 各 kubectl コマンドの stderr は STDERR_DIR に保持して fail 時に表示する。
   info '  - PVC に fixture を投入'
+  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-mkdir.stderr"
   kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
     mkdir -p "/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin" \
-    >/dev/null 2>&1 \
+    >/dev/null 2>"$LAST_HARNESS_STDERR" \
     || fail 'orchestrator Pod 内で mkdir /data/biblio-equipped に失敗'
 
+  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-marker.stderr"
   kubectl cp \
     "${FIXTURE_DIR}/marker.txt" \
     "${pod}:/data/biblio-equipped/${BIBLIO_NAME}/marker.txt" \
     -c orchestrator -n "${ns}" \
-    >/dev/null 2>&1 \
+    >/dev/null 2>"$LAST_HARNESS_STDERR" \
     || fail 'kubectl cp marker.txt が失敗'
 
+  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-json.stderr"
   kubectl cp \
     "${FIXTURE_DIR}/.claude-plugin/marker.json" \
     "${pod}:/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marker.json" \
     -c orchestrator -n "${ns}" \
-    >/dev/null 2>&1 \
+    >/dev/null 2>"$LAST_HARNESS_STDERR" \
     || fail 'kubectl cp marker.json が失敗'
 
   # orchestrator Pod 内から marker を直接読む (PVC subPath 経路の verify)
+  # kubectl exec 自体の失敗と marker 内容の不一致を区別するため、`|| true` ではなく
+  # `|| fail` で握り (kubectl cp と対称な非無視ハンドリング)、stderr は STDERR_DIR に保持する。
   info '  - orchestrator Pod 経由 marker 読み'
+  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-exec-cat.stderr"
+  local raw_marker
+  raw_marker="$(kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
+    cat "/data/biblio-equipped/${BIBLIO_NAME}/marker.txt" 2>"$LAST_HARNESS_STDERR")" \
+    || fail 'kubectl exec cat marker.txt が失敗 (kubectl 接続 / 権限 / Pod 状態を確認)'
   local marker
-  marker="$(kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
-    cat "/data/biblio-equipped/${BIBLIO_NAME}/marker.txt" 2>/dev/null | tr -d '\r\n' || true)"
+  marker="$(printf '%s' "${raw_marker}" | tr -d '\r\n')"
   case "${marker}" in
     "${EXPECTED_MARKER_PREFIX}"*) info "  → marker 検出: ${marker}" ;;
     *) fail "GKE 経路で marker prefix 不一致: '${marker}'" ;;

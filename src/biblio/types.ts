@@ -74,8 +74,8 @@ export type InspectResult =
  * `inspect()` のオプション。
  *
  * `quarantineRoot` を opts で受けるのは `vi.stubEnv('DATA_DIR', ...)` がモジュール
- * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため (acquire.test.ts
- * で実証済)。prod 経路では未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
+ * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため。prod 経路では
+ * 未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
  */
 export interface InspectOptions {
   quarantineRoot?: string;

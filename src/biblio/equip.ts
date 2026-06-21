@@ -1,17 +1,7 @@
 /**
- * 装備機構 (souwa / equip) の物理配置解決 (M3 Phase 1)。
- *
- * Phase 1 stub: env `BIBLIO_EQUIPPED_NAMES` (csv) を読み、`<DATA_DIR>/biblio-equipped/`
- * 配下の物理 dir 存在を確認して `EquippedBiblio[]` を返す。Phase 2 で内部実装を
- * session 単位の DB lookup (例: `session_equipped_biblios` table) に置換予定 — 上位
- * `buildMounts` への影響を抑えるため signature に `session` を持つ。
- *
- * **罠回避** (acquire.test.ts で実証済): `vi.stubEnv('DATA_DIR', ...)` はモジュール
- * load 時に const 束縛された `DATA_DIR` に効かないため、テストで base path を上書き
- * したい場合は `opts.equipmentRoot` を渡す (= prod 経路は未指定で `<DATA_DIR>/biblio-equipped`)。
- *
- * **silent failure 防止**: 無効な name (BIBLIO_NAME_RE 不通過) / dir 不在は warn log を
- * 出して skip する (= 開発者がリストの欠落に気づける)。
+ * 装備機構の物理配置解決 (M3 Phase 1 stub)。
+ * env `BIBLIO_EQUIPPED_NAMES` (csv) を読んで物理 dir を確認し `EquippedBiblio[]` を返す。
+ * Phase 2 で session 単位の DB lookup に置換予定 — signature 変更を避けるため `session` を持つ。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,37 +16,27 @@ import type { EquippedBiblio } from './types.js';
 /** `BIBLIO_EQUIPPED_NAMES` を csv parse する際の env name (Phase 1 stub の入口)。 */
 const ENV_NAME = 'BIBLIO_EQUIPPED_NAMES';
 
-/** Phase 1 で固定の sub-directory 名 (DATA_DIR 直下の装備物理配置 root)。 */
-const EQUIPMENT_SUBDIR = 'biblio-equipped';
-
-/** agent コンテナ内の装備 mount root (= `<MOUNT_ROOT>/<biblioName>` の親)。 */
-const CONTAINER_MOUNT_ROOT = '/workspace/biblios';
-
-export interface ResolveEquippedBibliosOptions {
-  /**
-   * 装備物理配置の root path を override する (= `<DATA_DIR>/biblio-equipped` の代わり)。
-   * `vi.stubEnv('DATA_DIR', ...)` の const 束縛罠を回避するためのテスト用フック。
-   * prod 経路では未指定。
-   */
+/** テスト用フック: const 束縛された DATA_DIR を上書きするために root path を渡す。 */
+interface ResolveEquippedBibliosOptions {
   equipmentRoot?: string;
 }
 
 /**
  * 装備済み biblio のリストを解決する。
  *
- * Phase 1 stub: env `BIBLIO_EQUIPPED_NAMES` (csv) を読み、各 name の物理 dir を
- * 確認して `EquippedBiblio[]` を返す。順序は csv の出現順を保つ (= buildMounts への
- * append 順 = container 内の見た目順、安定)。
+ * Phase 1 stub: env `BIBLIO_EQUIPPED_NAMES` (csv) の各 name について
+ * `BIBLIO_NAME_RE` 検証 + 物理 dir 存在確認を行い、通ったものだけ返す。
+ * 順序は csv 順を保つ (= buildMounts の append 順、container 内の見た目順)。
+ * skip 経路では `log.warn` を出して開発者がリストの欠落に気づける状態にする。
  *
- * **async signature について**: 本 stub は内部で await しないが、Phase 2 で DB lookup
- * (= `await db.prepare(...).all(session.id)` 等) に置換する際の呼び出し側 (buildMounts)
- * 変更を避けるため Promise を返す。
+ * `async` signature は Phase 2 で内部実装を DB lookup に置換する際の呼び出し側
+ * 変更を避けるためで、本 stub は内部で await しない。
  */
 export async function resolveEquippedBiblios(
   session: Session,
   opts?: ResolveEquippedBibliosOptions,
 ): Promise<EquippedBiblio[]> {
-  const root = opts?.equipmentRoot ?? path.join(DATA_DIR, EQUIPMENT_SUBDIR);
+  const root = opts?.equipmentRoot ?? path.join(DATA_DIR, 'biblio-equipped');
   const raw = process.env[ENV_NAME];
   if (!raw || raw.trim() === '') return [];
 
@@ -86,7 +66,7 @@ export async function resolveEquippedBiblios(
     result.push({
       name,
       sourcePath,
-      mountPath: `${CONTAINER_MOUNT_ROOT}/${name}`,
+      mountPath: `/workspace/biblios/${name}`,
     });
   }
   return result;

@@ -406,37 +406,30 @@ async function buildMounts(
     }
   }
 
-  // M3 装備機構: 装備済み biblio を per-biblio subPath で mount する。
-  // buildMounts は initGroupFilesystem / syncSkillSymlinks / composeGroupClaudeMd
-  // などの fs 副作用を多数持つため、equip mount の append だけを分離して export し
-  // (= テスト時の mock コストを最小化)、buildMounts からは薄く呼ぶ。
+  // M3 装備機構: buildMounts の fs 副作用 (initGroupFilesystem 等) と分離するため
+  // export 関数に委譲。テスト時の mock コストを最小化する。
   await appendEquippedBiblioMounts(mounts, session, DATA_DIR);
 
   return mounts;
 }
 
 /**
- * M3 装備機構: 環境変数 (Phase 1 stub) で指定された装備済み biblio を
- * `VolumeMount[]` の末尾に append する (= per-biblio subPath で readonly mount)。
+ * 装備済み biblio を `VolumeMount[]` 末尾に append する (per-biblio subPath, readonly)。
  *
- * hostPath は必ず DATA_DIR/biblio-equipped/<name> 配下なので `subPathOf` が
- * 必ず string を返し、K8s では PVC subPath volumeMount として projection
- * され、Docker は subPath を無視して直接 bind mount される (= 両 runtime で
- * 同一抽象 spec を共有)。readonly:true は agent からの書き戻しを防ぐ
- * (装備状態の cleanup は Phase 2 で host 側別経路、Phase 1 では mount のみ確立)。
+ * `dataDir` は `resolveEquippedBiblios` の `equipmentRoot` と `subPathOf` の両方に
+ * 渡される単一の真実の入口で、const 束縛された `DATA_DIR` を test で上書きする
+ * フックを兼ねる。Docker は subPath を無視して bind mount、K8s は PVC subPath
+ * volumeMount として projection することで両 runtime が同一抽象 spec を共有する。
  *
- * `dataDir` を引数で受けるのは const 束縛された `DATA_DIR` を test で上書き
- * できるようにするため (acquire.test.ts と同じ罠回避パターン)。
- *
- * Phase 2 では `resolveEquippedBiblios` 側を DB lookup に置換するだけで本
- * 関数の signature と buildMounts への組み込みは変更不要 (= interface 安定)。
+ * Phase 2 では `resolveEquippedBiblios` 側を DB lookup に置換するだけで signature 不変。
  */
 export async function appendEquippedBiblioMounts(
   mounts: VolumeMount[],
   session: Session,
   dataDir: string,
 ): Promise<void> {
-  const equipped = await resolveEquippedBiblios(session);
+  const equipmentRoot = path.join(dataDir, 'biblio-equipped');
+  const equipped = await resolveEquippedBiblios(session, { equipmentRoot });
   for (const b of equipped) {
     mounts.push({
       hostPath: b.sourcePath,

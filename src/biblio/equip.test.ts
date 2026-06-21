@@ -160,4 +160,14 @@ describe('resolveEquippedBiblios', () => {
     expect(result.map((b) => b.name)).toEqual(['alpha--beta']);
     expect(log.warn).not.toHaveBeenCalled();
   });
+
+  it('大文字 / 数字 / `.` / `_` を含む正規 owner--name も受理する (RE 文字クラスの regression 防止)', async () => {
+    const name = 'MyOrg123--Repo.Name_v2';
+    seedBiblio(name);
+    vi.stubEnv('BIBLIO_EQUIPPED_NAMES', name);
+    const result = await resolveEquippedBiblios(makeSession());
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe(name);
+    expect(log.warn).not.toHaveBeenCalled();
+  });
 });
