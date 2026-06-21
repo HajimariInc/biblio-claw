@@ -103,6 +103,45 @@ export interface InspectOptions {
 export const BIBLIO_CATEGORIES = ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'] as const;
 export type BiblioCategory = (typeof BIBLIO_CATEGORIES)[number];
 
+/**
+ * 蔵書一覧 (catalog) の型 (M3 Phase 4)。
+ *
+ * `@bot 蔵書` で棚 (HajimariInc/biblio-shelf) の `marketplace.json` から取得した
+ * plugins[] を最小投影した形。host 側 `list-biblio.ts` が `source` フィールド
+ * (`./<category>/<name>` 形式、`shelve.ts:293` 契約) を split して category を抽出する。
+ */
+
+/** 蔵書一覧の 1 件 (= marketplace.json plugins[] の最小投影)。 */
+export interface ListBiblioItem {
+  /** `<owner>--<repo>` 形式の biblio 名。 */
+  name: string;
+  /** `biblio-dev|art|bf|ai` のいずれか。source 解析失敗時は 'unknown'。 */
+  category: BiblioCategory | 'unknown';
+  /** plugin.json 由来の description (空文字許容)。 */
+  description: string;
+  /** plugin.json 由来の version (空文字許容)。 */
+  version: string;
+}
+
+/** `listBiblio()` の入力。 */
+export interface ListBiblioParams {
+  /** カテゴリ絞り込み (未指定 = 全件)。 */
+  category?: BiblioCategory;
+}
+
+/** `listBiblio()` の戻り値。 */
+export interface ListBiblioResult {
+  ok: true;
+  /** フィルタ適用後の biblio 一覧 (`category` で絞り込み済)。 */
+  items: ListBiblioItem[];
+  /** 全件 (= フィルタ前) のカテゴリ別件数。`unknown` も含む。 */
+  counts: Record<BiblioCategory | 'unknown', number>;
+  /** 全件 (= フィルタ前) の総数。 */
+  total: number;
+  /** 適用された category filter (= 入力をそのまま返す、agent 表示用)。 */
+  appliedFilter: BiblioCategory | null;
+}
+
 /** カテゴライズ失敗の分類。 */
 export type CategoryFailureReason =
   /** quarantine 配下に biblio dir が存在しない / 読めない (= LLM 呼び前の入力検証エラー)。 */
