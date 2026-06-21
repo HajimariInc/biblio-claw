@@ -29,16 +29,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-info() { printf '[INFO] %s\n' "$*" >&2; }
-warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() {
-  printf '[FAIL] %s\n' "$*" >&2
-  if [ -n "${LAST_HARNESS_STDERR:-}" ] && [ -s "$LAST_HARNESS_STDERR" ]; then
-    printf '[FAIL] 直近 harness の stderr (デバッグ用):\n' >&2
-    sed 's/^/    /' "$LAST_HARNESS_STDERR" >&2
-  fi
-  exit 1
-}
+# info/warn/fail/extract_result/json_field は verify-m3-helpers.sh に集約 (PR #21 code-simplifier 推奨)。
+# shellcheck source=scripts/verify-m3-helpers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/verify-m3-helpers.sh"
 
 # --- 引数 parse ---
 RUN_LOCAL=1
@@ -82,27 +75,6 @@ esac
 STDERR_DIR="$(mktemp -d -t biblio-m3p2-stderr-XXXXXX)"
 LAST_HARNESS_STDERR=''
 trap 'rm -rf "$STDERR_DIR"' EXIT
-
-# RESULT=<json> を取り出すヘルパ
-extract_result() { sed -n 's/^RESULT=//p'; }
-
-# JSON フィールド取り出し (jq 非依存、node 経由)
-json_field() {
-  local json="$1" key="$2"
-  printf '%s' "$json" | node -e "
-let d='';
-process.stdin.on('data', c => d += c);
-process.stdin.on('end', () => {
-  try {
-    const j = JSON.parse(d);
-    const k = process.argv[1];
-    const v = k.split('.').reduce((acc, p) => acc?.[p], j);
-    if (v === undefined || v === null) process.stdout.write('<missing>');
-    else process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v));
-  } catch (e) { process.stdout.write('<parse-error>'); }
-});
-" -- "$key"
-}
 
 # --- Phase 1 regression ---
 # 引数を透過転送 (= 冒頭の case で検証済の --local-only / --gke-only / 空 を渡す)。

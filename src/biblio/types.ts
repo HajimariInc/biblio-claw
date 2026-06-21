@@ -241,12 +241,19 @@ export type ShokyakuResult =
  * Phase 1 は env-driven な mount 配線のみ (= `equip.ts` の stub)。
  */
 
-/** 装備済み biblio 1 件の物理配置情報。 */
+/**
+ * 装備済み biblio 1 件の物理配置情報。
+ *
+ * `readonly` で構築後の mutation を禁止 (= 不変 value object、`equip.ts` の `resolveEquippedBiblios`
+ * 内で 1 度作って以降は変更されない設計を型で表現)。`sourcePath` は絶対パス保証
+ * (= `equip.ts:78` の `path.resolve(root, name)` で生成、Docker run -v が相対パスを local
+ * volume 名と解釈する罠を回避)。
+ */
 export interface EquippedBiblio {
   /** biblio 名 (= `owner--name` 形式、`BIBLIO_NAME_RE` 通過済)。 */
-  name: string;
-  /** host 側 source path (`<DATA_DIR>/biblio-equipped/<name>/`)。 */
-  sourcePath: string;
+  readonly name: string;
+  /** host 側 source path (`<DATA_DIR>/biblio-equipped/<name>/`、絶対パス)。 */
+  readonly sourcePath: string;
   /** agent コンテナ内 mount path (`/workspace/biblios/<name>/`)。 */
-  mountPath: string;
+  readonly mountPath: string;
 }

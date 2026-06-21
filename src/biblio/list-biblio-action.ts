@@ -6,7 +6,7 @@
  * `listBiblio()` を実行 → 整形済テキストを inbound.db に書き戻し → agent が patron
  * 向けに最終整形して Slack 応答する。
  *
- * `shelve-action.ts` と同形 (input validate / writeBack 3 retry / try-catch fail-closed)。
+ * `shelve-action.ts` と同形 (input validate / writeBack 3 attempts / try-catch fail-closed)。
  * 差分は (a) `category` が optional / (b) 不正 category を `invalid_input` で蹴らず silent
  * fallback で全件 + 注記を返す (= patron が `dev` のように略記しても落ちないように) /
  * (c) 応答テキストの整形 (= 件数 + カテゴリ別内訳 + 一覧) / (d) `BIBLIO_NAME_RE` 不要

@@ -15,6 +15,7 @@ import {
   getEquippedBibliosBySession,
   upsertEquippedBiblios,
   clearEquippedBiblios,
+  deleteEquippedBiblioByName,
 } from './session-equipped-biblios.js';
 import type { Session } from '../types.js';
 
@@ -123,5 +124,26 @@ describe('session_equipped_biblios CRUD', () => {
     const rows = getEquippedBibliosBySession('sess-dup');
     expect(rows.map((r) => r.biblio_name)).toEqual(['a--one', 'b--two', 'c--three']);
     expect(rows.map((r) => r.order_index)).toEqual([0, 1, 2]);
+  });
+
+  // PR #21 pr-test-analyzer 重要 — 焼却の「全 session 装備リストから個別削除」設計の DB レベル保証。
+  it('deleteEquippedBiblioByName: 複数 session を横断して同名 biblio を削除する (= shokyaku の全 session clear)', () => {
+    createSession(makeSession('sess-x'));
+    createSession(makeSession('sess-y'));
+    upsertEquippedBiblios('sess-x', ['shared--biblio', 'only-x--one']);
+    upsertEquippedBiblios('sess-y', ['shared--biblio', 'only-y--two']);
+
+    const changes = deleteEquippedBiblioByName('shared--biblio');
+    expect(changes).toBe(2); // 2 session から削除
+
+    expect(getEquippedBibliosBySession('sess-x').map((r) => r.biblio_name)).toEqual(['only-x--one']);
+    expect(getEquippedBibliosBySession('sess-y').map((r) => r.biblio_name)).toEqual(['only-y--two']);
+  });
+
+  it('deleteEquippedBiblioByName: 該当 entry が無くても 0 件削除で safe (= 焼却対象が装備されていない session を持つ場合)', () => {
+    createSession(makeSession('sess-noequip'));
+    // session はあるが装備なし
+    const changes = deleteEquippedBiblioByName('not-equipped--anywhere');
+    expect(changes).toBe(0);
   });
 });

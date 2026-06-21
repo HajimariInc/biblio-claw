@@ -20,19 +20,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-info() { printf '[INFO] %s\n' "$*" >&2; }
-warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() {
-  printf '[FAIL] %s\n' "$*" >&2
-  # 直近 harness の stderr があれば表示 (= verify-m2.sh と同パターン)。
-  # tsx コンパイルエラー / kubectl 通信エラー等の根本原因を assert メッセージと
-  # 一緒に出せるよう、消費した stderr を 1 つだけ保持して fail 時に sed で展開。
-  if [ -n "${LAST_HARNESS_STDERR:-}" ] && [ -s "$LAST_HARNESS_STDERR" ]; then
-    printf '[FAIL] 直近 harness の stderr (デバッグ用):\n' >&2
-    sed 's/^/    /' "$LAST_HARNESS_STDERR" >&2
-  fi
-  exit 1
-}
+# info/warn/fail は verify-m3-helpers.sh に集約 (PR #21 code-simplifier 推奨)。
+# shellcheck source=scripts/verify-m3-helpers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/verify-m3-helpers.sh"
 
 # --- 引数 parse ---
 RUN_LOCAL=1

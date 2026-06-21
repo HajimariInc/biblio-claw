@@ -16,18 +16,19 @@ import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import { shokyaku } from './shokyaku.js';
-import { BIBLIO_NAME_RE, safeNotify, writeBackMessage } from './action-helpers.js';
+import { safeNotify, validateBiblioInput, writeBackMessage } from './action-helpers.js';
 import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
-
-const VALID_CATEGORIES: readonly BiblioCategory[] = BIBLIO_CATEGORIES;
 
 const APPROVAL_ACTION = 'shokyaku_confirm';
 
 registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
+  // category cast 明確化 (= enkin-action.ts と同形、PR #21 silent-failure-hunter 提案)。
   const biblioName = typeof payload.biblioName === 'string' ? payload.biblioName : '';
-  const category =
-    typeof payload.category === 'string' ? (payload.category as BiblioCategory) : ('biblio-dev' as BiblioCategory);
-  if (!biblioName || !VALID_CATEGORIES.includes(category)) {
+  const category: BiblioCategory =
+    typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
+      ? (payload.category as BiblioCategory)
+      : 'biblio-dev';
+  if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
     log.error('shokyaku_confirm: invalid payload', { payload });
     safeNotify(notify, `焼却エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`, {
       action: APPROVAL_ACTION,
@@ -72,70 +73,28 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
 });
 
 registerDeliveryAction('shokyaku_biblio', async (content, session, inDb) => {
-  const rawName = typeof content.name === 'string' ? content.name.trim() : '';
-  const rawCategory = typeof content.category === 'string' ? content.category.trim() : '';
-
-  if (!rawName) {
-    log.warn('shokyaku_biblio missing name', { sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      '焼却エラー (invalid_input): name が指定されていません。',
-      'shokyaku-resp',
-      'shokyaku_biblio',
-    );
-    return;
-  }
-  if (!BIBLIO_NAME_RE.test(rawName)) {
-    log.warn('shokyaku_biblio invalid name', { biblioName: rawName, sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      `焼却エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
-      'shokyaku-resp',
-      'shokyaku_biblio',
-    );
-    return;
-  }
-  if (!rawCategory) {
-    log.warn('shokyaku_biblio missing category', { sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      '焼却エラー (invalid_input): category が指定されていません。',
-      'shokyaku-resp',
-      'shokyaku_biblio',
-    );
-    return;
-  }
-  if (!VALID_CATEGORIES.includes(rawCategory as BiblioCategory)) {
-    log.warn('shokyaku_biblio invalid category', { category: rawCategory, sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      `焼却エラー (invalid_category): category は biblio-dev|art|bf|ai のいずれかである必要があります: "${rawCategory}"`,
-      'shokyaku-resp',
-      'shokyaku_biblio',
-    );
-    return;
-  }
-
-  const category = rawCategory as BiblioCategory;
-  log.info('shokyaku_biblio from agent', { biblioName: rawName, category, sessionId: session.id });
+  const validated = await validateBiblioInput(content, inDb, session, 'shokyaku-resp', 'shokyaku_biblio', '焼却');
+  if (!validated) return;
+  const { biblioName, category } = validated;
+  log.info('shokyaku_biblio from agent', { biblioName, category, sessionId: session.id });
 
   try {
     await requestApproval({
       session,
       agentName: 'biblio-claw',
       action: APPROVAL_ACTION,
-      payload: { biblioName: rawName, category },
+      payload: { biblioName, category },
       title: '焼却の承認',
-      question: `${rawName} を焼却します (棚から除去 + 装備源を物理削除 = 再装備不可)。承認しますか?`,
+      question: `${biblioName} を焼却します (棚から除去 + 装備源を物理削除 = 再装備不可)。承認しますか?`,
     });
     await writeBackMessage(
       inDb,
-      `焼却承認を申請しました: ${rawName} (category=${category})。admin の応答をお待ちください。`,
+      `焼却承認を申請しました: ${biblioName} (category=${category})。admin の応答をお待ちください。`,
       'shokyaku-resp',
       'shokyaku_biblio',
     );
   } catch (err) {
-    log.error('shokyaku_biblio requestApproval threw', { biblioName: rawName, category, sessionId: session.id, err });
+    log.error('shokyaku_biblio requestApproval threw', { biblioName, category, sessionId: session.id, err });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(
       inDb,

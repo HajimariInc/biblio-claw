@@ -41,16 +41,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-info() { printf '[INFO] %s\n' "$*" >&2; }
-warn() { printf '[WARN] %s\n' "$*" >&2; }
-fail() {
-  printf '[FAIL] %s\n' "$*" >&2
-  if [ -n "${LAST_HARNESS_STDERR:-}" ] && [ -s "$LAST_HARNESS_STDERR" ]; then
-    printf '[FAIL] 直近 harness の stderr (デバッグ用):\n' >&2
-    sed 's/^/    /' "$LAST_HARNESS_STDERR" >&2
-  fi
-  exit 1
-}
+# info/warn/fail/extract_result/json_field/json_array_length は verify-m3-helpers.sh に集約
+# (PR #21 code-simplifier 推奨の Phase 横断重複解消)。
+# shellcheck source=scripts/verify-m3-helpers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/verify-m3-helpers.sh"
 
 # --- 引数 parse ---
 # Phase 1-3 verify と同形。MODE は最終 PASS 出力でのみ使い、regression chain には
@@ -105,6 +99,12 @@ cleanup_destructive_prs() {
   # 設計につき verify 結果には影響させないが、stderr を STDERR_DIR に取り込み warn で可視化
   # する (旧実装は `2>/dev/null || true` で失敗理由が完全に見えず、手動 cleanup 時に
   # 気づくしかなかった silent fail)。
+  #
+  # PR 作成直後の GitHub Search index eventual consistency ウィンドウ (= 5 秒以内に
+  # search index が更新されない) を跨ぐため、search 前に短い sleep を入れる (= PR #20
+  # Manual run で PR #13 取りこぼし観測 → PR #21 silent-failure-hunter Important で
+  # `sleep 5` 追加が指摘された)。
+  sleep 5
   local prs
   local pr_list_err="$STDERR_DIR/cleanup-gh-pr-list.stderr"
   prs="$(gh pr list --repo "$SHELF_REPO_OWNER/$SHELF_REPO_NAME" \
@@ -132,46 +132,6 @@ cleanup() {
   exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
-
-# --- RESULT 消費ヘルパ (= verify-m2.sh / verify-m3-phase-3.sh と同形) ---
-extract_result() { sed -n 's/^RESULT=//p'; }
-
-# JSON フィールド取り出し (jq 非依存、node 経由)。`<missing>` / `<parse-error>` の literal で
-# 戻す (= 上位の文字列比較で扱えるように、null/undefined と区別しない設計)。
-json_field() {
-  local json="$1" key="$2"
-  printf '%s' "$json" | node -e "
-let d='';
-process.stdin.on('data', c => d += c);
-process.stdin.on('end', () => {
-  try {
-    const j = JSON.parse(d);
-    const k = process.argv[1];
-    const v = k.split('.').reduce((acc, p) => acc?.[p], j);
-    if (v === undefined || v === null) process.stdout.write('<missing>');
-    else process.stdout.write(typeof v === 'string' ? v : JSON.stringify(v));
-  } catch (e) { process.stdout.write('<parse-error>'); }
-});
-" -- "$key"
-}
-
-# JSON 配列フィールドの長さ取り出し (= [5/6] と [6/6] で同一 inline node スニペットの重複
-# を解消、将来の修正点を 1 箇所に集約)。dot-path 解決で深いキーも辿れる。配列でない値が
-# 来たら `<not-array>` の sentinel で返す (= integer 比較で噛み合わず可視化される)。
-json_array_length() {
-  local json="$1" key="$2"
-  printf '%s' "$json" | node -e "
-let d='';
-process.stdin.on('data', c => d += c);
-process.stdin.on('end', () => {
-  try {
-    const j = JSON.parse(d);
-    const arr = process.argv[1].split('.').reduce((acc, p) => acc?.[p], j);
-    process.stdout.write(Array.isArray(arr) ? String(arr.length) : '<not-array>');
-  } catch (e) { process.stdout.write('<parse-error>'); }
-});
-" -- "$key"
-}
 
 # --- [1-4/6] Phase 1-3 regression chain ---
 # verify-m3-phase-3.sh が verify-m3-phase-2.sh → verify-m3-phase-1.sh の chain を内側で持つ。

@@ -1,7 +1,7 @@
 /**
  * scripts/biblio-list.ts — 蔵書一覧取得 (list_biblio) の CLI ハーネス。
  *
- * Phase 5 で追加予定の verify-m3.sh から呼ばれる想定で、host proxy bootstrap +
+ * verify-m3.sh (Phase 5) から呼ばれる CLI ハーネス。host proxy bootstrap +
  * ProxyAgent インストール → listBiblio() を実行し、結果を `RESULT=<json>` 行で
  * stdout に出す (host のログ類は stderr)。listBiblio は GitHub Git Data API を
  * OneCLI MITM 経由で叩くため、host proxy + ProxyAgent (= undici global dispatcher)
