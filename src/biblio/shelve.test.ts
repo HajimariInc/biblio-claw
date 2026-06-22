@@ -43,7 +43,7 @@ vi.mock('undici', () => ({
 }));
 
 import { readEnvFile } from '../env.js';
-import { shelve } from './shelve.js';
+import { shelve, shelveMulti } from './shelve.js';
 
 /** 簡易 Response モック (ok / status / json / text を持つ最小実装)。 */
 function res(
@@ -455,5 +455,311 @@ describe('shelve — rename_error (fs.promises.rename 失敗)', () => {
     expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', 'owner--repo'))).toBe(true);
     expect(fs.existsSync(path.join(TEST_DIR, 'shelf', 'biblio-dev', 'owner--repo'))).toBe(false);
     renameSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 4 — multi-category-shelve のユニットテスト。
+ *
+ * shelveMulti は単一 shelve の汎化 = N 件の (biblioName, category, reason) を 1 PR に
+ * まとめる。N=1 では既存 shelve と branch 名 / commit message / PR body / PR title が
+ * 完全互換に保たれる (= 上の 12 tests + verify-m2 で確認)。本セクションでは N>1 の
+ * 経路と原子性 (= 部分成功なし) を網羅する。
+ */
+
+/**
+ * multi-skill quarantine fixture を作る (3 skill / 各 SKILL.md + plugin.json)。
+ * 戻り値: 3 件の (biblioName, category) ペア (= shelveMulti の reqs にそのまま流す)。
+ */
+function setupMultiQuarantine(): Array<{ biblioName: string; category: 'biblio-dev' | 'biblio-art'; reason: string }> {
+  setupQuarantine('owner--repo--skill-a');
+  setupQuarantine('owner--repo--skill-b');
+  setupQuarantine('owner--repo--skill-c');
+  return [
+    { biblioName: 'owner--repo--skill-a', category: 'biblio-dev', reason: 'TS refactor 補助' },
+    { biblioName: 'owner--repo--skill-b', category: 'biblio-dev', reason: 'コードレビュー支援' },
+    { biblioName: 'owner--repo--skill-c', category: 'biblio-art', reason: '図版生成プロンプト' },
+  ];
+}
+
+/** tree push 時に body を捕える sink (= test 側で path 配列を assert するため)。 */
+type TreeSink = { body: Record<string, unknown> | null };
+
+/**
+ * multi 経路の happy path 用 fetch handler。tree push の body を引数 sink に記録する
+ * (= 後で path 配列の assert に使う)。
+ */
+function setupHappyPathMulti(
+  opts: {
+    marketplaceExists?: boolean;
+    treeSink?: TreeSink;
+    prNumber?: number;
+  } = {},
+): void {
+  const { marketplaceExists = false, treeSink, prNumber = 100 } = opts;
+  let blobIndex = 0;
+  fetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+    if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+      return marketplaceExists
+        ? res(200, { content: marketplaceContent([]), encoding: 'base64', sha: 'mp-sha' })
+        : res(404, { message: 'Not Found' });
+    }
+    if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+    if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+      return res(200, { tree: { sha: 'base-tree-sha' } });
+    if (url.endsWith('/git/blobs') && init?.method === 'POST') {
+      blobIndex++;
+      return res(201, { sha: `blob-sha-${blobIndex}` });
+    }
+    if (url.endsWith('/git/trees') && init?.method === 'POST') {
+      if (treeSink) treeSink.body = init?.body ? JSON.parse(init.body) : null;
+      return res(201, { sha: 'new-tree-sha' });
+    }
+    if (url.endsWith('/git/commits') && init?.method === 'POST') return res(201, { sha: 'new-commit-sha' });
+    if (url.endsWith('/git/refs') && init?.method === 'POST') return res(201, { ref: 'refs/heads/...' });
+    if (url.endsWith('/pulls') && init?.method === 'POST') {
+      return res(201, {
+        html_url: `https://github.com/HajimariInc/biblio-shelf/pull/${prNumber}`,
+        number: prNumber,
+      });
+    }
+    throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+  });
+}
+
+describe('shelveMulti — multi-category 跨ぎ happy path', () => {
+  // 3 skill × (SKILL.md + plugin.json) = 6 blob + marketplace 1 blob = 7 × GH_BLOB_SLEEP_MS (1000ms)
+  // → 約 7 秒 (= デフォルト 5s timeout 超過)。30s に明示拡張。
+  it('3 skill / 2 category 跨ぎで 1 PR に陳列され、tree に両 category の path が含まれる', async () => {
+    const reqs = setupMultiQuarantine();
+    const treeSink: TreeSink = { body: null };
+    setupHappyPathMulti({ treeSink });
+
+    const result = await shelveMulti(reqs, {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot: path.join(TEST_DIR, 'shelf'),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected ok=true');
+    expect(result.items).toHaveLength(3);
+    expect(result.items).toEqual([
+      { biblioName: 'owner--repo--skill-a', category: 'biblio-dev' },
+      { biblioName: 'owner--repo--skill-b', category: 'biblio-dev' },
+      { biblioName: 'owner--repo--skill-c', category: 'biblio-art' },
+    ]);
+    expect(result.branchName).toMatch(/^shelve\/multi-owner--repo-\d+$/);
+    expect(result.prUrl).toContain('/pull/100');
+
+    // tree push の path 配列が両 category dir を含んでいる (= 複数 cat 跨ぎ陳列の証跡)
+    expect(treeSink.body).not.toBeNull();
+    const treeArr = (treeSink.body?.tree ?? []) as Array<{ path: string }>;
+    const treePaths = treeArr.map((e) => e.path);
+    expect(treePaths.some((p) => p.startsWith('biblio-dev/owner--repo--skill-a/'))).toBe(true);
+    expect(treePaths.some((p) => p.startsWith('biblio-dev/owner--repo--skill-b/'))).toBe(true);
+    expect(treePaths.some((p) => p.startsWith('biblio-art/owner--repo--skill-c/'))).toBe(true);
+    expect(treePaths).toContain('.claude-plugin/marketplace.json');
+
+    // per-req 物理移動: 3 件すべて shelf へ移動済 (quarantine から消える)
+    for (const req of reqs) {
+      expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', req.biblioName))).toBe(false);
+      expect(fs.existsSync(path.join(TEST_DIR, 'shelf', req.category, req.biblioName))).toBe(true);
+    }
+  }, 30_000);
+});
+
+describe('shelveMulti — 入口 validation', () => {
+  it('空配列 → empty_items', async () => {
+    const result = await shelveMulti([], {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot: path.join(TEST_DIR, 'shelf'),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'empty_items' });
+    // 何も fetch しない
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('重複 biblioName → duplicate_biblio_name (pre-flight fail、何も fetch しない)', async () => {
+    const result = await shelveMulti(
+      [
+        { biblioName: 'owner--repo--dup', category: 'biblio-dev', reason: 'r1' },
+        { biblioName: 'owner--repo--dup', category: 'biblio-art', reason: 'r2' },
+      ],
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result).toMatchObject({ ok: false, reason: 'duplicate_biblio_name' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    // debug 用 items が全件含まれる
+    if (!result.ok) {
+      expect(result.items).toHaveLength(2);
+    }
+  });
+});
+
+describe('shelveMulti — 原子性 (1 件失敗で全体 fail、部分成功なし)', () => {
+  it('3 件中 1 件が marketplace で重複検知に引っかかれば全体 already_shelved (rename しない)', async () => {
+    const reqs = setupMultiQuarantine();
+    // marketplace.json に skill-b の entry が既存
+    fetchMock.mockImplementationOnce(async () =>
+      res(200, {
+        content: marketplaceContent([{ name: 'owner--repo--skill-b' }]),
+        encoding: 'base64',
+        sha: 'mp-sha',
+      }),
+    );
+    const result = await shelveMulti(reqs, {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot: path.join(TEST_DIR, 'shelf'),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'already_shelved' });
+    // 重複検知だけで終わる → fetch は 1 回のみ
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // 全 quarantine が温存される (= 部分 rename なし)
+    for (const req of reqs) {
+      expect(fs.existsSync(path.join(TEST_DIR, 'quarantine', req.biblioName))).toBe(true);
+      expect(fs.existsSync(path.join(TEST_DIR, 'shelf', req.category, req.biblioName))).toBe(false);
+    }
+  });
+
+  it('合算 fileCount > MAX_BLOBS_PER_PR で fail-closed (= github_api_error + 合算件数を detail に)', async () => {
+    // setupQuarantine は SKILL.md + plugin.json の 2 ファイルを置く。
+    // 50 件追加すると per-biblio 52 ファイル、2 biblio で合算 104 ファイル (= 上限 100 超)。
+    for (const name of ['owner--repo--a', 'owner--repo--b']) {
+      setupQuarantine(name);
+      const qDir = path.join(TEST_DIR, 'quarantine', name);
+      for (let i = 0; i < 50; i++) {
+        fs.writeFileSync(path.join(qDir, `extra-${i}.txt`), 'x');
+      }
+    }
+    // marketplace 404 → 重複検知通過、rename して合算 file count で落ちる経路
+    fetchMock.mockImplementationOnce(async () => res(404, { message: 'Not Found' }));
+
+    const result = await shelveMulti(
+      [
+        { biblioName: 'owner--repo--a', category: 'biblio-dev', reason: 'r1' },
+        { biblioName: 'owner--repo--b', category: 'biblio-dev', reason: 'r2' },
+      ],
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'github_api_error',
+      detail: expect.stringContaining('合算'),
+    });
+    if (!result.ok) {
+      expect(result.detail).toContain('104');
+      expect(result.detail).toContain('100');
+    }
+  });
+
+  it('2 件目の rename が EACCES で reject すると全体 rename_error + 1 件目残骸を detail に列挙', async () => {
+    setupQuarantine('owner--repo--first');
+    setupQuarantine('owner--repo--second');
+    // marketplace 404
+    fetchMock.mockImplementationOnce(async () => res(404, { message: 'Not Found' }));
+    // 1 回目 rename は本物 (= 1 件目を実際に shelf へ移動)、2 回目で EACCES。
+    // spy をかける前に元 fn を bind 経由で握っておく (= mock 内で本物を再帰呼出するため)。
+    const originalRename = fs.promises.rename.bind(fs.promises);
+    let renameCount = 0;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (src: fs.PathLike, dst: fs.PathLike) => {
+      renameCount++;
+      if (renameCount === 1) {
+        return originalRename(src, dst);
+      }
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+
+    const result = await shelveMulti(
+      [
+        { biblioName: 'owner--repo--first', category: 'biblio-dev', reason: 'r1' },
+        { biblioName: 'owner--repo--second', category: 'biblio-art', reason: 'r2' },
+      ],
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'rename_error',
+      detail: expect.stringContaining('EACCES'),
+    });
+    // detail に 1 件目の shelf 残骸 path が列挙される (= 運用者が rm -rf できる)
+    if (!result.ok) {
+      expect(result.detail).toContain('既に shelf に移動済の残骸');
+    }
+    // 1 件目は実際に移動済 (= shelf 残骸残置)
+    expect(fs.existsSync(path.join(TEST_DIR, 'shelf', 'biblio-dev', 'owner--repo--first'))).toBe(true);
+    renameSpy.mockRestore();
+  });
+});
+
+describe('shelveMulti — single 経路 (reqs.length === 1) で既存 shelve と完全互換', () => {
+  // POST /pulls と POST /git/commits の body を捕える sink。
+  // PR title / commit message / PR body の互換性を 1 つのテストで固定する
+  // (= reqs.length === 1 分岐の回帰を verify-m2 (実 API) に頼らず unit で検知)。
+  type CompatSink = { pullsBody: Record<string, unknown> | null; commitBody: Record<string, unknown> | null };
+
+  function setupCompatFetchMock(sink: CompatSink, prNumber = 7): void {
+    let blobIndex = 0;
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+        return res(404, { message: 'Not Found' });
+      }
+      if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+      if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+        return res(200, { tree: { sha: 'base-tree-sha' } });
+      if (url.endsWith('/git/blobs') && init?.method === 'POST') {
+        blobIndex++;
+        return res(201, { sha: `blob-sha-${blobIndex}` });
+      }
+      if (url.endsWith('/git/trees') && init?.method === 'POST') return res(201, { sha: 'new-tree-sha' });
+      if (url.endsWith('/git/commits') && init?.method === 'POST') {
+        sink.commitBody = init?.body ? JSON.parse(init.body) : null;
+        return res(201, { sha: 'new-commit-sha' });
+      }
+      if (url.endsWith('/git/refs') && init?.method === 'POST') return res(201, { ref: 'refs/heads/...' });
+      if (url.endsWith('/pulls') && init?.method === 'POST') {
+        sink.pullsBody = init?.body ? JSON.parse(init.body) : null;
+        return res(201, {
+          html_url: `https://github.com/HajimariInc/biblio-shelf/pull/${prNumber}`,
+          number: prNumber,
+        });
+      }
+      throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+    });
+  }
+
+  it('reqs.length === 1 で branch 名 / PR title / commit message が既存単一 shelve 形式を維持', async () => {
+    setupQuarantine('owner--repo');
+    const sink: CompatSink = { pullsBody: null, commitBody: null };
+    setupCompatFetchMock(sink);
+
+    const result = await shelveMulti([{ biblioName: 'owner--repo', category: 'biblio-dev', reason: 'compat check' }], {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot: path.join(TEST_DIR, 'shelf'),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected ok=true');
+
+    // branch 名が既存形式 (= verify-m2 で実 PR が立つときの命名と一致)
+    expect(result.branchName).toBe('shelve/biblio-dev--owner--repo');
+
+    // PR title が既存形式 `shelve(<cat>): <name>` (multi 経路 `shelve(multi): N biblios ...` ではない)
+    expect(sink.pullsBody).not.toBeNull();
+    expect(sink.pullsBody?.title).toBe('shelve(biblio-dev): owner--repo');
+    // PR body が single 形式 (= 「## 陳列対象」見出し、「## カテゴリ別内訳」は multi 専用)
+    const prBody = sink.pullsBody?.body as string;
+    expect(prBody).toContain('## 陳列対象');
+    expect(prBody).toContain('- biblio: `owner--repo`');
+    expect(prBody).toContain('- category: `biblio-dev`');
+    expect(prBody).not.toContain('カテゴリ別内訳'); // multi 専用見出しが混入しない
+
+    // commit message が既存形式 `feat(<cat>): shelve <name>` (multi `feat(multi):` ではない)
+    expect(sink.commitBody).not.toBeNull();
+    const commitMsg = sink.commitBody?.message as string;
+    expect(commitMsg).toMatch(/^feat\(biblio-dev\): shelve owner--repo\n/);
+    expect(commitMsg).toContain('カテゴリ判定: biblio-dev');
+    expect(commitMsg).toContain('理由: compat check');
+    expect(commitMsg).not.toMatch(/^feat\(multi\)/); // multi 専用先頭が混入しない
   });
 });

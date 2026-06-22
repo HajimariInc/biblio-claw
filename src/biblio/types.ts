@@ -205,6 +205,51 @@ export type ShelveResult =
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
 
 /**
+ * 複数 (biblioName, category) を 1 PR にまとめる陳列リクエストの 1 件 (Phase 4 multi-category-shelve)。
+ *
+ * 1 仕入れリクエストで複数 skill が異なる category に分かれるケース (= PRD シナリオ A
+ * 「同一 repo 内で複数 category へ分散」) を表現する。`reason` は per-item の categorize 判定
+ * 理由 (= shelveMulti が commit message / PR body に category 別 section で展開する)。
+ */
+export interface MultiShelveItem {
+  biblioName: string;
+  category: BiblioCategory;
+  reason: string;
+}
+
+/**
+ * `shelveMulti()` 固有の失敗理由 + 既存 `ShelveFailureReason` の継承。
+ *
+ * - `empty_items`: 入力配列が空 (= 上位の orchestration 不具合、agent が空配列を送ったケース)
+ * - `duplicate_biblio_name`: 同一 biblioName が複数 item に含まれる (= per-req 物理移動が衝突するため pre-flight で fail)
+ * - それ以外は単一 `shelve()` と同じ分類 (= 1 PR 単位で原子的に成功/失敗、部分成功なし)
+ */
+export type MultiShelveFailureReason = ShelveFailureReason | 'empty_items' | 'duplicate_biblio_name';
+
+/**
+ * `shelveMulti()` の結果。discriminated union — `ok` で分岐する。
+ *
+ * 部分成功なし (= N 件すべて陳列 or 0 件陳列の二択) で原子性を確保する。
+ * 成功時は 1 PR URL + branch + 陳列された items 一覧、失敗時は reason + detail +
+ * 試行された items 一覧を返す (= empty_items の空配列入力でも `items: []` で固定。
+ * `failMulti` ヘルパが常に全件詰めるため、caller は ok=false 時も items に必ずアクセスできる)。
+ */
+export type MultiShelveResult =
+  | {
+      ok: true;
+      prUrl: string;
+      prNumber: number;
+      branchName: string;
+      items: Array<{ biblioName: string; category: BiblioCategory }>;
+    }
+  | {
+      ok: false;
+      reason: MultiShelveFailureReason;
+      detail: string;
+      items: Array<{ biblioName: string; category: BiblioCategory }>;
+    };
+
+/**
  * 解除 (kaijo / unshelve) の型 (M3 Phase 3)。
  *
  * 棚 (shelf) から biblio を除去する draft PR を作る `unshelve()` の入出力。

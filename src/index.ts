@@ -71,6 +71,7 @@ import './biblio/acquire-action.js';
 import './biblio/inspect-action.js';
 import './biblio/categorize-action.js';
 import './biblio/shelve-action.js';
+import './biblio/multi-shelve-action.js';
 import './biblio/enkin-action.js';
 import './biblio/shokyaku-action.js';
 import './biblio/list-biblio-action.js';
