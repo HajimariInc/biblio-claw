@@ -134,7 +134,7 @@ spec:
           # (reproducibility 担保)。
           # M2 PRD A Phase 3 で src/index.ts + src/sidecar/ca-secret-sync.ts を
           # 追加したため m1-p1 → m2-p3 に bump (ca-secret-sync コードを焼き込む)。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m2-p3
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m2-p4
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -153,7 +153,7 @@ spec:
             # (container/Dockerfile) たため tag を m2-p2 に bump。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m2-p2,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m2-p4,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -205,7 +205,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m2-p3
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m2-p4
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -241,7 +241,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m2-p3
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m2-p4
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
