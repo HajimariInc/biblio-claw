@@ -33,6 +33,9 @@ groups/*
 # Temp files
 .tmp-*
 
+# k8s manifest backup (init-project-gcp-image-sync.sh が image tag 書き換え前に保存する *.bak.<timestamp>)
+k8s/*.bak.*
+
 # OS
 .DS_Store
 
