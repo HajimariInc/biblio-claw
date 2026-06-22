@@ -29,7 +29,8 @@
 #   - secret upsert (POST/PATCH): PoC-4 scripts/secret.sh:50-86
 #   - agent mode=all: biblio-claw scripts/onecli-vertex-secret.sh:118-149 を自己完結で再実装
 #
-# 使い方: docker compose up -d --wait + .env (GH_APP_ID/GH_INSTALLATION_ID/GH_APP_PEM_PATH) 投入後に
+# 使い方: docker compose up -d --wait + .env
+#   (GH_APP_ID/GH_INSTALLATION_ID/GH_APP_PEM_PATH/SHELF_REPO_OWNER) 投入後に
 #   bash scripts/onecli-gh-secret.sh
 
 set -euo pipefail
@@ -143,48 +144,74 @@ secret_id() {
 }
 
 # upsert_gh_secret: SIDECAR_GH_TOKEN を OneCLI に投入。
-#   未存在: POST /v1/secrets (期待 201)
-#   既存: PATCH /v1/secrets/:id で value 単独更新 (期待 200、id 保持 = hostPattern 解決の安定性)
+#   未存在: POST /v1/secrets (期待 201、pathPattern も同時投入で最小権限経路を確立)
+#   既存:   PATCH /v1/secrets/:id で value + pathPattern partial update
+#           (期待 200、id 保持 = hostPattern 解決の安定性)
+#
+#   PATCH 経路で pathPattern を常に投入する設計の論拠:
+#   - 旧 (= 第 1 段以前) で投入された pathPattern なし secret を refresh 1 回で自動補正
+#   - pathPattern は SHELF_REPO_OWNER 由来で不変 (運用上、手動変更は想定外)
+#   - 毎回同じ値を投入する = 冪等性確保
+#   - 仮に手動変更がありえる運用なら、本 PATCH で .env 値に戻る挙動は intended (= 最小権限経路の source of truth は scripts に集約)
+#   - hostPattern / injectionConfig 等他フィールドは partial update で OneCLI 側が保持
 #
 #   jq | curl のパイプ全体はサブシェルで set -o pipefail を有効化。
 #   有効化しないと jq の失敗 (invalid JSON 生成) が curl の rc に隠れる。
 #   token は SECRET_TOKEN env 経由で jq に渡す (シェル変数 / argv 非経由)。
+#
+# response body 検証は意図的に行わない (curl `-fsS ... >/dev/null` で body 破棄)。
+# OneCLI v1.30.0 仕様では 2xx 応答 → pathPattern / hostPattern が effective が保証されている。
+# 将来仕様変化で「2xx を返しながら pathPattern を黙って無視」する silent regression が起きうる
+# リスクは残るが、現在の防衛線は `/init-project verify` の Section 1 (= GET /v1/secrets で
+# pathPattern を test) + scripts/verify-m2.sh の E2E (= 棚リポ操作が authenticated で通れば
+# pathPattern が effective)。自動 assertion を入れるなら本関数末尾で GET /v1/secrets/<id>
+# 再取得 + jq assert する形 (= 別タスク、既存 vertex / GH 双方の curl 流儀を見直す範囲)。
 upsert_gh_secret() {
   local id
   id="$(secret_id)"
   if [ -z "$id" ] || [ "$id" = "null" ]; then
-    info "[secret] 未存在 → POST /v1/secrets で作成 (name=$GH_SECRET_NAME / host=$GH_API_HOST / header=$GH_SECRET_HEADER)"
+    info "[secret] 未存在 → POST /v1/secrets で作成 (name=$GH_SECRET_NAME / host=$GH_API_HOST / path=$GH_SECRET_PATH_PATTERN / header=$GH_SECRET_HEADER)"
     ( set -o pipefail
       SECRET_TOKEN="$SIDECAR_GH_TOKEN" jq -n \
           --arg name "$GH_SECRET_NAME" --arg host "$GH_API_HOST" \
+          --arg ppath "$GH_SECRET_PATH_PATTERN" \
           --arg header "$GH_SECRET_HEADER" --arg vfmt "$GH_SECRET_VALUE_FORMAT" \
           '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
+            pathPattern:$ppath,
             injectionConfig:{headerName:$header, valueFormat:$vfmt}}' \
         | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 投入 (POST /v1/secrets) に失敗"
     SECRET_OP="post"
   else
-    info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value 単独更新"
+    info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value+pathPattern partial update (path=$GH_SECRET_PATH_PATTERN)"
     ( set -o pipefail
       SECRET_TOKEN="$SIDECAR_GH_TOKEN" jq -n \
-          '{value:env.SECRET_TOKEN}' \
+          --arg ppath "$GH_SECRET_PATH_PATTERN" \
+          '{value:env.SECRET_TOKEN, pathPattern:$ppath}' \
         | curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
     SECRET_OP="patch"
   fi
   unset SECRET_TOKEN
-  ok "[secret] $SECRET_OP 完了 (name=${GH_SECRET_NAME} / host=${GH_API_HOST} / valueFormat=${GH_SECRET_VALUE_FORMAT} / 値はマスク)"
+  ok "[secret] $SECRET_OP 完了 (name=${GH_SECRET_NAME} / host=${GH_API_HOST} / path=${GH_SECRET_PATH_PATTERN} / valueFormat=${GH_SECRET_VALUE_FORMAT} / 値はマスク)"
 }
 
 # set_all_agents_mode_all は scripts/onecli-lib.sh で定義済み。
 
 main() {
-  info "OneCLI REST=${ONECLI_API} / GH App=${GH_APP_ID:-(未設定)} / Installation=${GH_INSTALLATION_ID:-(未設定)}"
   need GH_APP_ID
   need GH_INSTALLATION_ID
   need GH_APP_PEM_PATH
+  need SHELF_REPO_OWNER
+  # SHELF_REPO_OWNER から pathPattern を生成。デフォルトは置かない (.env.example 既定値
+  # HajimariInc は fork / 別案件で変わる可能性、必須 env 化で silent 罠を回避)。
+  # bash の global scope により upsert_gh_secret() (および内部の明示 subshell `( ... )`) から
+  # シェル変数として参照可能。export は機能上は冗長だが、env-driven 流儀 (= 関数間で
+  # 引き継ぐ値を明示) への整合のため残す。
+  export GH_SECRET_PATH_PATTERN="/repos/${SHELF_REPO_OWNER}/*"
+  info "OneCLI REST=${ONECLI_API} / GH App=${GH_APP_ID} / Installation=${GH_INSTALLATION_ID} / pathPattern=${GH_SECRET_PATH_PATTERN}"
   [ -r "$GH_APP_PEM_PATH" ] || fail "PEM ファイルが読めない: $GH_APP_PEM_PATH"
   # stderr を捨てない — curl の接続エラー (DNS / TLS / 接続拒否のメッセージ) が
   # 「到達できない」だけだと debug 不能になるため、curl 自身のエラーは端末に流す。

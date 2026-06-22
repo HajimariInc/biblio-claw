@@ -27,6 +27,7 @@ import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { resolveEquippedBiblios } from './biblio/equip.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -103,8 +104,10 @@ export function wakeContainer(session: Session): Promise<boolean> {
 async function spawnContainer(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
-    log.error('Agent group not found', { agentGroupId: session.agent_group_id });
-    return;
+    // throw して wakeContainer の .catch に拾わせる (= false 返却)。
+    // 旧実装は `return` で void 完了 → wakeContainer が `true` を返してしまい、
+    // caller が「コンテナ起動成功」と誤解する経路があった (M3 Phase 2 spawn-verify で表面化)。
+    throw new Error(`Agent group not found: ${session.agent_group_id}`);
   }
 
   // Refresh the destination map and default reply routing so any admin
@@ -126,7 +129,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+  const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -237,12 +240,12 @@ function resolveProviderContribution(
   return { provider, contribution };
 }
 
-function buildMounts(
+async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
   providerContribution: ProviderContainerContribution,
-): VolumeMount[] {
+): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
   // Per-group filesystem state lives forever after first creation. Init is
@@ -405,7 +408,37 @@ function buildMounts(
     }
   }
 
+  // M3 装備機構: buildMounts の fs 副作用 (initGroupFilesystem 等) と分離するため
+  // export 関数に委譲。テスト時の mock コストを最小化する。
+  await appendEquippedBiblioMounts(mounts, session, DATA_DIR);
+
   return mounts;
+}
+
+/**
+ * 装備済み biblio を `VolumeMount[]` 末尾に append する (per-biblio subPath, readonly)。
+ *
+ * `dataDir` は `resolveEquippedBiblios` の `equipmentRoot` と `subPathOf` の両方に
+ * 渡される単一の真実の入口で、const 束縛された `DATA_DIR` を test で上書きする
+ * フックを兼ねる。Docker は subPath を無視して bind mount、K8s は PVC subPath
+ * volumeMount として projection することで両 runtime が同一抽象 spec を共有する。
+ */
+export async function appendEquippedBiblioMounts(
+  mounts: VolumeMount[],
+  session: Session,
+  dataDir: string,
+): Promise<void> {
+  // path.resolve() で絶対パス保証 (= src/config.ts DATA_DIR の二重防御、equip.ts L78 と同じ理由)。
+  const equipmentRoot = path.resolve(dataDir, 'biblio-equipped');
+  const equipped = await resolveEquippedBiblios(session, { equipmentRoot });
+  for (const b of equipped) {
+    mounts.push({
+      hostPath: b.sourcePath,
+      subPath: subPathOf(b.sourcePath, dataDir),
+      containerPath: b.mountPath,
+      readonly: true,
+    });
+  }
 }
 
 /**
@@ -533,7 +566,12 @@ async function buildContainerSpec(
     mounts,
     env,
     onecliApplyArgs: onecliArgs,
-    command: ['-c', 'exec bun run /app/src/index.ts'],
+    // spawn-time biblio install を bun の前に挟む。`/app/install-biblios.sh` は
+    // image 内 wrapper (= /workspace/biblios/*/ を loop して `claude plugin
+    // marketplace add → install --scope user → enable`)。装備 0 件なら早期 exit で
+    // no-op。`exec` で bash プロセスが bun に置き換わり、bun が PID 1 として
+    // SIGTERM を直接受け取る (= `--entrypoint bash` 起動のため tini は介在しない)。
+    command: ['-c', '/app/install-biblios.sh && exec bun run /app/src/index.ts'],
     containerName,
     runAsUser,
     agentIdentifier,

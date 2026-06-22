@@ -2,28 +2,31 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: M2 PRD B Phase 3 完了 — **M2 北極星到達** (= patron 1 通の依頼で外部 biblio を棚に並べる経路が動く)。
+> **ステータス**: M3 Phase 4 (catalog-slack) 完了 — M2 北極星到達済 (patron 1 通の依頼で外部 biblio を棚に並べる経路が動く) + M3 Phase 1-4 完了 (装備機構 + 蔵書一覧 Slack feature)。
 >
 > - **PRD A 基盤**: GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet が **Native sidecar 多コンテナ Pod** (initContainers: `fetch-pem` + `cloud-sql-proxy` + `onecli` / containers: `orchestrator` + `gh-token-rotator` + `vertex-token-rotator`) として稼働。OneCLI gateway / GH installation token / Vertex Bearer token / CA bundle はすべて Pod 内 sidecar + `ca-secret-sync` で自動投入され、起動コマンドは `kubectl apply -f k8s/` のみで完結する。Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)、agent は K8s Job として spawn され NetworkPolicy で egress 制限される。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-m2-3.sh exit 0`)。
 > - **PRD B marketplace**: 仕入れ → 検品 → カテゴライズ (Vertex × Claude Sonnet-4.6) → 棚リポへの draft PR 作成 までの E2E が完成。M2 完成判定 verify (`scripts/verify-m2.sh <owner/repo>`) で **M2 PASS** を取得。OneCLI secret の `pathPattern=/repos/HajimariInc/*` で「棚 / 司書本体への operation のみ GH App auth が乗る、外部 public biblio の仕入れは無認証素通し」という最小権限経路を確立。
+> - **M3 装備機構 + 蔵書一覧**: 装備機構 (Phase 1-3 = 物理配置 / 司書自律呼び出し / 禁書・焼却の HITL 承認経路) + 蔵書一覧 Slack feature (Phase 4 = `@bot 蔵書` / `@bot 蔵書 biblio-dev` で棚の `marketplace.json` から全 / カテゴリ別 biblio 一覧を取得) まで完了。M9 (本体焼き込まない) は装備機構として継承。
 
 ## クイックスタート (biblio-claw, local)
 
+**前提**:
+- Node.js 22+ / pnpm / bun
+- Docker Desktop または Docker Engine
+- gcloud CLI + ADC ログイン済 (`gcloud auth application-default login --project hajimari-ai-hackathon-2026`)
+- `.env` 投入 — `.env.example` を雛形に `ANTHROPIC_VERTEX_PROJECT_ID` / `GH_APP_ID` / `GH_INSTALLATION_ID` / `GH_APP_PEM_PATH` / `SLACK_BOT_TOKEN` / `SHELF_REPO_OWNER` 等を手動で埋める
+
+**setup + 起動**:
+
 ```bash
-cp .env.example .env
-# .env に Vertex project / Slack token / GitHub App (App ID + Installation ID + PEM パス) を埋める
-gcloud auth application-default login --project hajimari-ai-hackathon-2026
-docker compose up -d --wait
-bash scripts/onecli-vertex-secret.sh     # ADC token を OneCLI に投入
-bash scripts/onecli-gh-secret.sh         # GitHub installation token を OneCLI に投入 (.env に GH_APP_* 設定済の場合)
-pnpm install
-./container/build.sh                      # agent コンテナをビルド (初回のみ)
-pnpm exec tsx scripts/init-cli-agent.ts --display-name <name> --agent-name <agent>
-pnpm run dev &                            # host を起動
-pnpm run chat "hello"                     # CLI から司書と会話 (smoke 用)
+cp .env.example .env       # 既存があれば skip、値は手動で埋める
+# claude code から /init-project を実行 (= 新規 setup、`.env` 準備 → docker compose →
+# deps install → host agent 登録 → token 投入 → コンテナ build → スモーク verify までを 1 連で実行)
+pnpm run dev               # host process を起動 (foreground、Slack adapter 接続)
+pnpm run chat "hello"      # smoke 用 CLI から司書と会話
 ```
 
-詳しくは `CLAUDE.md` (リポジトリ運用ルール + NanoClaw 上流継承) と `.claude/PRPs/` (実装計画、リポジトリ参加者のみ) を参照。日常運用は [`docs/operations-runbook.md`](docs/operations-runbook.md) (local / GCP の orchestrator・agent・OneCLI 早見表 + M2 verify 前提セットアップ)、Slack 2 環境分離 (本番 ws / 開発 ws) は [`docs/slack-environments-setup.md`](docs/slack-environments-setup.md) を参照。
+詳細手順 / トラブルシューティング / サブコマンド (`up` / `reset` / `refresh` / `verify`) は `.claude/commands/init-project.md` を参照。日常運用は [`docs/operations-runbook.md`](docs/operations-runbook.md) (local / GCP の orchestrator・agent・OneCLI 早見表 + M2 verify 前提セットアップ)、Slack 2 環境分離 (本番 ws / 開発 ws) は [`docs/slack-environments-setup.md`](docs/slack-environments-setup.md) を参照。
 
 ## GKE 運用メモ (デプロイ後の bootstrap / メンテ)
 

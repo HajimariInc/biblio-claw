@@ -180,4 +180,116 @@ export const shelveBiblio: McpToolDefinition = {
   },
 };
 
-registerTools([acquireBiblio, inspectBiblio, categorizeBiblio, shelveBiblio]);
+export const enkinBiblio: McpToolDefinition = {
+  tool: {
+    name: 'enkin_biblio',
+    description:
+      '禁書: 棚から biblio を除去するが装備源 (`/workspace/biblios/<name>/` の本物実体) は残置する (= 再装備可)。`name` (biblio 名 `<owner>--<repo>`) + `category` (biblio-dev|art|bf|ai、shelve 時に決めた値) を渡す。**破壊操作なので host 側で admin (DEN) 承認を経由する** — 承認後に shelf 側へ削除方向の draft PR が立ち、PR URL が後続のメッセージで通知される。fire-and-forget。装備リストの変更は本 tool では行わない (= 禁書後も装備源 dir が残るため次 spawn でも biblio は装備される。物理削除して再装備不可にしたい場合は shokyaku_biblio を使うこと)。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: {
+          type: 'string',
+          description: '禁書対象の biblio 名 (`<owner>--<repo>` 形式、棚に陳列済であること)。',
+        },
+        category: {
+          type: 'string',
+          enum: ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'],
+          description: '禁書対象の category (= shelve 時の値、shelf 上の path 計算に必要)。',
+        },
+      },
+      required: ['name', 'category'],
+    },
+  },
+  async handler(args) {
+    const name = ((args.name as string) || '').trim();
+    const category = ((args.category as string) || '').trim();
+    if (!name) return err('name を指定してください (禁書対象の biblio 名)。');
+    if (!category) return err('category を指定してください (biblio-dev|art|bf|ai のいずれか)。');
+
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'enkin_biblio', name, category }),
+    });
+
+    log(`enkin_biblio: ${requestId} → ${name} / ${category}`);
+    return ok(`禁書リクエストを受け付けました: ${name} (${category})。admin 承認後に PR が立ったら通知します。`);
+  },
+};
+
+export const shokyakuBiblio: McpToolDefinition = {
+  tool: {
+    name: 'shokyaku_biblio',
+    description:
+      '焼却: 棚から biblio を除去し、装備源 (`/workspace/biblios/<name>/` の本物実体) も物理削除する (= 再装備不可)。`name` (biblio 名 `<owner>--<repo>`) + `category` (biblio-dev|art|bf|ai、shelve 時に決めた値) を渡す。**破壊操作なので host 側で admin (DEN) 承認を経由する** — 承認後に shelf 側へ削除方向の draft PR が立ち + host の装備源 dir が `fs.rmSync` で物理削除される。装備リストからも全 session で個別削除される (= 次回 spawn 以降の warn ノイズ抑制)。fire-and-forget — PR URL は後続のメッセージで通知される。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: {
+          type: 'string',
+          description: '焼却対象の biblio 名 (`<owner>--<repo>` 形式、棚に陳列済であること)。',
+        },
+        category: {
+          type: 'string',
+          enum: ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'],
+          description: '焼却対象の category (= shelve 時の値、shelf 上の path 計算に必要)。',
+        },
+      },
+      required: ['name', 'category'],
+    },
+  },
+  async handler(args) {
+    const name = ((args.name as string) || '').trim();
+    const category = ((args.category as string) || '').trim();
+    if (!name) return err('name を指定してください (焼却対象の biblio 名)。');
+    if (!category) return err('category を指定してください (biblio-dev|art|bf|ai のいずれか)。');
+
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'shokyaku_biblio', name, category }),
+    });
+
+    log(`shokyaku_biblio: ${requestId} → ${name} / ${category}`);
+    return ok(`焼却リクエストを受け付けました: ${name} (${category})。admin 承認後に PR が立ったら通知します。`);
+  },
+};
+
+export const listBiblio: McpToolDefinition = {
+  tool: {
+    name: 'list_biblio',
+    description:
+      '棚 (HajimariInc/biblio-shelf) の marketplace.json から蔵書一覧を取得する。**patron が「蔵書」「蔵書一覧」「biblio list」「棚に何が並んでる」「biblio-dev だけ教えて」等の依頼を投げたら呼ぶ**。`category` 引数で 4 namespace (biblio-dev|art|bf|ai) のいずれかに絞り込める (省略時は全件)。fire-and-forget — 蔵書一覧 + カテゴリ別カウントの整形済テキストは後続のメッセージで通知されるので、それを受けて patron に渡すこと (= host 側で整形済なので原則そのまま流せる)。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        category: {
+          type: 'string',
+          enum: ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'],
+          description: '絞り込み対象の 4 namespace のいずれか。省略時は全件を返す。',
+        },
+      },
+      required: [],
+    },
+  },
+  async handler(args) {
+    // category は optional。型ガード後にそのまま action に渡す (= 妥当性は host 側で再 validate)。
+    const category = typeof args.category === 'string' ? args.category.trim() : '';
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'list_biblio', category }),
+    });
+
+    log(`list_biblio: ${requestId} → category=${category || '(all)'}`);
+    return ok(
+      `蔵書リクエストを受け付けました${category ? ` (category=${category})` : ''}。一覧が揃ったら結果を通知します。`,
+    );
+  },
+};
+
+registerTools([acquireBiblio, inspectBiblio, categorizeBiblio, shelveBiblio, enkinBiblio, shokyakuBiblio, listBiblio]);
