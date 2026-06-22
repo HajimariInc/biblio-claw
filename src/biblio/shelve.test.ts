@@ -693,17 +693,73 @@ describe('shelveMulti — 原子性 (1 件失敗で全体 fail、部分成功な
 });
 
 describe('shelveMulti — single 経路 (reqs.length === 1) で既存 shelve と完全互換', () => {
-  it('reqs.length === 1 で branch 名が既存形式 (shelve/<cat>--<name>) を維持', async () => {
+  // POST /pulls と POST /git/commits の body を捕える sink。
+  // PR title / commit message / PR body の互換性を 1 つのテストで固定する
+  // (= reqs.length === 1 分岐の回帰を verify-m2 (実 API) に頼らず unit で検知)。
+  type CompatSink = { pullsBody: Record<string, unknown> | null; commitBody: Record<string, unknown> | null };
+
+  function setupCompatFetchMock(sink: CompatSink, prNumber = 7): void {
+    let blobIndex = 0;
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string; body?: string }) => {
+      if (url.includes('/contents/.claude-plugin/marketplace.json') && (!init?.method || init.method === 'GET')) {
+        return res(404, { message: 'Not Found' });
+      }
+      if (url.includes('/git/ref/heads/main')) return res(200, { object: { sha: 'base-commit-sha' } });
+      if (url.match(/\/git\/commits\/[a-z0-9-]+$/) && (!init?.method || init.method === 'GET'))
+        return res(200, { tree: { sha: 'base-tree-sha' } });
+      if (url.endsWith('/git/blobs') && init?.method === 'POST') {
+        blobIndex++;
+        return res(201, { sha: `blob-sha-${blobIndex}` });
+      }
+      if (url.endsWith('/git/trees') && init?.method === 'POST') return res(201, { sha: 'new-tree-sha' });
+      if (url.endsWith('/git/commits') && init?.method === 'POST') {
+        sink.commitBody = init?.body ? JSON.parse(init.body) : null;
+        return res(201, { sha: 'new-commit-sha' });
+      }
+      if (url.endsWith('/git/refs') && init?.method === 'POST') return res(201, { ref: 'refs/heads/...' });
+      if (url.endsWith('/pulls') && init?.method === 'POST') {
+        sink.pullsBody = init?.body ? JSON.parse(init.body) : null;
+        return res(201, {
+          html_url: `https://github.com/HajimariInc/biblio-shelf/pull/${prNumber}`,
+          number: prNumber,
+        });
+      }
+      throw new Error(`unexpected: ${init?.method ?? 'GET'} ${url}`);
+    });
+  }
+
+  it('reqs.length === 1 で branch 名 / PR title / commit message が既存単一 shelve 形式を維持', async () => {
     setupQuarantine('owner--repo');
-    setupHappyPathMulti({ prNumber: 7 });
+    const sink: CompatSink = { pullsBody: null, commitBody: null };
+    setupCompatFetchMock(sink);
+
     const result = await shelveMulti([{ biblioName: 'owner--repo', category: 'biblio-dev', reason: 'compat check' }], {
       quarantineRoot: path.join(TEST_DIR, 'quarantine'),
       shelfRoot: path.join(TEST_DIR, 'shelf'),
     });
+
     expect(result.ok).toBe(true);
-    if (result.ok) {
-      // 既存 single shelve と同形式 (= verify-m2 で実 PR が立つときの命名と一致)
-      expect(result.branchName).toBe('shelve/biblio-dev--owner--repo');
-    }
+    if (!result.ok) throw new Error('expected ok=true');
+
+    // branch 名が既存形式 (= verify-m2 で実 PR が立つときの命名と一致)
+    expect(result.branchName).toBe('shelve/biblio-dev--owner--repo');
+
+    // PR title が既存形式 `shelve(<cat>): <name>` (multi 経路 `shelve(multi): N biblios ...` ではない)
+    expect(sink.pullsBody).not.toBeNull();
+    expect(sink.pullsBody?.title).toBe('shelve(biblio-dev): owner--repo');
+    // PR body が single 形式 (= 「## 陳列対象」見出し、「## カテゴリ別内訳」は multi 専用)
+    const prBody = sink.pullsBody?.body as string;
+    expect(prBody).toContain('## 陳列対象');
+    expect(prBody).toContain('- biblio: `owner--repo`');
+    expect(prBody).toContain('- category: `biblio-dev`');
+    expect(prBody).not.toContain('カテゴリ別内訳'); // multi 専用見出しが混入しない
+
+    // commit message が既存形式 `feat(<cat>): shelve <name>` (multi `feat(multi):` ではない)
+    expect(sink.commitBody).not.toBeNull();
+    const commitMsg = sink.commitBody?.message as string;
+    expect(commitMsg).toMatch(/^feat\(biblio-dev\): shelve owner--repo\n/);
+    expect(commitMsg).toContain('カテゴリ判定: biblio-dev');
+    expect(commitMsg).toContain('理由: compat check');
+    expect(commitMsg).not.toMatch(/^feat\(multi\)/); // multi 専用先頭が混入しない
   });
 });

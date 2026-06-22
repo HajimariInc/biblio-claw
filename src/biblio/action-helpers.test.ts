@@ -38,12 +38,21 @@ describe('BIBLIO_NAME_RE', () => {
     });
   });
 
+  describe('境界値 — 設計上 受理される (greedy matching の既知挙動を意図的に固定)', () => {
+    // 文字クラス `[A-Za-z0-9._-]*` が `-` を含むため `--` が segment 内に紛れ込んでも受理される。
+    // これは「先頭英数字 + 区切り存在 + path traversal 防御」の最小限制約として運用上問題に
+    // ならない (= GitHub repo 名にこれらの形は出ない)。将来 regex を厳格化したとき
+    // silent regression にならないよう、受理される境界を test として固定する。
+    it.each([
+      ['owner---repo'], // 3 連続ハイフン (= owner + "-repo" の組合せでマッチ)
+      ['owner--repo--'], // 末尾セパレータ (= owner + repo + "" の 3 要素として受理)
+      ['owner--repo--skill--extra'], // 4 要素以上 (= 3 要素まで定義だが greedy で受理、extractOwnerRepo で先頭 2 のみに丸める)
+    ])('"%s" を受理する (= greedy 既知挙動、Phase 4 前から)', (input) => {
+      expect(BIBLIO_NAME_RE.test(input)).toBe(true);
+    });
+  });
+
   describe('不正形式 — 拒否', () => {
-    // 注: regex の文字クラス `[A-Za-z0-9._-]*` は `-` を含むため、`owner---repo` /
-    // `owner--repo--` / `owner--repo--skill--extra` 等は **受理される** (= 既存挙動、Phase 4
-    // 前から)。これは「先頭が英数字 + パスセパレータ防御」の最小限制約として運用上問題に
-    // ならない (= GitHub repo 名にこれらの形は出ない)。Phase 4 では受理範囲を変えず
-    // 「2 要素または 3 要素を許容する」のみ拡張する。
     it.each([
       [''],
       ['short-name'], // セパレータなし
