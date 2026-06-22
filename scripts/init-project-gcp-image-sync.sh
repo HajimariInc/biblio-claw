@@ -15,10 +15,10 @@
 #   --dry-run            既定。全 Block を echo して exit 0 (Block 1 の実 probe は実行する)
 #   --confirm            実行 (= --dry-run の opposite)
 #   --no-build           Block 2 (build) を skip
-#   --no-push            Block 3 (push) を skip
-#   --no-apply           Block 4-6 (manifest 更新 + apply + 状況確認) を skip
-#   --rollout-restart    同 tag 上書き push 後の明示再起動 (= imagePullPolicy: Always と連携)
-#   -h, --help           ヘルプ
+#   --no-push           Block 3 (push) を skip
+#   --no-apply          Block 4-6 (manifest 更新 + apply + 状況確認) を skip
+#   --rollout-restart   同 tag 上書き push 後の明示再起動 (= imagePullPolicy: Always と連携)
+#   -h, --help          ヘルプ
 #
 # 前提:
 #   - kubectl context = gke_*_biblio-prod (= verify-phase-2-wiring.sh と同じ gate)
@@ -33,7 +33,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# .env 自動読み込み (= verify-m3.sh / onecli-gh-secret.sh と同パターン)
+# .env 自動読み込み (= verify-m3.sh / onecli-gh-secret.sh と同パターン)。本 script で
+# .env を直接参照する場面は現状ないが、将来の拡張 (= SHELF_* env を kubectl exec に
+# 渡す等) で必要になる可能性 + 既存スクリプト群との一貫性のため早期に取り込む。
 if [ -f "$ROOT/.env" ]; then set -a; . "$ROOT/.env"; set +a; fi
 
 # info/warn/fail/extract_result/json_field/json_array_length は verify-m3-helpers.sh に集約
@@ -95,7 +97,11 @@ EOF
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --tag)             TAG="${2:-}"; shift 2 ;;
+    --tag)
+      # `--tag` 末尾 (= 値なし) で `shift 2` が silent exit する罠を防ぐ事前チェック。
+      # `${2:-}` の空文字確認で「`--tag` の後に何もない」と「`--tag ''`」の両方を弾く。
+      if [ -z "${2:-}" ]; then usage >&2; fail "--tag の値が指定されていません (例: --tag m2-p4)"; fi
+      TAG="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=true; shift ;;
     --confirm)         DRY_RUN=false; shift ;;
     --no-build)        NO_BUILD=true; shift ;;
@@ -118,6 +124,17 @@ run() {
   else
     "$@" || fail "command failed: $*"
   fi
+}
+
+# push_image() ヘルパ: docker tag + docker push + ok の 3 操作を 1 呼び出しに集約。
+# Block 3 で 4 image × 3 操作 = 12 行繰り返しを 4 呼び出しに縮約 (= code-simplifier 採用)。
+# 2 引数で呼べる単純な関数 = 過剰抽象ではなく機械的反復の正当な吸収。
+push_image() {
+  local local_img="$1" ar_name="$2"
+  info "[push] $local_img → $GAR/$ar_name:$TAG"
+  run docker tag "$local_img" "$GAR/$ar_name:$TAG"
+  run docker push "$GAR/$ar_name:$TAG"
+  ok "[push] $ar_name:$TAG"
 }
 
 info "==== Phase 4.5 image-sync (tag=$TAG, dry-run=$DRY_RUN) ===="
@@ -152,8 +169,11 @@ if ! gcloud auth print-access-token >/dev/null 2>&1; then
 fi
 ok '[auth] gcloud auth print-access-token OK'
 
-# docker 設定確認 (= ~/.docker/config.json に gcloud helper が登録されているか)
-if [ -f "$HOME/.docker/config.json" ] && grep -q 'asia-northeast1-docker.pkg.dev' "$HOME/.docker/config.json" 2>/dev/null; then
+# docker 設定確認 (= ~/.docker/config.json に gcloud helper が登録されているか)。
+# 旧版は `grep -q ... 2>/dev/null` で読み取り権限エラーも「未設定」warn に倒していた
+# (= 真の原因が見えない silent failure)。stderr を捨てずに残し、grep 自体の失敗
+# (= 行 hit なし) のみで warn 経路に倒す。
+if [ -f "$HOME/.docker/config.json" ] && grep -q 'asia-northeast1-docker.pkg.dev' "$HOME/.docker/config.json"; then
   ok '[auth] gcloud auth configure-docker (asia-northeast1) 設定済'
 else
   warn '[auth] ~/.docker/config.json に asia-northeast1-docker.pkg.dev の credHelper 未設定。push 時に 401 リスク。対処: gcloud auth configure-docker asia-northeast1-docker.pkg.dev'
@@ -177,19 +197,17 @@ else
   run docker build -t "biblio-claw:$TAG" "$ROOT"
   ok "[build] biblio-claw:$TAG"
 
-  # agent (= container/build.sh 経由、install-slug 付き tag を local に作る)
-  # 注: container/build.sh は nanoclaw-agent-v2-<hash>:latest を打つ。
-  # AR push 用 tag (nanoclaw-agent:$TAG) は Block 3 で docker tag で打ち直す。
-  info '[build] nanoclaw-agent (= container/build.sh、install-slug 付き local tag)...'
+  # agent: container/build.sh は nanoclaw-agent-v2-<hash>:latest を生成する。
+  # AR push 用の nanoclaw-agent:$TAG は Block 3 で docker tag で貼り直す。
+  info '[build] nanoclaw-agent (= container/build.sh)...'
   run "$ROOT/container/build.sh"
   ok '[build] nanoclaw-agent (install-slug tag local)'
 
-  # sidecar-gh (build context = repo root)
+  # sidecar-gh / sidecar-vertex (build context = repo root)
   info "[build] biblio-sidecar-gh:$TAG..."
   run docker build -f "$ROOT/Dockerfile.sidecar.gh" -t "biblio-sidecar-gh:$TAG" "$ROOT"
   ok "[build] biblio-sidecar-gh:$TAG"
 
-  # sidecar-vertex (build context = repo root)
   info "[build] biblio-sidecar-vertex:$TAG..."
   run docker build -f "$ROOT/Dockerfile.sidecar.vertex" -t "biblio-sidecar-vertex:$TAG" "$ROOT"
   ok "[build] biblio-sidecar-vertex:$TAG"
@@ -201,32 +219,24 @@ info '=== Block 3: AR push (4 image) ==='
 if "$NO_PUSH"; then
   info '[push] --no-push 指定、skip'
 else
-  # orchestrator
-  info "[push] biblio-claw:$TAG → $GAR/biblio-claw:$TAG"
-  run docker tag "biblio-claw:$TAG" "$GAR/biblio-claw:$TAG"
-  run docker push "$GAR/biblio-claw:$TAG"
-  ok "[push] biblio-claw:$TAG"
-
-  # agent (= install-slug 付き local tag → AR tag に貼り直し)
-  # setup/lib/install-slug.sh を source した sub-shell で container_image_base を呼ぶ
-  slug_base="$(bash -c "source '$ROOT/setup/lib/install-slug.sh' && container_image_base")"
+  # agent image の install-slug 取得 (= setup/lib/install-slug.sh の container_image_base)。
+  # 旧版は sub-shell の失敗 (= ファイル不在 / shasum 不在 / source 構文エラー) を握らず、
+  # set -euo pipefail で silent exit していた (= fail() を経由しないため [FAIL] 不出力)。
+  # ファイル存在を先に確認 + stderr を別ファイルに退避して fail メッセージに展開する。
+  [ -f "$ROOT/setup/lib/install-slug.sh" ] || \
+    fail "[push] setup/lib/install-slug.sh が見つからない (path=$ROOT/setup/lib/install-slug.sh)"
+  slug_err="$(mktemp -t biblio-p4-5-slug-XXXXXX.stderr)"
+  slug_base="$(bash -c "source '$ROOT/setup/lib/install-slug.sh' && container_image_base" 2>"$slug_err")" \
+    || fail "[push] container_image_base 取得失敗 (stderr: $(cat "$slug_err"))"
+  rm -f "$slug_err"
   slug_image="${slug_base}:latest"
-  info "[push] nanoclaw-agent (slug=$slug_image → $GAR/nanoclaw-agent:$TAG)"
-  run docker tag "$slug_image" "$GAR/nanoclaw-agent:$TAG"
-  run docker push "$GAR/nanoclaw-agent:$TAG"
-  ok "[push] nanoclaw-agent:$TAG"
+  info "[push] agent slug 確定: $slug_image"
 
-  # sidecar-gh
-  info "[push] biblio-sidecar-gh:$TAG → $GAR/biblio-sidecar-gh:$TAG"
-  run docker tag "biblio-sidecar-gh:$TAG" "$GAR/biblio-sidecar-gh:$TAG"
-  run docker push "$GAR/biblio-sidecar-gh:$TAG"
-  ok "[push] biblio-sidecar-gh:$TAG"
-
-  # sidecar-vertex
-  info "[push] biblio-sidecar-vertex:$TAG → $GAR/biblio-sidecar-vertex:$TAG"
-  run docker tag "biblio-sidecar-vertex:$TAG" "$GAR/biblio-sidecar-vertex:$TAG"
-  run docker push "$GAR/biblio-sidecar-vertex:$TAG"
-  ok "[push] biblio-sidecar-vertex:$TAG"
+  # push_image() で 4 image を順次 push (= docker tag → docker push → ok 3 操作)。
+  push_image "biblio-claw:$TAG"              biblio-claw
+  push_image "$slug_image"                   nanoclaw-agent
+  push_image "biblio-sidecar-gh:$TAG"        biblio-sidecar-gh
+  push_image "biblio-sidecar-vertex:$TAG"    biblio-sidecar-vertex
 fi
 
 # === Block 4: manifest image tag 更新 (sed -i × 4 image) =============================
@@ -245,7 +255,8 @@ else
   # image 名で限定する regex で 4 行を一括書き換え。
   # `biblio-claw/<image-name>:<old-tag>` → `biblio-claw/<image-name>:$TAG`
   # 注: AR の repository path `biblio-claw/<image-name>` を prefix にすれば image 名で限定でき、
-  # L137 / L156 / L208 / L244 の 4 行のみ hit する (= 衝突なし)。
+  # 該当 4 行のみ hit する (= 衝突なし)。
+  # `[^"' ,}]*` は YAML flow style ({ ..., value: ..., }) の `,` と `}` まで除外。
   for img in biblio-claw nanoclaw-agent biblio-sidecar-gh biblio-sidecar-vertex; do
     before="$(grep "biblio-claw/$img:" "$MANIFEST" | head -1 | sed -n "s|.*biblio-claw/$img:\([^\"' ,}]*\).*|\1|p")"
     if [ -z "$before" ]; then
@@ -257,12 +268,21 @@ else
       continue
     fi
     run sed -i "s|biblio-claw/$img:[^\"' ,}]*|biblio-claw/$img:$TAG|g" "$MANIFEST"
-    ok "[manifest] $img $before → $TAG"
+    # dry-run 時の「書き換え完了」誤認を防ぐため confirm モード時のみ ok を出す
+    # (= dry-run では sed -i は実行されていない)。
+    "$DRY_RUN" || ok "[manifest] $img $before → $TAG"
   done
 
-  # 結果確認 (= dry-run でも実行、grep は読むだけ)
-  info '[manifest] 書き換え後の image 行:'
-  grep -n "biblio-claw/.*:.*$TAG" "$MANIFEST" >&2 || true
+  # 書き換え結果の事後 assert + 表示 (= 旧版は `grep -n ... || true` で hit 数を
+  # 確認せず、書き換え 0 件のまま Block 5 で古い tag を apply するリスクがあった)。
+  # 期待 hit 数: image 名 4 種 × 各 manifest 行 1 = 4 行以上。
+  if ! "$DRY_RUN"; then
+    hit="$(grep -c "biblio-claw/.*:$TAG" "$MANIFEST" || true)"
+    [ "$hit" -ge 4 ] || \
+      fail "[manifest] sed -i 後の tag 書き換え確認失敗 (期待=4 行以上、実際=$hit 行)。manifest を確認: $MANIFEST"
+    info "[manifest] 書き換え後の image 行 ($hit 行):"
+    grep -n "biblio-claw/.*:$TAG" "$MANIFEST" >&2
+  fi
 fi
 
 # === Block 5: kubectl apply + rollout status 待ち ====================================
@@ -309,30 +329,56 @@ else
     fail "[pod-image] mismatch: got=$pod_image expected=$expected_image"
   fi
 
-  # Pod 内 env 反映確認 (= Phase 2 で追加した LOG_FORMAT / LOG_COMPONENT)
-  env_dump="$(kubectl exec "$ORCH_POD" -c orchestrator -n "$NS" -- sh -c 'echo LOG_FORMAT=${LOG_FORMAT:-<unset>}; echo LOG_COMPONENT=${LOG_COMPONENT:-<unset>}' 2>/dev/null || echo '<exec failed>')"
+  # Pod 内 env 反映確認 (= Phase 2 で追加した LOG_FORMAT / LOG_COMPONENT)。
+  # 旧版は `2>/dev/null || echo '<exec failed>'` で kubectl exec 自体の失敗
+  # (Pod 不在 / CrashLoop / RBAC 不足) を「env 未反映」と誤誘導していた。
+  # stderr を保持して exec 失敗時は接続問題として fail する。
+  env_err="$(mktemp -t biblio-p4-5-env-XXXXXX.stderr)"
+  env_dump="$(kubectl exec "$ORCH_POD" -c orchestrator -n "$NS" -- \
+    sh -c 'echo LOG_FORMAT=${LOG_FORMAT:-<unset>}; echo LOG_COMPONENT=${LOG_COMPONENT:-<unset>}' \
+    2>"$env_err")" \
+    || fail "[pod-env] kubectl exec 失敗 (Pod/コンテナ接続問題): $(cat "$env_err")"
+  rm -f "$env_err"
   if echo "$env_dump" | grep -q 'LOG_FORMAT=json' && echo "$env_dump" | grep -q 'LOG_COMPONENT=host-orchestrator'; then
     ok '[pod-env] LOG_FORMAT=json + LOG_COMPONENT=host-orchestrator'
   else
     fail "[pod-env] Phase 2 env が反映されていない (got: $env_dump)"
   fi
 
-  # M3 ファイル存在確認 (= image に biblio-list.ts 等が焼かれているか)
-  if kubectl exec "$ORCH_POD" -c orchestrator -n "$NS" -- test -f /app/scripts/biblio-list.ts >/dev/null 2>&1; then
+  # M3 ファイル存在確認 (= image に biblio-list.ts 等が焼かれているか)。
+  # 旧版は `>/dev/null 2>&1` で kubectl exec 失敗と test -f 失敗を区別できなかった
+  # (= 「再 build 必要」と誤誘導されることがあった)。stderr を保持して原因分離する。
+  files_err="$(mktemp -t biblio-p4-5-files-XXXXXX.stderr)"
+  if kubectl exec "$ORCH_POD" -c orchestrator -n "$NS" -- \
+    test -f /app/scripts/biblio-list.ts 2>"$files_err"; then
     ok '[pod-files] /app/scripts/biblio-list.ts 存在 (= M3 反映済)'
   else
-    fail '[pod-files] /app/scripts/biblio-list.ts が存在しない (= image に M3 未焼成、再 build 必要)'
+    # kubectl exec の stderr が空 = test -f が exit 1 (= ファイル不在 = M3 未焼成)
+    # stderr 出力あり = kubectl 接続問題 (= RBAC / Pod 状態)
+    if [ -s "$files_err" ]; then
+      fail "[pod-files] kubectl exec 失敗 (Pod/コンテナ接続問題): $(cat "$files_err")"
+    else
+      fail '[pod-files] /app/scripts/biblio-list.ts が存在しない (= image に M3 未焼成、再 build 必要)'
+    fi
   fi
+  rm -f "$files_err"
 
-  # Phase 2 JSON ログ観測 (= 直近 60s、Pod 起動直後のログを拾う)
-  # 注: rollout 直後はログが出始める前なので 5s sleep + 直近 60s 内に JSON 行が無ければ WARN に留める
-  # (= 厳格 assert は verify-phase-4-deploy.sh に委ねる、本 Phase は image-sync 完了確認なので緩い)
+  # Phase 2 JSON ログ観測 (= 直近 60s、Pod 起動直後のログを拾う)。
+  # 旧版は `2>/dev/null | sed | grep | head -3 || true` で kubectl logs 自体の失敗
+  # (= Pod 名不正 / namespace エラー / RBAC 不足 / CrashLoopBackOff) を握りつぶし、
+  # 「ログが出ていないだけ」と誤誘導していた。stderr を保持して取得失敗を warn 経路で
+  # 可視化する。
   info '[log-gke] orchestrator JSON ログ観測 (直近 60s)...'
   sleep 5
-  recent_logs="$(kubectl logs "$ORCH_POD" -n "$NS" -c orchestrator --since=60s 2>/dev/null \
+  log_err="$(mktemp -t biblio-p4-5-log-XXXXXX.stderr)"
+  recent_logs="$(kubectl logs "$ORCH_POD" -n "$NS" -c orchestrator --since=60s 2>"$log_err" \
     | sed -r 's/\x1b\[[0-9;]*m//g' \
     | grep -E '^\{.*"severity":.*"component":.*\}' \
     | head -3 || true)"
+  if [ -s "$log_err" ]; then
+    warn "[log-gke] kubectl logs 取得時に stderr: $(tr '\n' ' ' < "$log_err")"
+  fi
+  rm -f "$log_err"
   if [ -z "$recent_logs" ]; then
     warn '[log-gke] 直近 60s に JSON ログ未観測 (= Pod 起動直後で normal、後で verify-phase-4-deploy.sh で再確認)'
   else
