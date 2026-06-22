@@ -142,8 +142,8 @@ export function setupVertexProxy(): void {
 }
 
 /**
- * Vertex 呼び出しの追跡 context。Task 10 (request_id propagation) で全 caller が ctx を渡す。
- * axis は inspect 経路の 3 軸判定 (`legal` / `quality` / `dangerous`)、biblio_name は対象 biblio。
+ * Vertex 呼び出しの追跡 context。
+ * axis は inspect 経路の 3 軸判定 (`legal` / `quality` / `dangerous`)、biblioName は対象 biblio。
  */
 export interface VertexCallCtx {
   requestId?: string;
@@ -269,6 +269,18 @@ export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx
     throw new Error(
       `vertex-client: response missing candidates[0].content.parts[0].text — ${JSON.stringify(json).slice(0, 300)}`,
     );
+  }
+  // usageMetadata 不在 (= Vertex API バージョン差 / streaming 経路) は BQ cost 集計が silent
+  // に 0 になる罠を生むため warn で可視化。`?? 0` fallback は維持し、ログ集約は崩さない。
+  if (!json.usageMetadata) {
+    log.warn('vertex.call: usageMetadata absent', {
+      event: 'vertex.call',
+      model: modelId,
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+      axis: ctx?.axis,
+      biblio_name: ctx?.biblioName,
+    });
   }
   log.info('vertex.call', {
     event: 'vertex.call',
@@ -409,6 +421,16 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
   const text = textBlock?.text;
   if (typeof text !== 'string' || text.length === 0) {
     throw new Error(`vertex-client: response missing content[type=text].text — ${JSON.stringify(json).slice(0, 300)}`);
+  }
+  if (!json.usage) {
+    log.warn('vertex.call: usage absent', {
+      event: 'vertex.call',
+      model: modelId,
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+      axis: ctx?.axis,
+      biblio_name: ctx?.biblioName,
+    });
   }
   log.info('vertex.call', {
     event: 'vertex.call',

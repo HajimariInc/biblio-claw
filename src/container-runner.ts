@@ -517,13 +517,10 @@ async function buildContainerSpec(
   // specific is in container.json (read by runner at startup).
   const env: { name: string; value: string }[] = [{ name: 'TZ', value: TIMEZONE }];
 
-  // Phase 2 ログ設定 — agent コンテナ側 (= Bun 経路の container/agent-runner/src/log.ts) が
-  // 読む env を host orchestrator の LOG_FORMAT から伝搬する。component は agent-runner 固定
-  // (= host orchestrator の host-orchestrator と Cloud Logging で区別できるように)。host 側で
-  // 未設定 (= local docker compose 開発で text モード等) なら伝搬しない (default text)。
-  if (process.env.LOG_FORMAT) {
-    env.push({ name: 'LOG_FORMAT', value: process.env.LOG_FORMAT });
-  }
+  // agent コンテナ (= Bun 経路の container/agent-runner/src/log.ts) の LOG_FORMAT を
+  // host orchestrator の値に合わせる。host が未設定なら 'text' を明示伝搬 = host と agent が
+  // 非対称 (host=json / agent=text) になる経路を塞ぐ。
+  env.push({ name: 'LOG_FORMAT', value: process.env.LOG_FORMAT ?? 'text' });
   env.push({ name: 'LOG_COMPONENT', value: 'agent-runner' });
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).

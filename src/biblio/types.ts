@@ -79,8 +79,8 @@ export type InspectResult =
  */
 export interface InspectOptions {
   quarantineRoot?: string;
-  /** Vertex 呼び出しに propagate する追跡 context (request_id 等)。 */
-  ctx?: { requestId?: string; sessionId?: string };
+  /** Vertex / ghFetch 呼び出しに propagate する追跡 context (`ShokyakuOptions.ctx` と同型)。 */
+  ctx?: import('./shelf-gh.js').GhFetchCtx;
 }
 
 /**

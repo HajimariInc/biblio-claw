@@ -71,9 +71,12 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
   try {
     const result = await inspect({ biblioName: rawName }, { ctx: { requestId, sessionId: session.id } });
     await writeBackMessage(inDb, resultText(rawName, result), 'inspect-resp', 'inspect_biblio');
+    // verdict 3 値 (ACCEPT/HOLD/REJECT) を outcome 3 値 (success/hold/failure) に対応させる。
+    // HOLD は「判定保留」で失敗ではないため、BQ 集計で REJECT (失敗) と区別する。
+    const outcome = result.verdict === 'ACCEPT' ? 'success' : result.verdict === 'HOLD' ? 'hold' : 'failure';
     log.info('inspect_biblio done', {
       event: 'biblio.inspect',
-      outcome: result.verdict === 'ACCEPT' ? 'success' : 'failure',
+      outcome,
       biblioName: rawName,
       verdict: result.verdict,
       sessionId: session.id,

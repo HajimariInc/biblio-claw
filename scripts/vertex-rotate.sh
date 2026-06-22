@@ -30,33 +30,8 @@ SCRIPTS_DIR="${SCRIPTS_DIR:-/scripts}"
 WORKER="${SCRIPTS_DIR}/onecli-vertex-secret.sh"
 
 COMPONENT_NAME="${LOG_COMPONENT:-vertex-token-rotator}"
-
-# JSON エスケープ (= bash 内で完結、jq 不要)。\ → \\, " → \", LF → \n。
-json_escape() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  s="${s//$'\n'/\\n}"
-  printf '%s' "$s"
-}
-
-# log_event SEVERITY event outcome msg...
-# LOG_FORMAT=json なら structured JSON、それ以外は既存 [component] text。両経路とも stderr。
-log_event() {
-  local severity="$1" event="$2" outcome="$3"
-  shift 3
-  local msg="$*"
-  if [ "${LOG_FORMAT:-text}" = "json" ]; then
-    local t
-    t=$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')
-    printf '{"severity":"%s","time":"%s","component":"%s","event":"%s","outcome":"%s","message":"%s"}\n' \
-      "$severity" "$t" "$COMPONENT_NAME" "$event" "$outcome" "$(json_escape "$msg")" >&2
-  else
-    printf '[%s] %s\n' "$COMPONENT_NAME" "$msg" >&2
-  fi
-}
-
-log() { log_event INFO rotation.message '' "$*"; }
+# shellcheck source=./rotate-log.sh
+source "${SCRIPTS_DIR}/rotate-log.sh"
 
 # bash で実行するので実行ビットは不要、存在確認で十分。
 [ -f "$WORKER" ] || { log_event ERROR rotation.config_error failure "worker script not found at $WORKER"; exit 1; }

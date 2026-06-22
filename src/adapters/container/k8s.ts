@@ -271,23 +271,29 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     const failed = conds.some((c) => c.type === 'Failed' && c.status === 'True');
     if (complete || failed) {
       this.pending.delete(jobName);
-      // killed (= host が kill 要求) は patron 視点では「正常終了」の延長なので残置の警告にしない。
-      // failed (= K8s が想定外に終了させた) は status.conditions[].message を propagate して
-      // 「なぜ Job が死んだか」を host ログに残す (silent failure 解消)。
-      if (failed && !handle.killed) {
+      // killed (= host が kill 要求) は patron 視点では「正常終了」の延長。
+      // failed の status.conditions[].message を propagate して「なぜ Job が死んだか」を host
+      // ログに残す。killed=true 時も conditions を debug で残す = kill 後に K8s 由来の異常が
+      // 重なったケースを切り分け可能にする。
+      if (failed) {
         const conditionsMessage =
           conds
             .filter((c) => c.type === 'Failed')
             .map((c) => `${c.reason ?? '?'}: ${c.message ?? ''}`)
             .join(' | ') || '(no conditions)';
-        log.error('k8s.job_failed', {
+        const logData = {
           event: 'k8s.job_failed',
           outcome: 'failure',
           job_name: jobName,
           session_id: job.metadata?.labels?.['biblio.session-id'] ?? null,
           agent_group_id: job.metadata?.labels?.['biblio.agent-group-id'] ?? null,
           conditions_message: conditionsMessage,
-        });
+        };
+        if (handle.killed) {
+          log.debug('k8s.job_failed after kill (expected)', logData);
+        } else {
+          log.error('k8s.job_failed', logData);
+        }
       }
       handle.resolve({
         code: job.status?.succeeded ?? null,

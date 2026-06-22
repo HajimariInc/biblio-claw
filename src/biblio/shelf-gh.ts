@@ -54,7 +54,6 @@ export class GhHttpError extends Error {
 
 /**
  * ghFetch を呼ぶ全 caller が 1 patron 依頼を跨いで追跡するための文脈。
- * Task 10 (request_id propagation) で全 caller が ctx を渡す。
  */
 export interface GhFetchCtx {
   requestId?: string;
@@ -91,10 +90,7 @@ export async function ghFetch(
     } catch (bodyErr) {
       log.warn('gh: failed to read error body', { step, status: res.status, bodyErr });
     }
-    // 404 は呼び出し側で expected fallback として扱う経路 (fetchMarketplace 等) があるため debug。
-    // それ以外の non-2xx は warn で残す (silent failure 解消)。
-    const level = res.status === 404 ? 'debug' : 'warn';
-    log[level]('github.fetch failed', {
+    const logData = {
       event: 'github.fetch',
       outcome: 'failure',
       step,
@@ -103,7 +99,14 @@ export async function ghFetch(
       error_body_preview: body.slice(0, 200),
       request_id: ctx?.requestId,
       session_id: ctx?.sessionId,
-    });
+    };
+    // 404 は呼び出し側で expected fallback として扱う経路 (fetchMarketplace 等) がある。
+    // それ以外の non-2xx は warn で残す。
+    if (res.status === 404) {
+      log.debug('github.fetch failed', logData);
+    } else {
+      log.warn('github.fetch failed', logData);
+    }
     throw new GhHttpError(step, res.status, body);
   }
   log.debug('github.fetch ok', {

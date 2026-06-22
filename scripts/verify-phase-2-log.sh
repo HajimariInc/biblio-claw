@@ -92,11 +92,10 @@ echo "$ERROR_LINE" | jq -e '.err.error_name == "Error" and .err.error_message ==
   || fail "assert Error type 展開失敗 (line: $ERROR_LINE)"
 ok "assertion 5: Error 型が { error_name, error_message, stack } に serialize された"
 
-# --- assertion 4: shell rotator (gh-rotate.sh の log_event) ---
+# --- assertion 4: shell rotator (rotate-log.sh の log_event) ---
 info 'assertion 4: shell rotator log_event JSON 出力 smoke test'
-ROTATE_OUT=$(LOG_FORMAT=json LOG_COMPONENT=gh-token-rotator bash -c '
-  # gh-rotate.sh の log_event を source で借用 (rotation 本体は実行しない)
-  source <(sed -n "/^COMPONENT_NAME=/,/^log() /p" scripts/gh-rotate.sh)
+ROTATE_OUT=$(LOG_FORMAT=json COMPONENT_NAME=gh-token-rotator bash -c '
+  source scripts/rotate-log.sh
   log_event INFO  rotation.ok      success "smoke test ok"
   log_event ERROR rotation.failed  failure "exit_code=42"
 ' 2>&1)
@@ -113,5 +112,16 @@ echo "$ROTATE_LINES" | sed -n '2p' | jq -e '.severity == "ERROR" and .event == "
   || fail "rotator ERROR 行 assert 失敗: $(echo "$ROTATE_LINES" | sed -n '2p')"
 ok "assertion 4: shell rotator log_event が JSON 形式 + event/outcome/component で出力"
 
+# --- assertion 4b: json_escape が TAB / CR / 制御文字を含む文字列でも valid JSON を生成する ---
+info 'assertion 4b: json_escape TAB/CR 制御文字エスケープ'
+ESCAPE_OUT=$(LOG_FORMAT=json COMPONENT_NAME=gh-token-rotator bash -c '
+  source scripts/rotate-log.sh
+  log_event ERROR rotation.failed failure "$(printf "col1\tcol2\rcol3")"
+' 2>&1 | grep '^{' | head -1)
+[ -n "$ESCAPE_OUT" ] || fail "TAB/CR を含む msg で JSON 行が出ませんでした"
+echo "$ESCAPE_OUT" | jq -e '.message' >/dev/null \
+  || fail "TAB/CR を含む msg で invalid JSON を生成しました: $ESCAPE_OUT"
+ok "assertion 4b: json_escape が TAB/CR を含む文字列で valid JSON を生成"
+
 # --- 全 PASS ---
-printf '\n[PASS] Phase 2 log JSON PASS — 5/5 assertion all passed\n'
+printf '\n[PASS] Phase 2 log JSON PASS — 6/6 assertion all passed\n'

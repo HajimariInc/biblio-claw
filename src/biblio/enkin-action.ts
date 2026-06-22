@@ -32,7 +32,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
       ? (payload.category as BiblioCategory)
       : 'biblio-dev';
-  // approval 後の実処理は「承認申請」とは別境界 → 独立 request_id を生成 (Plan: 各 action ごとに独立)。
+  // approval 後の実処理は「承認申請」とは別境界 → 独立 request_id を生成。
   const requestId = crypto.randomUUID();
   if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
     log.error('enkin_confirm: invalid payload', {
@@ -100,7 +100,7 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
   const validated = await validateBiblioInput(content, inDb, session, 'enkin-resp', 'enkin_biblio', '禁書');
   if (!validated) return;
   const { biblioName, category } = validated;
-  // 「承認申請」の境界 (= approval handler 側とは別 request_id、Plan: 各 action ごとに独立)。
+  // 「承認申請」の境界 (= approval handler 側とは別 request_id)。
   const requestId = crypto.randomUUID();
   log.info('enkin_biblio from agent', {
     event: 'biblio.enkin_request',

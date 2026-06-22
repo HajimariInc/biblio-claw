@@ -28,7 +28,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
       ? (payload.category as BiblioCategory)
       : 'biblio-dev';
-  // approval 後の境界 = 独立 request_id (enkin-action.ts と同方針)。
+  // approval 後の境界 = 独立 request_id (= 申請境界とは別 trace)。
   const requestId = crypto.randomUUID();
   if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
     log.error('shokyaku_confirm: invalid payload', {

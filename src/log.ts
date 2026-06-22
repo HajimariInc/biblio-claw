@@ -39,6 +39,7 @@ function formatErr(err: unknown): string {
 function formatData(data: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(data)) {
+    if (RESERVED_KEYS.has(k)) continue; // text モードでも json モードと対称に drop
     parts.push(`${KEY_COLOR}${k}${RESET}=${k === 'err' ? formatErr(v) : JSON.stringify(v)}`);
   }
   return parts.length ? ' ' + parts.join(' ') : '';
