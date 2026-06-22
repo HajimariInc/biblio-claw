@@ -368,6 +368,81 @@ describe('acquire', () => {
     expect(fs.existsSync(path.join(QUARANTINE, 'someone--repo--not-a-skill'))).toBe(false);
   });
 
+  it('skill 指定で sparse-checkout init 失敗 → clone_failed (quarantine 削除)', async () => {
+    // 4 子プロセスのうち最も環境依存度が高い (= --cone mode 未対応 git バージョン) 分岐の網羅
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'git') {
+        const a = args as string[];
+        if (a[0] === 'clone') {
+          const dest = a[a.length - 1];
+          fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+          return spawnResult(0);
+        }
+        if (a[2] === 'sparse-checkout' && a[3] === 'init') {
+          return spawnResult(128, 'error: unknown option `cone`');
+        }
+      }
+      return spawnResult(0);
+    });
+    const result = await acquire({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('clone_failed');
+      expect(result.detail).toContain('sparse-checkout init');
+    }
+    expect(fs.existsSync(path.join(QUARANTINE, 'anthropics--skills--algorithmic-art'))).toBe(false);
+  });
+
+  it('skill 指定で checkout 失敗 → clone_failed (quarantine 削除)', async () => {
+    // sparse-checkout set まで成功するが checkout (= blob 遅延 fetch 経路) が失敗するケース
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'git') {
+        const a = args as string[];
+        if (a[0] === 'clone') {
+          const dest = a[a.length - 1];
+          fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+          return spawnResult(0);
+        }
+        if (a[2] === 'sparse-checkout') return spawnResult(0);
+        if (a[2] === 'checkout') return spawnResult(128, 'error: unable to checkout');
+      }
+      return spawnResult(0);
+    });
+    const result = await acquire({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('clone_failed');
+      expect(result.detail).toContain('checkout に失敗');
+    }
+    expect(fs.existsSync(path.join(QUARANTINE, 'anthropics--skills--algorithmic-art'))).toBe(false);
+  });
+
+  it('skill 指定で sparse 後の skill dir 自体が不在 → manifest_missing (quarantine 削除)', async () => {
+    // patron が指定した skill が repo 内に存在しない場合の挙動 (= sparse-checkout set 自体は
+    // 成功するが、worktree 展開後に skill dir が作られないケース)。SKILL.md 不在 test とは別経路で、
+    // `!fs.existsSync(skillDir)` の早期分岐を直接 cover する。
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'git') {
+        const a = args as string[];
+        if (a[0] === 'clone') {
+          const dest = a[a.length - 1];
+          fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+          return spawnResult(0);
+        }
+        // sparse-checkout set / init / checkout すべて成功するが skill dir を作らない
+        return spawnResult(0);
+      }
+      return spawnResult(0);
+    });
+    const result = await acquire({ repo: 'someone/repo', skill: 'non-existent-skill' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('manifest_missing');
+      expect(result.detail).toContain('skill ディレクトリが見つかりません');
+    }
+    expect(fs.existsSync(path.join(QUARANTINE, 'someone--repo--non-existent-skill'))).toBe(false);
+  });
+
   it('既存 quarantine を冪等に上書きする (再取得)', async () => {
     const dest = path.join(QUARANTINE, 'octocat--hello');
     fs.mkdirSync(dest, { recursive: true });

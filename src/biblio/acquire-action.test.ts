@@ -119,6 +119,21 @@ describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
     await handler({ repo: 'oct/hi', skill: '   ' }, dummySession, dummyDb);
     expect(acquireMock).toHaveBeenCalledWith({ repo: 'oct/hi' });
   });
+
+  it('skill 指定で clone_failed — detail を素通しで patron に返す ("仕入れエラー (clone_failed)" 形式)', async () => {
+    // sparse-checkout 経路の clone / sparse init / sparse set / checkout のいずれかが失敗した時の handler 表現を固定。
+    // 文言は acquire.ts 側で組まれた detail を素通し、reason 名は括弧内に出る。
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'clone_failed',
+      detail: 'partial clone に失敗しました: anthropics/skills (fatal: repository not found)',
+    });
+    await handler({ repo: 'anthropics/skills', skill: 'bad-skill' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れエラー (clone_failed)');
+    expect(text).toContain('partial clone');
+    expect(text).not.toContain('仕入れ完了');
+  });
 });
 
 describe('acquire_biblio handler — 例外を握って writeBack に倒す', () => {
