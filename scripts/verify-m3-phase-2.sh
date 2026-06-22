@@ -211,10 +211,15 @@ run_gke() {
   esac
 
   # ephemeral 解除確認 (= PVC 装備源残置)
+  # `test -f` exit 1 (ファイル不在) と kubectl exec 接続失敗 (RBAC / Pod 状態) を
+  # 分岐できないと「PVC 装備源が消えた」誤誘導になるため、stderr を STDERR_DIR に
+  # 保持して fail() でデバッグ表示できるようにする (= 他 kubectl 呼び出しと同形)。
   info '  - GKE: PVC 装備源残置確認'
+  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-exec-test.stderr"
   if ! kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
-    test -f "/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marketplace.json" >/dev/null 2>&1; then
-    fail "GKE: PVC 装備源が消えた (= ephemeral の境界違反): /data/biblio-equipped/${BIBLIO_NAME}/"
+    test -f "/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marketplace.json" \
+    >/dev/null 2>"$LAST_HARNESS_STDERR"; then
+    fail "GKE: PVC 装備源確認に失敗 (= ファイル不在 or kubectl exec 接続失敗): /data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marketplace.json"
   fi
 
   info '[Phase B] PASS (GKE 経路 = spawn-verify が Pod 内で成立 → marker 検出 → PVC 残置)'

@@ -141,7 +141,7 @@ run_gke() {
   kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
     mkdir -p "/data/biblio-equipped/${BIBLIO_NAME}" \
     >/dev/null 2>"$LAST_HARNESS_STDERR" \
-    || fail 'orchestrator Pod 内で mkdir /data/biblio-equipped に失敗'
+    || fail "orchestrator Pod 内で mkdir /data/biblio-equipped/${BIBLIO_NAME} に失敗"
 
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-marker.stderr"
   kubectl cp \
