@@ -16,7 +16,7 @@
 # 既定値 (env で上書き可、.env から読み込み):
 #   GCP_PROJECT_ID=hajimari-ai-hackathon-2026
 #   GCP_REGION=asia-northeast1
-#   GKE_CLUSTER=biblio-prod
+#   GKE_CLUSTER=biblio-prod        ← shell glob (*, ?) は不可 (context match の bash case pattern に展開されるため)
 #   CLOUD_SQL_INSTANCE=biblio-pgsql
 #   SM_GH_PEM_NAME=biblio-gh-app-pem
 #   AR_REPO_NAME=biblio-claw
@@ -64,16 +64,16 @@ ok "[deps] gcloud + kubectl 検出"
 
 # === 2. kubectl context 確認 (= GKE 接続前提) ===
 # GKE Autopilot cluster context 名は `gke_<project>_<region>_<cluster>` 形式。
-# 名前ベース match のため、$GKE_CLUSTER に shell glob (* / ?) を入れないこと。
+# project + region + cluster の 3 フィールド全てを検証する (= 別 project / 別 region の同名 cluster
+# が current のとき namespace 確認 §7 で誤検出 OK にならないようにする)。
+# 名前ベース match のため、$GKE_CLUSTER / $REGION / $PROJECT に shell glob (* / ?) を入れないこと。
 ctx="$(kubectl config current-context 2>/dev/null || echo NONE)"
-case "$ctx" in
-  gke_*_${GKE_CLUSTER})
-    ok "[ctx] $ctx"
-    ;;
-  *)
-    fail "[ctx] biblio-prod 以外のコンテキスト: $ctx (gcloud container clusters get-credentials $GKE_CLUSTER --region=$REGION --project=$PROJECT)"
-    ;;
-esac
+expected_ctx="gke_${PROJECT}_${REGION}_${GKE_CLUSTER}"
+if [ "$ctx" = "$expected_ctx" ]; then
+  ok "[ctx] $ctx"
+else
+  fail "[ctx] expected=$expected_ctx, actual=$ctx (gcloud container clusters get-credentials $GKE_CLUSTER --region=$REGION --project=$PROJECT)"
+fi
 
 # === 3. GKE cluster の生存確認 (gcloud 側) ===
 # Autopilot cluster は RUNNING 以外でも describe は返るため、status で正規化。
@@ -92,7 +92,10 @@ case "$status" in
 esac
 
 # === 4. Cloud SQL instance 確認 ===
-# teardown 直後など RUNNABLE 以外でも完走させたいので warn で継続。
+# §3 GKE cluster と異なり MISSING でも fail にしない: teardown 直後や未構築では存在しないことが
+# 「設計通りの中間状態」であり、orchestrator が起動できない事実を warn で通知して後続チェックを
+# 完走させる方が運用上の情報量が大きい (= §3 GKE は cluster 無いと resource-check 自体の前提が崩れる
+# ため fail、§4 Cloud SQL は teardown 確認や再構築 dry-run の通常文脈で MISSING が出る)。
 state="$(gcloud sql instances describe "$CLOUD_SQL_INSTANCE" --project "$PROJECT" --format='value(state)' 2>/dev/null || echo MISSING)"
 case "$state" in
   RUNNABLE)
@@ -109,7 +112,9 @@ case "$state" in
 esac
 
 # === 5. Secret Manager biblio-gh-app-pem 確認 ===
-# 無いと gh-token-rotator が動かず、棚への陳列が失敗するため fail。
+# 無いと fetch-pem initContainer (= 本物 init、run-to-completion) が PEM 取得に失敗して
+# orchestrator Pod 自体が起動しない (= gh-token-rotator や onecli sidecar に到達する手前で詰まる)
+# ため fail。
 if gcloud secrets describe "$SM_GH_PEM_NAME" --project "$PROJECT" >/dev/null 2>&1; then
   ok "[sm] $SM_GH_PEM_NAME 存在"
 else

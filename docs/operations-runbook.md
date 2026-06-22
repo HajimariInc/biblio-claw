@@ -241,9 +241,9 @@ bash scripts/verify-phase-2-wiring.sh   # 復旧確認
 
 PVC は維持されるため SQLite データ + boots カウンタは引き継がれる (= `verify-phase-2-wiring.sh` §7 boots assertion で確認)。
 
-### 手順 3: 完全 teardown + 再構築 (= cluster ごと作り直す)
+### 手順 3: 完全 teardown + 再構築
 
-部分 reset で復旧しないとき / setup を最初からやり直したいとき:
+部分 reset で復旧しないとき、または setup を最初からやり直したいとき:
 
 ```bash
 # 1. 削除予定リソースを dry-run で確認
@@ -258,9 +258,9 @@ bash scripts/teardown-phase-2.sh --confirm
 # 4. K8s manifest 再適用
 kubectl apply -f k8s/
 
-# 5. K8s Secret 投入 (= 既存手順、別 ops doc 参照)
+# 5. K8s Secret 投入 (= 既存手順、README §GKE 運用メモ + docs/slack-environments-setup.md を参照)
 #    - biblio-gh-app (GH App ID + installation ID)
-#    - biblio-slack-tokens (SLACK_BOT_TOKEN + SLACK_APP_TOKEN)
+#    - biblio-slack-tokens (SLACK_BOT_TOKEN + SLACK_APP_TOKEN、本番 / 開発 ws の使い分けは slack-environments-setup.md)
 
 # 6. Cloud SQL Bootstrap GRANT (Postgres 15+ で IAM user に必須、再構築のたびに必要)
 bash scripts/init-project-gcp-pgsql-grant.sh

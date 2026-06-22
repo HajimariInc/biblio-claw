@@ -101,16 +101,14 @@ run gcloud compute networks subnets delete biblio-subnet-an1 --region="$REGION" 
 run gcloud compute networks delete biblio-net --project="$PROJECT" --quiet
 
 if $DRY_RUN; then
-  printf '\n'
+  printf '\n' >&2
   info "==== dry-run 完了。実行するなら: bash $0 --confirm ===="
   info "残置リソース: Secret Manager biblio-gh-app-pem (本番運用継続のため)"
   info "self-grant role の解除は別途:"
   info "  gcloud projects remove-iam-policy-binding $PROJECT --member=user:<DEN> --role=roles/servicenetworking.networksAdmin"
   info "  gcloud projects remove-iam-policy-binding $PROJECT --member=user:<DEN> --role=roles/secretmanager.admin"
-  info ""
-  info "(参考) 再構築時の Bootstrap GRANT 案内は --confirm 実行成功時に表示します"
 elif [ "$WARN_COUNT" -gt 0 ]; then
-  printf '\n'
+  printf '\n' >&2
   warn "==== Phase 2 teardown 終了 — $WARN_COUNT 件の失敗あり ===="
   warn "削除失敗が含まれる可能性。次のコマンドで残存リソースを確認 + 手動 cleanup を推奨:"
   warn "  kubectl get all -n $NS"
@@ -120,6 +118,9 @@ elif [ "$WARN_COUNT" -gt 0 ]; then
   warn "  gcloud iam service-accounts list --filter='email~biblio' --project=$PROJECT"
   warn "  gcloud compute networks list --filter='name:biblio-net' --project=$PROJECT"
   warn "Secret Manager biblio-gh-app-pem は残置 (本番運用継続のため)"
+  warn ""
+  warn "Cloud SQL も削除済の場合、再構築時に Bootstrap GRANT が必要:"
+  warn "  bash scripts/init-project-gcp-pgsql-grant.sh"
   exit 1
 else
   ok "==== Phase 2 teardown 完了 — 全コマンド成功 (Secret Manager biblio-gh-app-pem は残置) ===="
