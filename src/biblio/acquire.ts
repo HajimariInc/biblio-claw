@@ -280,6 +280,154 @@ async function countSkillsInRepo(
 }
 
 /**
+ * 個別 skill 仕入れの本体 (Phase 3) — 該当 skill ディレクトリのみを quarantine に展開する。
+ *
+ * sparse-checkout 経路:
+ *   1. git clone --depth 1 --filter=blob:none --no-checkout <url> <qpath>
+ *      → shallow + blobless + worktree 展開なし
+ *   2. git -C <qpath> sparse-checkout init --cone
+ *      → cone mode (= path prefix 形式) で sparse-checkout を有効化
+ *   3. git -C <qpath> sparse-checkout set <skill>
+ *      → 該当 skill ディレクトリのみを include 対象に
+ *   4. git -C <qpath> checkout
+ *      → HEAD を sparse pattern に従って worktree に展開 (= 該当 dir のみ、blob は遅延 fetch)
+ *
+ * 採用根拠: 既存全体仕入れ経路 (= git clone) と同じ env (= getChildProcEnv()) で動く =
+ * OneCLI MITM proxy / HTTPS_PROXY / GIT_SSL_CAINFO / shallow timeout 等の既存配線を継承する。
+ * GitHub Contents/Trees API の N+1 fetch より rate limit 安全、tarball ダウンロード (= 全体取得)
+ * より帯域効率良し。
+ *
+ * シナリオ C (複数 skill 一括指定) 対応: 1 skill 処理を本関数に閉じることで、上位の
+ * `acquire()` が将来ループから呼ぶ拡張をしても改修最小化 (= 過剰設計はしない、関数化のみ)。
+ */
+async function fetchSkillSubtree(owner: string, name: string, skill: string, cloneUrl: string): Promise<AcquireResult> {
+  const biblioName = `${owner}--${name}--${skill}`;
+  const quarantinePath = path.join(QUARANTINE_DIR, biblioName);
+
+  // 1. quarantine 親 + 配置先準備 (上書き warn + 冪等削除 = 既存全体経路と同パターン)
+  try {
+    fs.mkdirSync(QUARANTINE_DIR, { recursive: true });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn('acquire failed (skill)', { repo: `${owner}/${name}`, skill, reason: 'clone_failed', detail });
+    return { ok: false, reason: 'clone_failed', detail: `quarantine ディレクトリを作成できません: ${detail}` };
+  }
+  if (fs.existsSync(quarantinePath)) {
+    log.warn('acquire: overwriting existing skill quarantine for same dedup key', {
+      quarantinePath,
+      owner,
+      name,
+      skill,
+    });
+  }
+  removeQuarantine(quarantinePath);
+
+  const env = getChildProcEnv();
+  const baseSpawn = { env, stdio: 'pipe' as const, encoding: 'utf-8' as const };
+
+  // 2. partial clone (blobless + 非展開)
+  const clone = spawnSync(
+    'git',
+    ['clone', '--depth', '1', '--filter=blob:none', '--no-checkout', cloneUrl, quarantinePath],
+    { ...baseSpawn, timeout: CLONE_TIMEOUT_MS },
+  );
+  if (clone.status !== 0) {
+    const detail = spawnDetail(clone, 'git');
+    removeQuarantine(quarantinePath);
+    log.warn('acquire failed (skill)', { repo: `${owner}/${name}`, skill, reason: 'clone_failed', detail });
+    return {
+      ok: false,
+      reason: 'clone_failed',
+      detail: `partial clone に失敗しました: ${owner}/${name} (${detail})`,
+    };
+  }
+
+  // 3. sparse-checkout init --cone
+  const sparseInit = spawnSync('git', ['-C', quarantinePath, 'sparse-checkout', 'init', '--cone'], {
+    ...baseSpawn,
+    timeout: GH_TIMEOUT_MS,
+  });
+  if (sparseInit.status !== 0) {
+    const detail = spawnDetail(sparseInit, 'git');
+    removeQuarantine(quarantinePath);
+    log.warn('acquire failed (skill)', { repo: `${owner}/${name}`, skill, reason: 'clone_failed', detail });
+    return {
+      ok: false,
+      reason: 'clone_failed',
+      detail: `sparse-checkout init に失敗しました: ${owner}/${name} (${detail})`,
+    };
+  }
+
+  // 4. sparse-checkout set <skill>
+  const sparseSet = spawnSync('git', ['-C', quarantinePath, 'sparse-checkout', 'set', skill], {
+    ...baseSpawn,
+    timeout: GH_TIMEOUT_MS,
+  });
+  if (sparseSet.status !== 0) {
+    const detail = spawnDetail(sparseSet, 'git');
+    removeQuarantine(quarantinePath);
+    log.warn('acquire failed (skill)', { repo: `${owner}/${name}`, skill, reason: 'clone_failed', detail });
+    return {
+      ok: false,
+      reason: 'clone_failed',
+      detail: `sparse-checkout set に失敗しました: ${owner}/${name}/${skill} (${detail})`,
+    };
+  }
+
+  // 5. checkout (sparse pattern に従って worktree 展開、blob を遅延 fetch)
+  const checkout = spawnSync('git', ['-C', quarantinePath, 'checkout'], {
+    ...baseSpawn,
+    timeout: CLONE_TIMEOUT_MS,
+  });
+  if (checkout.status !== 0) {
+    const detail = spawnDetail(checkout, 'git');
+    removeQuarantine(quarantinePath);
+    log.warn('acquire failed (skill)', { repo: `${owner}/${name}`, skill, reason: 'clone_failed', detail });
+    return {
+      ok: false,
+      reason: 'clone_failed',
+      detail: `checkout に失敗しました: ${owner}/${name}/${skill} (${detail})`,
+    };
+  }
+
+  // 6. manifest 存在チェック (= skill dir 直下 + 任意階層に SKILL.md がある = agentskills.io spec)。
+  //    全体経路の hasManifest は marketplace.json + SKILL.md だが、sparse 経路では
+  //    marketplace.json は (skill dir に無いため) 探索対象外。SKILL.md 存在のみ確認する。
+  const skillDir = path.join(quarantinePath, skill);
+  if (!fs.existsSync(skillDir)) {
+    removeQuarantine(quarantinePath);
+    log.warn('acquire failed (skill)', {
+      repo: `${owner}/${name}`,
+      skill,
+      reason: 'manifest_missing',
+      detail: 'skill dir not found',
+    });
+    return {
+      ok: false,
+      reason: 'manifest_missing',
+      detail: `skill ディレクトリが見つかりません: ${owner}/${name}/${skill} (sparse-checkout に該当 dir が含まれていません)`,
+    };
+  }
+  if (!hasFileRecursive(skillDir, 'SKILL.md')) {
+    removeQuarantine(quarantinePath);
+    log.warn('acquire failed (skill)', {
+      repo: `${owner}/${name}`,
+      skill,
+      reason: 'manifest_missing',
+      detail: 'SKILL.md not found',
+    });
+    return {
+      ok: false,
+      reason: 'manifest_missing',
+      detail: `biblio ではありません (SKILL.md 不在): ${owner}/${name}/${skill}`,
+    };
+  }
+
+  log.info('biblio acquired (skill)', { repo: `${owner}/${name}`, skill, biblioName, quarantinePath });
+  return { ok: true, biblioName, quarantinePath };
+}
+
+/**
  * 外部 biblio を取得して quarantine に配置する。
  * 失敗は全て `{ ok:false, reason, detail }` で返す (throw しない / silent failure なし)。
  */
@@ -290,12 +438,11 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
     return { ok: false, reason: 'invalid_input', detail: `owner/repo か GitHub URL を指定してください: "${req.repo}"` };
   }
 
-  // Phase 1: 個別 skill 仕入れ (req.skill or normalized.skill のいずれか) は受領通知のみ返す。
-  // 実 fetch は Phase 3 (`individual-acquire`) で実装し、本ブロックを差し替える。
+  // Phase 3: 個別 skill 仕入れ (req.skill or normalized.skill のいずれか) は sparse-checkout 経路に分岐。
+  // skill 指定が無い場合 (= req.skill === undefined && normalized.skill === undefined) は既存全体経路に進む。
   const skill = req.skill ?? normalized.skill;
   if (skill !== undefined) {
-    // Phase 3 で skill 値を実 fetch パス (= GitHub Contents API path or sparse-checkout) に
-    // 使うことになるため、Phase 1 のうちに SEGMENT_RE 検証を入口で済ませる防衛線。
+    // skill 値が後続の sparse-checkout に渡るため、入口で SEGMENT_RE 検証する防衛線。
     // 3 segments 経路 (normalized.skill) は normalizeRepo で検証済だが、MCP tool 経路 (req.skill) は
     // ここまでトリムのみで来るため、両経路を同基準で再検証する (= 二重検証だが冪等)。
     if (!SEGMENT_RE.test(skill)) {
@@ -306,17 +453,9 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
         detail: `skill は識別子形式 ([A-Za-z0-9._-]、主に kebab-case) で指定してください: "${skill}"`,
       };
     }
-    log.info('acquire skipped (skill requested, Phase 3 pending)', {
-      repo: req.repo,
-      skill,
-      owner: normalized.owner,
-      name: normalized.name,
-    });
-    return {
-      ok: false,
-      reason: 'not_implemented',
-      detail: `個別 skill 仕入れは Phase 3 で実装中: ${normalized.owner}/${normalized.name}/${skill}`,
-    };
+    // 個別 skill 経路は全体経路 (gh / countSkillsInRepo / 全体 clone) を完全に bypass する。
+    // sparse-checkout の git clone 自体が repo 存在確認を兼ねる (= clone_failed で 404 detect)。
+    return await fetchSkillSubtree(normalized.owner, normalized.name, skill, normalized.cloneUrl);
   }
 
   const { owner, name, cloneUrl } = normalized;

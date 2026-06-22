@@ -92,19 +92,20 @@ describe('acquire_biblio handler — 既存経路 (skill 未指定)', () => {
   });
 });
 
-describe('acquire_biblio handler — Phase 1 個別 skill 経路', () => {
-  it('skill 指定時に acquire を `{ repo, skill }` で呼び、受領通知文言を返す', async () => {
+describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
+  it('skill 指定で成功時、仕入れ完了文言を返す (biblioName = 3 要素形式)', async () => {
     acquireMock.mockResolvedValue({
-      ok: false,
-      reason: 'not_implemented',
-      detail: '個別 skill 仕入れは Phase 3 で実装中: anthropics/skills/algorithmic-art',
+      ok: true,
+      biblioName: 'anthropics--skills--algorithmic-art',
+      quarantinePath: '/data/quarantine/anthropics--skills--algorithmic-art',
     });
     await handler({ repo: 'anthropics/skills', skill: 'algorithmic-art' }, dummySession, dummyDb);
     expect(acquireMock).toHaveBeenCalledWith({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
     const text = getWrittenText() ?? '';
-    expect(text).toContain('個別 skill 仕入れリクエストを受領');
-    expect(text).toContain('anthropics/skills/algorithmic-art');
-    // patron UX として「エラー」表記を出さない (= 「受領通知」と分離する設計判断)。
+    expect(text).toContain('仕入れ完了');
+    expect(text).toContain('anthropics/skills');
+    expect(text).toContain('inspect_biblio');
+    // 失敗系の「エラー」表記が混入しないことを確認 (= 成功経路では出さない設計判断)
     expect(text).not.toContain('仕入れエラー');
   });
 
