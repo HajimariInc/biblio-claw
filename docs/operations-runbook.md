@@ -298,7 +298,7 @@ GIT_SSL_NO_VERIFY=true git clone --depth 1 https://github.com/<owner>/<repo>.git
 
 GKE 環境にトラブルが起きたとき / 完全再構築したいとき / ハッカソンデモ前の動作確認 に叩く手順を 1 箇所に集約する。本セクションは Phase 5 で本格拡張予定の骨格 (= 最低限)。
 
-> **1 発実行**: 本セクションの手順は `/init-project-gcp reset` (= 完全 teardown + 再構築) と `/init-project-gcp up` (= 部分復旧) に集約済 (= 本 PRD Phase 3 で整備)。本セクションは **生コマンドの正本** として残置 (= slash command は wrapper)。手で再現する場合 / トラブル切り分けで個別コマンドを叩きたい場合はそのまま参照する。
+> **1 発実行**: 本セクションの手順は `/init-project-gcp reset` (= 完全 teardown + 再構築) と `/init-project-gcp up` (= 不足リソースの起動・再 ready 確認、§手順 2 の `kubectl delete pod` とは別) に集約済。本セクションは **生コマンドの正本** として残置 (= slash command は wrapper)。手で再現する場合 / トラブル切り分けで個別コマンドを叩きたい場合はそのまま参照する。
 
 ### トリガ
 
