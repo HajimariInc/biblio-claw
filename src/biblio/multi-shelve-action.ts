@@ -39,7 +39,10 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
   // (BIBLIO_CATEGORIES 通過) が揃っていること。reason は optional (空でも進める)。
   const rawItems = (content as { items?: unknown }).items;
   if (!Array.isArray(rawItems) || rawItems.length === 0) {
-    log.warn('shelve_biblio_multi: empty/invalid items', { sessionId: session.id });
+    log.warn('shelve_biblio_multi: empty/invalid items', {
+      sessionId: session.id,
+      totalItems: Array.isArray(rawItems) ? rawItems.length : 'not-array',
+    });
     await writeBackMessage(
       inDb,
       '陳列エラー (invalid_input): items 配列が空 or 未指定です (1 件以上の {name, category, reason} を含めてください)。',
@@ -52,7 +55,11 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
   const items: MultiShelveItem[] = [];
   for (const [i, raw] of rawItems.entries()) {
     if (typeof raw !== 'object' || raw === null) {
-      log.warn('shelve_biblio_multi: invalid item shape', { index: i, sessionId: session.id });
+      log.warn('shelve_biblio_multi: invalid item shape', {
+        index: i,
+        totalItems: rawItems.length,
+        sessionId: session.id,
+      });
       await writeBackMessage(
         inDb,
         `陳列エラー (invalid_input): items[${i}] が object ではありません。`,
@@ -68,7 +75,11 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
     const reason = rawReason || '(理由未指定)';
 
     if (!name) {
-      log.warn('shelve_biblio_multi: missing name', { index: i, sessionId: session.id });
+      log.warn('shelve_biblio_multi: missing name', {
+        index: i,
+        totalItems: rawItems.length,
+        sessionId: session.id,
+      });
       await writeBackMessage(
         inDb,
         `陳列エラー (invalid_input): items[${i}].name が指定されていません。`,
@@ -78,7 +89,12 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
       return;
     }
     if (!BIBLIO_NAME_RE.test(name)) {
-      log.warn('shelve_biblio_multi: invalid name', { index: i, name, sessionId: session.id });
+      log.warn('shelve_biblio_multi: invalid name', {
+        index: i,
+        totalItems: rawItems.length,
+        name,
+        sessionId: session.id,
+      });
       await writeBackMessage(
         inDb,
         `陳列エラー (invalid_input): items[${i}].name が \`owner--name\` または \`owner--repo--skill\` 形式ではありません: "${name}"`,
@@ -88,7 +104,11 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
       return;
     }
     if (!category) {
-      log.warn('shelve_biblio_multi: missing category', { index: i, sessionId: session.id });
+      log.warn('shelve_biblio_multi: missing category', {
+        index: i,
+        totalItems: rawItems.length,
+        sessionId: session.id,
+      });
       await writeBackMessage(
         inDb,
         `陳列エラー (invalid_input): items[${i}].category が指定されていません。`,
@@ -98,7 +118,12 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
       return;
     }
     if (!BIBLIO_CATEGORIES.includes(category as BiblioCategory)) {
-      log.warn('shelve_biblio_multi: invalid category', { index: i, category, sessionId: session.id });
+      log.warn('shelve_biblio_multi: invalid category', {
+        index: i,
+        totalItems: rawItems.length,
+        category,
+        sessionId: session.id,
+      });
       await writeBackMessage(
         inDb,
         `陳列エラー (invalid_category): items[${i}].category は ${BIBLIO_CATEGORIES.join('|')} のいずれかである必要があります: "${category}"`,

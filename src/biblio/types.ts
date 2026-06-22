@@ -231,7 +231,8 @@ export type MultiShelveFailureReason = ShelveFailureReason | 'empty_items' | 'du
  *
  * 部分成功なし (= N 件すべて陳列 or 0 件陳列の二択) で原子性を確保する。
  * 成功時は 1 PR URL + branch + 陳列された items 一覧、失敗時は reason + detail +
- * (debug 用) 試行された items 一覧を返す。
+ * 試行された items 一覧を返す (= empty_items の空配列入力でも `items: []` で固定。
+ * `failMulti` ヘルパが常に全件詰めるため、caller は ok=false 時も items に必ずアクセスできる)。
  */
 export type MultiShelveResult =
   | {
@@ -245,7 +246,7 @@ export type MultiShelveResult =
       ok: false;
       reason: MultiShelveFailureReason;
       detail: string;
-      items?: Array<{ biblioName: string; category: BiblioCategory }>;
+      items: Array<{ biblioName: string; category: BiblioCategory }>;
     };
 
 /**
