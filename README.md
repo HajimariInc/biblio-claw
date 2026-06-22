@@ -30,7 +30,11 @@ pnpm run chat "hello"      # smoke 用 CLI から司書と会話
 
 ## GKE 運用メモ (デプロイ後の bootstrap / メンテ)
 
-> ⚠️ **暫定セクション** — 日常運用の早見表は [`docs/operations-runbook.md`](docs/operations-runbook.md) に集約済。本セクションは初回デプロイ + 再構築時に **1 回だけ走らせる Bootstrap 手順** に絞って残置している。手順が枯れたら本セクションを最小化し詳細は runbook に転記する。
+> ⚠️ **暫定セクション** — 日常運用の早見表は [`docs/operations-runbook.md`](docs/operations-runbook.md) に集約済。本セクションは初回デプロイ + 再構築時に **1 回だけ走らせる Bootstrap 手順** に絞って残置している。
+>
+> **完全再構築時の Bootstrap GRANT は `bash scripts/init-project-gcp-pgsql-grant.sh` (= PR #23 で公式化、`gcloud sql connect` + IAP 経由) が正本**。以下の K8s Pod + psql 手順は **参考残置** で、特に **「既存 DB を新 GSA で引き継ぐ場合」(後述) の role membership 継承 GRANT** は新スクリプトに含まれていないため、空でない DB の移行ケースでは下記手順を参照する。
+>
+> 完全 teardown 後の空 DB 再構築 (= 通常の reset → 再構築) は新スクリプトのみで完結する。リセット運用の全体像は [`docs/operations-runbook.md` §GKE リセット手順](docs/operations-runbook.md#gke-リセット手順) を参照。
 
 ### Cloud SQL `postgres` user パスワード変更 (初回 Bootstrap GRANT)
 
