@@ -12,11 +12,8 @@
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { shelve } from './shelve.js';
-import { BIBLIO_NAME_RE, writeBackMessage } from './action-helpers.js';
-import { BIBLIO_CATEGORIES, type BiblioCategory, type ShelveResult } from './types.js';
-
-/** category の合法集合 (= BiblioCategory)。`includes` で `category as BiblioCategory` を validate。 */
-const VALID_CATEGORIES: readonly BiblioCategory[] = BIBLIO_CATEGORIES;
+import { validateBiblioInput, writeBackMessage } from './action-helpers.js';
+import type { ShelveResult } from './types.js';
 
 /** shelve 結果を patron 向けテキストに整形する。 */
 function resultText(biblioName: string, result: ShelveResult): string {
@@ -30,61 +27,21 @@ function resultText(biblioName: string, result: ShelveResult): string {
 }
 
 registerDeliveryAction('shelve_biblio', async (content, session, inDb) => {
-  const rawName = typeof content.name === 'string' ? content.name.trim() : '';
-  const rawCategory = typeof content.category === 'string' ? content.category.trim() : '';
+  // validate ブロックは action-helpers.ts の validateBiblioInput に集約 (= enkin/shokyaku/shelve
+  // で 40 行 × 3 ファイル重複していたものを 1 箇所に、PR #21 code-simplifier 推奨)。
+  const validated = await validateBiblioInput(content, inDb, session, 'shelve-resp', 'shelve_biblio', '陳列');
+  if (!validated) return;
+  const { biblioName, category } = validated;
   // reason は optional だが、空でも shelve() に渡す (commit/PR body に出る)。
   const rawReason = typeof content.reason === 'string' ? content.reason.trim() : '';
-
-  if (!rawName) {
-    log.warn('shelve_biblio missing name', { sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      '陳列エラー (invalid_input): name が指定されていません。',
-      'shelve-resp',
-      'shelve_biblio',
-    );
-    return;
-  }
-  if (!BIBLIO_NAME_RE.test(rawName)) {
-    log.warn('shelve_biblio invalid name', { biblioName: rawName, sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      `陳列エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
-      'shelve-resp',
-      'shelve_biblio',
-    );
-    return;
-  }
-  if (!rawCategory) {
-    log.warn('shelve_biblio missing category', { sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      '陳列エラー (invalid_input): category が指定されていません。',
-      'shelve-resp',
-      'shelve_biblio',
-    );
-    return;
-  }
-  if (!VALID_CATEGORIES.includes(rawCategory as BiblioCategory)) {
-    log.warn('shelve_biblio invalid category', { category: rawCategory, sessionId: session.id });
-    await writeBackMessage(
-      inDb,
-      `陳列エラー (invalid_category): category は biblio-dev|art|bf|ai のいずれかである必要があります: "${rawCategory}"`,
-      'shelve-resp',
-      'shelve_biblio',
-    );
-    return;
-  }
-
-  const category = rawCategory as BiblioCategory;
   const reason = rawReason || '(理由未指定)';
-  log.info('shelve_biblio from agent', { biblioName: rawName, category, sessionId: session.id });
+  log.info('shelve_biblio from agent', { biblioName, category, sessionId: session.id });
 
   try {
-    const result = await shelve({ biblioName: rawName, category, reason });
-    await writeBackMessage(inDb, resultText(rawName, result), 'shelve-resp', 'shelve_biblio');
+    const result = await shelve({ biblioName, category, reason });
+    await writeBackMessage(inDb, resultText(biblioName, result), 'shelve-resp', 'shelve_biblio');
     log.info('shelve_biblio done', {
-      biblioName: rawName,
+      biblioName,
       category,
       ok: result.ok,
       prUrl: result.ok ? result.prUrl : null,
@@ -93,7 +50,7 @@ registerDeliveryAction('shelve_biblio', async (content, session, inDb) => {
     });
   } catch (err) {
     // shelve() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('shelve_biblio threw', { biblioName: rawName, category, sessionId: session.id, err });
+    log.error('shelve_biblio threw', { biblioName, category, sessionId: session.id, err });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(inDb, `陳列エラー (internal): 予期しない失敗 — ${detail}`, 'shelve-resp', 'shelve_biblio');
   }

@@ -1,11 +1,15 @@
 /**
- * 4 つの biblio action handler (acquire/inspect/categorize/shelve) の共通ヘルパ。
+ * biblio action handler (acquire/inspect/categorize/shelve/enkin/shokyaku) の共通ヘルパ。
  *
  * - `writeBackMessage`: chat メッセージを inbound.db に書き戻し agent を起こす共通ロジック。
  *   SQLITE_BUSY 等を線形バックオフで 3 attempts まで再試行、全失敗時は patron 通知消失を
  *   error ログで明示。絶対に throw しない。
  * - `BIBLIO_NAME_RE`: `<owner>--<name>` 形式の biblioName を validate する正規表現。
  *   dedup key と path traversal 防御を兼ねる。
+ * - `safeNotify`: approval handler 内で session に notify を書く `ApprovalHandlerContext.notify`
+ *   を try/catch で包み、SQLITE_BUSY 等の throw を握って `log.error` で「patron 通知消失」を
+ *   明示する。`notify` は `writeSessionMessage` の同期ラッパで retry 機構を持たないため、
+ *   HITL 承認後の通知が host を巻き込まないよう本ヘルパで防御する (PR #15 silent-failure HIGH 1)。
  */
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -13,6 +17,9 @@ import type Database from 'better-sqlite3';
 
 import { insertMessage } from '../db/session-db.js';
 import { log } from '../log.js';
+import type { Session } from '../types.js';
+
+import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
 
 /** writeBack の SQLITE_BUSY 等への小規模リトライ回数 (1 + 2 = 計 3 attempts)。 */
 const WRITEBACK_MAX_RETRIES = 2;
@@ -79,4 +86,117 @@ export async function writeBackMessage(
       await sleep((attempt + 1) * WRITEBACK_RETRY_BASE_MS);
     }
   }
+}
+
+/**
+ * approval handler 内の `notify()` 呼び出しを try/catch で包む。
+ *
+ * `notify` (= `ApprovalHandlerContext.notify`) は `writeSessionMessage` の同期ラッパで、
+ * SQLITE_BUSY 等が throw すると caller (= `response-handler.ts` の最終 catch) に抜けて
+ * patron 通知が消失する。本ヘルパで握って `log.error` を出すことで、通知失敗を
+ * 「patron 通知消失」として可視化する (= `writeBackMessage` と同じ silent failure 防止方針)。
+ *
+ * 絶対に throw しない。
+ *
+ * @param notify approval handler に渡される `ApprovalHandlerContext.notify` の同期関数
+ * @param text patron に届ける本文
+ * @param ctx ログに含める識別情報 (action 名 + biblioName 等)
+ */
+export function safeNotify(
+  notify: (text: string) => void,
+  text: string,
+  ctx: { action: string; biblioName?: string },
+): void {
+  try {
+    notify(text);
+  } catch (err) {
+    log.error(`${ctx.action}: notify failed (patron notification lost)`, {
+      biblioName: ctx.biblioName,
+      textPreview: text.slice(0, 200),
+      err,
+    });
+  }
+}
+
+/** {@link validateBiblioInput} の入力 (= delivery action handler が agent から受け取る content)。 */
+export interface BiblioNameCategoryInput {
+  name?: unknown;
+  category?: unknown;
+}
+
+/** {@link validateBiblioInput} の成功時返り値 (= name + category の両方が validate 通過)。 */
+export interface BiblioNameCategoryValidated {
+  biblioName: string;
+  category: BiblioCategory;
+}
+
+/**
+ * enkin / shokyaku / shelve delivery action handler 共通の name + category validate。
+ *
+ * 4 つの validate (name 不在 / `BIBLIO_NAME_RE` 不通過 / category 不在 / `BIBLIO_CATEGORIES`
+ * 不通過) を 1 箇所に集約し、失敗時は `writeBackMessage` で patron にエラーを書き戻して
+ * `null` を返す。caller は `null` を見たら return する想定 (= guard clause)。成功時は
+ * `{ biblioName, category }` を返す (= caller は trust して `requestApproval` / `shelve` に
+ * 渡せる)。
+ *
+ * 旧実装は enkin-action / shokyaku-action / shelve-action の 3 ファイルに 40 行ずつ
+ * 逐語コピーされており、将来 category 追加 / メッセージ変更で 3 箇所同時修正が必要だった
+ * (= PR #21 code-simplifier 推奨で集約)。
+ *
+ * @param respPrefix `writeBackMessage` の id プレフィックス (例: `enkin-resp`)
+ * @param actionName log の識別用 action 名 (例: `enkin_biblio`)
+ * @param errorLabel patron 向けエラーメッセージの先頭ラベル (例: `禁書` / `焼却` / `陳列`)
+ */
+export async function validateBiblioInput(
+  content: BiblioNameCategoryInput,
+  inDb: Database.Database,
+  session: Session,
+  respPrefix: string,
+  actionName: string,
+  errorLabel: string,
+): Promise<BiblioNameCategoryValidated | null> {
+  const rawName = typeof content.name === 'string' ? content.name.trim() : '';
+  const rawCategory = typeof content.category === 'string' ? content.category.trim() : '';
+
+  if (!rawName) {
+    log.warn(`${actionName} missing name`, { sessionId: session.id });
+    await writeBackMessage(
+      inDb,
+      `${errorLabel}エラー (invalid_input): name が指定されていません。`,
+      respPrefix,
+      actionName,
+    );
+    return null;
+  }
+  if (!BIBLIO_NAME_RE.test(rawName)) {
+    log.warn(`${actionName} invalid name`, { biblioName: rawName, sessionId: session.id });
+    await writeBackMessage(
+      inDb,
+      `${errorLabel}エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
+      respPrefix,
+      actionName,
+    );
+    return null;
+  }
+  if (!rawCategory) {
+    log.warn(`${actionName} missing category`, { sessionId: session.id });
+    await writeBackMessage(
+      inDb,
+      `${errorLabel}エラー (invalid_input): category が指定されていません。`,
+      respPrefix,
+      actionName,
+    );
+    return null;
+  }
+  if (!BIBLIO_CATEGORIES.includes(rawCategory as BiblioCategory)) {
+    log.warn(`${actionName} invalid category`, { category: rawCategory, sessionId: session.id });
+    await writeBackMessage(
+      inDb,
+      `${errorLabel}エラー (invalid_category): category は biblio-dev|biblio-art|biblio-bf|biblio-ai のいずれかである必要があります: "${rawCategory}"`,
+      respPrefix,
+      actionName,
+    );
+    return null;
+  }
+  return { biblioName: rawName, category: rawCategory as BiblioCategory };
 }

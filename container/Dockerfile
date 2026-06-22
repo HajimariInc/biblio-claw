@@ -53,6 +53,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         curl \
         git \
+        jq \
         tini \
         unzip \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
@@ -129,6 +130,16 @@ RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+# ---- Equipped biblio install wrapper (M3 Phase 2) -----------------------------
+# Spawn-time wrapper that loops /workspace/biblios/*/ and runs
+#   claude plugin marketplace add → install --scope user → enable
+# for each equipped biblio. Image carries the script; the equipped set is purely
+# runtime (mounted under /workspace/biblios/), so an empty equipment list is a
+# no-op. See docs/equip-physical.md and src/container-runner.ts buildContainerSpec
+# (the spawn command chains '/app/install-biblios.sh && exec bun run …').
+COPY install-biblios.sh /app/install-biblios.sh
+RUN chmod 755 /app/install-biblios.sh
 
 # ---- Workspace + permissions -------------------------------------------------
 RUN mkdir -p /workspace/group /workspace/extra && \

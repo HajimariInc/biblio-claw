@@ -359,6 +359,7 @@ CREATE TABLE boots (
 | 014 | `014-container-configs.ts` | `container_configs` — agent group ごとのコンテナランタイム設定 |
 | 015 | `015-cli-scope.ts` | `ALTER TABLE container_configs ADD COLUMN cli_scope` |
 | 016 | `016-boots.ts` | `boots` — biblio-claw 追加。Phase 2 verify 用の決定的指紋 (PVC + SQLite 永続化アサーション) |
+| 017 | `017-session-equipped-biblios.ts` | `session_equipped_biblios` — biblio-claw 追加 (M3 Phase 2)。session 単位の装備リスト (session_id + biblio_name + order_index + equipped_at、PK = (session_id, biblio_name)、ON DELETE CASCADE) |
 
 005 と 006 は意図的に欠番 — 初期開発中にマイグレーションが番号付け直された。
 

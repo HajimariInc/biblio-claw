@@ -74,8 +74,8 @@ export type InspectResult =
  * `inspect()` のオプション。
  *
  * `quarantineRoot` を opts で受けるのは `vi.stubEnv('DATA_DIR', ...)` がモジュール
- * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため (acquire.test.ts
- * で実証済)。prod 経路では未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
+ * load 時に const 束縛された `DATA_DIR` に効かない罠を回避するため。prod 経路では
+ * 未指定 → `${DATA_DIR}/quarantine` を inspect.ts 内で計算する。
  */
 export interface InspectOptions {
   quarantineRoot?: string;
@@ -102,6 +102,45 @@ export interface InspectOptions {
  */
 export const BIBLIO_CATEGORIES = ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'] as const;
 export type BiblioCategory = (typeof BIBLIO_CATEGORIES)[number];
+
+/**
+ * 蔵書一覧 (catalog) の型。
+ *
+ * `@bot 蔵書` で棚 (HajimariInc/biblio-shelf) の `marketplace.json` から取得した
+ * plugins[] を最小投影した形。host 側 `list-biblio.ts` が `source` フィールド
+ * (`./<category>/<name>` 形式、`shelve.ts:293` 契約) を split して category を抽出する。
+ */
+
+/** 蔵書一覧の 1 件 (= marketplace.json plugins[] の最小投影)。 */
+export interface ListBiblioItem {
+  /** `<owner>--<repo>` 形式の biblio 名。 */
+  name: string;
+  /** `biblio-dev|art|bf|ai` のいずれか。source 解析失敗時は 'unknown'。 */
+  category: BiblioCategory | 'unknown';
+  /** plugin.json 由来の description (空文字許容)。 */
+  description: string;
+  /** plugin.json 由来の version (空文字許容)。 */
+  version: string;
+}
+
+/** `listBiblio()` の入力。 */
+export interface ListBiblioParams {
+  /** カテゴリ絞り込み (未指定 = 全件)。 */
+  category?: BiblioCategory;
+}
+
+/** `listBiblio()` の戻り値。 */
+export interface ListBiblioResult {
+  ok: true;
+  /** フィルタ適用後の biblio 一覧 (`category` で絞り込み済)。 */
+  items: ListBiblioItem[];
+  /** 全件 (= フィルタ前) のカテゴリ別件数。`unknown` も含む。 */
+  counts: Record<BiblioCategory | 'unknown', number>;
+  /** 全件 (= フィルタ前) の総数。 */
+  total: number;
+  /** 適用された category filter (= 入力をそのまま返す、agent 表示用)。 */
+  appliedFilter: BiblioCategory | null;
+}
 
 /** カテゴライズ失敗の分類。 */
 export type CategoryFailureReason =
@@ -142,3 +181,79 @@ export type ShelveFailureReason =
 export type ShelveResult =
   | { ok: true; biblioName: string; category: BiblioCategory; prUrl: string; prNumber: number; branchName: string }
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
+
+/**
+ * 解除 (kaijo / unshelve) の型 (M3 Phase 3)。
+ *
+ * 棚 (shelf) から biblio を除去する draft PR を作る `unshelve()` の入出力。
+ * 禁書 (`enkin`) / 焼却 (`shokyaku`) はこの薄ラッパで、本ファイル末尾に
+ * `EnkinResult` / `ShokyakuResult` を type alias として並べる。
+ */
+
+/** 解除 (unshelve) 失敗の分類。 */
+export type UnshelveFailureReason =
+  /** marketplace.json 404 or `plugins[]` に entry がない (= 既に解除済 / 元から不在)。 */
+  | 'not_shelved'
+  /** Git Data API / Pulls API の non-2xx response (step + status + body を detail に含む)。 */
+  | 'github_api_error'
+  /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
+  | 'invalid_category';
+
+/**
+ * 解除結果。discriminated union — `ok` で分岐する。
+ * 成功時は PR URL + branch、失敗時は理由 + 詳細を持つ (silent failure 防止)。
+ */
+export type UnshelveResult =
+  | { ok: true; biblioName: string; category: BiblioCategory; prUrl: string; prNumber: number; branchName: string }
+  | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
+
+/** 禁書 = `unshelve()` 薄ラッパ。挙動は完全に同じ shape。 */
+export type EnkinResult = UnshelveResult;
+
+/**
+ * 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName`。
+ *
+ * `UnshelveResult` の ok=true に **`cleanupWarning?: string` を追加** した独立 type。
+ * 焼却特有の host 側 cleanup (= 装備源 dir 削除 + 全 session DB 個別削除) は shelf PR
+ * 作成が成功した後の付随処理で、失敗しても `ok=true` を維持する設計だが、patron に
+ * 「物理削除しました」と無条件通知すると焼却の意味 (= 再装備不可) を誤認させるため、
+ * 失敗内容を `cleanupWarning` で持ち上げて action handler 側で通知文言を切替える
+ * (= silent failure 防止、PR #15 silent-failure-hunter HIGH 2 対応)。
+ */
+export type ShokyakuResult =
+  | {
+      ok: true;
+      biblioName: string;
+      category: BiblioCategory;
+      prUrl: string;
+      prNumber: number;
+      branchName: string;
+      /** host 側 cleanup (rmSync / DB delete) が失敗した場合の警告文。成功時は undefined。 */
+      cleanupWarning?: string;
+    }
+  | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
+
+/**
+ * 装備機構 (souwa / equip) の型 (M3 Phase 1)。
+ *
+ * 司書が shelf clone を agent-container に取り込み実行する「装備」の
+ * 物理配置 1 件を表す。install / cleanup ライフサイクルは Phase 2 以降。
+ * Phase 1 は env-driven な mount 配線のみ (= `equip.ts` の stub)。
+ */
+
+/**
+ * 装備済み biblio 1 件の物理配置情報。
+ *
+ * `readonly` で構築後の mutation を禁止 (= 不変 value object、`equip.ts` の `resolveEquippedBiblios`
+ * 内で 1 度作って以降は変更されない設計を型で表現)。`sourcePath` は絶対パス保証
+ * (= `equip.ts:78` の `path.resolve(root, name)` で生成、Docker run -v が相対パスを local
+ * volume 名と解釈する罠を回避)。
+ */
+export interface EquippedBiblio {
+  /** biblio 名 (= `owner--name` 形式、`BIBLIO_NAME_RE` 通過済)。 */
+  readonly name: string;
+  /** host 側 source path (`<DATA_DIR>/biblio-equipped/<name>/`、絶対パス)。 */
+  readonly sourcePath: string;
+  /** agent コンテナ内 mount path (`/workspace/biblios/<name>/`)。 */
+  readonly mountPath: string;
+}

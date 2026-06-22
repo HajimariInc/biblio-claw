@@ -1,0 +1,5 @@
+{
+  "name": "biblio-hello",
+  "description": "Minimal biblio for biblio-claw M3 Phase 2. Bundles the fire-marker skill that emits a deterministic marker on activation, used to prove biblio executes inside the agent-container sandbox after spawn-time install.",
+  "version": "0.1.0"
+}

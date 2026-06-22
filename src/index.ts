@@ -61,15 +61,19 @@ import './cli/delivery-action.js';
 import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
 // biblio delivery actions — `acquire_biblio` (仕入れ) / `inspect_biblio` (検品) /
-// `categorize_biblio` (カテゴライズ) / `shelve_biblio` (陳列) を registerDeliveryAction で
-// 登録する side-effect import。host proxy bootstrap (initHostProxy) と Vertex ProxyAgent
-// インストール (setupVertexProxy) は main() 内で呼ぶ — Phase 3 の陳列も GitHub Git Data API
-// を OneCLI MITM proxy 経由で叩くため、Vertex 用に設定する ProxyAgent (= global dispatcher)
-// を共用する。
+// `categorize_biblio` (カテゴライズ) / `shelve_biblio` (陳列) / `enkin_biblio` (禁書) /
+// `shokyaku_biblio` (焼却) / `list_biblio` (蔵書一覧) を registerDeliveryAction で登録する
+// side-effect import。host proxy bootstrap (initHostProxy) と Vertex ProxyAgent インストール
+// (setupVertexProxy) は main() 内で呼ぶ — 陳列 / 解除 (enkin / shokyaku) / 蔵書一覧 (list) も
+// GitHub Git Data API or Contents API を OneCLI MITM proxy 経由で叩くため、Vertex 用に
+// 設定する ProxyAgent (= global dispatcher) を共用する。
 import './biblio/acquire-action.js';
 import './biblio/inspect-action.js';
 import './biblio/categorize-action.js';
 import './biblio/shelve-action.js';
+import './biblio/enkin-action.js';
+import './biblio/shokyaku-action.js';
+import './biblio/list-biblio-action.js';
 import { initHostProxy } from './biblio/host-proxy.js';
 import { setupVertexProxy } from './biblio/vertex-client.js';
 
