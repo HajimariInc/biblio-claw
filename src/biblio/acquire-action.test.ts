@@ -92,19 +92,21 @@ describe('acquire_biblio handler — 既存経路 (skill 未指定)', () => {
   });
 });
 
-describe('acquire_biblio handler — Phase 1 個別 skill 経路', () => {
-  it('skill 指定時に acquire を `{ repo, skill }` で呼び、受領通知文言を返す', async () => {
+describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
+  it('skill 指定で成功時、仕入れ完了文言を返す (target = repo/skill 形式)', async () => {
     acquireMock.mockResolvedValue({
-      ok: false,
-      reason: 'not_implemented',
-      detail: '個別 skill 仕入れは Phase 3 で実装中: anthropics/skills/algorithmic-art',
+      ok: true,
+      biblioName: 'anthropics--skills--algorithmic-art',
+      quarantinePath: '/data/quarantine/anthropics--skills--algorithmic-art',
     });
     await handler({ repo: 'anthropics/skills', skill: 'algorithmic-art' }, dummySession, dummyDb);
     expect(acquireMock).toHaveBeenCalledWith({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
     const text = getWrittenText() ?? '';
-    expect(text).toContain('個別 skill 仕入れリクエストを受領');
+    expect(text).toContain('仕入れ完了');
+    // target は `repo/skill` 形式 (= 個別 skill 経路、全体経路 `repo` 単独と区別可能)
     expect(text).toContain('anthropics/skills/algorithmic-art');
-    // patron UX として「エラー」表記を出さない (= 「受領通知」と分離する設計判断)。
+    expect(text).toContain('inspect_biblio');
+    // 失敗系の「エラー」表記が混入しないことを確認 (= 成功経路では出さない設計判断)
     expect(text).not.toContain('仕入れエラー');
   });
 
@@ -116,6 +118,21 @@ describe('acquire_biblio handler — Phase 1 個別 skill 経路', () => {
     });
     await handler({ repo: 'oct/hi', skill: '   ' }, dummySession, dummyDb);
     expect(acquireMock).toHaveBeenCalledWith({ repo: 'oct/hi' });
+  });
+
+  it('skill 指定で clone_failed — detail を素通しで patron に返す ("仕入れエラー (clone_failed)" 形式)', async () => {
+    // sparse-checkout 経路の clone / sparse init / sparse set / checkout のいずれかが失敗した時の handler 表現を固定。
+    // 文言は acquire.ts 側で組まれた detail を素通し、reason 名は括弧内に出る。
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'clone_failed',
+      detail: 'partial clone に失敗しました: anthropics/skills (fatal: repository not found)',
+    });
+    await handler({ repo: 'anthropics/skills', skill: 'bad-skill' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れエラー (clone_failed)');
+    expect(text).toContain('partial clone');
+    expect(text).not.toContain('仕入れ完了');
   });
 });
 
