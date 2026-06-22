@@ -29,13 +29,15 @@ set -euo pipefail
 SCRIPTS_DIR="${SCRIPTS_DIR:-/scripts}"
 WORKER="${SCRIPTS_DIR}/onecli-vertex-secret.sh"
 
-log() { printf '[vertex-rotate] %s\n' "$*" >&2; }
+COMPONENT_NAME="${LOG_COMPONENT:-vertex-token-rotator}"
+# shellcheck source=./rotate-log.sh
+source "${SCRIPTS_DIR}/rotate-log.sh"
 
 # bash で実行するので実行ビットは不要、存在確認で十分。
-[ -f "$WORKER" ] || { log "FAIL: worker script not found at $WORKER"; exit 1; }
+[ -f "$WORKER" ] || { log_event ERROR rotation.config_error failure "worker script not found at $WORKER"; exit 1; }
 
 # OneCLI 起動待ち。満了を warn で可視化 (gh-rotate.sh と同じ理由)。
-log "wait for OneCLI ready (${ONECLI_URL})"
+log_event INFO rotation.wait_ready '' "wait for OneCLI ready (${ONECLI_URL})"
 ready=false
 for _ in $(seq 1 "$ROTATE_READY_RETRIES"); do
   if curl -fsS "${ONECLI_URL%/}/v1/secrets" >/dev/null 2>&1; then
@@ -45,17 +47,18 @@ for _ in $(seq 1 "$ROTATE_READY_RETRIES"); do
   sleep "$ROTATE_READY_INTERVAL_SEC"
 done
 if [ "$ready" = true ]; then
-  log "OneCLI ready"
+  log_event INFO rotation.ready success "OneCLI ready"
 else
-  log "WARN: OneCLI not ready after ${ROTATE_READY_RETRIES} retries — entering rotation loop anyway"
+  log_event WARNING rotation.ready_timeout failure "OneCLI not ready after ${ROTATE_READY_RETRIES} retries — entering rotation loop anyway"
 fi
 
 while true; do
-  log "rotation cycle start"
+  log_event INFO rotation.cycle_start '' "rotation cycle start"
   if bash "$WORKER"; then
-    log "rotation OK (sleep ${ROTATE_INTERVAL_SEC}s)"
+    log_event INFO rotation.ok success "Vertex ADC token refreshed (sleep ${ROTATE_INTERVAL_SEC}s)"
   else
-    log "rotation FAILED (sleep ${ROTATE_INTERVAL_SEC}s and retry)"
+    rc=$?
+    log_event ERROR rotation.failed failure "exit_code=${rc} (sleep ${ROTATE_INTERVAL_SEC}s and retry)"
   fi
   sleep "$ROTATE_INTERVAL_SEC"
 done

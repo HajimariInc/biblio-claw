@@ -32,10 +32,7 @@ import { buildSystemPromptAddendum } from './destinations.js';
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { runPollLoop } from './poll-loop.js';
-
-function log(msg: string): void {
-  console.error(`[agent-runner] ${msg}`);
-}
+import { log } from './log.js';
 
 const CWD = '/workspace/agent';
 
@@ -43,7 +40,7 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const providerName = config.provider.toLowerCase() as ProviderName;
 
-  log(`Starting v2 agent-runner (provider: ${providerName})`);
+  log.info(`Starting v2 agent-runner (provider: ${providerName})`);
 
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module
@@ -64,7 +61,7 @@ async function main(): Promise<void> {
       }
     }
     if (additionalDirectories.length > 0) {
-      log(`Additional directories: ${additionalDirectories.join(', ')}`);
+      log.info(`Additional directories: ${additionalDirectories.join(', ')}`);
     }
   }
 
@@ -83,7 +80,7 @@ async function main(): Promise<void> {
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
     mcpServers[name] = serverConfig;
-    log(`Additional MCP server: ${name} (${serverConfig.command})`);
+    log.info(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
 
   const provider = createProvider(providerName, {
@@ -104,6 +101,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  log(`Fatal error: ${err instanceof Error ? err.message : String(err)}`);
+  log.fatal('Fatal error', { err });
   process.exit(1);
 });

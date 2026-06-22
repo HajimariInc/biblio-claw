@@ -181,6 +181,9 @@ spec:
             - { name: CLOUD_ML_REGION, value: global }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
+            # === ログ設定 (= Cloud Logging が jsonPayload として自動解析) ===
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: host-orchestrator }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
@@ -213,6 +216,8 @@ spec:
             - { name: GH_SECRET_VALUE_FORMAT, value: 'Bearer {value}' }
             - { name: JWT_EXP_SECONDS, value: '540' }
             - { name: ROTATE_INTERVAL_SEC, value: '3000' }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: gh-token-rotator }
             - name: GH_APP_ID
               valueFrom:
                 secretKeyRef:
@@ -245,6 +250,8 @@ spec:
             - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
             - { name: ROTATE_INTERVAL_SEC, value: '3000' }
             - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: vertex-token-rotator }
           resources:
             requests:
               cpu: 50m

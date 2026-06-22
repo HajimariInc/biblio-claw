@@ -141,6 +141,17 @@ export function setupVertexProxy(): void {
   });
 }
 
+/**
+ * Vertex 呼び出しの追跡 context。
+ * axis は inspect 経路の 3 軸判定 (`legal` / `quality` / `dangerous`)、biblioName は対象 biblio。
+ */
+export interface VertexCallCtx {
+  requestId?: string;
+  sessionId?: string;
+  axis?: string;
+  biblioName?: string;
+}
+
 /** `callVertexGemini` の引数。 */
 export interface VertexCallArgs {
   /** 入力テキスト (system 不要、user 1 turn 想定で十分)。 */
@@ -162,6 +173,12 @@ interface VertexGeminiResponse {
     };
     finishReason?: string;
   }>;
+  /** Vertex `:generateContent` は usageMetadata でトークン使用量を返す (BQ cost 集計の基盤)。 */
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    totalTokenCount?: number;
+  };
 }
 
 /**
@@ -175,7 +192,7 @@ interface VertexGeminiResponse {
  *   - `!res.ok` (4xx/5xx) → status + body 抜粋を message に含めて throw
  *   - `candidates[0].content.parts[0].text` 不在 → 応答形式崩れ
  */
-export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
+export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx): Promise<string> {
   const env = readEnvFile(['ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION', 'INSPECT_DANGEROUS_MODEL']);
   const project = env.ANTHROPIC_VERTEX_PROJECT_ID;
   if (!project) {
@@ -190,6 +207,7 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
     throw new Error('vertex-client: INSPECT_DANGEROUS_MODEL is not set (.env / process.env both empty)');
   }
   const url = vertexUrl(project, region, modelId, 'google', 'generateContent');
+  const t0 = performance.now();
 
   // Gemini 2.5 系は thinking がデフォルト ON で `thoughtsTokenCount` に予算を喰われる
   // (= maxOutputTokens を thinking が先食いし、テキスト出力が截切れる)。検品 dangerous 軸の
@@ -230,6 +248,18 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
         bodyErr,
       });
     }
+    log.warn('vertex.call failed', {
+      event: 'vertex.call',
+      outcome: 'failure',
+      model: modelId,
+      status: res.status,
+      latency_ms: Math.round(performance.now() - t0),
+      error_body_preview: bodyText.slice(0, 200),
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+      axis: ctx?.axis,
+      biblio_name: ctx?.biblioName,
+    });
     throw new Error(`vertex-client: generateContent ${res.status} ${res.statusText} — ${bodyText}`);
   }
 
@@ -240,6 +270,30 @@ export async function callVertexGemini(args: VertexCallArgs): Promise<string> {
       `vertex-client: response missing candidates[0].content.parts[0].text — ${JSON.stringify(json).slice(0, 300)}`,
     );
   }
+  // usageMetadata 不在 (= Vertex API バージョン差 / streaming 経路) は BQ cost 集計が silent
+  // に 0 になる罠を生むため warn で可視化。`?? 0` fallback は維持し、ログ集約は崩さない。
+  if (!json.usageMetadata) {
+    log.warn('vertex.call: usageMetadata absent', {
+      event: 'vertex.call',
+      model: modelId,
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+      axis: ctx?.axis,
+      biblio_name: ctx?.biblioName,
+    });
+  }
+  log.info('vertex.call', {
+    event: 'vertex.call',
+    outcome: 'success',
+    model: modelId,
+    tokens_in: json.usageMetadata?.promptTokenCount ?? 0,
+    tokens_out: json.usageMetadata?.candidatesTokenCount ?? 0,
+    latency_ms: Math.round(performance.now() - t0),
+    request_id: ctx?.requestId,
+    session_id: ctx?.sessionId,
+    axis: ctx?.axis,
+    biblio_name: ctx?.biblioName,
+  });
   return text;
 }
 
@@ -273,6 +327,11 @@ export interface VertexAnthropicCallArgs {
 interface VertexAnthropicResponse {
   content?: Array<{ type?: string; text?: string }>;
   stop_reason?: string;
+  /** Anthropic Messages API は usage.{input,output}_tokens でトークン使用量を返す。 */
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+  };
 }
 
 /**
@@ -284,7 +343,7 @@ interface VertexAnthropicResponse {
  *   - `!res.ok` (4xx/5xx、特に Marketplace enable 未了の 403/404) → status + body 抜粋を message に含めて throw
  *   - `content[]` に `type === 'text'` の要素がない (= 応答形式崩れ) → throw
  */
-export async function callVertexAnthropic(args: VertexAnthropicCallArgs): Promise<string> {
+export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: VertexCallCtx): Promise<string> {
   const env = readEnvFile(['ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION', 'CATEGORIZE_MODEL']);
   const project = env.ANTHROPIC_VERTEX_PROJECT_ID;
   if (!project) {
@@ -298,6 +357,7 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs): Promis
     throw new Error('vertex-client: CATEGORIZE_MODEL is not set (.env / process.env both empty)');
   }
   const url = vertexUrl(project, region, modelId, 'anthropic', 'rawPredict');
+  const t0 = performance.now();
 
   // Anthropic on Vertex の body 必須フィールド (docs.anthropic.com/en/api/claude-on-vertex-ai):
   //   - anthropic_version: "vertex-2023-10-16" がリリース時点の固定値 (= バージョニング rail)
@@ -337,6 +397,18 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs): Promis
         bodyErr,
       });
     }
+    log.warn('vertex.call failed', {
+      event: 'vertex.call',
+      outcome: 'failure',
+      model: modelId,
+      status: res.status,
+      latency_ms: Math.round(performance.now() - t0),
+      error_body_preview: bodyText.slice(0, 200),
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+      axis: ctx?.axis,
+      biblio_name: ctx?.biblioName,
+    });
     throw new Error(`vertex-client: rawPredict ${res.status} ${res.statusText} — ${bodyText}`);
   }
 
@@ -350,5 +422,27 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs): Promis
   if (typeof text !== 'string' || text.length === 0) {
     throw new Error(`vertex-client: response missing content[type=text].text — ${JSON.stringify(json).slice(0, 300)}`);
   }
+  if (!json.usage) {
+    log.warn('vertex.call: usage absent', {
+      event: 'vertex.call',
+      model: modelId,
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+      axis: ctx?.axis,
+      biblio_name: ctx?.biblioName,
+    });
+  }
+  log.info('vertex.call', {
+    event: 'vertex.call',
+    outcome: 'success',
+    model: modelId,
+    tokens_in: json.usage?.input_tokens ?? 0,
+    tokens_out: json.usage?.output_tokens ?? 0,
+    latency_ms: Math.round(performance.now() - t0),
+    request_id: ctx?.requestId,
+    session_id: ctx?.sessionId,
+    axis: ctx?.axis,
+    biblio_name: ctx?.biblioName,
+  });
   return text;
 }

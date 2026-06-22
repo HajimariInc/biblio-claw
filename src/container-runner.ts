@@ -517,6 +517,12 @@ async function buildContainerSpec(
   // specific is in container.json (read by runner at startup).
   const env: { name: string; value: string }[] = [{ name: 'TZ', value: TIMEZONE }];
 
+  // agent コンテナ (= Bun 経路の container/agent-runner/src/log.ts) の LOG_FORMAT を
+  // host orchestrator の値に合わせる。host が未設定なら 'text' を明示伝搬 = host と agent が
+  // 非対称 (host=json / agent=text) になる経路を塞ぐ。
+  env.push({ name: 'LOG_FORMAT', value: process.env.LOG_FORMAT ?? 'text' });
+  env.push({ name: 'LOG_COMPONENT', value: 'agent-runner' });
+
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {

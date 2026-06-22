@@ -23,6 +23,7 @@ RUN apt-get update && \
 COPY scripts/vertex-rotate.sh        /scripts/vertex-rotate.sh
 COPY scripts/onecli-vertex-secret.sh /scripts/onecli-vertex-secret.sh
 COPY scripts/onecli-lib.sh           /scripts/onecli-lib.sh
+COPY scripts/rotate-log.sh           /scripts/rotate-log.sh
 RUN chmod +x /scripts/vertex-rotate.sh /scripts/onecli-vertex-secret.sh
 
 WORKDIR /scripts

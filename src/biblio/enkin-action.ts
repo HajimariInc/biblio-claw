@@ -32,8 +32,15 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
       ? (payload.category as BiblioCategory)
       : 'biblio-dev';
+  // approval 後の実処理は「承認申請」とは別境界 → 独立 request_id を生成。
+  const requestId = crypto.randomUUID();
   if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
-    log.error('enkin_confirm: invalid payload', { payload });
+    log.error('enkin_confirm: invalid payload', {
+      event: 'biblio.enkin',
+      outcome: 'failure',
+      payload,
+      request_id: requestId,
+    });
     safeNotify(notify, `禁書エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`, {
       action: APPROVAL_ACTION,
       biblioName,
@@ -41,7 +48,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     return;
   }
   try {
-    const result = await enkin({ biblioName, category });
+    const result = await enkin({ biblioName, category }, { ctx: { requestId } });
     if (result.ok) {
       safeNotify(
         notify,
@@ -49,17 +56,38 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
           `${biblioName} を棚から除去する draft PR を立てました。装備源は残置 (= 再装備可)。手動 merge をお願いします。`,
         { action: APPROVAL_ACTION, biblioName },
       );
-      log.info('enkin_confirm: ok', { biblioName, category, prUrl: result.prUrl });
+      log.info('enkin_confirm: ok', {
+        event: 'biblio.enkin',
+        outcome: 'success',
+        biblioName,
+        category,
+        prUrl: result.prUrl,
+        request_id: requestId,
+      });
     } else {
       safeNotify(notify, `禁書失敗 (${result.reason}): ${biblioName} — ${result.detail}`, {
         action: APPROVAL_ACTION,
         biblioName,
       });
-      log.warn('enkin_confirm: enkin returned not ok', { biblioName, category, reason: result.reason });
+      log.warn('enkin_confirm: enkin returned not ok', {
+        event: 'biblio.enkin',
+        outcome: 'failure',
+        biblioName,
+        category,
+        reason: result.reason,
+        request_id: requestId,
+      });
     }
   } catch (err) {
     // enkin() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('enkin_confirm threw', { biblioName, category, err });
+    log.error('enkin_confirm threw', {
+      event: 'biblio.enkin',
+      outcome: 'failure',
+      biblioName,
+      category,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     safeNotify(notify, `禁書エラー (internal): 予期しない失敗 — ${detail}`, {
       action: APPROVAL_ACTION,
@@ -72,7 +100,15 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
   const validated = await validateBiblioInput(content, inDb, session, 'enkin-resp', 'enkin_biblio', '禁書');
   if (!validated) return;
   const { biblioName, category } = validated;
-  log.info('enkin_biblio from agent', { biblioName, category, sessionId: session.id });
+  // 「承認申請」の境界 (= approval handler 側とは別 request_id)。
+  const requestId = crypto.randomUUID();
+  log.info('enkin_biblio from agent', {
+    event: 'biblio.enkin_request',
+    biblioName,
+    category,
+    sessionId: session.id,
+    request_id: requestId,
+  });
 
   try {
     await requestApproval({
@@ -90,7 +126,15 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
       'enkin_biblio',
     );
   } catch (err) {
-    log.error('enkin_biblio requestApproval threw', { biblioName, category, sessionId: session.id, err });
+    log.error('enkin_biblio requestApproval threw', {
+      event: 'biblio.enkin_request',
+      outcome: 'failure',
+      biblioName,
+      category,
+      sessionId: session.id,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(inDb, `禁書エラー (internal): 承認申請に失敗 — ${detail}`, 'enkin-resp', 'enkin_biblio');
   }

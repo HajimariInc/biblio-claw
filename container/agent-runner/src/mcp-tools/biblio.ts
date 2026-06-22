@@ -12,10 +12,7 @@
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
-
-function log(msg: string): void {
-  console.error(`[mcp-tools] ${msg}`);
-}
+import { log } from '../log.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -56,7 +53,7 @@ export const acquireBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'acquire_biblio', repo }),
     });
 
-    log(`acquire_biblio: ${requestId} → ${repo}`);
+    log.info(`acquire_biblio: ${requestId} → ${repo}`);
     return ok(`仕入れリクエストを受け付けました: ${repo}。取得が完了したら結果を通知します。`);
   },
 };
@@ -88,7 +85,7 @@ export const inspectBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'inspect_biblio', name }),
     });
 
-    log(`inspect_biblio: ${requestId} → ${name}`);
+    log.info(`inspect_biblio: ${requestId} → ${name}`);
     return ok(`検品リクエストを受け付けました: ${name}。判定が完了したら結果を通知します。`);
   },
 };
@@ -120,7 +117,7 @@ export const categorizeBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'categorize_biblio', name }),
     });
 
-    log(`categorize_biblio: ${requestId} → ${name}`);
+    log.info(`categorize_biblio: ${requestId} → ${name}`);
     return ok(`カテゴライズリクエストを受け付けました: ${name}。判定が完了したら結果を通知します。`);
   },
 };
@@ -164,7 +161,7 @@ export const shelveBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'shelve_biblio', name, category, reason }),
     });
 
-    log(`shelve_biblio: ${requestId} → ${name} / ${category}`);
+    log.info(`shelve_biblio: ${requestId} → ${name} / ${category}`);
     return ok(`陳列リクエストを受け付けました: ${name} → ${category}。PR 作成が完了したら結果を通知します。`);
   },
 };
@@ -203,7 +200,7 @@ export const enkinBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'enkin_biblio', name, category }),
     });
 
-    log(`enkin_biblio: ${requestId} → ${name} / ${category}`);
+    log.info(`enkin_biblio: ${requestId} → ${name} / ${category}`);
     return ok(`禁書リクエストを受け付けました: ${name} (${category})。admin 承認後に PR が立ったら通知します。`);
   },
 };
@@ -242,7 +239,7 @@ export const shokyakuBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'shokyaku_biblio', name, category }),
     });
 
-    log(`shokyaku_biblio: ${requestId} → ${name} / ${category}`);
+    log.info(`shokyaku_biblio: ${requestId} → ${name} / ${category}`);
     return ok(`焼却リクエストを受け付けました: ${name} (${category})。admin 承認後に PR が立ったら通知します。`);
   },
 };
@@ -274,7 +271,7 @@ export const listBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'list_biblio', category }),
     });
 
-    log(`list_biblio: ${requestId} → category=${category || '(all)'}`);
+    log.info(`list_biblio: ${requestId} → category=${category || '(all)'}`);
     return ok(
       `蔵書リクエストを受け付けました${category ? ` (category=${category})` : ''}。一覧が揃ったら結果を通知します。`,
     );

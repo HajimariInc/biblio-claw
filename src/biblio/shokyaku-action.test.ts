@@ -130,7 +130,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
       userId: 'slack:U-DEN',
       notify: notifyMock,
     });
-    expect(shokyakuMock).toHaveBeenCalledWith({ biblioName: 'owner--repo', category: 'biblio-ai' });
+    expect(shokyakuMock).toHaveBeenCalledWith({ biblioName: 'owner--repo', category: 'biblio-ai' }, expect.anything());
     const notifiedText = notifyMock.mock.calls[0][0] as string;
     expect(notifiedText).toContain('焼却完了');
     expect(notifiedText).toContain('https://github.com/HajimariInc/biblio-shelf/pull/88');

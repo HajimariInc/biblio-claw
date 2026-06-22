@@ -72,6 +72,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
   // category は optional。空文字 / null / undefined / 不正値は「全件」として扱う (= patron が
   // 適当に書いても落ちないように silent fallback。完全に不正なら情報提示)。
   const rawCategory = typeof content.category === 'string' ? content.category.trim() : '';
+  const requestId = crypto.randomUUID();
 
   let category: BiblioCategory | undefined;
   let invalidNotice = '';
@@ -81,28 +82,44 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
     } else {
       invalidNotice = `\n\n(注: 指定されたカテゴリ "${rawCategory}" は biblio-dev|art|bf|ai のいずれでもないため、全件を返しました)`;
       log.warn('list_biblio invalid category — falling back to all', {
+        event: 'biblio.list',
         category: rawCategory,
         sessionId: session.id,
+        request_id: requestId,
       });
     }
   }
 
-  log.info('list_biblio from agent', { category: category ?? null, sessionId: session.id });
+  log.info('list_biblio from agent', {
+    event: 'biblio.list',
+    category: category ?? null,
+    sessionId: session.id,
+    request_id: requestId,
+  });
 
   try {
-    const result = await listBiblio({ category });
+    const result = await listBiblio({ category }, { ctx: { requestId, sessionId: session.id } });
     const text = formatResult(result) + invalidNotice;
     await writeBackMessage(inDb, text, 'list-resp', 'list_biblio');
     log.info('list_biblio done', {
+      event: 'biblio.list',
+      outcome: 'success',
       category: category ?? null,
       total: result.total,
       filtered: result.items.length,
       sessionId: session.id,
+      request_id: requestId,
     });
   } catch (err) {
     // listBiblio() は fetchMarketplace / readShelveEnv の throw 等で抜けることがある。
     // 想定外例外も握って patron に通知 (host を落とさない、`shelve-action.ts` 流儀)。
-    log.error('list_biblio threw', { sessionId: session.id, err });
+    log.error('list_biblio threw', {
+      event: 'biblio.list',
+      outcome: 'failure',
+      sessionId: session.id,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(inDb, `蔵書一覧取得エラー (internal): ${detail}`, 'list-resp', 'list_biblio');
   }

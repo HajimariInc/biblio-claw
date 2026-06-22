@@ -28,8 +28,15 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
       ? (payload.category as BiblioCategory)
       : 'biblio-dev';
+  // approval 後の境界 = 独立 request_id (= 申請境界とは別 trace)。
+  const requestId = crypto.randomUUID();
   if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
-    log.error('shokyaku_confirm: invalid payload', { payload });
+    log.error('shokyaku_confirm: invalid payload', {
+      event: 'biblio.shokyaku',
+      outcome: 'failure',
+      payload,
+      request_id: requestId,
+    });
     safeNotify(notify, `焼却エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`, {
       action: APPROVAL_ACTION,
       biblioName,
@@ -37,7 +44,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     return;
   }
   try {
-    const result = await shokyaku({ biblioName, category });
+    const result = await shokyaku({ biblioName, category }, { ctx: { requestId } });
     if (result.ok) {
       // cleanup 成否で通知文言を切替 (= 「物理削除しました」と無条件通知で焼却の意味を誤認させない、
       // PR #15 silent-failure-hunter HIGH 2 対応)。
@@ -50,20 +57,37 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
         biblioName,
       });
       log.info('shokyaku_confirm: ok', {
+        event: 'biblio.shokyaku',
+        outcome: 'success',
         biblioName,
         category,
         prUrl: result.prUrl,
         cleanupWarning: result.cleanupWarning ?? null,
+        request_id: requestId,
       });
     } else {
       safeNotify(notify, `焼却失敗 (${result.reason}): ${biblioName} — ${result.detail}`, {
         action: APPROVAL_ACTION,
         biblioName,
       });
-      log.warn('shokyaku_confirm: shokyaku returned not ok', { biblioName, category, reason: result.reason });
+      log.warn('shokyaku_confirm: shokyaku returned not ok', {
+        event: 'biblio.shokyaku',
+        outcome: 'failure',
+        biblioName,
+        category,
+        reason: result.reason,
+        request_id: requestId,
+      });
     }
   } catch (err) {
-    log.error('shokyaku_confirm threw', { biblioName, category, err });
+    log.error('shokyaku_confirm threw', {
+      event: 'biblio.shokyaku',
+      outcome: 'failure',
+      biblioName,
+      category,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     safeNotify(notify, `焼却エラー (internal): 予期しない失敗 — ${detail}`, {
       action: APPROVAL_ACTION,
@@ -76,7 +100,14 @@ registerDeliveryAction('shokyaku_biblio', async (content, session, inDb) => {
   const validated = await validateBiblioInput(content, inDb, session, 'shokyaku-resp', 'shokyaku_biblio', '焼却');
   if (!validated) return;
   const { biblioName, category } = validated;
-  log.info('shokyaku_biblio from agent', { biblioName, category, sessionId: session.id });
+  const requestId = crypto.randomUUID();
+  log.info('shokyaku_biblio from agent', {
+    event: 'biblio.shokyaku_request',
+    biblioName,
+    category,
+    sessionId: session.id,
+    request_id: requestId,
+  });
 
   try {
     await requestApproval({
@@ -94,7 +125,15 @@ registerDeliveryAction('shokyaku_biblio', async (content, session, inDb) => {
       'shokyaku_biblio',
     );
   } catch (err) {
-    log.error('shokyaku_biblio requestApproval threw', { biblioName, category, sessionId: session.id, err });
+    log.error('shokyaku_biblio requestApproval threw', {
+      event: 'biblio.shokyaku_request',
+      outcome: 'failure',
+      biblioName,
+      category,
+      sessionId: session.id,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(
       inDb,
