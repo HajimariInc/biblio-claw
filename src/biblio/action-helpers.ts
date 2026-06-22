@@ -39,6 +39,12 @@ const WRITEBACK_RETRY_BASE_MS = 100;
  *
  * 文字クラスは `acquire.ts` の SEGMENT_RE と同じ集合を 2-3 セグメントに繋いだ形
  * (= 3 セグメント目は optional、2 要素のみの M2 全体仕入れ経路は引き続き valid)。
+ *
+ * 既知の greedy matching 挙動: 文字クラス `[A-Za-z0-9._-]*` が `-` を含むため、
+ * `owner---repo` / `owner--repo--` / `owner--repo--skill--extra` 等の形式は **受理される**
+ * (= 既存挙動、Phase 4 で 3 要素対応を追加した際も維持)。「先頭が英数字 + パスセパレータ
+ * 防御」の最小限制約として運用上問題にならない (= GitHub repo 名にこれらの形は出ない)。
+ * 受理範囲のテスト固定は `action-helpers.test.ts` に集約。
  */
 export const BIBLIO_NAME_RE =
   /^[A-Za-z0-9][A-Za-z0-9._-]*--[A-Za-z0-9][A-Za-z0-9._-]*(?:--[A-Za-z0-9][A-Za-z0-9._-]*)?$/;
