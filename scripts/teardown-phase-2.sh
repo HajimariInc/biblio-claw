@@ -6,13 +6,19 @@
 #   2. GKE Autopilot biblio-prod
 #   3. Cloud SQL biblio-pgsql
 #   4. Artifact Registry biblio-claw
-#   5. GSA biblio-sidecar + biblio-onecli (Vault 方針 = 2 件)
+#   5. GSA biblio-sidecar + biblio-onecli + biblio-orchestrator (M2 PRD A Phase 3 後 = 3 件)
 #   6. VPC peering 解除 + PSC アドレス削除 + Subnet 削除 + VPC 削除
 #
 # 削除しない (残置):
-#   - Secret Manager biblio-gh-app-pem (本番 biblio-claw 用途で残置)
+#   - Secret Manager biblio-gh-app-pem (本番 biblio-claw 用途で残置、再構築時も再利用)
 #   - Self-grant role (roles/servicenetworking.networksAdmin, roles/secretmanager.admin)
 #     は別途 gcloud projects remove-iam-policy-binding で剥がす
+#   - GSA に紐付く IAM policy binding (= roles/secretmanager.secretAccessor on
+#     biblio-gh-app-pem 等) は GSA 削除と同時に自動解除されるが、念のため
+#     gcloud projects get-iam-policy で残存確認推奨
+#   - Cloud SQL Bootstrap GRANT (= IAM user の権限) は Cloud SQL instance 削除と
+#     同時に消えるため明示削除不要。再構築後は scripts/init-project-gcp-pgsql-grant.sh
+#     で再付与
 #
 # 使い方:
 #   bash scripts/teardown-phase-2.sh              # dry-run (既定、リスト確認のみ)
@@ -79,9 +85,13 @@ run gcloud sql instances delete biblio-pgsql --project="$PROJECT" --quiet
 # === 4. Artifact Registry 削除 (image を含めて消える) ===
 run gcloud artifacts repositories delete biblio-claw --location="$REGION" --project="$PROJECT" --quiet
 
-# === 5. GSA 削除 (Vault 方針 = 2 件) ===
+# === 5. GSA 削除 (M2 PRD A Phase 3 後 = 3 件) ===
+# - biblio-sidecar      (旧 sidecar CronJob 用、Phase 3 で廃止、未削除なら残置中)
+# - biblio-onecli       (旧 OneCLI Deployment 用、Phase 3 で廃止、未削除なら残置中)
+# - biblio-orchestrator (Phase 3 で統合された現役 GSA、WI で Cloud SQL / Vertex / Secret Manager を impersonate)
 run gcloud iam service-accounts delete "biblio-sidecar@$PROJECT.iam.gserviceaccount.com" --project="$PROJECT" --quiet
 run gcloud iam service-accounts delete "biblio-onecli@$PROJECT.iam.gserviceaccount.com" --project="$PROJECT" --quiet
+run gcloud iam service-accounts delete "biblio-orchestrator@$PROJECT.iam.gserviceaccount.com" --project="$PROJECT" --quiet
 
 # === 6. VPC peering 解除 + PSC アドレス削除 + Subnet 削除 + VPC 削除 ===
 # 順序固定: peering 解除 → アドレス → Subnet → VPC (上から下への依存解除)
@@ -97,6 +107,8 @@ if $DRY_RUN; then
   info "self-grant role の解除は別途:"
   info "  gcloud projects remove-iam-policy-binding $PROJECT --member=user:<DEN> --role=roles/servicenetworking.networksAdmin"
   info "  gcloud projects remove-iam-policy-binding $PROJECT --member=user:<DEN> --role=roles/secretmanager.admin"
+  info ""
+  info "(参考) 再構築時の Bootstrap GRANT 案内は --confirm 実行成功時に表示します"
 elif [ "$WARN_COUNT" -gt 0 ]; then
   printf '\n'
   warn "==== Phase 2 teardown 終了 — $WARN_COUNT 件の失敗あり ===="
@@ -111,4 +123,14 @@ elif [ "$WARN_COUNT" -gt 0 ]; then
   exit 1
 else
   ok "==== Phase 2 teardown 完了 — 全コマンド成功 (Secret Manager biblio-gh-app-pem は残置) ===="
+  printf '\n' >&2
+  info "==== 次のステップ: GKE を再構築する場合 ===="
+  info "1. GKE / Cloud SQL / VPC を再作成 (= docs/operations-runbook.md §GKE リセット手順 を参照)"
+  info "2. K8s manifest 再適用: kubectl apply -f k8s/"
+  info "3. K8s Secret 投入: biblio-gh-app + biblio-slack-tokens"
+  info "4. Cloud SQL Bootstrap GRANT 適用 (Postgres 15+ で IAM user に必須):"
+  info "     bash scripts/init-project-gcp-pgsql-grant.sh"
+  info "5. リソース現状確認 + GKE wiring 確認:"
+  info "     bash scripts/init-project-gcp-resource-check.sh"
+  info "     bash scripts/verify-phase-2-wiring.sh"
 fi

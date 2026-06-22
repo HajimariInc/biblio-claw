@@ -203,6 +203,89 @@ GIT_SSL_NO_VERIFY=true git clone --depth 1 https://github.com/<owner>/<repo>.git
 
 ---
 
+## GKE リセット手順
+
+GKE 環境にトラブルが起きたとき / 完全再構築したいとき / ハッカソンデモ前の動作確認 に叩く手順を 1 箇所に集約する。本セクションは Phase 5 で本格拡張予定の骨格 (= 最低限)。
+
+### トリガ
+
+次のいずれかが見えたら本手順に降りる:
+
+- Slack で `@bot` 応答が来ない (orchestrator Pod は Running だが処理が回っていない)
+- `kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw` がタイムアウト
+- 仕入れ / 検品 / 陳列 が `401 Unauthorized` で失敗 (= GH or Vertex token 期限切れ)
+- Cloud SQL 接続失敗 (= `psql: connection to server ... failed`)
+- `permission denied for schema public` (= Bootstrap GRANT 未実行、再構築直後)
+
+### 手順 1: 現状確認 (= 何が壊れているかを最短で切り分ける)
+
+```bash
+# GCP リソース側 (cluster / Cloud SQL / Secret Manager / Artifact Registry)
+bash scripts/init-project-gcp-resource-check.sh
+
+# GKE 内 (StatefulSet / PVC / Sidecar / OneCLI REST / Slack adapter)
+bash scripts/verify-phase-2-wiring.sh
+```
+
+両方 OK なのにトラブルが続く場合は orchestrator 本体ログ (`kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw --since=5m`) を見て個別対処。
+
+### 手順 2: 部分 reset (= Pod のみ再起動、cluster は残す)
+
+GH / Vertex token 期限切れや orchestrator 内部状態の不整合が疑われるとき:
+
+```bash
+kubectl delete pod biblio-orchestrator-0 -n biblio-claw
+kubectl wait --for=condition=Ready pod/biblio-orchestrator-0 -n biblio-claw --timeout=180s
+bash scripts/verify-phase-2-wiring.sh   # 復旧確認
+```
+
+PVC は維持されるため SQLite データ + boots カウンタは引き継がれる (= `verify-phase-2-wiring.sh` §7 boots assertion で確認)。
+
+### 手順 3: 完全 teardown + 再構築 (= cluster ごと作り直す)
+
+部分 reset で復旧しないとき / setup を最初からやり直したいとき:
+
+```bash
+# 1. 削除予定リソースを dry-run で確認
+bash scripts/teardown-phase-2.sh --dry-run
+
+# 2. 確認後に実行 (10 秒カウントダウン後に削除開始)
+bash scripts/teardown-phase-2.sh --confirm
+
+# 3. GKE / Cloud SQL / VPC / Artifact Registry を再作成
+#    (= 既存 M1 Phase 2 構築手順、本 Phase では未記載、Phase 5 で本格拡張予定)
+
+# 4. K8s manifest 再適用
+kubectl apply -f k8s/
+
+# 5. K8s Secret 投入 (= 既存手順、別 ops doc 参照)
+#    - biblio-gh-app (GH App ID + installation ID)
+#    - biblio-slack-tokens (SLACK_BOT_TOKEN + SLACK_APP_TOKEN)
+
+# 6. Cloud SQL Bootstrap GRANT (Postgres 15+ で IAM user に必須、再構築のたびに必要)
+bash scripts/init-project-gcp-pgsql-grant.sh
+
+# 7. リソース現状確認 + GKE wiring 確認
+bash scripts/init-project-gcp-resource-check.sh
+bash scripts/verify-phase-2-wiring.sh
+```
+
+Secret Manager `biblio-gh-app-pem` は teardown でも残置するため、再投入不要 (= `teardown-phase-2.sh` 冒頭コメント参照)。
+
+### トラブルシューティング
+
+| 症状 | 原因 | 対処 |
+| :--- | :--- | :--- |
+| orchestrator log に `permission denied for schema public` | Bootstrap GRANT 未実行 (= 再構築直後) | `bash scripts/init-project-gcp-pgsql-grant.sh` |
+| StatefulSet `readyReplicas=0` のまま | initContainer (fetch-pem / cloud-sql-proxy) のいずれかが失敗 | `kubectl describe statefulset biblio-orchestrator -n biblio-claw` で initContainer 状態を確認 |
+| `cloud-sql-proxy` が CrashLoopBackOff | Cloud SQL 起動前 / IAM 権限不足 / private IP route 不通 | `kubectl logs biblio-orchestrator-0 -c cloud-sql-proxy --previous -n biblio-claw` |
+| `gh-token-rotator` が token 投入できない | GH App PEM 不在 / installation ID 不一致 | `kubectl logs biblio-orchestrator-0 -c gh-token-rotator -n biblio-claw` + GH App settings 画面で installation を確認 |
+| Slack adapter の "credentials missing" log | `biblio-slack-tokens` 未投入 or 値違い | `kubectl get secret biblio-slack-tokens -n biblio-claw -o jsonpath='{.data}' \| base64 -d` で値確認 |
+
+OneCLI MITM が tunnel に倒れているケースの切り分けは [§OneCLI MITM が `tunnel` mode で素通しになる](#落とし穴-onecli-mitm-が-tunnel-mode-で素通しになる) も参照。
+
+---
+
 ## M2 完成判定 verify(`scripts/verify-m2.sh`)
 
 M2 PRD B Phase 3 で導入した E2E 検証スクリプト。Slack 入力 → 仕入れ → 検品 → カテゴライズ → 陳列(棚リポへ draft PR 作成) → 重複検知 の 6 段を 1 度に流す。host process は起動不要 — 各段の CLI ハーネス(`scripts/biblio-{acquire,inspect,categorize,shelve}.ts`)が `initHostProxy()` / `setupVertexProxy()` を自前で呼ぶ。
