@@ -171,12 +171,16 @@ run_gke() {
 
   # PVC に fixture を投入 (= verify-m3-phase-1.sh と同形、ただし fixture 構造が
   # marketplace に発展済なので tar 経路で一括投入する)
+  # 注: 後段の `tar -C /data/biblio-equipped/${BIBLIO_NAME} -xf -` は -C の引数 dir が
+  # 既存である前提のため、mkdir で `${BIBLIO_NAME}` まで作る (旧版は親 dir のみ作って
+  # 子 dir が無く tar が「No such file or directory」で fail していた、本日 GKE 経路の
+  # 初実走で顕在化)。
   info '  - PVC に fixture (marketplace 構造) を投入'
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-mkdir.stderr"
   kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
-    bash -c "rm -rf /data/biblio-equipped/${BIBLIO_NAME} && mkdir -p /data/biblio-equipped" \
+    bash -c "rm -rf /data/biblio-equipped/${BIBLIO_NAME} && mkdir -p /data/biblio-equipped/${BIBLIO_NAME}" \
     >/dev/null 2>"$LAST_HARNESS_STDERR" \
-    || fail 'orchestrator Pod 内で mkdir /data/biblio-equipped に失敗'
+    || fail "orchestrator Pod 内で mkdir /data/biblio-equipped/${BIBLIO_NAME} に失敗"
 
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-tar.stderr"
   # tar で fixture ツリー全体を Pod に送り込む (kubectl cp は symlink / 実行権を保ちにくいので tar 経路)
