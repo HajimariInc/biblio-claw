@@ -18,12 +18,15 @@ import type { AcquireResult } from './types.js';
 /**
  * acquire 結果を patron 向けの 1 行テキストに整形する。
  *
- * `threshold_exceeded` は Phase 2 閾値超過 promote (= clone 前 early return)。
- * 「エラー」表記を避け、patron が次の手 (= 個別指定) に進める文言に倒す。
+ * 成功時は `repo` (= 全体経路) または `repo/skill` (= 個別 skill 経路) を target として表示し、
+ * patron が「自分のリクエストが期待どおり解釈されたか」を 1 文字で判別できるようにする。
+ * `threshold_exceeded` は Phase 2 閾値超過 promote (= clone 前 early return)。「エラー」表記を
+ * 避け、patron が次の手 (= 個別指定) に進める文言に倒す。
  */
-function resultText(repo: string, result: AcquireResult): string {
+function resultText(repo: string, skill: string | undefined, result: AcquireResult): string {
   if (result.ok) {
-    return `仕入れ完了: ${repo} を quarantine に配置しました (${result.quarantinePath})。次は inspect_biblio で検品できます。`;
+    const target = skill ? `${repo}/${skill}` : repo;
+    return `仕入れ完了: ${target} を quarantine に配置しました (${result.quarantinePath})。次は inspect_biblio で検品できます。`;
   }
   if (result.reason === 'threshold_exceeded') {
     // 動的 promote 文言 (count + 上限 + 個別指定例 + ブラウザ確認案内) は acquire.ts 側で
@@ -55,7 +58,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
 
   try {
     const result = await acquire({ repo, ...(skill ? { skill } : {}) });
-    await writeBackMessage(inDb, resultText(repo, result), 'acquire-resp', 'acquire_biblio');
+    await writeBackMessage(inDb, resultText(repo, skill, result), 'acquire-resp', 'acquire_biblio');
     log.info('acquire_biblio done', { repo, skill, ok: result.ok, sessionId: session.id });
   } catch (err) {
     // 想定外例外も握って patron に通知する (host を落とさない)。

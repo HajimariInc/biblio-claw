@@ -93,7 +93,7 @@ describe('acquire_biblio handler — 既存経路 (skill 未指定)', () => {
 });
 
 describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
-  it('skill 指定で成功時、仕入れ完了文言を返す (biblioName = 3 要素形式)', async () => {
+  it('skill 指定で成功時、仕入れ完了文言を返す (target = repo/skill 形式)', async () => {
     acquireMock.mockResolvedValue({
       ok: true,
       biblioName: 'anthropics--skills--algorithmic-art',
@@ -103,7 +103,8 @@ describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
     expect(acquireMock).toHaveBeenCalledWith({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
     const text = getWrittenText() ?? '';
     expect(text).toContain('仕入れ完了');
-    expect(text).toContain('anthropics/skills');
+    // target は `repo/skill` 形式 (= 個別 skill 経路、全体経路 `repo` 単独と区別可能)
+    expect(text).toContain('anthropics/skills/algorithmic-art');
     expect(text).toContain('inspect_biblio');
     // 失敗系の「エラー」表記が混入しないことを確認 (= 成功経路では出さない設計判断)
     expect(text).not.toContain('仕入れエラー');

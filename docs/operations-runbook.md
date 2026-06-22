@@ -234,7 +234,7 @@ EXPECTED_CATEGORY=biblio-ai bash scripts/verify-m2.sh nanocoai/some-skill
 ### 後始末(verify 中断時)
 
 - **draft PR が残った**: `gh pr list --repo HajimariInc/biblio-shelf --state open --search 'in:title shelve(biblio-' | head -20` で `shelve(biblio-*): ...` 形式のタイトルを目視 → `gh pr close --repo HajimariInc/biblio-shelf --delete-branch <PR#>` で個別 close
-- **shelf 内の biblio が残った**: `ls data/shelf/` で確認 → 不要なら `rm -rf data/shelf/<category>/<owner--name>`(= `DATA_DIR` 既定値 `./data` 配下、`.env` で `DATA_DIR=` を上書きしている場合はそのパス)
+- **shelf 内の biblio が残った**: `ls data/shelf/` で確認 → 不要なら `rm -rf data/shelf/<category>/<owner--name>` (個別 skill 仕入れ経路の場合は `<owner--name--skill>` 形式、= `DATA_DIR` 既定値 `./data` 配下、`.env` で `DATA_DIR=` を上書きしている場合はそのパス)
 - **`marketplace.json` への entry は draft PR を close = branch 削除すれば消える**(main は更新されていない)
 
 ### GKE 経路で実行する場合(将来運用、現状は local のみ)

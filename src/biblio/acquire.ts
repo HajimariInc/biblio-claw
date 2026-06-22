@@ -1,13 +1,18 @@
 /**
  * 仕入れ本体 — 外部 public biblio を取得して quarantine に配置する。
  *
- * patron の `owner/repo`(または GitHub URL)を起点に:
- *   normalizeRepo → gh api で存在確認 → git clone → quarantine 配置 →
- *   manifest (marketplace.json / SKILL.md) 存在チェック
- * を行う。決定的ロジックは全てここに集約し、`acquire.test.ts` で固める。
+ * 2 経路を持つ:
+ *   - 全体仕入れ (`req.skill === undefined`): normalizeRepo → gh api で存在確認 →
+ *     countSkillsInRepo (Phase 2 閾値判定、超過なら clone 前 early return) → git clone →
+ *     manifest (marketplace.json / SKILL.md) 存在チェック
+ *   - 個別 skill 仕入れ (`req.skill !== undefined`, Phase 3): normalizeRepo →
+ *     fetchSkillSubtree が partial clone + sparse-checkout で該当 skill dir のみ展開 →
+ *     SKILL.md 存在チェック。gh api 存在確認は bypass (= clone 自体が repo 不在を 404 で検知する)
+ * 決定的ロジックは全てここに集約し、`acquire.test.ts` で固める。
  *
  * `git`/`gh` は `getChildProcEnv()` の env (OneCLI proxy 経由) で実行するため、
- * host から認証付きで github に到達する。PoC-7 `verify.sh` の clone/存在確認を写経。
+ * host から認証付きで github に到達する (個別 skill 経路は `gh` を呼ばないが `git` には同じ env が
+ * 乗る)。PoC-7 `verify.sh` の clone/存在確認を写経。
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -182,8 +187,11 @@ function resolveSkillThreshold(): number {
  *     後段の `MAX_BLOBS_PER_PR=100` fail-closed に倒す方が UX 影響が小さい)
  *
  * GitHub API call は最大 3 回 (= marketplace.json + git/trees/main + git/trees/master)。
- * 認証あり rate limit (5000 req/h) に対して余裕十分。`ghFetch` は OneCLI MITM 経由で
- * Authorization: Bearer placeholder を wire で本物 token に置換する (= `shelve.ts` と同経路)。
+ * いずれも `ghFetch(..., { noAuth: true })` で Authorization ヘッダを省略する (= OneCLI secret の
+ * pathPattern `/repos/HajimariInc/*` に外部 repo は match せず、`Bearer placeholder` を素通しすると
+ * GitHub が invalid token として 401 を返すため。`shelve.ts` の HajimariInc 系経路とは非対称)。
+ * よって rate limit は IP 単位の無認証 60 req/h が上限だが、本関数は 1 仕入れあたり 1-3 回しか
+ * 呼ばないため余裕十分。
  */
 async function countSkillsInRepo(
   owner: string,
@@ -282,15 +290,17 @@ async function countSkillsInRepo(
 /**
  * 個別 skill 仕入れの本体 (Phase 3) — 該当 skill ディレクトリのみを quarantine に展開する。
  *
- * sparse-checkout 経路:
- *   1. git clone --depth 1 --filter=blob:none --no-checkout <url> <qpath>
+ * 経路 (= コード内の 6 ステップに対応):
+ *   1. quarantine 配置先準備 (mkdir + 上書き warn + 冪等削除)
+ *   2. git clone --depth 1 --filter=blob:none --no-checkout <url> <qpath>
  *      → shallow + blobless + worktree 展開なし
- *   2. git -C <qpath> sparse-checkout init --cone
+ *   3. git -C <qpath> sparse-checkout init --cone
  *      → cone mode (= path prefix 形式) で sparse-checkout を有効化
- *   3. git -C <qpath> sparse-checkout set <skill>
+ *   4. git -C <qpath> sparse-checkout set <skill>
  *      → 該当 skill ディレクトリのみを include 対象に
- *   4. git -C <qpath> checkout
+ *   5. git -C <qpath> checkout
  *      → HEAD を sparse pattern に従って worktree に展開 (= 該当 dir のみ、blob は遅延 fetch)
+ *   6. manifest 確認 (= skill dir 直下 + 任意階層に SKILL.md が存在 = agentskills.io spec)
  *
  * 採用根拠: 既存全体仕入れ経路 (= git clone) と同じ env (= getChildProcEnv()) で動く =
  * OneCLI MITM proxy / HTTPS_PROXY / GIT_SSL_CAINFO / shallow timeout 等の既存配線を継承する。
@@ -450,7 +460,7 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
       return {
         ok: false,
         reason: 'invalid_input',
-        detail: `skill は識別子形式 ([A-Za-z0-9._-]、主に kebab-case) で指定してください: "${skill}"`,
+        detail: `skill は識別子形式 (先頭 [A-Za-z0-9]、続き [A-Za-z0-9._-]、主に kebab-case) で指定してください: "${skill}"`,
       };
     }
     // 個別 skill 経路は全体経路 (gh / countSkillsInRepo / 全体 clone) を完全に bypass する。
