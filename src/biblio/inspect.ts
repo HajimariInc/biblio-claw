@@ -253,11 +253,14 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
   const prompt = `${DANGEROUS_PROMPT}\n${body}\n----- 検品対象本文ここまで -----`;
   let llmOutput: string;
   try {
-    llmOutput = await callVertexGemini({
-      prompt,
-      maxOutputTokens: DANGEROUS_MAX_TOKENS,
-      temperature: DANGEROUS_TEMPERATURE,
-    });
+    llmOutput = await callVertexGemini(
+      {
+        prompt,
+        maxOutputTokens: DANGEROUS_MAX_TOKENS,
+        temperature: DANGEROUS_TEMPERATURE,
+      },
+      { ...opts.ctx, axis: 'dangerous', biblioName },
+    );
   } catch (err) {
     // LLM 経路失敗 (proxy 未到達 / 4xx/5xx / 応答崩れ) は HOLD に倒す (fail-closed)。
     const detail = err instanceof Error ? err.message : String(err);

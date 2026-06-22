@@ -15,10 +15,7 @@
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
-
-function log(msg: string): void {
-  console.error(`[mcp-tools] ${msg}`);
-}
+import { log } from '../log.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -73,7 +70,7 @@ export const installPackages: McpToolDefinition = {
       }),
     });
 
-    log(`install_packages: ${requestId} → apt=[${apt.join(',')}] npm=[${npm.join(',')}]`);
+    log.info(`install_packages: ${requestId} → apt=[${apt.join(',')}] npm=[${npm.join(',')}]`);
     return ok(`Package install request submitted. You will be notified when admin approves or rejects.`);
   },
 };
@@ -112,7 +109,7 @@ export const addMcpServer: McpToolDefinition = {
       }),
     });
 
-    log(`add_mcp_server: ${requestId} → "${name}" (${command})`);
+    log.info(`add_mcp_server: ${requestId} → "${name}" (${command})`);
     return ok(`MCP server request submitted. You will be notified when admin approves or rejects.`);
   },
 };

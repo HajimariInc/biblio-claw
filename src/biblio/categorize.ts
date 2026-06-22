@@ -218,13 +218,16 @@ export async function categorize(req: { biblioName: string }, opts: InspectOptio
   const modelId = env.CATEGORIZE_MODEL;
   let llmOutput: string;
   try {
-    llmOutput = await callVertexAnthropic({
-      system: SYSTEM_PROMPT,
-      prompt: `${body}\n\n----- 本文ここまで -----\n\n${OUTPUT_INSTRUCTION}`,
-      maxTokens: CATEGORIZE_MAX_TOKENS,
-      temperature: CATEGORIZE_TEMPERATURE,
-      modelId: modelId ?? undefined,
-    });
+    llmOutput = await callVertexAnthropic(
+      {
+        system: SYSTEM_PROMPT,
+        prompt: `${body}\n\n----- 本文ここまで -----\n\n${OUTPUT_INSTRUCTION}`,
+        maxTokens: CATEGORIZE_MAX_TOKENS,
+        temperature: CATEGORIZE_TEMPERATURE,
+        modelId: modelId ?? undefined,
+      },
+      { ...opts.ctx, axis: 'categorize', biblioName },
+    );
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     log.warn('categorize: LLM call failed', { biblioName, detail });

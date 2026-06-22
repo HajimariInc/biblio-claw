@@ -136,7 +136,7 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
       userId: 'slack:U-DEN',
       notify: notifyMock,
     });
-    expect(enkinMock).toHaveBeenCalledWith({ biblioName: 'owner--repo', category: 'biblio-dev' });
+    expect(enkinMock).toHaveBeenCalledWith({ biblioName: 'owner--repo', category: 'biblio-dev' }, expect.anything());
     expect(notifyMock).toHaveBeenCalledTimes(1);
     const notifiedText = notifyMock.mock.calls[0][0] as string;
     expect(notifiedText).toContain('禁書完了');

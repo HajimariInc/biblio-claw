@@ -52,7 +52,21 @@ export class GhHttpError extends Error {
   }
 }
 
-export async function ghFetch(step: string, url: string, init: UndiciRequestInit = {}): Promise<unknown> {
+/**
+ * ghFetch を呼ぶ全 caller が 1 patron 依頼を跨いで追跡するための文脈。
+ * Task 10 (request_id propagation) で全 caller が ctx を渡す。
+ */
+export interface GhFetchCtx {
+  requestId?: string;
+  sessionId?: string;
+}
+
+export async function ghFetch(
+  step: string,
+  url: string,
+  init: UndiciRequestInit = {},
+  ctx?: GhFetchCtx,
+): Promise<unknown> {
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
@@ -62,11 +76,14 @@ export async function ghFetch(step: string, url: string, init: UndiciRequestInit
   };
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
 
+  const t0 = performance.now();
   const res = await fetch(url, {
     ...init,
     headers,
     signal: AbortSignal.timeout(GH_FETCH_TIMEOUT_MS),
   });
+  const latency_ms = Math.round(performance.now() - t0);
+
   if (!res.ok) {
     let body = '';
     try {
@@ -74,8 +91,30 @@ export async function ghFetch(step: string, url: string, init: UndiciRequestInit
     } catch (bodyErr) {
       log.warn('gh: failed to read error body', { step, status: res.status, bodyErr });
     }
+    // 404 は呼び出し側で expected fallback として扱う経路 (fetchMarketplace 等) があるため debug。
+    // それ以外の non-2xx は warn で残す (silent failure 解消)。
+    const level = res.status === 404 ? 'debug' : 'warn';
+    log[level]('github.fetch failed', {
+      event: 'github.fetch',
+      outcome: 'failure',
+      step,
+      status: res.status,
+      latency_ms,
+      error_body_preview: body.slice(0, 200),
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+    });
     throw new GhHttpError(step, res.status, body);
   }
+  log.debug('github.fetch ok', {
+    event: 'github.fetch',
+    outcome: 'success',
+    step,
+    status: res.status,
+    latency_ms,
+    request_id: ctx?.requestId,
+    session_id: ctx?.sessionId,
+  });
   return res.json();
 }
 
@@ -130,10 +169,11 @@ export function readShelveEnv(): ShelfEnv {
 /** 既存 marketplace.json を取得する。404 なら null。それ以外の non-2xx は throw。 */
 export async function fetchMarketplace(
   env: ShelfEnv,
+  ctx?: GhFetchCtx,
 ): Promise<{ raw: Record<string, unknown> | null; sha: string | null }> {
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/contents/.claude-plugin/marketplace.json`;
   try {
-    const data = (await ghFetch('GET contents/marketplace.json', url)) as {
+    const data = (await ghFetch('GET contents/marketplace.json', url, {}, ctx)) as {
       content?: string;
       encoding?: string;
       sha?: string;
@@ -178,19 +218,24 @@ export interface CommitArgs {
 }
 
 /** `POST /git/commits` を 1 author で叩く (PAT fallback は呼び出し側で分岐)。 */
-export async function createCommit(args: CommitArgs): Promise<{ sha: string }> {
+export async function createCommit(args: CommitArgs, ctx?: GhFetchCtx): Promise<{ sha: string }> {
   const { env, message, treeSha, parentSha, author } = args;
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/commits`;
-  const data = (await ghFetch('POST git/commits', url, {
-    method: 'POST',
-    body: JSON.stringify({
-      message,
-      tree: treeSha,
-      parents: [parentSha],
-      author,
-      committer: author,
-    }),
-  })) as { sha?: string };
+  const data = (await ghFetch(
+    'POST git/commits',
+    url,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        tree: treeSha,
+        parents: [parentSha],
+        author,
+        committer: author,
+      }),
+    },
+    ctx,
+  )) as { sha?: string };
   if (typeof data.sha !== 'string') {
     throw new GhHttpError('POST git/commits', 200, 'response missing sha');
   }

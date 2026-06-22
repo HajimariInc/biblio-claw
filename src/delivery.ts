@@ -170,8 +170,16 @@ async function drainSession(session: Session): Promise<void> {
   try {
     outDb = openOutboundDb(agentGroup.id, session.id);
     inDb = openInboundDb(agentGroup.id, session.id);
-  } catch {
-    return; // DBs might not exist yet
+  } catch (err) {
+    // 初回 spawn 前は ENOENT で正常スキップ。debug レベルで残し、LOG_LEVEL=debug 時のみ可視化。
+    // それ以外 (パーミッション / I/O エラー) も err を保持して silent failure を防ぐ。
+    log.debug('drainSession: db open skipped', {
+      event: 'delivery.db_open_skipped',
+      session_id: session.id,
+      agent_group_id: agentGroup.id,
+      err,
+    });
+    return;
   }
 
   try {

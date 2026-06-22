@@ -25,8 +25,14 @@ function resultText(repo: string, result: AcquireResult): string {
 
 registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   const repo = typeof content.repo === 'string' ? content.repo : '';
+  const requestId = crypto.randomUUID();
   if (!repo) {
-    log.warn('acquire_biblio missing repo', { sessionId: session.id });
+    log.warn('acquire_biblio missing repo', {
+      event: 'biblio.acquire',
+      outcome: 'failure',
+      sessionId: session.id,
+      request_id: requestId,
+    });
     await writeBackMessage(
       inDb,
       '仕入れエラー (invalid_input): repo が指定されていません。',
@@ -36,15 +42,36 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
     return;
   }
 
-  log.info('acquire_biblio from agent', { repo, sessionId: session.id });
+  log.info('acquire_biblio from agent', {
+    event: 'biblio.acquire',
+    repo,
+    sessionId: session.id,
+    request_id: requestId,
+  });
 
   try {
+    // acquire() は内部で gh / git subprocess を使うため ctx propagate の経路はない。
+    // request_id は本 handler の entry/exit log にのみ載る (= patron 依頼 1 件の境界記録)。
     const result = await acquire({ repo });
     await writeBackMessage(inDb, resultText(repo, result), 'acquire-resp', 'acquire_biblio');
-    log.info('acquire_biblio done', { repo, ok: result.ok, sessionId: session.id });
+    log.info('acquire_biblio done', {
+      event: 'biblio.acquire',
+      outcome: result.ok ? 'success' : 'failure',
+      repo,
+      ok: result.ok,
+      sessionId: session.id,
+      request_id: requestId,
+    });
   } catch (err) {
     // 想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('acquire_biblio threw', { repo, sessionId: session.id, err });
+    log.error('acquire_biblio threw', {
+      event: 'biblio.acquire',
+      outcome: 'failure',
+      repo,
+      sessionId: session.id,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(
       inDb,

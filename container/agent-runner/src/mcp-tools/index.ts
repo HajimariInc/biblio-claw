@@ -12,12 +12,9 @@ import './agents.js';
 import './self-mod.js';
 import './biblio.js';
 import { startMcpServer } from './server.js';
-
-function log(msg: string): void {
-  console.error(`[mcp-tools] ${msg}`);
-}
+import { log } from '../log.js';
 
 startMcpServer().catch((err) => {
-  log(`MCP server error: ${err instanceof Error ? err.message : String(err)}`);
+  log.error('MCP server error', { err });
   process.exit(1);
 });

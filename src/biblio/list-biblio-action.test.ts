@@ -88,7 +88,7 @@ describe('list_biblio handler', () => {
       appliedFilter: null,
     });
     await handler({ action: 'list_biblio', category: '' }, dummySession, dummyDb);
-    expect(listBiblioMock).toHaveBeenCalledWith({ category: undefined });
+    expect(listBiblioMock).toHaveBeenCalledWith({ category: undefined }, expect.anything());
     const text = getWrittenText();
     expect(text).toContain('2 件');
     expect(text).toContain('biblio-dev (1)');
@@ -108,7 +108,7 @@ describe('list_biblio handler', () => {
       appliedFilter: 'biblio-dev',
     });
     await handler({ action: 'list_biblio', category: 'biblio-dev' }, dummySession, dummyDb);
-    expect(listBiblioMock).toHaveBeenCalledWith({ category: 'biblio-dev' });
+    expect(listBiblioMock).toHaveBeenCalledWith({ category: 'biblio-dev' }, expect.anything());
     const text = getWrittenText();
     expect(text).toContain('biblio-dev');
     expect(text).toContain('2 件');
@@ -125,7 +125,7 @@ describe('list_biblio handler', () => {
     });
     await handler({ action: 'list_biblio', category: 'invalid' }, dummySession, dummyDb);
     // 不正値は undefined にフォールバックして全件取得を要求する。
-    expect(listBiblioMock).toHaveBeenCalledWith({ category: undefined });
+    expect(listBiblioMock).toHaveBeenCalledWith({ category: undefined }, expect.anything());
     const text = getWrittenText();
     expect(text).toContain('invalid');
     expect(text).toContain('全件を返しました');

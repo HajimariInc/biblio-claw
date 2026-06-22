@@ -84,7 +84,7 @@ describe('categorize_biblio handler — happy path', () => {
       reason: 'TS refactor 補助',
     });
     await handler({ name: 'owner--repo' }, dummySession, dummyDb);
-    expect(categorizeMock).toHaveBeenCalledWith({ biblioName: 'owner--repo' });
+    expect(categorizeMock).toHaveBeenCalledWith({ biblioName: 'owner--repo' }, expect.anything());
     const text = getWrittenText() ?? '';
     expect(text).toContain('カテゴリ判定: `biblio-dev`');
     expect(text).toContain('TS refactor 補助');

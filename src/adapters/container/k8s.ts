@@ -271,6 +271,24 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     const failed = conds.some((c) => c.type === 'Failed' && c.status === 'True');
     if (complete || failed) {
       this.pending.delete(jobName);
+      // killed (= host が kill 要求) は patron 視点では「正常終了」の延長なので残置の警告にしない。
+      // failed (= K8s が想定外に終了させた) は status.conditions[].message を propagate して
+      // 「なぜ Job が死んだか」を host ログに残す (silent failure 解消)。
+      if (failed && !handle.killed) {
+        const conditionsMessage =
+          conds
+            .filter((c) => c.type === 'Failed')
+            .map((c) => `${c.reason ?? '?'}: ${c.message ?? ''}`)
+            .join(' | ') || '(no conditions)';
+        log.error('k8s.job_failed', {
+          event: 'k8s.job_failed',
+          outcome: 'failure',
+          job_name: jobName,
+          session_id: job.metadata?.labels?.['biblio.session-id'] ?? null,
+          agent_group_id: job.metadata?.labels?.['biblio.agent-group-id'] ?? null,
+          conditions_message: conditionsMessage,
+        });
+      }
       handle.resolve({
         code: job.status?.succeeded ?? null,
         reason: handle.killed ? 'killed' : failed ? 'failed' : 'complete',
@@ -287,6 +305,15 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
     // honor that; otherwise treat the disappearance as a failed run (= the
     // host should not silently assume success).
     this.pending.delete(jobName);
+    if (!handle.killed) {
+      log.warn('k8s.job_deleted_unexpectedly', {
+        event: 'k8s.job_deleted_unexpectedly',
+        outcome: 'failure',
+        job_name: jobName,
+        session_id: job.metadata?.labels?.['biblio.session-id'] ?? null,
+        agent_group_id: job.metadata?.labels?.['biblio.agent-group-id'] ?? null,
+      });
+    }
     handle.resolve({
       code: job.status?.succeeded ?? null,
       reason: handle.killed ? 'killed' : 'failed',
