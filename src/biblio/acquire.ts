@@ -127,7 +127,8 @@ function hasFileRecursive(dir: string, filename: string, depth = 0): boolean {
 
 /**
  * biblio 成立条件: `.claude-plugin/marketplace.json` または任意階層の `SKILL.md`。
- * Phase 1 は「存在チェック」のみ (schema 妥当性は Phase 2 検品)。
+ * M2 PRD B Phase 1 (= 仕入れ段階) では「存在チェック」のみ実施 (schema 妥当性は M2 PRD B
+ * Phase 2 検品 `inspect.ts` の責務)。
  */
 function hasManifest(quarantinePath: string): boolean {
   const marketplace = path.join(quarantinePath, '.claude-plugin', 'marketplace.json');
@@ -519,11 +520,11 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
 
   // 2. quarantine 配置先 (biblioName = `<owner>--<name>` の dedup key)。
   //
-  // Phase 1 では `biblioName = name` だったが、別 owner の同名 repo が同じ
-  // quarantine dir を奪い合う silent failure を産んでいた (= Phase 3 で陳列が
-  // 別ownerの同名 biblio をすり替えるリスク)。GitHub 規約上 `/` は owner/repo に
+  // M2 PRD B Phase 1 (= 仕入れ初期実装) では `biblioName = name` だったが、別 owner の同名 repo が
+  // 同じ quarantine dir を奪い合う silent failure を産んでいた (= M2 PRD B Phase 3 (= 陳列) で
+  // 別 owner の同名 biblio をすり替えるリスク)。GitHub 規約上 `/` は owner/repo に
   // 含まれず、`--` は通常 repo 名に出現しない (= 衝突可能性は実務上ゼロ) ため、
-  // dedup key かつ shelf entry name として安全に使える形式 (PRD B Phase 3 §補足)。
+  // dedup key かつ shelf entry name として安全に使える形式 (M2 PRD B Phase 3 §補足)。
   const biblioName = `${owner}--${name}`;
   const quarantinePath = path.join(QUARANTINE_DIR, biblioName);
   try {
