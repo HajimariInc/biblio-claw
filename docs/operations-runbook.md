@@ -46,6 +46,8 @@ slash command 本体は `.claude/commands/init-project.md` (ローカル) と `.
 | **再起動** | プロセス kill → `pnpm run dev` | `kubectl rollout restart statefulset biblio-orchestrator -n biblio-claw` |
 | Slack 接続確認 | 上記ログで `Slack socket mode connected` / `botUserId` | 同左(`--since=3m \| grep -iE 'auth completed\|socket'`) |
 
+> **Phase 2 ログを読む**: §Phase 2 JSON ログの読み方 参照(フィルタ:`LOG_COMPONENT=host-orchestrator`)。
+
 ### 2. agent container(agent-runner)
 
 | 操作 | ローカル | GCP |
@@ -56,6 +58,8 @@ slash command 本体は `.claude/commands/init-project.md` (ローカル) と `.
 | **孤児の強制削除** | `docker rm -f <container>` | `kubectl delete job <job-name> -n biblio-claw`(host 台帳外の孤児用) |
 
 > ⚠️ **agent ログはコンテナ終了で消える**(ローカルは `--rm`、GCP も Job 完了後 pod が剥がれる)。silent fail を追うなら**生きているうちに**採取する。再起動は host 経由(`ncl groups restart`)が基本で、`kubectl delete job` は host が見失った孤児専用。
+
+> **Phase 2 ログを読む**: §Phase 2 JSON ログの読み方 参照(フィルタ:`LOG_COMPONENT=agent-runner`、host orchestrator の `LOG_FORMAT` を伝搬)。
 
 ### 3. OneCLI gateway
 
@@ -69,6 +73,8 @@ slash command 本体は `.claude/commands/init-project.md` (ローカル) と `.
 
 > GCP の `/v1/agents` は **orchestrator Pod 内から叩く**こと。ローカル端末から port-forward 経由で叩くと auth context が違い別 view になる(CLAUDE.md の罠参照)。
 
+> **Phase 2 ログ視点**: OneCLI gateway は **OneCLI 自前ログ形式**(= Phase 2 JSON 形式と異なる、`severity` / `message` / `time` / `component` 規約は適用されない)。§Phase 2 JSON ログの読み方の `jq` クエリは effective でない。OneCLI ログは plain text or OneCLI 独自の構造化形式で出力(= `host=... mode="mitm"` 形式等、§「落とし穴: OneCLI MITM が `tunnel` mode で素通しになる」も参照)。
+
 ### 4. token rotator(GCP のみ、自動更新)
 
 | | コマンド |
@@ -77,6 +83,8 @@ slash command 本体は `.claude/commands/init-project.md` (ローカル) と `.
 | Vertex token rotator ログ | `kubectl logs biblio-orchestrator-0 -n biblio-claw -c vertex-token-rotator -f` |
 
 ローカルには rotator がない → **Vertex token は ~1h で失効**するので `bash scripts/onecli-vertex-secret.sh` を手動再実行(401 が出たら)。
+
+> **Phase 2 ログを読む**: §Phase 2 JSON ログの読み方 参照(フィルタ:`LOG_COMPONENT=gh-token-rotator` / `LOG_COMPONENT=vertex-token-rotator`、rotation event は `event=rotation.ok` / `event=rotation.failed`)。
 
 ---
 
@@ -511,6 +519,118 @@ kubectl get jobs -n biblio-claw -l app.kubernetes.io/component=agent -o name | \
 # Pod 完全削除を待ってから再実行
 kubectl get pods -n biblio-claw -l app.kubernetes.io/component=agent --watch
 ```
+
+---
+
+## M3 Slack 経路の運用(= 装備 / 蔵書一覧 / 仕入れ)
+
+M3 で patron が Slack から `@bot` mention で叩く 3 種の経路を 1 § にまとめる。**verify は assert 中心**(= `verify-m3.sh`、上記)**、本 § は patron 動線中心**(= 「`@bot ...` を打った後何が起きるか」+ 「動かない時どこを見るか」)で役割分担。各経路の詳細仕様は cross-link 先(= [equip-physical.md](equip-physical.md) / ルート `CLAUDE.md` §src/biblio)を参照。
+
+### `@bot 装備して <biblio-name>` 経路(装備機構)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| patron 動線 | Slack で `@bot 装備して example-org--test-biblio-minimal` → host が `session_equipped_biblios` に upsert → **次回 spawn で `install-biblios.sh` が PVC / `data/shelf/` 上の biblio 実体を agent コンテナに mount** |
+| 反映タイミング | **次回 session 起動時**(= 同セッションでは反映されない。即時反映したい場合は `ncl groups restart`) |
+| host ログ(local) | `pnpm run dev` の stdout に `event=biblio.equip` 系 |
+| host ログ(GKE) | `kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw \| jq 'select(.event=="biblio.equip")'` |
+| 装備リスト確認 | `pnpm exec tsx scripts/q.ts data/v2.db "SELECT biblio_name, order_index FROM session_equipped_biblios WHERE session_id='<id>' ORDER BY order_index"`(GKE は orchestrator Pod 内に `kubectl exec`、DB パスは `/data/v2.db`) |
+| 動かない時 | (1) 装備対象 biblio が PVC / `data/shelf/` に物理存在するか(= **焼却済だと装備不可**)/ (2) `install-biblios.sh` が agent コンテナに COPY されているか(= Dockerfile で `chmod 755`、CLAUDE.md §コンテナランタイム参照) |
+| verify との接続 | `verify-m3.sh` assertion 1(マーカー検出)/ 2(ephemeral 解除)が同経路を独立 assert |
+
+詳細は [equip-physical.md](equip-physical.md)(= 物理配置規約 + Docker/K8s 両 runtime 透過 + spawn-time install lifecycle)を参照。
+
+### `@bot 蔵書` / `@bot 蔵書一覧` 経路(蔵書一覧)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| patron 動線 | Slack で `@bot 蔵書` → agent が `list_biblio` MCP tool を **自律発火**(= host 側 keyword parser を持たない)→ host `listBiblio()` が `fetchMarketplace`(GitHub Contents API)→ source split(= 棚 author 由来 only)→ category filter → patron へ JSON 返却 |
+| category 指定 | `@bot 蔵書 biblio-ai` 形式で絞り込み。**不正 category は silent fallback で全件 + 注記**(= UX 寄せ) |
+| host ログ(local) | `event=biblio.list` |
+| host ログ(GKE) | `kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw \| jq 'select(.event=="biblio.list")'` |
+| 動かない時 | (1) `SHELF_REPO_OWNER` / `SHELF_REPO_NAME` env が host に投入されているか(= GKE は `k8s/10-orchestrator-statefulset.yaml` の orchestrator container env、Phase 4.6 で投入確定)/ (2) GH installation token が valid か(= `kubectl logs biblio-orchestrator-0 -c gh-token-rotator` で rotation 状況確認、~50min 周期) |
+| verify との接続 | `verify-m3.sh` assertion 5(全件)/ 6(カテゴリ別)が同経路を独立 assert |
+
+### `@bot 仕入れて <owner>/<repo>` 経路(仕入れ → 検品 → カテゴライズ → 陳列)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| patron 動線 | Slack で `@bot 仕入れて example-org/test-biblio-minimal` → agent が `acquire_biblio` MCP tool 発火 → host が **4 段** を順次実行:(1) `acquire`(= GitHub Contents API + clone、host-proxy 経由)→ (2) `inspect`(= Vertex × Gemini 3 軸)→ (3) `categorize`(= Vertex × Claude Sonnet-4.6)→ (4) `shelve`(= 棚リポへ draft PR 作成、Git Data API) |
+| 完了通知 | patron に **draft PR URL** が返る(= 棚 main への merge は patron の手動操作、merge 後に `@bot 蔵書` で見える) |
+| host ログ(local) | `event=biblio.acquire` / `biblio.inspect` / `biblio.categorize` / `biblio.shelve`(= 4 段それぞれ独立 event) |
+| host ログ(GKE) | `kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw \| jq 'select(.event \| startswith("biblio."))'` で 4 段串刺し |
+| 動かない時 | (1) Vertex token / GH token が valid か(= **401 retry-loop に陥った agent は `/init-project-gcp refresh` の Section 4 で clean restart**)/ (2) OneCLI MITM が tunnel に倒れていないか(= §「落とし穴: OneCLI MITM が `tunnel` mode で素通しになる」)/ (3) Vertex Marketplace で対象 model が enable されているか(= `claude-sonnet-4-6` / Gemini) |
+| verify との接続 | `verify-m2.sh`(= M2 完成判定)が 4 段全部を 1 周 + 重複検知 + cleanup を assert(= 本経路の主たる回帰検証) |
+
+> **禁書 / 焼却**(= 破壊操作 HITL):`@bot 禁書 <biblio-name>` / `@bot 焼却 <biblio-name>` は **admin 承認を経由**(= owner / scoped admin に DM、CLAUDE.md §シークレット / クレデンシャル / OneCLI §「クレデンシャル使用時の承認要求」と同経路)。承認後に削除方向 draft PR(= 棚から marketplace entry 削除)+ 焼却は agent からの装備対象も物理削除する。詳細は [equip-physical.md](equip-physical.md) §破壊操作 + ルート `CLAUDE.md` §src/biblio。verify との接続は `verify-m3.sh` assertion 3(禁書 = clone 残置で再装備可)/ 4(焼却 = clone 物理削除で装備不可)。
+
+---
+
+## /init-project-gcp サブコマンド利用ガイド
+
+GKE 環境の初期化 / 起動 / 動作確認は `/init-project-gcp` 1 発で完結する設計(= local 経路の `/init-project` と対称)。**サブコマンド本体の詳細実装は [`.claude/commands/init-project-gcp.md`](../.claude/commands/init-project-gcp.md)(= 421 行)が正本**。本 § は patron 視点の「いつ叩くか / 期待結果 / 主要ログ確認経路」のサマリ。生コマンドは本 runbook 既存 §(= 大原則 / 早見表 / GKE リセット手順)に残置。
+
+### `/init-project-gcp`(引数なし、= 状態確認 + up)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| いつ叩くか | **入室直後の第一選択**。GKE 環境の現状を診断 → healthy なら no-op、不足分があれば自動で `up` に進む |
+| 期待結果 | resource-check + GKE wiring 確認(= `verify-phase-2-wiring.sh`)の両 PASS → 「GKE 環境 ready」 |
+| 主要ログ | `kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw --since=5m`(= `Channel adapter started` 観測) |
+| 副作用 | なし(= 純粋な状態確認) |
+
+### `/init-project-gcp up`(= ensure running、不足分だけ起動)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| いつ叩くか | Pod 落ち / Secret 未投入 / token 期限切れ後の復帰用 |
+| 期待結果 | `kubectl apply -f k8s/` 冪等適用 → StatefulSet ready → `verify-phase-2-wiring.sh` 全 9 assertions PASS |
+| 主要ログ | `kubectl rollout status statefulset/biblio-orchestrator` 出力 + 上記 orchestrator log |
+| 副作用 | manifest 適用のみ(= 冪等)。**deps install / image build は触らない**(= `image-sync` の責務) |
+
+### `/init-project-gcp reset`(= factory reset、副作用大)
+
+> ⚠️ **DEN さん確認後に実行**:本サブコマンドは GKE / Cloud SQL / VPC を **teardown(= 既存 cluster の初期化)** する。実行前に必ず `--dry-run` で削除予定リソースを確認すること。Secret Manager `biblio-gh-app-pem` は teardown でも残置するため再投入不要。
+
+| 項目 | 内容 |
+| :--- | :--- |
+| いつ叩くか | 部分 reset(= Pod 再起動)で復旧しないとき、または setup を最初からやり直したいとき |
+| 期待結果 | `teardown-phase-2.sh --confirm` → 再構築 → Bootstrap GRANT → `verify-phase-2-wiring.sh` 全 PASS |
+| 主要ログ | teardown スクリプトの 6 段階出力(= K8s manifest / GKE cluster / Cloud SQL / AR / GSA / VPC) |
+| 副作用 | **大**(= GKE cluster / Cloud SQL を実削除、再作成は手作業)。詳細手順は本 runbook §GKE リセット手順 §手順 3 |
+
+### `/init-project-gcp refresh`(= token 強制再投入、debug 用途)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| いつ叩くか | **通常運用では不要**(= `gh-token-rotator` + `vertex-token-rotator` sidecar が ~50min 周期で自動 rotate)。即座に token を入れ替えたい debug 場面のみ |
+| 期待結果 | port-forward 経由で OneCLI に `PATCH /v1/secrets/<id>` 直叩き → Vertex / GH token 即時反映 |
+| 主要ログ | OneCLI sidecar の `kubectl logs biblio-orchestrator-0 -c onecli` で secret 更新観測 |
+| 副作用 | 中(= 既存 token 即時失効。稼働中 agent が 401 retry-loop に陥った場合は Section 4 で `ncl groups restart` 経由 clean restart) |
+| 罠 | **`.env` の `ONECLI_URL` 上書き罠**(= `scripts/onecli-*-secret.sh` は `.env` を `set -a; . .env; set +a` で読み込むため、ローカル用 `ONECLI_URL=http://localhost:10254` が居ると外部指定が上書きされる)。本サブコマンドは `.env` を読まない経路(= 直接 curl + ADC token)を案内 |
+
+### `/init-project-gcp verify`(= 全 verify、5 Section 順次)
+
+| 項目 | 内容 |
+| :--- | :--- |
+| いつ叩くか | ハッカソンデモ前の動作確認 / トラブル復旧後の最終確認 |
+| 期待結果 | Section 1 resource-check + 2 wiring(`verify-phase-2-wiring.sh`)+ 3 log(`verify-phase-2-log.sh`)+ 4 Phase 4 deploy-verify(`verify-phase-4-deploy.sh`)+ 5 Slack E2E(= **placeholder**、Phase 6 で本実装)を順次実行 |
+| 主要ログ | 各 verify スクリプトの ok/fail 出力 + 失敗時の orchestrator log 個別確認 |
+| 副作用 | 読み取り中心(= `kubectl logs` / `curl` ベース、書き込みなし) |
+
+### `/init-project-gcp image-sync --tag <tag>`(= 4 image を本番反映、副作用大)
+
+> ⚠️ **DEN さん確認後に実行**:本サブコマンドは AR に新 image を push + manifest tag bump + rollout する。**dry-run(= 既定)で空打ち確認した後に `--confirm` で実行**。実行時間 ~10 min。
+
+| 項目 | 内容 |
+| :--- | :--- |
+| いつ叩くか | local repo のコード変更を GKE に反映したいとき(= Phase 4 verify を成立させる前提セットアップ、`m2-pN` 形式の新 tag を打って実行) |
+| 期待結果 | 4 image rebuild(`biblio-claw` orchestrator + `nanoclaw-agent` + `biblio-sidecar-gh` + `biblio-sidecar-vertex`)→ AR push → `k8s/10-orchestrator-statefulset.yaml` の image tag bump → `kubectl apply -f k8s/` → rollout 完了 → `Image sync PASS` |
+| 前提 | `gcloud auth configure-docker asia-northeast1-docker.pkg.dev` 済(= 初回のみ)+ kubectl context = `biblio-prod` + GSA に `roles/artifactregistry.writer` 付与済 |
+| 主要ログ | スクリプトの 6 Block 出力(= pre-flight / build / push / manifest sed -i / kubectl apply + rollout / 状況確認) |
+| 副作用 | **大**(= AR への image push + manifest 書き換え + StatefulSet rollout、git tracked file 変更で別 commit 要) |
+
+詳細は [`.claude/commands/init-project-gcp.md`](../.claude/commands/init-project-gcp.md) を参照(= 各サブコマンドの実装本体 + Open Questions A-G の GCP 版確定内容 + トラブルシューティング)。
 
 ---
 
