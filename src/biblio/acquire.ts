@@ -153,7 +153,7 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
     return {
       ok: false,
       reason: 'internal',
-      detail: `gh CLI が container に install されていません (image build を確認: orchestrator は ./Dockerfile、agent は container/Dockerfile)`,
+      detail: `gh CLI が orchestrator container に install されていません (image build を確認: ./Dockerfile)`,
     };
   }
   if (ghCheck.status !== 0) {

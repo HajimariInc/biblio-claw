@@ -490,6 +490,15 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
       if (e.name === 'NODE_EXTRA_CA_CERTS' && e.value.includes('/tmp/')) {
         e.value = ONECLI_COMBINED_CA_PATH;
       }
+      // OneCLI SDK injects `SSL_CERT_FILE=/tmp/onecli-combined-ca.pem` together
+      // with the bind-mount for Go-based clients (gh CLI etc.) that read this
+      // env to locate the trust bundle. The `/tmp/` hostPath mount gets dropped
+      // on GKE Autopilot (Warden deny), so without this rewrite the agent Pod
+      // sees `SSL_CERT_FILE=/tmp/...` pointing at a non-existent path and
+      // `gh api` over the OneCLI MITM proxy fails TLS verification.
+      if (e.name === 'SSL_CERT_FILE' && e.value.includes('/tmp/')) {
+        e.value = ONECLI_COMBINED_CA_PATH;
+      }
     }
   }
 }

@@ -77,6 +77,11 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     rm -rf /root/.bun
 
 # ---- GitHub CLI -------------------------------------------------------------
+# Agent コンテナ用途: Claude Agent SDK の Bash tool で `gh api` / `gh repo view`
+# / `gh pr view` 等を自律実行する経路 (= biblio-claw / biblio-shelf 系 private
+# repo を agent が直接読むケース)。host 側の acquire.ts spawnSync 経路は
+# orchestrator container (./Dockerfile) で別途 install しているため、両 image とも
+# gh CLI を持つ。
 # Install via release tarball direct download (= apt repo 追加なしの最短経路、
 # gh CLI 公式 docs/install_linux.md の "Other" 節準拠)。
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" \

@@ -142,7 +142,7 @@ describe('acquire', () => {
     const result = await acquire({ repo: 'octocat/hello' });
     expect(result).toMatchObject({ ok: false, reason: 'internal' });
     if (result.ok === false) {
-      expect(result.detail).toMatch(/gh CLI が container に install されていません/);
+      expect(result.detail).toMatch(/gh CLI が orchestrator container に install されていません/);
     }
     // 後続の git clone は実行されない (= 1 回しか spawnSync が呼ばれない)。
     expect(mockSpawn).toHaveBeenCalledTimes(1);

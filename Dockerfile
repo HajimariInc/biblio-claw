@@ -48,8 +48,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# === GitHub CLI (= orchestrator container 上の src/biblio/acquire.ts:139
-#     spawnSync('gh', ...) 経路で必須。host-proxy.ts:122 getChildProcEnv() が
+# === GitHub CLI (= orchestrator container 上の src/biblio/acquire.ts の
+#     spawnSync('gh', ...) 経路で必須。getChildProcEnv() (host-proxy.ts) が
 #     子プロセス起動時に HTTPS_PROXY + SSL_CERT_FILE + GIT_SSL_CAINFO を動的
 #     inject するため、Dockerfile / manifest 側で ENV 設定は不要) ===
 ARG GH_CLI_VERSION=2.95.0
