@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR } from '../src/config.js';
+import { getContainerRuntimeProvider } from '../src/adapters/container/index.js';
 import { getDsnProvider } from '../src/adapters/dsn/index.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
@@ -178,6 +179,13 @@ async function main(): Promise<number> {
     trigger: 1,
   });
   process.stderr.write(`[spawn-verify] inbound message written: ${msgId}\n`);
+
+  // K8s 経路 (orchestrator Pod 内実行) では K8sJobContainerRuntimeProvider.spawn() が
+  // `batchApi` 未初期化で throw する。本ハーネスは short-lived のため `cleanupOrphans()`
+  // は不要 (= 既存 Job の sweep は orchestrator 常駐側の責務)。Docker 経路は副作用なし。
+  const containerRuntime = getContainerRuntimeProvider();
+  await containerRuntime.ensureRuntime();
+  process.stderr.write(`[spawn-verify] container runtime ready: ${containerRuntime.name}\n`);
 
   // 7. wakeContainer → spawn → install-biblios.sh → SKILL 発火
   const woke = await wakeContainer(session);

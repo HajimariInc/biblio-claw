@@ -186,6 +186,16 @@ spec:
             - { name: CLOUD_ML_REGION, value: global }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
+            # === 棚リポ参照 (init-project-gcp Phase 4.6 bug 4 修正) ===
+            # list-biblio / shelve / unshelve / acquire 等が棚 (HajimariInc/biblio-shelf)
+            # を指すために必要。local docker compose では `.env` 経由で渡るが、GKE
+            # では Pod 起動時から env として持っていないと `readListEnv` / `readShelveEnv`
+            # が起動直後に throw する (= rotator 周期前の最初の `@bot 蔵書` で 401 相当)。
+            # email は GitHub が検証しないため架空アドレスで commit 成立 (= DEN さん個人 email を露出させない)。
+            - { name: SHELF_REPO_OWNER, value: HajimariInc }
+            - { name: SHELF_REPO_NAME, value: biblio-shelf }
+            - { name: SHELF_PR_AUTHOR_NAME, value: 'biblio-claw bot' }
+            - { name: SHELF_PR_AUTHOR_EMAIL, value: 'biblio-claw@wforest.jp' }
             # === ログ設定 (= Cloud Logging が jsonPayload として自動解析) ===
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: host-orchestrator }
