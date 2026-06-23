@@ -20,10 +20,8 @@ function resultText(repo: string, result: AcquireResult): string {
   if (result.ok) {
     return `仕入れ完了: ${repo} を quarantine に配置しました (${result.quarantinePath})。次は inspect_biblio で検品できます。`;
   }
-  // 'internal' = container 内部の構成不備 (= gh / git バイナリ不在 等)。patron は手で
-  // 対処できず、image build / Dockerfile の修正が必要。文言を「仕入れエラー (internal)」
-  // から「システム構成エラー」に変えて、patron が「repo 名を間違えたか?」と再試行する
-  // のではなく、運用者 (DEN さん) に報告すべきと即理解できるようにする。
+  // 'internal' は patron が手で対処できない構成不備 (詳細は types.ts AcquireFailureReason)。
+  // 再試行ではなく運用者への報告を促す文言にする。
   if (result.reason === 'internal') {
     return `システム構成エラー: ${result.detail}`;
   }
