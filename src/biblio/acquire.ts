@@ -2,12 +2,15 @@
  * 仕入れ本体 — 外部 public biblio を取得して quarantine に配置する。
  *
  * patron の `owner/repo`(または GitHub URL)を起点に:
- *   normalizeRepo → gh api で存在確認 → git clone → quarantine 配置 →
+ *   normalizeRepo → ghFetch で存在確認 → git clone → quarantine 配置 →
  *   manifest (marketplace.json / SKILL.md) 存在チェック
  * を行う。決定的ロジックは全てここに集約し、`acquire.test.ts` で固める。
  *
- * `git`/`gh` は `getChildProcEnv()` の env (OneCLI proxy 経由) で実行するため、
- * host から認証付きで github に到達する。PoC-7 `verify.sh` の clone/存在確認を写経。
+ * `git` は `getChildProcEnv()` の env (HTTPS_PROXY = OneCLI proxy) 経由で実行。
+ * 存在確認は `ghFetch` (undici fetch + initHostProxy が設定する global ProxyAgent
+ * 経由 + OneCLI MITM Authorization 注入) で行うため、orchestrator container 内に
+ * gh CLI の local credential (`gh auth login`) を持たずに authenticated request を
+ * 通せる (= shelve / unshelve / list-biblio と同じ経路)。
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -16,6 +19,7 @@ import path from 'node:path';
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
 import { getChildProcEnv } from './host-proxy.js';
+import { GITHUB_API, GhHttpError, ghFetch } from './shelf-gh.js';
 import type { AcquireRequest, AcquireResult, NormalizedRepo } from './types.js';
 
 /** owner / repo セグメントの許容文字 (GitHub の命名規則に準拠した安全側)。 */
@@ -28,11 +32,12 @@ const QUARANTINE_DIR = path.join(DATA_DIR, 'quarantine');
 const MANIFEST_SCAN_MAX_DEPTH = 6;
 
 /**
- * 子プロセスの timeout (ms)。OneCLI proxy が応答しない / 遅い経路 (GKE sidecar の
+ * `git clone` の timeout (ms)。OneCLI proxy が応答しない / 遅い経路 (GKE sidecar の
  * cold start, 低速ネットワーク) で `spawnSync` が無期限ブロックし host の delivery
  * poll を止めるのを防ぐ。timeout 時は SIGTERM kill され `status=null` + `signal` が立つ。
+ *
+ * 存在確認 (`ghFetch`) 側の timeout は `shelf-gh.ts:GH_FETCH_TIMEOUT_MS` (30s) を使う。
  */
-const GH_TIMEOUT_MS = 30_000; // proxy 往復を考慮した存在確認の上限
 const CLONE_TIMEOUT_MS = 120_000; // shallow clone でも大きめ repo を考慮
 
 /**
@@ -134,32 +139,43 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
   const env = getChildProcEnv();
   const baseSpawn = { env, stdio: 'pipe' as const, encoding: 'utf-8' as const };
 
-  // 1. 存在確認 (gh api)。gh が非 0 (404 等、timeout 含む) は not_found に分類。
-  //    private/不在いずれも GitHub は 404 を返す。timeout は detail に明示される。
+  // 1. 存在確認 (= GET /repos/{owner}/{name})。`ghFetch` は undici fetch + global
+  //    ProxyAgent (= `initHostProxy` で設定) 経由で OneCLI proxy に乗り、proxy 側で
+  //    Authorization: Bearer <installation-token> を wire 置換する (= shelve /
+  //    unshelve / list-biblio で本番動作実証済の経路)。orchestrator container 内に
+  //    gh CLI の local credential (`gh auth login` / `GH_TOKEN`) を持つ必要が無い。
   //
-  //    例外: gh バイナリが PATH 上に無い (= ENOENT) ケースは container 内部の構成
-  //    不備であり patron は repo の有無として誤解する。`internal` reason に分岐し、
-  //    対処すべき image を detail で明示する (silent failure 防止)。
-  const ghCheck = spawnSync('gh', ['api', `repos/${owner}/${name}`, '--silent'], {
-    ...baseSpawn,
-    timeout: GH_TIMEOUT_MS,
-  });
-  if (ghCheck.error && (ghCheck.error as NodeJS.ErrnoException).code === 'ENOENT') {
-    log.error('acquire: gh CLI binary not found in PATH', {
-      repo: `${owner}/${name}`,
-      reason: 'internal',
-      path: process.env.PATH,
-    });
+  //    分岐: 404 → not_found / 他 status → internal / network エラー (timeout 含む)
+  //    → internal。GitHub は private/不在いずれも 404 を返す仕様 (= 旧 gh api 経路と
+  //    同じ)。401/403/5xx は OneCLI 認証経路 or GitHub 障害を示唆するため、patron
+  //    に誤解させず `internal` で明示する (silent failure 防止)。
+  try {
+    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`);
+  } catch (err) {
+    if (err instanceof GhHttpError) {
+      if (err.status === 404) {
+        log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'not_found', status: 404 });
+        return { ok: false, reason: 'not_found', detail: `repo が見つかりません: ${owner}/${name}` };
+      }
+      log.error('acquire: GitHub API error', {
+        repo: `${owner}/${name}`,
+        reason: 'internal',
+        status: err.status,
+        body: err.body,
+      });
+      return {
+        ok: false,
+        reason: 'internal',
+        detail: `GitHub API エラー: ${owner}/${name} (status=${err.status}, ${err.body.slice(0, 100)})`,
+      };
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    log.error('acquire: fetch error', { repo: `${owner}/${name}`, reason: 'internal', detail });
     return {
       ok: false,
       reason: 'internal',
-      detail: `gh CLI が orchestrator container に install されていません (image build を確認: ./Dockerfile)`,
+      detail: `GitHub API への接続に失敗: ${owner}/${name} (${detail})`,
     };
-  }
-  if (ghCheck.status !== 0) {
-    const detail = spawnDetail(ghCheck, 'gh');
-    log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'not_found', detail });
-    return { ok: false, reason: 'not_found', detail: `repo が見つかりません: ${owner}/${name} (${detail})` };
   }
 
   // 2. quarantine 配置先 (biblioName = `<owner>--<name>` の dedup key)。
