@@ -68,7 +68,7 @@ describe('OneCLISecretProvider', () => {
     expect(res).toEqual({ name: 'g1', identifier: 'id1', created: true });
   });
 
-  it('promotes agent to secret-mode=all after ensureAgent (= bug 5 fix)', async () => {
+  it('promotes agent to secret-mode=all after ensureAgent', async () => {
     mocks.ensureAgent.mockResolvedValue({ name: 'g1', identifier: 'id1', created: true });
     const p = new OneCLISecretProvider();
     await p.ensureAgent({ name: 'g1', identifier: 'id1' });
@@ -127,6 +127,22 @@ describe('OneCLISecretProvider', () => {
     await expect(p.ensureAgent({ name: 'g1', identifier: 'id1' })).resolves.toBeDefined();
     expect(log.warn).toHaveBeenCalledWith(
       'onecli.promote_mode_all: unexpected error',
+      expect.objectContaining({ outcome: 'failure', identifier: 'id1' }),
+    );
+  });
+
+  it('does not throw when GET /v1/agents returns non-array shape (= Array.isArray guard)', async () => {
+    // OneCLI バージョン差で `{ data: [...] }` 等の wrapper shape が返るケース。
+    // Array.isArray ガード (onecli.ts:80) で `target` が undefined になり、agent not found
+    // ルートで WARN を出して握る。ensureAgent 全体は success として返る。
+    mocks.ensureAgent.mockResolvedValue({ name: 'g1', identifier: 'id1', created: true });
+    fetchMock.mockImplementationOnce(async () =>
+      fakeFetchResponse(200, { data: [{ id: 'agt-id', identifier: 'id1' }] }),
+    );
+    const p = new OneCLISecretProvider();
+    await expect(p.ensureAgent({ name: 'g1', identifier: 'id1' })).resolves.toBeDefined();
+    expect(log.warn).toHaveBeenCalledWith(
+      'onecli.promote_mode_all: agent not found after ensure',
       expect.objectContaining({ outcome: 'failure', identifier: 'id1' }),
     );
   });

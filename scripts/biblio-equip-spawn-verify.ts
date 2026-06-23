@@ -180,9 +180,10 @@ async function main(): Promise<number> {
   });
   process.stderr.write(`[spawn-verify] inbound message written: ${msgId}\n`);
 
-  // K8s 経路 (orchestrator Pod 内実行) では K8sJobContainerRuntimeProvider.spawn() が
-  // `batchApi` 未初期化で throw する。本ハーネスは short-lived のため `cleanupOrphans()`
-  // は不要 (= 既存 Job の sweep は orchestrator 常駐側の責務)。Docker 経路は副作用なし。
+  // 本ハーネスは 1-shot プロセスのため、常駐 orchestrator が起動時に呼ぶ `ensureRuntime()`
+  // が自動では実行されない。K8s 経路では未呼出のまま `spawn()` を呼ぶと throw するため、
+  // ここで明示的に初期化する。`cleanupOrphans()` は不要 (= sweep は常駐 orchestrator の責務)。
+  // Docker 経路では `ensureRuntime()` は接続確認のみで副作用なし。
   const containerRuntime = getContainerRuntimeProvider();
   await containerRuntime.ensureRuntime();
   process.stderr.write(`[spawn-verify] container runtime ready: ${containerRuntime.name}\n`);

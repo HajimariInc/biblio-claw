@@ -21,8 +21,9 @@ export class OneCLISecretProvider implements SecretProvider {
 
   async ensureAgent(input: CreateAgentInput): Promise<EnsureAgentResponse> {
     // SDK の戻り値は `{ name, identifier, created }` のみ (`id` / `secretMode` は載らない)。
-    // `created` (= 新規 / 既存) は「新規作成 agent は OneCLI default で mode=selective」という
-    // 文脈で mode=all 昇格漏れ検知の手掛かりになる。
+    // `created` (= 新規 / 既存) は観測用のログフィールドとして保持するのみで、本クラスでは
+    // 振る舞い分岐に使わない (= 昇格 PATCH は冪等のため既存 agent にも無条件で適用する方が
+    // selective まま残るケースを構造的にゼロにできる)。
     let result: EnsureAgentResponse;
     try {
       result = await this.client.ensureAgent(input);
@@ -46,11 +47,11 @@ export class OneCLISecretProvider implements SecretProvider {
       throw err;
     }
 
-    // OneCLI default の `selective` mode のままだと vault にある secret が injection
-    // されず 401 retry-loop に入る (= biblio-shelf gh API 呼出が全て失敗)。rotator
-    // (`gh-rotate.sh` 50min 周期) が safety net として後追いで昇格するが、最初の
-    // `@bot 仕入れて` で 401 を返すまで待つことになる。ensureAgent と同 transaction で
-    // PATCH しておくことで順序保証完璧。失敗は WARN で握る (= rotator が拾う)。
+    // OneCLI default の `selective` mode のままだと vault にある secret が injection されず
+    // 401 retry-loop に入る (= biblio-shelf gh API 呼出が全て失敗)。`gh-token-rotator` sidecar
+    // が safety net として周期的に全 agent を昇格するが、最初の `@bot 仕入れて` 等は rotator
+    // 1 周目を待つことになる。ensureAgent 直後に PATCH することで初回 spawn 時点から mode=all
+    // が有効になる。失敗 (=Best-Effort) でも rotator が後追いで拾う。
     await this.promoteAgentToModeAll(result.identifier);
     return result;
   }
@@ -60,7 +61,7 @@ export class OneCLISecretProvider implements SecretProvider {
    *
    * SDK 戻り値に `id` が含まれないため `GET /v1/agents` で identifier lookup → PATCH の
    * 2 段構え。失敗は WARN で握って throw しない (= caller の ensureAgent は成功扱いで継続、
-   * `gh-rotate.sh` の 50min 周期 rotator が後追いで再昇格する safety net がある)。
+   * `gh-token-rotator` sidecar が周期的に全 agent を再昇格する safety net がある)。
    */
   private async promoteAgentToModeAll(identifier: string): Promise<void> {
     const event = 'onecli.promote_mode_all';
@@ -107,7 +108,7 @@ export class OneCLISecretProvider implements SecretProvider {
         identifier,
         id: target.id,
       });
-      // eslint-disable-next-line no-catch-all/no-catch-all -- 設計上 best-effort: rotator (gh-rotate.sh) が safety net として全 agent を再昇格する
+      // eslint-disable-next-line no-catch-all/no-catch-all -- 設計上 best-effort: gh-token-rotator sidecar が safety net として全 agent を周期的に再昇格する
     } catch (err) {
       log.warn('onecli.promote_mode_all: unexpected error', {
         event,

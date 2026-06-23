@@ -190,7 +190,8 @@ spec:
             # list-biblio / shelve / unshelve / acquire 等が棚 (HajimariInc/biblio-shelf)
             # を指すために必要。local docker compose では `.env` 経由で渡るが、GKE
             # では Pod 起動時から env として持っていないと `readListEnv` / `readShelveEnv`
-            # が起動直後に throw する (= rotator 周期前の最初の `@bot 蔵書` で 401 相当)。
+            # が起動直後に throw し、最初の `@bot 蔵書` / `@bot 仕入れて` で
+            # 設定エラー応答になる (= HTTP 401 ではなく `Error: list: required env missing: ...`)。
             # email は GitHub が検証しないため架空アドレスで commit 成立 (= DEN さん個人 email を露出させない)。
             - { name: SHELF_REPO_OWNER, value: HajimariInc }
             - { name: SHELF_REPO_NAME, value: biblio-shelf }

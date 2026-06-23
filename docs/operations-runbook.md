@@ -485,7 +485,7 @@ VERIFY_M3_P3_CATEGORY=biblio-ai \
 
 orchestrator Pod 内から実行する。GKE では sidecar が GH/Vertex token を自動 rotate するため、ステップ M3-c は不要。`/data/biblio-equipped/` の fixture 投入は別途 PVC 経由(= `verify-m3-phase-2.sh` の Phase B 参照)。
 
-> **Note**: M3 PRD の GKE 経路は未完了(= 2026-06-23 Phase 4 実走で `spawn-verify ensureRuntime` 未呼出 / `readShelveEnv` 必須 env 過剰 / OneCLI agent selective mode の 3 bug が顕在化、M3 PRD への申し送り)。Phase 2 構造化ログの GKE 実機 verify のみは Phase 4 で完了済(= `scripts/verify-phase-4-deploy.sh` 参照)。
+> **Note**: 2026-06-23 Phase 4 実走で顕在化した M3 GKE 経路 bug 3 件 (= `spawn-verify ensureRuntime` 未呼出 / `readShelveEnv` 必須 env 過剰 + manifest 未投入 / OneCLI agent selective mode) は init-project-gcp PRD Phase 4.6 (PR #29) で修正済。GKE 実機 E2E (= `verify-m3.sh --gke-only` で `M3 PASS (gke)` 取得) は DEN さんによる Level 6-7 実機検証待ち。Phase 2 構造化ログの GKE 実機 verify は Phase 4 で完了済 (= `scripts/verify-phase-4-deploy.sh` 参照)。
 
 ```bash
 kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- \

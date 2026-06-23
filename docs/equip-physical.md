@@ -218,6 +218,10 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
   / `pluginsOf` / `createCommit` / `readShelveEnv` を `src/biblio/shelf-gh.ts` に切り出し、
   `shelve.ts` (追加方向) と `unshelve.ts` (削除方向 = `sha:null + base_tree`) の両方から
   共有。GitHub Git Data API の wire 経路は 1 箇所に集約された。
+  init-project-gcp Phase 4.6 (PR #29) で read-only 経路向けに `readListEnv()` / `ListEnv` を
+  追加。`readShelveEnv` (4 件必須) は write 経路 (shelve / unshelve / enkin / shokyaku) が
+  継続利用、`list-biblio.ts` は `readListEnv` (owner/repo のみ) に切替済。`fetchMarketplace`
+  の引数型も `ShelfEnv` → `ListEnv` に変更 (= list-biblio 経路で author env 不在でも呼出可)。
 - **`UnshelveResult` + `EnkinResult` / `ShokyakuResult`**: `src/biblio/types.ts` に追加。
   失敗分類 `UnshelveFailureReason` (`not_shelved` / `github_api_error` / `invalid_category`)
   + 成功時 `{ ok: true, biblioName, category, prUrl, prNumber, branchName }`。enkin /
