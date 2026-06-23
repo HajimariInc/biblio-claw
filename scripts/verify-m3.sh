@@ -84,10 +84,18 @@ fi
 # OneCLI proxy 到達確認 (= verify-m2.sh パターン、fail-slow 防止)。
 # OneCLI 未起動 / 未認証で待たされるのを 数分 → 数秒 に縮める。
 # probe_onecli は curl 優先 / node fetch fallback (= helpers 参照)、GKE distroless 対応。
+# fail メッセージは MODE で local / gke 別の対処を案内 (= silent-failure-hunter 指摘で正、
+# 旧版は GKE 経路でも「docker compose up」を提案して operator を誤誘導していた)。
 ONECLI_URL_CHECK="${ONECLI_URL:-http://localhost:10254}"
 if ! probe_onecli "$ONECLI_URL_CHECK"; then
-  fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。
-    対処: docker compose up -d --wait + scripts/onecli-{vertex,gh}-secret.sh で secret 投入"
+  case "$MODE" in
+    gke)
+      fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。
+    対処 (GKE): orchestrator Pod 内 OneCLI sidecar が落ちている可能性。kubectl logs biblio-orchestrator-0 -n biblio-claw -c onecli で確認、必要なら kubectl rollout restart statefulset/biblio-orchestrator -n biblio-claw" ;;
+    *)
+      fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。
+    対処 (local): docker compose up -d --wait + scripts/onecli-{vertex,gh}-secret.sh で secret 投入" ;;
+  esac
 fi
 
 # --- cleanup trap ---

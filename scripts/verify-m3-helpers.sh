@@ -67,7 +67,10 @@ probe_onecli() {
   if command -v curl >/dev/null 2>&1; then
     curl -fsS --max-time 5 "${url}/v1/agents" >/dev/null 2>&1
   elif command -v node >/dev/null 2>&1; then
-    node -e "fetch('${url}/v1/agents', { signal: AbortSignal.timeout(5000) }).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" 2>/dev/null
+    # URL は process.argv 経由で渡す (= `node -e` の JS リテラル内に直展開すると
+    # url 内のシングルクォート等で JS 構文が壊れて常に exit 1 → false negative、
+    # = silent-failure-hunter / code-reviewer 指摘で正)。
+    node -e "fetch(process.argv[1] + '/v1/agents', { signal: AbortSignal.timeout(5000) }).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" "$url" 2>/dev/null
   else
     return 1
   fi

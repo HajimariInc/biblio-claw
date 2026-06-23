@@ -224,7 +224,7 @@ async function main(): Promise<number> {
   const MARKER_RE = /BIBLIO_EQUIP_M3_P2_MARKER_[A-Za-z0-9_]+/;
   const start = Date.now();
   let foundMarker: string | undefined;
-  let foundSource: 'outbound.db' | 'docker-logs' | undefined;
+  let foundSource: 'outbound.db' | 'docker-logs' | 'k8s-pod-log' | undefined;
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     // (a) outbound.db (= 正規経路)
     try {
@@ -277,13 +277,15 @@ async function main(): Promise<number> {
         });
         const target = running[0];
         if (target?.metadata?.name) {
-          // readNamespacedPodLog は string (= log 本体) を返す。失敗時は throw して下の catch へ。
-          logs = (await coreApi.readNamespacedPodLog({
+          // readNamespacedPodLog は SDK 型上 `Promise<string>` (=
+          // `@kubernetes/client-node` の `ObjectParamAPI.readNamespacedPodLog`)。
+          // 失敗時は throw して下の catch へ。
+          logs = await coreApi.readNamespacedPodLog({
             name: target.metadata.name,
             namespace,
             container: 'agent',
             tailLines: 500,
-          })) as unknown as string;
+          });
         }
       } else {
         // Docker 経路: 既存実装 (container 名は spawn 時点で `nanoclaw-v2-biblio-equip-verify-<ts>`)。
@@ -308,10 +310,14 @@ async function main(): Promise<number> {
         foundSource = process.env.CONTAINER_PROVIDER === 'k8s' ? 'k8s-pod-log' : 'docker-logs';
       }
     } catch (err) {
-      // polling 序盤の「container がまだない」「Pod が見つからない」ケースは expected noise として抑制。
-      // 想定外のエラー (daemon 不到達、RBAC 不足、API 接続不能 等) は出力する。
+      // polling 序盤の「container がまだない」「Pod がまだ作成されていない」ケースは
+      // expected noise として抑制。想定外のエラー (daemon 不到達 / RBAC 不足 / namespace 設定ミス /
+      // container 名の誤指定 等) は stderr に可視化する。Docker の `no such container` /
+      // `No such image` / `cannot connect`、K8s の "pod <name> not found" を expected として
+      // narrowly match (= 旧 `/not found|404/` は広すぎ、RBAC 403 や namespace 未存在の
+      // 404 まで silent 抑制していた = silent-failure-hunter Critical 指摘)。
       const msg = err instanceof Error ? err.message : String(err);
-      const isExpectedPollingNoise = /no such container|No such image|cannot connect|not found|404/i.test(msg);
+      const isExpectedPollingNoise = /no such container|No such image|cannot connect|pod[^,]* not found/i.test(msg);
       if (!isExpectedPollingNoise) {
         process.stderr.write(`[spawn-verify] container log fetch error: ${msg}\n`);
       }
@@ -337,7 +343,10 @@ async function main(): Promise<number> {
         biblio_name: biblioName,
         agent_group_id: AG_ID,
         poll_seconds: pollSec,
-        detail: `marker not found in outbound.db within ${POLL_TIMEOUT_MS / 1000}s`,
+        detail:
+          process.env.CONTAINER_PROVIDER === 'k8s'
+            ? `marker not found within ${POLL_TIMEOUT_MS / 1000}s (k8s: outbound.db + readNamespacedPodLog 経路。RBAC / namespace / container 名の設定を確認、kubectl logs -n ${process.env.BIBLIO_NAMESPACE || 'biblio-claw'} -l app.kubernetes.io/component=agent --tail=200 で直接確認)`
+            : `marker not found in outbound.db within ${POLL_TIMEOUT_MS / 1000}s`,
       },
       1,
     );
