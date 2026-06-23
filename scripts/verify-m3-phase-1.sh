@@ -130,12 +130,18 @@ run_gke() {
 
   # PVC に fixture 投入: orchestrator container 側で mkdir → kubectl cp
   # 各 kubectl コマンドの stderr は STDERR_DIR に保持して fail 時に表示する。
+  # 注: 旧版は `.claude-plugin/marker.json` も kubectl cp していたが、M3 Phase 2 で
+  # fixture が marker.env + marker.txt + plugins/ (marketplace 構造) に発展した際に
+  # marker.json は廃止された (実在ファイル: marker.env + marker.txt のみ)。後段の
+  # `kubectl exec cat marker.txt` で marker prefix を検証するため、Phase 1 GKE 経路
+  # としては marker.txt の投入 + 読み取りで十分 (= verify-m3-phase-2.sh は tar 経路で
+  # marketplace 構造一式を投入する別経路で扱う)。
   info '  - PVC に fixture を投入'
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-mkdir.stderr"
   kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
-    mkdir -p "/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin" \
+    mkdir -p "/data/biblio-equipped/${BIBLIO_NAME}" \
     >/dev/null 2>"$LAST_HARNESS_STDERR" \
-    || fail 'orchestrator Pod 内で mkdir /data/biblio-equipped に失敗'
+    || fail "orchestrator Pod 内で mkdir /data/biblio-equipped/${BIBLIO_NAME} に失敗"
 
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-marker.stderr"
   kubectl cp \
@@ -144,14 +150,6 @@ run_gke() {
     -c orchestrator -n "${ns}" \
     >/dev/null 2>"$LAST_HARNESS_STDERR" \
     || fail 'kubectl cp marker.txt が失敗'
-
-  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-json.stderr"
-  kubectl cp \
-    "${FIXTURE_DIR}/.claude-plugin/marker.json" \
-    "${pod}:/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marker.json" \
-    -c orchestrator -n "${ns}" \
-    >/dev/null 2>"$LAST_HARNESS_STDERR" \
-    || fail 'kubectl cp marker.json が失敗'
 
   # orchestrator Pod 内から marker を直接読む (PVC subPath 経路の verify)
   # kubectl exec 自体の失敗と marker 内容の不一致を区別するため、`|| true` ではなく

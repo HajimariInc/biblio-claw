@@ -1,6 +1,6 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-06-22
+最終更新:2026-06-23
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
 
@@ -481,14 +481,46 @@ VERIFY_M3_P3_CATEGORY=biblio-ai \
 - **`401 Bad credentials`(verify 中の `enkin smoke`)**: GH installation token 期限切れ → `bash scripts/onecli-gh-secret.sh` で再投入(~60min ごと)
 - **`marker not found in outbound.db within 120s`**: spawn-verify が outbound.db + docker logs の 2 経路で marker を polling、両方で見つからない場合は container 内で SKILL が fire していない可能性 → `docker logs $(docker ps --filter 'name=nanoclaw-v2-biblio-equip-verify' --format '{{.Names}}' | head -1)` で内部状態確認(= `model is not available` 等の Vertex 側 enable 漏れが典型)
 
-### GKE 経路で実行する場合(将来運用、現状は local のみ)
+### GKE 経路で実行する場合(装備機構 E2E の GKE 完成は申し送り中)
 
 orchestrator Pod 内から実行する。GKE では sidecar が GH/Vertex token を自動 rotate するため、ステップ M3-c は不要。`/data/biblio-equipped/` の fixture 投入は別途 PVC 経由(= `verify-m3-phase-2.sh` の Phase B 参照)。
+
+> **Note**: M3 PRD の GKE 経路は未完了(= 2026-06-23 Phase 4 実走で `spawn-verify ensureRuntime` 未呼出 / `readShelveEnv` 必須 env 過剰 / OneCLI agent selective mode の 3 bug が顕在化、M3 PRD への申し送り)。Phase 2 構造化ログの GKE 実機 verify のみは Phase 4 で完了済(= `scripts/verify-phase-4-deploy.sh` 参照)。
 
 ```bash
 kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- \
   sh -c 'cd /app && VERIFY_M3_P3_BIBLIO=<owner>--<name> VERIFY_M3_P3_CATEGORY=biblio-ai bash scripts/verify-m3.sh --gke-only'
 ```
+
+---
+
+## Phase 4(GKE deploy-verify)verify(`scripts/verify-phase-4-deploy.sh`)
+
+`init-project-gcp` PRD Phase 4 で導入した GKE 専用 verify スクリプト。Phase 4.5 image-sync で本番反映された image が **構造化ログ(Phase 2)** を期待どおり吐いているかを `kubectl logs` 経由で独立に assert する。
+
+### 前提
+
+| # | 項目 | 確認 |
+| :---: | :--- | :--- |
+| P4-a | kubectl context = `gke_*_biblio-prod` | `kubectl config current-context` で確認 |
+| P4-b | orchestrator StatefulSet `readyReplicas=1` + Pod phase=Running | `kubectl get pod biblio-orchestrator-0 -n biblio-claw` |
+| P4-c | `gh-token-rotator` container が Pod spec に含まれる | `k8s/10-orchestrator-statefulset.yaml` apply 済 |
+| P4-d | `LOG_FORMAT=json` + `LOG_COMPONENT=host-orchestrator` env が StatefulSet で投入済 | Phase 2 で manifest 追加、Phase 4.5 image-sync で GKE に反映済 |
+
+### 実行
+
+```bash
+bash scripts/verify-phase-4-deploy.sh
+```
+
+期待出力:`Phase 4 PASS (GKE deploy-verify) — Block 1 (Phase 2 ログ観測) all OK`
+
+### 観点(= 1 ブロック構成)
+
+- orchestrator container の直近 300s から JSON ログ 1 行以上観測 + `severity / message / time / component=host-orchestrator` 4 field の整合
+- gh-token-rotator container の直近 600s から JSON ログを取得(= 50min 周期のためなくても WARN)、出ていれば `component=gh-token-rotator` 整合
+
+> **Note**: 当初 plan は Block 2(M3 装備機構 GKE)+ Block 3(M3 蔵書リスト GKE)を含む 3 ブロック構成だったが、2026-06-23 実走で **M3 PRD GKE 経路 bug 群 5 件** が顕在化したため、Z+δ 案で Block 1 のみに縮小し、bug 3-5 を M3 PRD への申し送りとした(= 装備機構 + 蔵書リストの GKE E2E は未完了)。詳細は auto memory `m3-gke-completion-pending` 参照。
 
 ---
 

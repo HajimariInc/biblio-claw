@@ -171,12 +171,16 @@ run_gke() {
 
   # PVC に fixture を投入 (= verify-m3-phase-1.sh と同形、ただし fixture 構造が
   # marketplace に発展済なので tar 経路で一括投入する)
+  # 注: 後段の `tar -C /data/biblio-equipped/${BIBLIO_NAME} -xf -` は -C の引数 dir が
+  # 既存である前提のため、mkdir で `${BIBLIO_NAME}` まで作る (旧版は親 dir のみ作って
+  # 子 dir が無く tar が「No such file or directory」で fail していた、本日 GKE 経路の
+  # 初実走で顕在化)。
   info '  - PVC に fixture (marketplace 構造) を投入'
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-mkdir.stderr"
   kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
-    bash -c "rm -rf /data/biblio-equipped/${BIBLIO_NAME} && mkdir -p /data/biblio-equipped" \
+    bash -c "rm -rf /data/biblio-equipped/${BIBLIO_NAME} && mkdir -p /data/biblio-equipped/${BIBLIO_NAME}" \
     >/dev/null 2>"$LAST_HARNESS_STDERR" \
-    || fail 'orchestrator Pod 内で mkdir /data/biblio-equipped に失敗'
+    || fail "orchestrator Pod 内で mkdir /data/biblio-equipped/${BIBLIO_NAME} に失敗"
 
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-cp-tar.stderr"
   # tar で fixture ツリー全体を Pod に送り込む (kubectl cp は symlink / 実行権を保ちにくいので tar 経路)
@@ -207,10 +211,15 @@ run_gke() {
   esac
 
   # ephemeral 解除確認 (= PVC 装備源残置)
+  # `test -f` exit 1 (ファイル不在) と kubectl exec 接続失敗 (RBAC / Pod 状態) を
+  # 分岐できないと「PVC 装備源が消えた」誤誘導になるため、stderr を STDERR_DIR に
+  # 保持して fail() でデバッグ表示できるようにする (= 他 kubectl 呼び出しと同形)。
   info '  - GKE: PVC 装備源残置確認'
+  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-exec-test.stderr"
   if ! kubectl exec "${pod}" -c orchestrator -n "${ns}" -- \
-    test -f "/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marketplace.json" >/dev/null 2>&1; then
-    fail "GKE: PVC 装備源が消えた (= ephemeral の境界違反): /data/biblio-equipped/${BIBLIO_NAME}/"
+    test -f "/data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marketplace.json" \
+    >/dev/null 2>"$LAST_HARNESS_STDERR"; then
+    fail "GKE: PVC 装備源確認に失敗 (= ファイル不在 or kubectl exec 接続失敗): /data/biblio-equipped/${BIBLIO_NAME}/.claude-plugin/marketplace.json"
   fi
 
   info '[Phase B] PASS (GKE 経路 = spawn-verify が Pod 内で成立 → marker 検出 → PVC 残置)'

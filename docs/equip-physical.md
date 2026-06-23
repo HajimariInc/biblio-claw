@@ -40,8 +40,9 @@ M3 Phase 1 で物理配置を確立、M3 Phase 2 で spawn-time install + SKILL 
 ║     └── biblio-equipped/                       ★ M3 Phase 1 で確立           ║
 ║          └── <biblioName>/                                                   ║
 ║               ├── marker.txt                                                 ║
-║               └── .claude-plugin/                                            ║
-║                    └── marker.json                                           ║
+║               ├── marker.env                                                 ║
+║               ├── .claude-plugin/marketplace.json                            ║
+║               └── plugins/<plugin>/                                          ║
 ║                                                                              ║
 ║   agent-container (spawn 後):                                                ║
 ║     /workspace/                                                              ║
@@ -50,7 +51,9 @@ M3 Phase 1 で物理配置を確立、M3 Phase 2 で spawn-time install + SKILL 
 ║       └── biblios/                              ★ M3 Phase 1 で確立          ║
 ║            └── <biblioName>/                    (readonly, per-biblio)        ║
 ║                 ├── marker.txt                                               ║
-║                 └── .claude-plugin/marker.json                               ║
+║                 ├── marker.env                                               ║
+║                 ├── .claude-plugin/marketplace.json                          ║
+║                 └── plugins/<plugin>/                                        ║
 ║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 ```
