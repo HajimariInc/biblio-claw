@@ -136,10 +136,26 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
 
   // 1. 存在確認 (gh api)。gh が非 0 (404 等、timeout 含む) は not_found に分類。
   //    private/不在いずれも GitHub は 404 を返す。timeout は detail に明示される。
+  //
+  //    例外: gh バイナリが PATH 上に無い (= ENOENT) ケースは container 内部の構成
+  //    不備であり patron は repo の有無として誤解する。`internal` reason に分岐し、
+  //    対処すべき image を detail で明示する (silent failure 防止)。
   const ghCheck = spawnSync('gh', ['api', `repos/${owner}/${name}`, '--silent'], {
     ...baseSpawn,
     timeout: GH_TIMEOUT_MS,
   });
+  if (ghCheck.error && (ghCheck.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    log.error('acquire: gh CLI binary not found in PATH', {
+      repo: `${owner}/${name}`,
+      reason: 'internal',
+      path: process.env.PATH,
+    });
+    return {
+      ok: false,
+      reason: 'internal',
+      detail: `gh CLI が container に install されていません (image build を確認: orchestrator は ./Dockerfile、agent は container/Dockerfile)`,
+    };
+  }
   if (ghCheck.status !== 0) {
     const detail = spawnDetail(ghCheck, 'gh');
     log.warn('acquire failed', { repo: `${owner}/${name}`, reason: 'not_found', detail });

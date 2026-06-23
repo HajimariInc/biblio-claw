@@ -234,6 +234,11 @@ spec:
             - { name: ROTATE_INTERVAL_SEC, value: '3000' }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: gh-token-rotator }
+            # rotator が onecli-gh-secret.sh を呼ぶときに必要 (orchestrator container
+            # と同じ literal 値)。欠落すると script が起動直後に `必須 env が未設定`
+            # で exit 1 → 50min ごとに fail を繰り返す silent failure 経路。
+            - { name: SHELF_REPO_OWNER, value: HajimariInc }
+            - { name: SHELF_REPO_NAME, value: biblio-shelf }
             - name: GH_APP_ID
               valueFrom:
                 secretKeyRef:

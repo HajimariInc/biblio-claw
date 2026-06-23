@@ -28,7 +28,10 @@ export type AcquireFailureReason =
   /** clone は成功したが marketplace.json も SKILL.md も無い (biblio ではない)。 */
   | 'manifest_missing'
   /** git clone 自体が失敗 (network / proxy / 権限)。 */
-  | 'clone_failed';
+  | 'clone_failed'
+  /** container 内部の構成不備 (= gh / git バイナリが PATH 上にない等の ENOENT)。
+   *  patron は手で対処できず、image build / Dockerfile の修正が必要。 */
+  | 'internal';
 
 /**
  * 取得結果。discriminated union — `ok` で分岐する。

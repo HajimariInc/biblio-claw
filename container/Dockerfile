@@ -27,6 +27,7 @@ ARG CLAUDE_CODE_VERSION=2.1.128
 ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=52.2.1
 ARG BUN_VERSION=1.3.12
+ARG GH_CLI_VERSION=2.95.0
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -74,6 +75,23 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
     rm -rf /root/.bun
+
+# ---- GitHub CLI -------------------------------------------------------------
+# Install via release tarball direct download (= apt repo 追加なしの最短経路、
+# gh CLI 公式 docs/install_linux.md の "Other" 節準拠)。
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/gh.tar.gz \
+    && tar -xzf /tmp/gh.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+    && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_CLI_VERSION}_linux_amd64"
+
+# ---- OneCLI MITM trust ------------------------------------------------------
+# gh CLI (Go バイナリ) は HTTPS_PROXY 経由で OneCLI proxy に接続する。OneCLI は
+# api.github.com を MITM mode で扱い偽 cert を提示するため、cert trust を Go の
+# crypto/x509 に解決させるには SSL_CERT_FILE で combined CA bundle を指定する。
+# /etc/ssl/certs/onecli/onecli-combined-ca.pem は K8s Secret mount 経由で配備
+# される (src/adapters/container/k8s.ts:395-410)。
+ENV SSL_CERT_FILE=/etc/ssl/certs/onecli/onecli-combined-ca.pem
 
 # ---- agent-runner deps -------------------------------------------------------
 # Deps are cached independently of CLI versions.

@@ -49,6 +49,21 @@ function spawnResult(status: number, stderr = ''): ReturnType<typeof spawnSync> 
   return { status, stdout: '', stderr, pid: 1, output: [], signal: null } as unknown as ReturnType<typeof spawnSync>;
 }
 
+/** spawnSync が ENOENT (= binary が PATH に無い) で起動失敗したときの戻り値ヘルパ。 */
+function spawnEnoent(cmd: string): ReturnType<typeof spawnSync> {
+  const err = new Error(`spawnSync ${cmd} ENOENT`) as NodeJS.ErrnoException;
+  err.code = 'ENOENT';
+  return {
+    status: null,
+    stdout: '',
+    stderr: '',
+    pid: 0,
+    output: [],
+    signal: null,
+    error: err,
+  } as unknown as ReturnType<typeof spawnSync>;
+}
+
 beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -117,6 +132,25 @@ describe('acquire', () => {
     mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 1 : 0, 'HTTP 404'));
     const result = await acquire({ repo: 'octocat/missing' });
     expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+  });
+
+  it('gh が ENOENT (= container に gh CLI 不在) で internal を返す (not_found に誤分類しない)', async () => {
+    mockSpawn.mockImplementation((cmd) => {
+      if (cmd === 'gh') return spawnEnoent('gh');
+      return spawnResult(0);
+    });
+    const result = await acquire({ repo: 'octocat/hello' });
+    expect(result).toMatchObject({ ok: false, reason: 'internal' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/gh CLI が container に install されていません/);
+    }
+    // 後続の git clone は実行されない (= 1 回しか spawnSync が呼ばれない)。
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    // patron 誤解防止のため log.error で出る (warn ではなく)。
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      'acquire: gh CLI binary not found in PATH',
+      expect.objectContaining({ reason: 'internal' }),
+    );
   });
 
   it('clone 失敗で clone_failed を返し quarantine を残さない', async () => {
