@@ -221,7 +221,7 @@ host=github.com mode="tunnel"  ← MITM ではなく素通し
 
 ### なぜ起きるか
 
-- biblio-claw は仕入れ経路で `gh api repos/<owner>/<repo>`(= `api.github.com`)と `git clone https://github.com/...`(= `github.com`)の **2 経路** を子プロセスで叩く。
+- biblio-claw は仕入れ経路で **2 経路** の GitHub アクセスを持つ: 存在確認は `ghFetch`(`api.github.com`、undici fetch + OneCLI proxy 経由)、ソース取得は `git clone https://github.com/...`(`github.com`、子プロセス)。`ghFetch` 化以降は子プロセス経由の `gh api` は使わない。
 - OneCLI に投入している GH secret は `hostPattern=api.github.com` のみ → `github.com` への接続には MITM 用 leaf cert が発行されない → `mode=tunnel` で fail-open。
 - tunnel 経路で client が受け取るのは **DigiCert で署名された実 GitHub の cert chain**。OneCLI 自家 CA では trust できない。
 
@@ -299,7 +299,7 @@ GIT_SSL_NO_VERIFY=true git clone --depth 1 https://github.com/<owner>/<repo>.git
 - **proxy URL に `aoc_<token>` を含めずに叩くと OneCLI は agent 識別失敗で `mode=tunnel` に倒れる**。デバッグ用に直接 `curl -x http://127.0.0.1:10255` で叩くときは MITM にならないので注意(本物の biblio-claw 経路は SDK が token 入り URL を組むので問題ない)。
 - OneCLI container を `docker restart` しても **CA は永続化されている**(`/app/data/gateway/ca.pem`)ので `data/.onecli-host-ca.pem` の再生成は不要。MITM が tunnel に倒れている場合の対処は cert 問題ではなく secret/agent 設定問題。
 - system CA bundle のパスは環境依存(Debian=`/etc/ssl/certs/ca-certificates.crt` / RHEL=`/etc/pki/tls/certs/ca-bundle.crt`)。`tls.rootCertificates` を使えば OS 依存しない。
-- 検品(Vertex × Gemini)は `aiplatform.googleapis.com` の secret に、陳列(GitHub Git Data API)は `api.github.com` の secret にそれぞれ hostPattern マッチして MITM 経路で動く。`git clone`(`github.com`)だけが secret 不在で tunnel 経路。外部 public biblio の `gh api`(`api.github.com/repos/<外部>/...`)は GH secret の `pathPattern=/repos/HajimariInc/*` で injection 対象外となり、無認証で素通しする (= 棚 / 司書本体への operation のみ GH App auth が乗る設計、PR #8 で確立)。
+- 検品(Vertex × Gemini)は `aiplatform.googleapis.com` の secret に、陳列(GitHub Git Data API)+ 仕入れの存在確認(`ghFetch`)は `api.github.com` の secret にそれぞれ hostPattern マッチして MITM 経路で動く。`git clone`(`github.com`)だけが secret 不在で tunnel 経路。外部 public biblio への `ghFetch`(`api.github.com/repos/<外部>/...`)は GH secret の `pathPattern=/repos/HajimariInc/*` で injection 対象外となり、無認証で素通しする (= 棚 / 司書本体への operation のみ GH App auth が乗る設計、PR #8 で確立)。
 
 ---
 

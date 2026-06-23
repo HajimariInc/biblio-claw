@@ -95,7 +95,8 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/
 # api.github.com を MITM mode で扱い偽 cert を提示するため、cert trust を Go の
 # crypto/x509 に解決させるには SSL_CERT_FILE で combined CA bundle を指定する。
 # /etc/ssl/certs/onecli/onecli-combined-ca.pem は K8s Secret mount 経由で配備
-# される (src/adapters/container/k8s.ts:395-410)。
+# される (src/adapters/container/k8s.ts の translateSpec 内 OneCLI CA Secret
+# volume mount ロジック)。
 ENV SSL_CERT_FILE=/etc/ssl/certs/onecli/onecli-combined-ca.pem
 
 # ---- agent-runner deps -------------------------------------------------------

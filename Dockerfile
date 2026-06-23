@@ -48,10 +48,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# === GitHub CLI (= orchestrator container 上の src/biblio/acquire.ts の
-#     spawnSync('gh', ...) 経路で必須。getChildProcEnv() (host-proxy.ts) が
-#     子プロセス起動時に HTTPS_PROXY + SSL_CERT_FILE + GIT_SSL_CAINFO を動的
-#     inject するため、Dockerfile / manifest 側で ENV 設定は不要) ===
+# === GitHub CLI (= debug 用 + 将来互換のため残置。acquire.ts の存在確認は
+#     ghFetch (undici fetch + OneCLI MITM) 経路に移行済のため、runtime では
+#     gh の子プロセス経路を使わない。getChildProcEnv() (host-proxy.ts) は
+#     git clone 子プロセスに HTTPS_PROXY + SSL_CERT_FILE + GIT_SSL_CAINFO を
+#     動的 inject するため、Dockerfile / manifest 側で ENV 設定は不要) ===
 ARG GH_CLI_VERSION=2.95.0
 RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" \
       -o /tmp/gh.tar.gz \

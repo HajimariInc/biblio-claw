@@ -37,8 +37,9 @@ vi.mock('../adapters/secret/index.js', () => ({
 // child_process.spawnSync は git clone 経路で残るため引き続き mock。
 vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }));
 
-// shelf-gh.ts の ghFetch のみ override。GhHttpError は実物を使う (= acquire.ts 内の
-// `err instanceof GhHttpError` 検査が壊れないようにする = shelve.test.ts の流儀)。
+// ghFetch のみ mock し GhHttpError クラスは実物のまま使う。vi.mock で全上書きすると
+// GhHttpError が別参照になり、acquire.ts の `err instanceof GhHttpError` 判定が
+// テスト環境で壊れるため、importActual で実物 module を取り込んで部分上書きする。
 vi.mock('./shelf-gh.js', async () => {
   const actual = await vi.importActual<typeof import('./shelf-gh.js')>('./shelf-gh.js');
   return { ...actual, ghFetch: vi.fn() };

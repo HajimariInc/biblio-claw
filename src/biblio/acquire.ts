@@ -6,11 +6,8 @@
  *   manifest (marketplace.json / SKILL.md) 存在チェック
  * を行う。決定的ロジックは全てここに集約し、`acquire.test.ts` で固める。
  *
- * `git` は `getChildProcEnv()` の env (HTTPS_PROXY = OneCLI proxy) 経由で実行。
- * 存在確認は `ghFetch` (undici fetch + initHostProxy が設定する global ProxyAgent
- * 経由 + OneCLI MITM Authorization 注入) で行うため、orchestrator container 内に
- * gh CLI の local credential (`gh auth login`) を持たずに authenticated request を
- * 通せる (= shelve / unshelve / list-biblio と同じ経路)。
+ * 存在確認と git clone の経路差 + 採用理由 (WHY) はそれぞれの呼出ブロックの
+ * インラインコメントに記述する。ここでは流れだけを示す。
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
