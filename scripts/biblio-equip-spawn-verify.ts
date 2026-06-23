@@ -252,39 +252,68 @@ async function main(): Promise<number> {
     }
     if (foundMarker) break;
 
-    // (b) docker logs (= scratchpad 経路、container 名は spawn 時点で `nanoclaw-v2-biblio-equip-verify-<ts>`)。
-    // docker ps -a で `--rm` 直前 + running 両方を拾えるよう -a で検索。複数 match は
-    // 直近 (= 最新 ts 接尾辞、awk sort 不要、docker ps は新しい順) の 1 件のみ確認。
+    // (b) scratchpad fallback 経路 — agent が `<message to="...">` で wrap しなかった出力を
+    // container log から拾う。Docker 経路は `docker logs`、K8s 経路は in-cluster Kubernetes
+    // API で `readNamespacedPodLog` を呼ぶ (= orchestrator Pod 内には kubectl / docker
+    // バイナリが無いため、@kubernetes/client-node で SA token + CA bundle ベースの API 直叩き)。
     try {
-      const namesRaw = execSync(
-        "docker ps -a --filter name=nanoclaw-v2-biblio-equip-verify --format {{.Names}}",
-        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
-      ).trim();
-      const names = namesRaw ? namesRaw.split('\n').filter(Boolean) : [];
-      if (names.length > 0) {
-        const containerName = names[0] as string;
-        // containerName は docker ps --filter の出力で `name=nanoclaw-v2-biblio-equip-verify-*`
-        // prefix にマッチするものだが、防御として JSON.stringify で escape (= sh -c 経由の
-        // 補間で空白 / 特殊文字を持つ name が混入した場合の injection 経路を塞ぐ)。
-        const logs = execSync(`docker logs ${JSON.stringify(containerName)} 2>&1`, {
-          encoding: 'utf-8',
-          stdio: ['ignore', 'pipe', 'pipe'],
+      let logs = '';
+      if (process.env.CONTAINER_PROVIDER === 'k8s') {
+        // K8s 経路: agent label の Running Pod のうち creationTimestamp 最新の log を tail。
+        const k8s = await import('@kubernetes/client-node');
+        const kc = new k8s.KubeConfig();
+        kc.loadFromCluster();
+        const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+        const namespace = process.env.BIBLIO_NAMESPACE || 'biblio-claw';
+        const list = await coreApi.listNamespacedPod({
+          namespace,
+          labelSelector: 'app.kubernetes.io/component=agent',
         });
-        const match = logs.match(MARKER_RE);
-        if (match) {
-          foundMarker = match[0];
-          foundSource = 'docker-logs';
+        const running = (list.items ?? []).filter((p) => p.status?.phase === 'Running');
+        running.sort((a, b) => {
+          const ta = a.metadata?.creationTimestamp ? new Date(a.metadata.creationTimestamp).getTime() : 0;
+          const tb = b.metadata?.creationTimestamp ? new Date(b.metadata.creationTimestamp).getTime() : 0;
+          return tb - ta;
+        });
+        const target = running[0];
+        if (target?.metadata?.name) {
+          // readNamespacedPodLog は string (= log 本体) を返す。失敗時は throw して下の catch へ。
+          logs = (await coreApi.readNamespacedPodLog({
+            name: target.metadata.name,
+            namespace,
+            container: 'agent',
+            tailLines: 500,
+          })) as unknown as string;
+        }
+      } else {
+        // Docker 経路: 既存実装 (container 名は spawn 時点で `nanoclaw-v2-biblio-equip-verify-<ts>`)。
+        const namesRaw = execSync(
+          'docker ps -a --filter name=nanoclaw-v2-biblio-equip-verify --format {{.Names}}',
+          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+        ).trim();
+        const names = namesRaw ? namesRaw.split('\n').filter(Boolean) : [];
+        if (names.length > 0) {
+          const containerName = names[0] as string;
+          // 防御として JSON.stringify で escape (= sh -c 経由の補間で空白 / 特殊文字を持つ
+          // name が混入した場合の injection 経路を塞ぐ)。
+          logs = execSync(`docker logs ${JSON.stringify(containerName)} 2>&1`, {
+            encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
         }
       }
+      const match = logs.match(MARKER_RE);
+      if (match) {
+        foundMarker = match[0];
+        foundSource = process.env.CONTAINER_PROVIDER === 'k8s' ? 'k8s-pod-log' : 'docker-logs';
+      }
     } catch (err) {
-      // polling 序盤の「container がまだない」ケースは expected noise — 抑制する。
-      // 想定外のエラー (daemon 不到達、権限不足 等) は出力する。`|name|` 単独は汎用すぎて
-      // `invalid container name` 等の本物のエラーを silent skip するため除外、container 不在
-      // は `No such container` で十分絞れる。
+      // polling 序盤の「container がまだない」「Pod が見つからない」ケースは expected noise として抑制。
+      // 想定外のエラー (daemon 不到達、RBAC 不足、API 接続不能 等) は出力する。
       const msg = err instanceof Error ? err.message : String(err);
-      const isExpectedPollingNoise = /no such container|No such image|cannot connect/i.test(msg);
+      const isExpectedPollingNoise = /no such container|No such image|cannot connect|not found|404/i.test(msg);
       if (!isExpectedPollingNoise) {
-        process.stderr.write(`[spawn-verify] docker logs error: ${msg}\n`);
+        process.stderr.write(`[spawn-verify] container log fetch error: ${msg}\n`);
       }
     }
     if (foundMarker) break;

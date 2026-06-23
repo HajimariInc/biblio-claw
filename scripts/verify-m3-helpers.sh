@@ -57,6 +57,22 @@ process.stdin.on('end', () => {
 " -- "$key"
 }
 
+# OneCLI gateway 到達 probe。curl 優先、curl 不在 (= GKE orchestrator container は
+# distroless 寄りで curl を持たない) は node 内蔵 fetch にフォールバック。両方とも
+# 無ければ return 1 (caller が fail メッセージを出す)。
+# 引数: $1 = OneCLI base URL (e.g. http://localhost:10254)
+# 戻り値: 0 = 到達 OK / 1 = 到達 NG
+probe_onecli() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 5 "${url}/v1/agents" >/dev/null 2>&1
+  elif command -v node >/dev/null 2>&1; then
+    node -e "fetch('${url}/v1/agents', { signal: AbortSignal.timeout(5000) }).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
 # JSON 配列フィールドの長さ取り出し。dot-path 解決で深いキーも辿れる。
 # 配列でない値が来たら `<not-array>` の sentinel で返す (= integer 比較で噛み合わず可視化される)。
 # parse 失敗の stderr 出力は json_field と同形。
