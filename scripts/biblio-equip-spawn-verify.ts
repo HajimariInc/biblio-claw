@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR } from '../src/config.js';
+import { getContainerRuntimeProvider } from '../src/adapters/container/index.js';
 import { getDsnProvider } from '../src/adapters/dsn/index.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
@@ -179,6 +180,14 @@ async function main(): Promise<number> {
   });
   process.stderr.write(`[spawn-verify] inbound message written: ${msgId}\n`);
 
+  // 本ハーネスは 1-shot プロセスのため、常駐 orchestrator が起動時に呼ぶ `ensureRuntime()`
+  // が自動では実行されない。K8s 経路では未呼出のまま `spawn()` を呼ぶと throw するため、
+  // ここで明示的に初期化する。`cleanupOrphans()` は不要 (= sweep は常駐 orchestrator の責務)。
+  // Docker 経路では `ensureRuntime()` は接続確認のみで副作用なし。
+  const containerRuntime = getContainerRuntimeProvider();
+  await containerRuntime.ensureRuntime();
+  process.stderr.write(`[spawn-verify] container runtime ready: ${containerRuntime.name}\n`);
+
   // 7. wakeContainer → spawn → install-biblios.sh → SKILL 発火
   const woke = await wakeContainer(session);
   process.stderr.write(`[spawn-verify] wakeContainer returned: ${woke}\n`);
@@ -215,7 +224,7 @@ async function main(): Promise<number> {
   const MARKER_RE = /BIBLIO_EQUIP_M3_P2_MARKER_[A-Za-z0-9_]+/;
   const start = Date.now();
   let foundMarker: string | undefined;
-  let foundSource: 'outbound.db' | 'docker-logs' | undefined;
+  let foundSource: 'outbound.db' | 'docker-logs' | 'k8s-pod-log' | undefined;
   while (Date.now() - start < POLL_TIMEOUT_MS) {
     // (a) outbound.db (= 正規経路)
     try {
@@ -243,39 +252,74 @@ async function main(): Promise<number> {
     }
     if (foundMarker) break;
 
-    // (b) docker logs (= scratchpad 経路、container 名は spawn 時点で `nanoclaw-v2-biblio-equip-verify-<ts>`)。
-    // docker ps -a で `--rm` 直前 + running 両方を拾えるよう -a で検索。複数 match は
-    // 直近 (= 最新 ts 接尾辞、awk sort 不要、docker ps は新しい順) の 1 件のみ確認。
+    // (b) scratchpad fallback 経路 — agent が `<message to="...">` で wrap しなかった出力を
+    // container log から拾う。Docker 経路は `docker logs`、K8s 経路は in-cluster Kubernetes
+    // API で `readNamespacedPodLog` を呼ぶ (= orchestrator Pod 内には kubectl / docker
+    // バイナリが無いため、@kubernetes/client-node で SA token + CA bundle ベースの API 直叩き)。
     try {
-      const namesRaw = execSync(
-        "docker ps -a --filter name=nanoclaw-v2-biblio-equip-verify --format {{.Names}}",
-        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
-      ).trim();
-      const names = namesRaw ? namesRaw.split('\n').filter(Boolean) : [];
-      if (names.length > 0) {
-        const containerName = names[0] as string;
-        // containerName は docker ps --filter の出力で `name=nanoclaw-v2-biblio-equip-verify-*`
-        // prefix にマッチするものだが、防御として JSON.stringify で escape (= sh -c 経由の
-        // 補間で空白 / 特殊文字を持つ name が混入した場合の injection 経路を塞ぐ)。
-        const logs = execSync(`docker logs ${JSON.stringify(containerName)} 2>&1`, {
-          encoding: 'utf-8',
-          stdio: ['ignore', 'pipe', 'pipe'],
+      let logs = '';
+      if (process.env.CONTAINER_PROVIDER === 'k8s') {
+        // K8s 経路: agent label の Running Pod のうち creationTimestamp 最新の log を tail。
+        const k8s = await import('@kubernetes/client-node');
+        const kc = new k8s.KubeConfig();
+        kc.loadFromCluster();
+        const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+        const namespace = process.env.BIBLIO_NAMESPACE || 'biblio-claw';
+        const list = await coreApi.listNamespacedPod({
+          namespace,
+          labelSelector: 'app.kubernetes.io/component=agent',
         });
-        const match = logs.match(MARKER_RE);
-        if (match) {
-          foundMarker = match[0];
-          foundSource = 'docker-logs';
+        const running = (list.items ?? []).filter((p) => p.status?.phase === 'Running');
+        running.sort((a, b) => {
+          const ta = a.metadata?.creationTimestamp ? new Date(a.metadata.creationTimestamp).getTime() : 0;
+          const tb = b.metadata?.creationTimestamp ? new Date(b.metadata.creationTimestamp).getTime() : 0;
+          return tb - ta;
+        });
+        const target = running[0];
+        if (target?.metadata?.name) {
+          // readNamespacedPodLog は SDK 型上 `Promise<string>` (=
+          // `@kubernetes/client-node` の `ObjectParamAPI.readNamespacedPodLog`)。
+          // 失敗時は throw して下の catch へ。
+          logs = await coreApi.readNamespacedPodLog({
+            name: target.metadata.name,
+            namespace,
+            container: 'agent',
+            tailLines: 500,
+          });
+        }
+      } else {
+        // Docker 経路: 既存実装 (container 名は spawn 時点で `nanoclaw-v2-biblio-equip-verify-<ts>`)。
+        const namesRaw = execSync(
+          'docker ps -a --filter name=nanoclaw-v2-biblio-equip-verify --format {{.Names}}',
+          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
+        ).trim();
+        const names = namesRaw ? namesRaw.split('\n').filter(Boolean) : [];
+        if (names.length > 0) {
+          const containerName = names[0] as string;
+          // 防御として JSON.stringify で escape (= sh -c 経由の補間で空白 / 特殊文字を持つ
+          // name が混入した場合の injection 経路を塞ぐ)。
+          logs = execSync(`docker logs ${JSON.stringify(containerName)} 2>&1`, {
+            encoding: 'utf-8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
         }
       }
+      const match = logs.match(MARKER_RE);
+      if (match) {
+        foundMarker = match[0];
+        foundSource = process.env.CONTAINER_PROVIDER === 'k8s' ? 'k8s-pod-log' : 'docker-logs';
+      }
     } catch (err) {
-      // polling 序盤の「container がまだない」ケースは expected noise — 抑制する。
-      // 想定外のエラー (daemon 不到達、権限不足 等) は出力する。`|name|` 単独は汎用すぎて
-      // `invalid container name` 等の本物のエラーを silent skip するため除外、container 不在
-      // は `No such container` で十分絞れる。
+      // polling 序盤の「container がまだない」「Pod がまだ作成されていない」ケースは
+      // expected noise として抑制。想定外のエラー (daemon 不到達 / RBAC 不足 / namespace 設定ミス /
+      // container 名の誤指定 等) は stderr に可視化する。Docker の `no such container` /
+      // `No such image` / `cannot connect`、K8s の "pod <name> not found" を expected として
+      // narrowly match (= 旧 `/not found|404/` は広すぎ、RBAC 403 や namespace 未存在の
+      // 404 まで silent 抑制していた = silent-failure-hunter Critical 指摘)。
       const msg = err instanceof Error ? err.message : String(err);
-      const isExpectedPollingNoise = /no such container|No such image|cannot connect/i.test(msg);
+      const isExpectedPollingNoise = /no such container|No such image|cannot connect|pod[^,]* not found/i.test(msg);
       if (!isExpectedPollingNoise) {
-        process.stderr.write(`[spawn-verify] docker logs error: ${msg}\n`);
+        process.stderr.write(`[spawn-verify] container log fetch error: ${msg}\n`);
       }
     }
     if (foundMarker) break;
@@ -299,7 +343,10 @@ async function main(): Promise<number> {
         biblio_name: biblioName,
         agent_group_id: AG_ID,
         poll_seconds: pollSec,
-        detail: `marker not found in outbound.db within ${POLL_TIMEOUT_MS / 1000}s`,
+        detail:
+          process.env.CONTAINER_PROVIDER === 'k8s'
+            ? `marker not found within ${POLL_TIMEOUT_MS / 1000}s (k8s: outbound.db + readNamespacedPodLog 経路。RBAC / namespace / container 名の設定を確認、kubectl logs -n ${process.env.BIBLIO_NAMESPACE || 'biblio-claw'} -l app.kubernetes.io/component=agent --tail=200 で直接確認)`
+            : `marker not found in outbound.db within ${POLL_TIMEOUT_MS / 1000}s`,
       },
       1,
     );

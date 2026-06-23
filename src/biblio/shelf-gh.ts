@@ -121,9 +121,17 @@ export async function ghFetch(
   return res.json();
 }
 
-export interface ShelfEnv {
+/**
+ * read-only 経路 (list-biblio など) で必要な最小 env のみを保持する型。
+ * `ShelfEnv` の subset (= 棚 owner/repo のみ)、author 情報は持たない。
+ * shelve/unshelve 系の write 経路は引き続き `ShelfEnv` を要求する。
+ */
+export interface ListEnv {
   shelfOwner: string;
   shelfRepo: string;
+}
+
+export interface ShelfEnv extends ListEnv {
   authorName: string;
   authorEmail: string;
   /** PR commit author の fallback (`Name <email>` 形式、未設定なら null)。 */
@@ -135,6 +143,26 @@ function parseAuthorString(s: string): { name: string; email: string } | null {
   const m = s.trim().match(/^(.+?)\s*<([^>]+)>\s*$/);
   if (!m) return null;
   return { name: m[1].trim(), email: m[2].trim() };
+}
+
+/**
+ * read-only 経路 (list-biblio など) に必要な棚 owner/repo のみを読む。
+ * `readShelveEnv` の必須 env サブセット (= `SHELF_PR_AUTHOR_*` を要求しない) で、
+ * `@bot 蔵書` のような書き込みを伴わない経路を author env 不在でも通すためにある。
+ */
+export function readListEnv(): ListEnv {
+  const env = readEnvFile(['SHELF_REPO_OWNER', 'SHELF_REPO_NAME']);
+  const missing: string[] = [];
+  for (const k of ['SHELF_REPO_OWNER', 'SHELF_REPO_NAME'] as const) {
+    if (!env[k]) missing.push(k);
+  }
+  if (missing.length > 0) {
+    throw new Error(`list: required env missing: ${missing.join(', ')}`);
+  }
+  return {
+    shelfOwner: env.SHELF_REPO_OWNER!,
+    shelfRepo: env.SHELF_REPO_NAME!,
+  };
 }
 
 /** shelf 経路に必要な env (棚リポ + author 情報) を読み、未設定はその場で throw (起動時に問題を即可視化)。 */
@@ -171,7 +199,7 @@ export function readShelveEnv(): ShelfEnv {
 
 /** 既存 marketplace.json を取得する。404 なら null。それ以外の non-2xx は throw。 */
 export async function fetchMarketplace(
-  env: ShelfEnv,
+  env: ListEnv,
   ctx?: GhFetchCtx,
 ): Promise<{ raw: Record<string, unknown> | null; sha: string | null }> {
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/contents/.claude-plugin/marketplace.json`;

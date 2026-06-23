@@ -58,12 +58,15 @@ case "${1:-}" in
 esac
 
 # --- pre-flight ---
-[ -f .env ] || fail ".env が見つかりません — repo root で実行してください (現在地: $PWD)"
-
-set -a
-# shellcheck disable=SC1091
-. .env
-set +a
+# .env は local 経路用。GKE 経路では manifest env 直接投入のため不在 = 正常 (= verify-m3.sh:60 の解説参照)。
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .env
+  set +a
+else
+  warn ".env が見つかりません — GKE 経路 (manifest env 直接投入) と想定して継続 (現在地: $PWD)"
+fi
 
 # 直近 harness の stderr 保持用
 STDERR_DIR="$(mktemp -d -t biblio-m3p3-stderr-XXXXXX)"
@@ -80,7 +83,7 @@ run_smoke() {
 
   # OneCLI proxy 到達確認 (= GitHub fetch 経路、verify-m3-phase-2.sh と同形)
   local onecli_url="${ONECLI_URL:-http://localhost:10254}"
-  if ! curl -fsS --max-time 5 "${onecli_url}/v1/agents" >/dev/null 2>&1; then
+  if ! probe_onecli "$onecli_url"; then
     fail "OneCLI proxy (${onecli_url}/v1/agents) に到達できません。
     対処: docker compose up -d --wait + scripts/onecli-gh-secret.sh で secret 投入"
   fi

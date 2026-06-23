@@ -58,12 +58,18 @@ case "${1:-}" in
 esac
 
 # --- pre-flight ---
-[ -f .env ] || fail ".env が見つかりません — repo root で実行してください (現在地: $PWD)。手順は docs/operations-runbook.md を参照。"
-
-set -a
-# shellcheck disable=SC1091
-. .env
-set +a
+# .env は local 経路 (= docker compose で host から env を渡す) のもの。GKE 経路では
+# manifest 経由で orchestrator container に env を直接投入する設計 (= Phase 4.6 bug 4 fix で
+# SHELF_* 4 件投入済) のため `.env` ファイルは存在しない = 正常。必須 env の有無は後続の
+# `${VAR:?msg}` で一括 fail-fast するので、`.env` 不在は warn 継続で十分。
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .env
+  set +a
+else
+  warn ".env が見つかりません — GKE 経路 (manifest env 直接投入) と想定して継続 (現在地: $PWD)"
+fi
 
 # 必須 env (Phase 5 = M3 完成判定 = skip 不可、未設定で fail-fast)。
 # `${VAR:?msg}` は VAR が unset または empty なら msg を stderr に出して exit 1。
@@ -77,10 +83,19 @@ set +a
 
 # OneCLI proxy 到達確認 (= verify-m2.sh パターン、fail-slow 防止)。
 # OneCLI 未起動 / 未認証で待たされるのを 数分 → 数秒 に縮める。
+# probe_onecli は curl 優先 / node fetch fallback (= helpers 参照)、GKE distroless 対応。
+# fail メッセージは MODE で local / gke 別の対処を案内 (= silent-failure-hunter 指摘で正、
+# 旧版は GKE 経路でも「docker compose up」を提案して operator を誤誘導していた)。
 ONECLI_URL_CHECK="${ONECLI_URL:-http://localhost:10254}"
-if ! curl -fsS --max-time 5 "${ONECLI_URL_CHECK}/v1/agents" >/dev/null 2>&1; then
-  fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。
-    対処: docker compose up -d --wait + scripts/onecli-{vertex,gh}-secret.sh で secret 投入"
+if ! probe_onecli "$ONECLI_URL_CHECK"; then
+  case "$MODE" in
+    gke)
+      fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。
+    対処 (GKE): orchestrator Pod 内 OneCLI sidecar が落ちている可能性。kubectl logs biblio-orchestrator-0 -n biblio-claw -c onecli で確認、必要なら kubectl rollout restart statefulset/biblio-orchestrator -n biblio-claw" ;;
+    *)
+      fail "OneCLI proxy (${ONECLI_URL_CHECK}/v1/agents) に到達できません。
+    対処 (local): docker compose up -d --wait + scripts/onecli-{vertex,gh}-secret.sh で secret 投入" ;;
+  esac
 fi
 
 # --- cleanup trap ---

@@ -21,10 +21,12 @@ export class OneCLISecretProvider implements SecretProvider {
 
   async ensureAgent(input: CreateAgentInput): Promise<EnsureAgentResponse> {
     // SDK の戻り値は `{ name, identifier, created }` のみ (`id` / `secretMode` は載らない)。
-    // `created` (= 新規 / 既存) は「新規作成 agent は OneCLI default で mode=selective」という
-    // 文脈で mode=all 昇格漏れ検知の手掛かりになる。
+    // `created` (= 新規 / 既存) は観測用のログフィールドとして保持するのみで、本クラスでは
+    // 振る舞い分岐に使わない (= 昇格 PATCH は冪等のため既存 agent にも無条件で適用する方が
+    // selective まま残るケースを構造的にゼロにできる)。
+    let result: EnsureAgentResponse;
     try {
-      const result = await this.client.ensureAgent(input);
+      result = await this.client.ensureAgent(input);
       log.info('onecli.ensure_agent', {
         event: 'onecli.ensure_agent',
         outcome: 'success',
@@ -32,7 +34,6 @@ export class OneCLISecretProvider implements SecretProvider {
         identifier: result.identifier,
         created: result.created,
       });
-      return result;
     } catch (err) {
       // 失敗経路を成功経路と同 event 名 + outcome=failure で残す (= caller 側は throw を catch
       // するが、SDK の error 詳細を握り潰さないため本クラスでも記録)。
@@ -44,6 +45,77 @@ export class OneCLISecretProvider implements SecretProvider {
         err,
       });
       throw err;
+    }
+
+    // OneCLI default の `selective` mode のままだと vault にある secret が injection されず
+    // 401 retry-loop に入る (= biblio-shelf gh API 呼出が全て失敗)。`gh-token-rotator` sidecar
+    // が safety net として周期的に全 agent を昇格するが、最初の `@bot 仕入れて` 等は rotator
+    // 1 周目を待つことになる。ensureAgent 直後に PATCH することで初回 spawn 時点から mode=all
+    // が有効になる。失敗 (=Best-Effort) でも rotator が後追いで拾う。
+    await this.promoteAgentToModeAll(result.identifier);
+    return result;
+  }
+
+  /**
+   * OneCLI agent の `secretMode` を `all` に PATCH する best-effort 経路。
+   *
+   * SDK 戻り値に `id` が含まれないため `GET /v1/agents` で identifier lookup → PATCH の
+   * 2 段構え。失敗は WARN で握って throw しない (= caller の ensureAgent は成功扱いで継続、
+   * `gh-token-rotator` sidecar が周期的に全 agent を再昇格する safety net がある)。
+   */
+  private async promoteAgentToModeAll(identifier: string): Promise<void> {
+    const event = 'onecli.promote_mode_all';
+    const authHeader: Record<string, string> = ONECLI_API_KEY ? { Authorization: `Bearer ${ONECLI_API_KEY}` } : {};
+    try {
+      const listRes = await fetch(`${ONECLI_URL}/v1/agents`, { headers: authHeader });
+      if (!listRes.ok) {
+        log.warn('onecli.promote_mode_all: GET /v1/agents failed', {
+          event,
+          outcome: 'failure',
+          identifier,
+          status: listRes.status,
+        });
+        return;
+      }
+      const agents = (await listRes.json()) as Array<{ id?: string; identifier?: string }>;
+      const target = Array.isArray(agents) ? agents.find((a) => a.identifier === identifier) : undefined;
+      if (!target?.id) {
+        log.warn('onecli.promote_mode_all: agent not found after ensure', {
+          event,
+          outcome: 'failure',
+          identifier,
+        });
+        return;
+      }
+      const patchRes = await fetch(`${ONECLI_URL}/v1/agents/${target.id}/secret-mode`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...authHeader },
+        body: JSON.stringify({ mode: 'all' }),
+      });
+      if (!patchRes.ok) {
+        log.warn('onecli.promote_mode_all: PATCH secret-mode failed', {
+          event,
+          outcome: 'failure',
+          identifier,
+          id: target.id,
+          status: patchRes.status,
+        });
+        return;
+      }
+      log.info('onecli.promote_mode_all', {
+        event,
+        outcome: 'success',
+        identifier,
+        id: target.id,
+      });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- 設計上 best-effort: gh-token-rotator sidecar が safety net として全 agent を周期的に再昇格する
+    } catch (err) {
+      log.warn('onecli.promote_mode_all: unexpected error', {
+        event,
+        outcome: 'failure',
+        identifier,
+        err,
+      });
     }
   }
 

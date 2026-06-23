@@ -479,17 +479,37 @@ VERIFY_M3_P3_CATEGORY=biblio-ai \
 
 - **`exit 125 / Container exited unexpectedly`(host log)**: docker run の引数 reject。PR #20 以降は `DockerAgentHandle` が exit !=0 / signal 終了時に stderr buffer(64 KiB tail)を warn で吐くため、host stderr に root cause が出る(= `LOG_LEVEL=debug` で line-by-line tail も得られる)
 - **`401 Bad credentials`(verify 中の `enkin smoke`)**: GH installation token 期限切れ → `bash scripts/onecli-gh-secret.sh` で再投入(~60min ごと)
-- **`marker not found in outbound.db within 120s`**: spawn-verify が outbound.db + docker logs の 2 経路で marker を polling、両方で見つからない場合は container 内で SKILL が fire していない可能性 → `docker logs $(docker ps --filter 'name=nanoclaw-v2-biblio-equip-verify' --format '{{.Names}}' | head -1)` で内部状態確認(= `model is not available` 等の Vertex 側 enable 漏れが典型)
+- **`marker not found ...`**: spawn-verify が outbound.db + コンテナログ (Docker: `docker logs` / K8s: `@kubernetes/client-node` の `readNamespacedPodLog`) の 2 経路で marker を polling、両方で見つからない場合は container 内で SKILL が fire していない可能性
+  - **local 経路**: `docker logs $(docker ps --filter 'name=nanoclaw-v2-biblio-equip-verify' --format '{{.Names}}' | head -1)` で内部状態確認 (= `model is not available` 等の Vertex 側 enable 漏れが典型)
+  - **GKE 経路**: `kubectl logs -n biblio-claw -l app.kubernetes.io/component=agent --tail=200` で agent Pod ログを確認 (= 古い agent Pod が複数 Running の場合は \"GKE 経路の罠\" §参照)
 
-### GKE 経路で実行する場合(装備機構 E2E の GKE 完成は申し送り中)
+### GKE 経路で実行する場合
 
 orchestrator Pod 内から実行する。GKE では sidecar が GH/Vertex token を自動 rotate するため、ステップ M3-c は不要。`/data/biblio-equipped/` の fixture 投入は別途 PVC 経由(= `verify-m3-phase-2.sh` の Phase B 参照)。
 
-> **Note**: M3 PRD の GKE 経路は未完了(= 2026-06-23 Phase 4 実走で `spawn-verify ensureRuntime` 未呼出 / `readShelveEnv` 必須 env 過剰 / OneCLI agent selective mode の 3 bug が顕在化、M3 PRD への申し送り)。Phase 2 構造化ログの GKE 実機 verify のみは Phase 4 で完了済(= `scripts/verify-phase-4-deploy.sh` 参照)。
+> **Note**: 2026-06-23 Phase 4 実走で顕在化した M3 GKE 経路 bug 3 件 (= `spawn-verify ensureRuntime` 未呼出 / `readShelveEnv` 必須 env 過剰 + manifest 未投入 / OneCLI agent selective mode) + Level 7 実走で顕在化した bug 3 件 (= `.env` 必須 fail-fast / `curl` 必須 / scratchpad fallback の docker logs 専用) は init-project-gcp PRD Phase 4.6 (PR #29) で修正済、`verify-m3.sh --gke-only` で `M3 PASS (gke)` 取得済。Phase 2 構造化ログの GKE 実機 verify は Phase 4 で完了済 (= `scripts/verify-phase-4-deploy.sh` 参照)。
 
 ```bash
 kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- \
   sh -c 'cd /app && VERIFY_M3_P3_BIBLIO=<owner>--<name> VERIFY_M3_P3_CATEGORY=biblio-ai bash scripts/verify-m3.sh --gke-only'
+```
+
+#### GKE 経路の罠: 古い agent Pod 残存による race condition
+
+`verify-m3.sh --gke-only` を **連続実行 / 失敗試行直後の再実行** で発生する罠。spawn-verify は `ag-biblio-equip-verify` agent group の agent-shared session を使うため、過去 verify の agent Pod が `ttlSecondsAfterFinished: 120` 内で Running 状態のまま残存していると、新 verify が spawn する Pod と並列で同 session を resume する race condition に陥り、新 Pod が message を処理しない (= MARKER 出力されない、120s polling timeout で fail)。
+
+**対処**: 残存 Pod を強制削除してから再実行する。
+
+```bash
+# 残存 Pod 確認
+kubectl get pods -n biblio-claw -l app.kubernetes.io/component=agent
+
+# 複数 Running なら Job ごと削除 (= TTL 待たずに即時削除)
+kubectl get jobs -n biblio-claw -l app.kubernetes.io/component=agent -o name | \
+  xargs -r kubectl delete -n biblio-claw
+
+# Pod 完全削除を待ってから再実行
+kubectl get pods -n biblio-claw -l app.kubernetes.io/component=agent --watch
 ```
 
 ---

@@ -35,12 +35,15 @@ case "${1:-}" in
 esac
 
 # --- pre-flight ---
-[ -f .env ] || fail ".env が見つかりません — repo root で実行してください (現在地: $PWD)"
-
-set -a
-# shellcheck disable=SC1091
-. .env
-set +a
+# .env は local 経路用。GKE 経路では manifest env 直接投入のため不在 = 正常 (= verify-m3.sh:60 の解説参照)。
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . .env
+  set +a
+else
+  warn ".env が見つかりません — GKE 経路 (manifest env 直接投入) と想定して継続 (現在地: $PWD)"
+fi
 
 # 固定 fixture (Phase 1)
 BIBLIO_NAME='hello--world'
