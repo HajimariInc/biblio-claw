@@ -88,7 +88,12 @@ function hasFileRecursive(dir: string, filename: string, depth = 0): boolean {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // I/O 障害 (= EACCES / EMFILE 等) を silent skip しないため warn で可視化する。
+    // 返り値は false で継続 = manifest 不在と同義の挙動を維持 (= 既存挙動を壊さない)、
+    // ただし patron に「SKILL.md 不在」と誤分類されるケースをログで追跡可能にする。
+    // 同パターン: `inspect.ts:collectScanTargets` / `categorize.ts:collectByName`。
+    log.warn('acquire: hasFileRecursive unreadable dir', { dir, depth, err });
     return false;
   }
   for (const entry of entries) {
