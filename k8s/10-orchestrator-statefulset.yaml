@@ -176,6 +176,13 @@ spec:
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
             - { name: CLOUD_ML_REGION, value: global }
+            # === 検品 (Vertex × Gemini) + カテゴライズ (Vertex × Claude) の model 設定 ===
+            # local docker compose では `.env` 経由で渡るが、GKE manifest に明示投入が必要。
+            # 欠落すると inspect_biblio が「INSPECT_DANGEROUS_MODEL が未設定」で HOLD、
+            # categorize_biblio も同様の失敗経路に倒れる (init-project-gcp PRD env 投入漏れ、
+            # 2026-06-24 L5 Phase 6 verify-slack-e2e-gke 実走で顕在化)。
+            - { name: INSPECT_DANGEROUS_MODEL, value: gemini-2.5-flash }
+            - { name: CATEGORIZE_MODEL, value: claude-sonnet-4-6 }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
             # === 棚リポ参照 (init-project-gcp Phase 4.6 bug 4 修正) ===
