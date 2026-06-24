@@ -29,28 +29,38 @@ info() { printf '[INFO] %s\n' "$*" >&2; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
 fail() {
   printf '[FAIL] %s\n' "$*" >&2
+  # 直近 harness の stderr が残っていれば表示 (= tsx 起動失敗 / migration 失敗 / 致命的エラーの
+  # 切り分けに必要、verify-m2.sh の LAST_HARNESS_STDERR と同流儀)。
+  if [ -n "${LAST_HARNESS_STDERR:-}" ] && [ -s "$LAST_HARNESS_STDERR" ]; then
+    printf '[FAIL] 直近 harness の stderr (デバッグ用):\n' >&2
+    sed 's/^/    /' "$LAST_HARNESS_STDERR" >&2
+  fi
   exit 1
 }
 
 # --- fixture DB の準備 ---
 TMP_DB="/tmp/biblio-verify-p5-$$.db"
-trap 'rm -f "$TMP_DB" "$TMP_DB-shm" "$TMP_DB-wal"' EXIT
+# 各 harness の stderr を捕捉するファイル (= run_cli / run_resolve で都度上書き)
+LAST_HARNESS_STDERR="/tmp/biblio-verify-p5-stderr-$$.log"
+trap 'rm -f "$TMP_DB" "$TMP_DB-shm" "$TMP_DB-wal" "$LAST_HARNESS_STDERR"' EXIT
 
 info "fixture DB: $TMP_DB (verify 終了時に削除)"
 
 # tsx 起動の startup cost を吸収するため、host のログは stderr に出る = 構造化された RESULT 行だけ
 # stdout から拾う。grep RESULT で stderr ログを除去 + tail -1 で最後の RESULT 行のみ採用。
+# stderr は $LAST_HARNESS_STDERR に保存し、fail() で表示することで「tsx 起動失敗 / migration 失敗 /
+# CRUD 失敗」の切り分けを可能にする (= silent-failure-hunter MED 4 対応)。
 run_cli() {
-  DB_PATH="$TMP_DB" pnpm exec tsx "$@" 2>/dev/null | grep '^RESULT=' | tail -1
+  DB_PATH="$TMP_DB" pnpm exec tsx "$@" 2>"$LAST_HARNESS_STDERR" | grep '^RESULT=' | tail -1
 }
 
 run_resolve() {
-  # 第 1 引数があれば ACQUIRE_SKILL_THRESHOLD env として渡す。0 = 未設定。
+  # 第 1 引数があれば ACQUIRE_SKILL_THRESHOLD env として渡す。空 = 未設定。
   if [ -n "${1:-}" ]; then
-    DB_PATH="$TMP_DB" ACQUIRE_SKILL_THRESHOLD="$1" pnpm exec tsx scripts/biblio-resolve-threshold.ts 2>/dev/null | grep '^RESULT=' | tail -1
+    DB_PATH="$TMP_DB" ACQUIRE_SKILL_THRESHOLD="$1" pnpm exec tsx scripts/biblio-resolve-threshold.ts 2>"$LAST_HARNESS_STDERR" | grep '^RESULT=' | tail -1
   else
     # env を明示的に解除 (.env / 親プロセス由来の値を遮断)
-    DB_PATH="$TMP_DB" env -u ACQUIRE_SKILL_THRESHOLD pnpm exec tsx scripts/biblio-resolve-threshold.ts 2>/dev/null | grep '^RESULT=' | tail -1
+    DB_PATH="$TMP_DB" env -u ACQUIRE_SKILL_THRESHOLD pnpm exec tsx scripts/biblio-resolve-threshold.ts 2>"$LAST_HARNESS_STDERR" | grep '^RESULT=' | tail -1
   fi
 }
 

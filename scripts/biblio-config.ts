@@ -23,7 +23,7 @@
  *
  * biblio-acquire.ts と同流儀の薄ラッパ。
  */
-import { initDb, runMigrations } from '../src/db/index.js';
+import { getDb, initDb, runMigrations } from '../src/db/index.js';
 import {
   deleteBiblioSetting,
   getAllBiblioSettings,
@@ -52,7 +52,7 @@ async function main(): Promise<number> {
 
   const dbPath = process.env.DB_PATH || 'data/v2.db';
   initDb(dbPath);
-  runMigrations((await import('../src/db/connection.js')).getDb());
+  runMigrations(getDb());
 
   if (verb === 'get') {
     const key = process.argv[3];

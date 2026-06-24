@@ -11,13 +11,13 @@
  *   0 = 結果が返った
  *   3 = ハーネスクラッシュ
  */
-import { initDb, runMigrations } from '../src/db/index.js';
+import { getDb, initDb, runMigrations } from '../src/db/index.js';
 import { resolveSkillThreshold } from '../src/biblio/acquire.js';
 
 async function main(): Promise<number> {
   const dbPath = process.env.DB_PATH || 'data/v2.db';
   initDb(dbPath);
-  runMigrations((await import('../src/db/connection.js')).getDb());
+  runMigrations(getDb());
   const threshold = resolveSkillThreshold();
   process.stdout.write(`RESULT=${JSON.stringify({ ok: true, threshold })}\n`);
   return 0;
