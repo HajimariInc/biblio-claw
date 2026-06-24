@@ -70,7 +70,7 @@ export async function resolveEquippedBiblios(
   for (const name of names) {
     if (!BIBLIO_NAME_RE.test(name)) {
       log.warn('equip: invalid biblio name, skipping', {
-        sessionId: session.id,
+        session_id: session.id,
         name,
       });
       continue;
@@ -81,7 +81,7 @@ export async function resolveEquippedBiblios(
     const sourcePath = path.resolve(root, name);
     if (!fs.existsSync(sourcePath)) {
       log.warn('equip: equipped biblio dir not found, skipping', {
-        sessionId: session.id,
+        session_id: session.id,
         name,
         sourcePath,
       });

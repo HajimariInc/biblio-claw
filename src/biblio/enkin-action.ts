@@ -16,22 +16,17 @@ import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import { enkin } from './enkin.js';
-import { safeNotify, validateBiblioInput, writeBackMessage } from './action-helpers.js';
-import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
+import { parseApprovalPayload, safeNotify, validateBiblioInput, writeBackMessage } from './action-helpers.js';
+import { BIBLIO_CATEGORIES } from './types.js';
 
 /** approval handler の action key (= `requestApproval` の action と完全一致が必要)。 */
 const APPROVAL_ACTION = 'enkin_confirm';
 
 // 承認後の処理は register at module-import-time (= side-effect import で `src/index.ts` から)。
 registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
-  // payload.category は型強制 + includes 検証を 1 行に統合 (= 旧実装の「string なら cast、それ
-  // 以外は biblio-dev デフォルト」だと不正文字列が validation を素通しする罠を解消、
-  // PR #21 silent-failure-hunter 提案)。
-  const biblioName = typeof payload.biblioName === 'string' ? payload.biblioName : '';
-  const category: BiblioCategory =
-    typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
-      ? (payload.category as BiblioCategory)
-      : 'biblio-dev';
+  // payload.biblioName + category の型強制 + includes 検証を集約 helper に委譲
+  // (= PR #37 code-simplifier S2、shokyaku-action.ts と逐語コピー解消)。
+  const { biblioName, category } = parseApprovalPayload(payload);
   // approval 後の実処理は「承認申請」とは別境界 → 独立 request_id を生成。
   const requestId = crypto.randomUUID();
   if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
@@ -106,7 +101,7 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
     event: 'biblio.enkin_request',
     biblioName,
     category,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
@@ -131,7 +126,7 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
       outcome: 'failure',
       biblioName,
       category,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });

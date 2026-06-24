@@ -61,6 +61,7 @@ while true; do
   # `set -e` は worker の失敗で wrapper を落とす方向に倒れる。1 周期 fail で
   # sidecar が死ぬと restartPolicy: Always で再起動が連続してログが埋まる + 復旧が
   # 次の周期まで遅れるため、if 文で受けて wrapper 自身は生かす (PoC-5 写経)。
+  rc=0  # 防御的初期化 (= `set -u` 環境で将来 if 内で $rc 参照を追加した時の unbound variable 罠を回避)
   if bash "$WORKER"; then
     log_event INFO rotation.ok success "GH installation token refreshed (sleep ${ROTATE_INTERVAL_SEC}s)"
   else

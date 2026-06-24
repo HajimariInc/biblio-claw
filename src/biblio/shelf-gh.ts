@@ -56,6 +56,23 @@ export class GhHttpError extends Error {
 }
 
 /**
+ * marketplace.json の parse 失敗 (= HTTP 200 だが content 欠落 / decode 後 invalid JSON)
+ * を `GhHttpError(200, ...)` の文脈不整合から分離するための例外型。
+ *
+ * 互換維持のため `extends GhHttpError` (= status=200 固定)。既存の caller が `instanceof
+ * GhHttpError` で catch している経路 (`shelve.ts` / `unshelve.ts` / `list-biblio.ts`) は
+ * 引き続き同経路で動く。新規 caller では `instanceof MarketplaceParseError` で別分岐
+ * できる (= 「HTTP 200 なのに GitHub API エラー?」と読者を混乱させない設計、PR #37
+ * review-agents silent-failure-hunter SH4 提案)。
+ */
+export class MarketplaceParseError extends GhHttpError {
+  constructor(step: string, body: string) {
+    super(step, 200, body);
+    this.name = 'MarketplaceParseError';
+  }
+}
+
+/**
  * ghFetch を呼ぶ全 caller が 1 patron 依頼を跨いで追跡するための文脈。
  */
 export interface GhFetchCtx {
@@ -154,16 +171,25 @@ function parseAuthorString(s: string): { name: string; email: string } | null {
 }
 
 /**
+ * env キー定数 — 必須キー配列の逐語コピーを集約 (= `readListEnv` / `readShelveEnv` で 2 回登場)。
+ * 将来キー追加時の修正箇所を 1 箇所に絞る (= PR #37 code-simplifier S3 提案)。
+ *
+ * `SHELVE_ENV_KEYS_REQUIRED` は `LIST_ENV_KEYS` + author 2 件で、`SHELF_PR_AUTHOR_FALLBACK`
+ * は optional のため別配列。`readEnvFile` に渡す全キー集合は `[...SHELVE_ENV_KEYS_REQUIRED,
+ * ...SHELVE_ENV_KEYS_OPTIONAL]`。
+ */
+const LIST_ENV_KEYS = ['SHELF_REPO_OWNER', 'SHELF_REPO_NAME'] as const;
+const SHELVE_ENV_KEYS_REQUIRED = [...LIST_ENV_KEYS, 'SHELF_PR_AUTHOR_NAME', 'SHELF_PR_AUTHOR_EMAIL'] as const;
+const SHELVE_ENV_KEYS_OPTIONAL = ['SHELF_PR_AUTHOR_FALLBACK'] as const;
+
+/**
  * read-only 経路 (list-biblio など) に必要な棚 owner/repo のみを読む。
  * `readShelveEnv` の必須 env サブセット (= `SHELF_PR_AUTHOR_*` を要求しない) で、
  * `@bot 蔵書` のような書き込みを伴わない経路を author env 不在でも通すためにある。
  */
 export function readListEnv(): ListEnv {
-  const env = readEnvFile(['SHELF_REPO_OWNER', 'SHELF_REPO_NAME']);
-  const missing: string[] = [];
-  for (const k of ['SHELF_REPO_OWNER', 'SHELF_REPO_NAME'] as const) {
-    if (!env[k]) missing.push(k);
-  }
+  const env = readEnvFile([...LIST_ENV_KEYS]);
+  const missing = LIST_ENV_KEYS.filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`list: required env missing: ${missing.join(', ')}`);
   }
@@ -175,17 +201,8 @@ export function readListEnv(): ListEnv {
 
 /** shelf 経路に必要な env (棚リポ + author 情報) を読み、未設定はその場で throw (起動時に問題を即可視化)。 */
 export function readShelveEnv(): ShelfEnv {
-  const env = readEnvFile([
-    'SHELF_REPO_OWNER',
-    'SHELF_REPO_NAME',
-    'SHELF_PR_AUTHOR_NAME',
-    'SHELF_PR_AUTHOR_EMAIL',
-    'SHELF_PR_AUTHOR_FALLBACK',
-  ]);
-  const missing: string[] = [];
-  for (const k of ['SHELF_REPO_OWNER', 'SHELF_REPO_NAME', 'SHELF_PR_AUTHOR_NAME', 'SHELF_PR_AUTHOR_EMAIL'] as const) {
-    if (!env[k]) missing.push(k);
-  }
+  const env = readEnvFile([...SHELVE_ENV_KEYS_REQUIRED, ...SHELVE_ENV_KEYS_OPTIONAL]);
+  const missing = SHELVE_ENV_KEYS_REQUIRED.filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`shelve: required env missing: ${missing.join(', ')}`);
   }
@@ -218,7 +235,9 @@ export async function fetchMarketplace(
       sha?: string;
     };
     if (typeof data.content !== 'string' || data.encoding !== 'base64') {
-      throw new GhHttpError('GET contents/marketplace.json', 200, 'response missing content/encoding');
+      // HTTP 200 だが content 欠落 = parse 失敗。GhHttpError(200) より MarketplaceParseError
+      // のほうが「HTTP 200 なのに API エラー?」と読者を混乱させない (= SH4)。
+      throw new MarketplaceParseError('GET contents/marketplace.json', 'response missing content/encoding');
     }
     // GitHub の base64 は MIME 風に改行が入る可能性があるため Buffer.from で安全に decode する。
     const decoded = Buffer.from(data.content, 'base64').toString('utf-8');
@@ -226,9 +245,8 @@ export async function fetchMarketplace(
     try {
       parsed = JSON.parse(decoded) as Record<string, unknown>;
     } catch (err) {
-      throw new GhHttpError(
+      throw new MarketplaceParseError(
         'GET contents/marketplace.json',
-        200,
         `existing marketplace.json is invalid JSON: ${err instanceof Error ? err.message : err}`,
       );
     }

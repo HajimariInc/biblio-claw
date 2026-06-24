@@ -84,7 +84,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
       log.warn('list_biblio invalid category — falling back to all', {
         event: 'biblio.list',
         category: rawCategory,
-        sessionId: session.id,
+        session_id: session.id,
         request_id: requestId,
       });
     }
@@ -93,7 +93,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
   log.info('list_biblio from agent', {
     event: 'biblio.list',
     category: category ?? null,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
@@ -107,7 +107,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
       category: category ?? null,
       total: result.total,
       filtered: result.items.length,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
   } catch (err) {
@@ -116,7 +116,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
     log.error('list_biblio threw', {
       event: 'biblio.list',
       outcome: 'failure',
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });

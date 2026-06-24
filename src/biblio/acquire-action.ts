@@ -35,7 +35,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
     log.warn('acquire_biblio missing repo', {
       event: 'biblio.acquire',
       outcome: 'failure',
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
     await writeBackMessage(
@@ -50,7 +50,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   log.info('acquire_biblio from agent', {
     event: 'biblio.acquire',
     repo,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
@@ -64,7 +64,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
       outcome: result.ok ? 'success' : 'failure',
       repo,
       ok: result.ok,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
   } catch (err) {
@@ -73,7 +73,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
       event: 'biblio.acquire',
       outcome: 'failure',
       repo,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });
