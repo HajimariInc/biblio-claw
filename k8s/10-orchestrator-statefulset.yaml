@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m3-hotfix-2
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m3-hotfix-3
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m3-hotfix-2,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m3-hotfix-3,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -176,6 +176,13 @@ spec:
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
             - { name: CLOUD_ML_REGION, value: global }
+            # === 検品 (Vertex × Gemini) + カテゴライズ (Vertex × Claude) の model 設定 ===
+            # local docker compose では `.env` 経由で渡るが、GKE manifest に明示投入が必要。
+            # 欠落すると inspect_biblio が「INSPECT_DANGEROUS_MODEL が未設定」で HOLD、
+            # categorize_biblio も同様の失敗経路に倒れる (init-project-gcp PRD env 投入漏れ、
+            # 2026-06-24 L5 Phase 6 verify-slack-e2e-gke 実走で顕在化)。
+            - { name: INSPECT_DANGEROUS_MODEL, value: gemini-2.5-flash }
+            - { name: CATEGORIZE_MODEL, value: claude-sonnet-4-6 }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
             # === 棚リポ参照 (init-project-gcp Phase 4.6 bug 4 修正) ===
@@ -213,7 +220,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m3-hotfix-2
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m3-hotfix-3
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -258,7 +265,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m3-hotfix-2
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m3-hotfix-3
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
