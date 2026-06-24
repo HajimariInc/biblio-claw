@@ -45,6 +45,7 @@ import {
   pluginsOf,
   readShelveEnv,
   ghFetch,
+  type GhFetchCtx,
   type ShelfEnv,
 } from './shelf-gh.js';
 import type { BiblioCategory, ShelveFailureReason, ShelveResult } from './types.js';
@@ -94,19 +95,30 @@ function isAlreadyShelved(marketplace: Record<string, unknown>, biblioName: stri
   return pluginsOf(marketplace).some((entry) => entry.name === biblioName);
 }
 
-/** plugin.json から description / version を読む (失敗時は既定値)。 */
+/**
+ * plugin.json から description / version を読む (失敗時は既定値)。
+ *
+ * ENOENT は biblio によっては自然 (= plugin.json 省略可)。それ以外の I/O 障害 (EACCES /
+ * EMFILE 等) や JSON 不正は warn で可視化する (silent skip 禁止、`categorize.ts:readPluginDescription`
+ * と同パターン)。返り値は既定値で継続するため陳列自体は止めない。
+ */
 function readPluginMeta(shelfPath: string): { description: string; version: string } {
   const p = path.join(shelfPath, '.claude-plugin', 'plugin.json');
   let raw: string;
   try {
     raw = fs.readFileSync(p, 'utf-8');
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code !== 'ENOENT') {
+      log.warn('shelve: plugin.json unreadable (using defaults)', { p, code, err });
+    }
     return { description: '', version: '0.0.0' };
   }
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (err) {
+    log.warn('shelve: plugin.json invalid JSON (using defaults)', { p, err });
     return { description: '', version: '0.0.0' };
   }
   return {
@@ -200,8 +212,9 @@ function mergeMarketplace(
  */
 export async function shelve(
   req: { biblioName: string; category: BiblioCategory; reason: string },
-  opts: { quarantineRoot?: string; shelfRoot?: string } = {},
+  opts: { quarantineRoot?: string; shelfRoot?: string; ctx?: GhFetchCtx } = {},
 ): Promise<ShelveResult> {
+  const ctx = opts.ctx;
   const { biblioName, category, reason } = req;
   const quarantineRoot = opts.quarantineRoot ?? path.join(DATA_DIR, 'quarantine');
   const shelfRoot = opts.shelfRoot ?? path.join(DATA_DIR, 'shelf');
@@ -213,14 +226,17 @@ export async function shelve(
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shelve: env not ready', { biblioName, detail });
+    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
+    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
+    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
+    log.warn('shelve: env not ready', { biblioName, detail, reason: 'config_error (mapped to github_api_error)' });
     return fail(biblioName, 'github_api_error', detail);
   }
 
   // 1. 重複検知 (marketplace.json 事前読み)
   let marketplace: Record<string, unknown>;
   try {
-    const fetched = await fetchMarketplace(env);
+    const fetched = await fetchMarketplace(env, ctx);
     if (fetched.raw && isAlreadyShelved(fetched.raw, biblioName)) {
       log.info('shelve: already shelved (early return)', { biblioName, category });
       return fail(biblioName, 'already_shelved', `marketplace.json に同 name の entry が既存: ${biblioName}`);
@@ -301,6 +317,8 @@ export async function shelve(
     const refData = (await ghFetch(
       'GET git/ref/heads/main',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/ref/heads/main`,
+      {},
+      ctx,
     )) as { object?: { sha?: string } };
     const baseCommitSha = refData.object?.sha;
     if (!baseCommitSha) throw new GhHttpError('GET git/ref/heads/main', 200, 'response missing object.sha');
@@ -308,6 +326,8 @@ export async function shelve(
     const commitData = (await ghFetch(
       'GET git/commits/{base}',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/commits/${baseCommitSha}`,
+      {},
+      ctx,
     )) as { tree?: { sha?: string } };
     const baseTreeSha = commitData.tree?.sha;
     if (!baseTreeSha) throw new GhHttpError('GET git/commits/{base}', 200, 'response missing tree.sha');
@@ -335,6 +355,7 @@ export async function shelve(
           method: 'POST',
           body: JSON.stringify({ content, encoding: 'utf-8' }),
         },
+        ctx,
       )) as { sha?: string };
       if (typeof blobData.sha !== 'string') {
         throw new GhHttpError('POST git/blobs', 200, `response missing sha for ${f.rel}`);
@@ -358,6 +379,7 @@ export async function shelve(
         method: 'POST',
         body: JSON.stringify({ content: marketplaceContent, encoding: 'utf-8' }),
       },
+      ctx,
     )) as { sha?: string };
     if (typeof mpBlobData.sha !== 'string') {
       throw new GhHttpError('POST git/blobs (marketplace)', 200, 'response missing sha');
@@ -377,6 +399,7 @@ export async function shelve(
         method: 'POST',
         body: JSON.stringify({ base_tree: baseTreeSha, tree: treeEntries }),
       },
+      ctx,
     )) as { sha?: string };
     if (typeof treeRes.sha !== 'string') throw new GhHttpError('POST git/trees', 200, 'response missing sha');
 
@@ -384,13 +407,16 @@ export async function shelve(
     const message = buildCommitMessage(biblioName, category, reason);
     let commitSha: string;
     try {
-      const r = await createCommit({
-        env,
-        message,
-        treeSha: treeRes.sha,
-        parentSha: baseCommitSha,
-        author: { name: env.authorName, email: env.authorEmail },
-      });
+      const r = await createCommit(
+        {
+          env,
+          message,
+          treeSha: treeRes.sha,
+          parentSha: baseCommitSha,
+          author: { name: env.authorName, email: env.authorEmail },
+        },
+        ctx,
+      );
       commitSha = r.sha;
     } catch (err) {
       if (err instanceof GhHttpError && err.status >= 400 && err.status < 500 && env.fallbackAuthor) {
@@ -399,13 +425,16 @@ export async function shelve(
           status: err.status,
           bodyPreview: err.body.slice(0, 200),
         });
-        const r = await createCommit({
-          env,
-          message,
-          treeSha: treeRes.sha,
-          parentSha: baseCommitSha,
-          author: env.fallbackAuthor,
-        });
+        const r = await createCommit(
+          {
+            env,
+            message,
+            treeSha: treeRes.sha,
+            parentSha: baseCommitSha,
+            author: env.fallbackAuthor,
+          },
+          ctx,
+        );
         commitSha = r.sha;
       } else {
         throw err;
@@ -414,22 +443,32 @@ export async function shelve(
 
     // 4e. branch 作成 (GOTCHA-5: refs/heads/ プレフィックス必須)
     const branchName = branchNameFor(category, biblioName);
-    await ghFetch('POST git/refs', `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/refs`, {
-      method: 'POST',
-      body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: commitSha }),
-    });
+    await ghFetch(
+      'POST git/refs',
+      `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/refs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: commitSha }),
+      },
+      ctx,
+    );
 
     // 4f. draft PR 作成
-    const prData = (await ghFetch('POST pulls', `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/pulls`, {
-      method: 'POST',
-      body: JSON.stringify({
-        title: `shelve(${category}): ${biblioName}`,
-        head: branchName,
-        base: 'main',
-        body: buildPrBody(biblioName, category, reason),
-        draft: true,
-      }),
-    })) as { html_url?: string; number?: number };
+    const prData = (await ghFetch(
+      'POST pulls',
+      `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/pulls`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          title: `shelve(${category}): ${biblioName}`,
+          head: branchName,
+          base: 'main',
+          body: buildPrBody(biblioName, category, reason),
+          draft: true,
+        }),
+      },
+      ctx,
+    )) as { html_url?: string; number?: number };
     if (typeof prData.html_url !== 'string' || typeof prData.number !== 'number') {
       throw new GhHttpError('POST pulls', 200, 'response missing html_url/number');
     }

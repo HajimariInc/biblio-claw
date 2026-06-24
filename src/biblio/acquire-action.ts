@@ -20,13 +20,24 @@ function resultText(repo: string, result: AcquireResult): string {
   if (result.ok) {
     return `仕入れ完了: ${repo} を quarantine に配置しました (${result.quarantinePath})。次は inspect_biblio で検品できます。`;
   }
+  // 'internal' は patron が手で対処できない構成不備 (詳細は types.ts AcquireFailureReason)。
+  // 再試行ではなく運用者への報告を促す文言にする。
+  if (result.reason === 'internal') {
+    return `システム構成エラー: ${result.detail}`;
+  }
   return `仕入れエラー (${result.reason}): ${result.detail}`;
 }
 
 registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   const repo = typeof content.repo === 'string' ? content.repo : '';
+  const requestId = crypto.randomUUID();
   if (!repo) {
-    log.warn('acquire_biblio missing repo', { sessionId: session.id });
+    log.warn('acquire_biblio missing repo', {
+      event: 'biblio.acquire',
+      outcome: 'failure',
+      session_id: session.id,
+      request_id: requestId,
+    });
     await writeBackMessage(
       inDb,
       '仕入れエラー (invalid_input): repo が指定されていません。',
@@ -36,21 +47,38 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
     return;
   }
 
-  log.info('acquire_biblio from agent', { repo, sessionId: session.id });
+  log.info('acquire_biblio from agent', {
+    event: 'biblio.acquire',
+    repo,
+    session_id: session.id,
+    request_id: requestId,
+  });
 
   try {
-    const result = await acquire({ repo });
+    // ctx を渡して acquire 内の ghFetch ログに request_id / session_id を伝搬
+    // (= Phase 2 で確立した patron 依頼単位の trace 経路、shelve-action.ts と同流儀)。
+    const result = await acquire({ repo }, { ctx: { requestId, sessionId: session.id } });
     await writeBackMessage(inDb, resultText(repo, result), 'acquire-resp', 'acquire_biblio');
-    log.info('acquire_biblio done', { repo, ok: result.ok, sessionId: session.id });
+    log.info('acquire_biblio done', {
+      event: 'biblio.acquire',
+      outcome: result.ok ? 'success' : 'failure',
+      repo,
+      ok: result.ok,
+      session_id: session.id,
+      request_id: requestId,
+    });
   } catch (err) {
     // 想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('acquire_biblio threw', { repo, sessionId: session.id, err });
+    log.error('acquire_biblio threw', {
+      event: 'biblio.acquire',
+      outcome: 'failure',
+      repo,
+      session_id: session.id,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
-    await writeBackMessage(
-      inDb,
-      `仕入れエラー (internal): 予期しない失敗 — ${detail}`,
-      'acquire-resp',
-      'acquire_biblio',
-    );
+    // resultText() の 'internal' 分岐と同じ文言形式に揃える (patron へのメッセージ統一)。
+    await writeBackMessage(inDb, `システム構成エラー: 予期しない失敗 — ${detail}`, 'acquire-resp', 'acquire_biblio');
   }
 });

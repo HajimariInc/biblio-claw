@@ -45,7 +45,20 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# === GitHub CLI (= debug 用 + 将来互換のため残置。acquire.ts の存在確認は
+#     ghFetch (undici fetch + OneCLI MITM) 経路に移行済のため、runtime では
+#     gh の子プロセス経路を使わない。getChildProcEnv() (host-proxy.ts) は
+#     git clone 子プロセスに HTTPS_PROXY + SSL_CERT_FILE + GIT_SSL_CAINFO を
+#     動的 inject するため、Dockerfile / manifest 側で ENV 設定は不要) ===
+ARG GH_CLI_VERSION=2.95.0
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz" \
+      -o /tmp/gh.tar.gz \
+    && tar -xzf /tmp/gh.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+    && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_CLI_VERSION}_linux_amd64"
 
 # pnpm を corepack 経由で有効化。package.json の packageManager フィールドと一致させる
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate

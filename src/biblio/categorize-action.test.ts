@@ -84,7 +84,15 @@ describe('categorize_biblio handler — happy path', () => {
       reason: 'TS refactor 補助',
     });
     await handler({ name: 'owner--repo' }, dummySession, dummyDb);
-    expect(categorizeMock).toHaveBeenCalledWith({ biblioName: 'owner--repo' });
+    // requestId が `crypto.randomUUID()` 形式で渡されていることを検証 (= 素通し expect.anything() の改善、PT5)。
+    expect(categorizeMock).toHaveBeenCalledWith(
+      { biblioName: 'owner--repo' },
+      expect.objectContaining({
+        ctx: expect.objectContaining({
+          requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+        }),
+      }),
+    );
     const text = getWrittenText() ?? '';
     expect(text).toContain('カテゴリ判定: `biblio-dev`');
     expect(text).toContain('TS refactor 補助');

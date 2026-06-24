@@ -131,10 +131,8 @@ spec:
         - name: orchestrator
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
-          # (reproducibility 担保)。
-          # M2 PRD A Phase 3 で src/index.ts + src/sidecar/ca-secret-sync.ts を
-          # 追加したため m1-p1 → m2-p3 に bump (ca-secret-sync コードを焼き込む)。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m2-p3
+          # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m3-hotfix-2
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -149,11 +147,10 @@ spec:
             # agent Job が pull する image。container-runner.ts:buildContainerSpec
             # で spec.image にセットされ、K8sJobProvider が Job spec の image に
             # 写し込む。`imagePullPolicy: Always` で同 tag への上書き push に追従。
-            # M2 PRD A Phase 2 で agent-runner src / skills / CLAUDE.md を焼き込み
-            # (container/Dockerfile) たため tag を m2-p2 に bump。
+            # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m2-p2,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m3-hotfix-2,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -181,6 +178,20 @@ spec:
             - { name: CLOUD_ML_REGION, value: global }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
+            # === 棚リポ参照 (init-project-gcp Phase 4.6 bug 4 修正) ===
+            # list-biblio / shelve / unshelve / acquire 等が棚 (HajimariInc/biblio-shelf)
+            # を指すために必要。local docker compose では `.env` 経由で渡るが、GKE
+            # では Pod 起動時から env として持っていないと `readListEnv` / `readShelveEnv`
+            # が起動直後に throw し、最初の `@bot 蔵書` / `@bot 仕入れて` で
+            # 設定エラー応答になる (= HTTP 401 ではなく `Error: list: required env missing: ...`)。
+            # email は GitHub が検証しないため架空アドレスで commit 成立 (= DEN さん個人 email を露出させない)。
+            - { name: SHELF_REPO_OWNER, value: HajimariInc }
+            - { name: SHELF_REPO_NAME, value: biblio-shelf }
+            - { name: SHELF_PR_AUTHOR_NAME, value: 'biblio-claw bot' }
+            - { name: SHELF_PR_AUTHOR_EMAIL, value: 'biblio-claw@wforest.jp' }
+            # === ログ設定 (= Cloud Logging が jsonPayload として自動解析) ===
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: host-orchestrator }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
@@ -202,7 +213,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m2-p3
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m3-hotfix-2
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -213,6 +224,17 @@ spec:
             - { name: GH_SECRET_VALUE_FORMAT, value: 'Bearer {value}' }
             - { name: JWT_EXP_SECONDS, value: '540' }
             - { name: ROTATE_INTERVAL_SEC, value: '3000' }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: gh-token-rotator }
+            # SHELF_REPO_OWNER は onecli-gh-secret.sh の need() 必須 env =
+            # 欠落すると script が起動直後に `必須 env が未設定` で exit 1 →
+            # 50min ごとに fail を繰り返す silent failure 経路。
+            # SHELF_REPO_NAME は worker (gh-rotate.sh / onecli-gh-secret.sh) からは
+            # 参照されないが、orchestrator container と値を揃えて運用一貫性を保つ
+            # (= rotator pod 内 debug で SHELF_REPO_* を grep したとき orchestrator
+            # と同じ literal が見えることで「経路が同じ」と判別できる)。
+            - { name: SHELF_REPO_OWNER, value: HajimariInc }
+            - { name: SHELF_REPO_NAME, value: biblio-shelf }
             - name: GH_APP_ID
               valueFrom:
                 secretKeyRef:
@@ -236,7 +258,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m2-p3
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m3-hotfix-2
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -245,6 +267,8 @@ spec:
             - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
             - { name: ROTATE_INTERVAL_SEC, value: '3000' }
             - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: vertex-token-rotator }
           resources:
             requests:
               cpu: 50m

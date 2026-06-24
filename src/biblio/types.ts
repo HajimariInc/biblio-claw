@@ -23,12 +23,15 @@ export interface NormalizedRepo {
 export type AcquireFailureReason =
   /** 入力が owner/repo にも URL にも解釈できない。 */
   | 'invalid_input'
-  /** gh api が非 0 (404 等)。不在も非公開も GitHub は 404 を返す。timeout もここに含む。 */
+  /** ghFetch が 404 を返した。GitHub は不在も非公開も 404 で返すため両方含む。 */
   | 'not_found'
   /** clone は成功したが marketplace.json も SKILL.md も無い (biblio ではない)。 */
   | 'manifest_missing'
   /** git clone 自体が失敗 (network / proxy / 権限)。 */
-  | 'clone_failed';
+  | 'clone_failed'
+  /** GitHub API 経路の構成不備 (= 401/403/5xx、network エラー、proxy 到達不可、timeout 等)。
+   *  patron は手で対処できず、運用者が OneCLI proxy / token / GitHub 障害を確認する必要がある。 */
+  | 'internal';
 
 /**
  * 取得結果。discriminated union — `ok` で分岐する。
@@ -79,6 +82,8 @@ export type InspectResult =
  */
 export interface InspectOptions {
   quarantineRoot?: string;
+  /** Vertex / ghFetch 呼び出しに propagate する追跡 context (`ShokyakuOptions.ctx` と同型)。 */
+  ctx?: import('./shelf-gh.js').GhFetchCtx;
 }
 
 /**

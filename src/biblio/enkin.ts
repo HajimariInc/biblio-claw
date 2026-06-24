@@ -7,6 +7,7 @@
  * 削除しない、shokyaku.ts との対称設計)。
  */
 import { unshelve } from './unshelve.js';
+import type { GhFetchCtx } from './shelf-gh.js';
 import type { BiblioCategory, EnkinResult } from './types.js';
 
 /** 禁書の入力 (= 棚から除去するだけ、装備源は残す)。 */
@@ -20,11 +21,14 @@ export interface EnkinRequest {
  *
  * `<DATA_DIR>/biblio-equipped/<biblioName>/` は **意図的に残置** する (= 再装備可)。
  */
-export async function enkin(req: EnkinRequest): Promise<EnkinResult> {
-  return unshelve({
-    biblioName: req.biblioName,
-    category: req.category,
-    opLabel: '禁書',
-    branchPrefix: 'enkin',
-  });
+export async function enkin(req: EnkinRequest, opts: { ctx?: GhFetchCtx } = {}): Promise<EnkinResult> {
+  return unshelve(
+    {
+      biblioName: req.biblioName,
+      category: req.category,
+      opLabel: '禁書',
+      branchPrefix: 'enkin',
+    },
+    { ctx: opts.ctx },
+  );
 }

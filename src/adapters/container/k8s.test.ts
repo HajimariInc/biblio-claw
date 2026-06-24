@@ -82,6 +82,8 @@ function makeSpec(overrides: Partial<AgentSpawnSpec> = {}): AgentSpawnSpec {
       'http_proxy=http://x:aoc_token@host.docker.internal:10255',
       '-e',
       'NODE_EXTRA_CA_CERTS=/tmp/onecli-gateway-ca.pem',
+      '-e',
+      'SSL_CERT_FILE=/tmp/onecli-combined-ca.pem',
       '-v',
       '/tmp/onecli-proxy-ca.pem:/tmp/onecli-proxy-ca.pem:ro',
       '-v',
@@ -324,6 +326,11 @@ describe('K8sJobContainerRuntimeProvider.spawn — spec translation', () => {
     }
     const ca = env.find((x: { name: string }) => x.name === 'NODE_EXTRA_CA_CERTS');
     expect(ca.value).toBe('/etc/ssl/certs/onecli/onecli-combined-ca.pem');
+    // SSL_CERT_FILE は Go バイナリ (gh CLI 等) が trust bundle を解決するための env。
+    // /tmp/ hostPath は Warden が drop するため、Secret mount 済みの K8s path に
+    // rewrite されないと agent Pod 内 gh CLI の TLS 検証が失敗する。
+    const sslCertFile = env.find((x: { name: string }) => x.name === 'SSL_CERT_FILE');
+    expect(sslCertFile.value).toBe('/etc/ssl/certs/onecli/onecli-combined-ca.pem');
   });
 
   it('honours ONECLI_SERVICE_HOST env to override the in-cluster Service DNS for proxy URLs', async () => {

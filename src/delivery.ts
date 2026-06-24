@@ -170,8 +170,17 @@ async function drainSession(session: Session): Promise<void> {
   try {
     outDb = openOutboundDb(agentGroup.id, session.id);
     inDb = openInboundDb(agentGroup.id, session.id);
-  } catch {
-    return; // DBs might not exist yet
+  } catch (err) {
+    // ENOENT は初回 spawn 前 = 正常スキップなので debug。それ以外 (EACCES / EMFILE / EIO 等の
+    // パーミッション / I/O エラー) は本番 LOG_LEVEL=info でも見える warn に倒す。
+    const code = (err as NodeJS.ErrnoException)?.code;
+    const ctx = { session_id: session.id, agent_group_id: agentGroup.id, err };
+    if (code === 'ENOENT') {
+      log.debug('drainSession: db open skipped', { event: 'delivery.db_open_skipped', ...ctx });
+    } else {
+      log.warn('drainSession: db open failed', { event: 'delivery.db_open_failed', ...ctx });
+    }
+    return;
   }
 
   try {

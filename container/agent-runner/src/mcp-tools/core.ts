@@ -15,10 +15,7 @@ import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messa
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
-
-function log(msg: string): void {
-  console.error(`[mcp-tools] ${msg}`);
-}
+import { log } from '../log.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -126,7 +123,7 @@ export const sendMessage: McpToolDefinition = {
       content: JSON.stringify({ text }),
     });
 
-    log(`send_message: #${seq} → ${routing.resolvedName}`);
+    log.info(`send_message: #${seq} → ${routing.resolvedName}`);
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
 };
@@ -173,7 +170,7 @@ export const sendFile: McpToolDefinition = {
       content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
     });
 
-    log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
+    log.info(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
     return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
   },
 };
@@ -214,7 +211,7 @@ export const editMessage: McpToolDefinition = {
       content: JSON.stringify({ operation: 'edit', messageId: platformId, text }),
     });
 
-    log(`edit_message: #${seq} → ${platformId}`);
+    log.info(`edit_message: #${seq} → ${platformId}`);
     return ok(`Message edit queued for #${seq}`);
   },
 };
@@ -255,7 +252,7 @@ export const addReaction: McpToolDefinition = {
       content: JSON.stringify({ operation: 'reaction', messageId: platformId, emoji }),
     });
 
-    log(`add_reaction: #${seq} → ${emoji} on ${platformId}`);
+    log.info(`add_reaction: #${seq} → ${emoji} on ${platformId}`);
     return ok(`Reaction queued for #${seq}`);
   },
 };

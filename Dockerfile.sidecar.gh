@@ -23,6 +23,7 @@ COPY scripts/gh-rotate.sh        /scripts/gh-rotate.sh
 COPY scripts/onecli-gh-secret.sh /scripts/onecli-gh-secret.sh
 COPY scripts/sign_jwt.cjs        /scripts/sign_jwt.cjs
 COPY scripts/onecli-lib.sh       /scripts/onecli-lib.sh
+COPY scripts/rotate-log.sh       /scripts/rotate-log.sh
 RUN chmod +x /scripts/gh-rotate.sh /scripts/onecli-gh-secret.sh
 
 WORKDIR /scripts

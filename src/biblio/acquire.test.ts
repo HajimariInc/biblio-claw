@@ -2,11 +2,12 @@
  * 仕入れの決定的ロジックのユニットテスト。
  *
  * - normalizeRepo: 各入力形式 + 不正入力
- * - acquire: gh/git の spawnSync を mock し 4 分岐 (404 / clone失敗 / manifest不在 / 成功)
+ * - acquire: ghFetch (= shelf-gh) を mock + git の spawnSync を mock し 6 分岐
+ *   (ghFetch 404 / 5xx / network error / 成功 → さらに clone失敗 / manifest不在 / 成功)
  * - getChildProcEnv: initHostProxy 後に proxy env + CA が乗ること
  *
  * fs は /tmp の実ディレクトリ (DATA_DIR を mock で TEST_DIR に差し替え)、
- * child_process / log / secret provider は mock。circuit-breaker.test.ts を踏襲。
+ * child_process / shelf-gh / log / secret provider は mock。circuit-breaker.test.ts を踏襲。
  */
 import fs from 'fs';
 import path from 'path';
@@ -33,15 +34,25 @@ vi.mock('../adapters/secret/index.js', () => ({
   getSecretProvider: () => ({ ensureAgent: mockEnsureAgent, getProxyConfig: mockGetProxyConfig }),
 }));
 
-// child_process.spawnSync を mock。テストごとに mockImplementation を差し替える。
+// child_process.spawnSync は git clone 経路で残るため引き続き mock。
 vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }));
+
+// ghFetch のみ mock し GhHttpError クラスは実物のまま使う。vi.mock で全上書きすると
+// GhHttpError が別参照になり、acquire.ts の `err instanceof GhHttpError` 判定が
+// テスト環境で壊れるため、importActual で実物 module を取り込んで部分上書きする。
+vi.mock('./shelf-gh.js', async () => {
+  const actual = await vi.importActual<typeof import('./shelf-gh.js')>('./shelf-gh.js');
+  return { ...actual, ghFetch: vi.fn() };
+});
 
 import { spawnSync } from 'node:child_process';
 import { log } from '../log.js';
 import { normalizeRepo, acquire } from './acquire.js';
 import { getChildProcEnv, initHostProxy, _resetHostProxyForTesting } from './host-proxy.js';
+import { GhHttpError, ghFetch } from './shelf-gh.js';
 
 const mockSpawn = vi.mocked(spawnSync);
+const mockGhFetch = vi.mocked(ghFetch);
 const QUARANTINE = path.join(TEST_DIR, 'quarantine');
 
 /** spawnSync 戻り値のヘルパ (encoding:'utf-8' なので stdout/stderr は string)。 */
@@ -53,6 +64,9 @@ beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   mockSpawn.mockReset();
+  mockGhFetch.mockReset();
+  // 既定で存在確認は成功扱い (= 200 OK の repo metadata 相当)。各 test で個別 reject 上書き可。
+  mockGhFetch.mockResolvedValue({ full_name: 'octocat/hello' });
   mockEnsureAgent.mockReset();
   mockGetProxyConfig.mockReset();
   _resetHostProxyForTesting();
@@ -107,28 +121,64 @@ describe('normalizeRepo', () => {
 });
 
 describe('acquire', () => {
-  it('不正入力で invalid_input を返す (gh を呼ばない)', async () => {
+  it('不正入力で invalid_input を返す (ghFetch を呼ばない)', async () => {
     const result = await acquire({ repo: 'not a repo/x/y' });
     expect(result).toEqual({ ok: false, reason: 'invalid_input', detail: expect.any(String) });
+    expect(mockGhFetch).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it('gh 404 で not_found を返す', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 1 : 0, 'HTTP 404'));
+  it('ghFetch 404 で not_found を返す (= repo 不在 or private)', async () => {
+    mockGhFetch.mockRejectedValue(new GhHttpError('acquire.check-repo', 404, '{"message":"Not Found"}'));
     const result = await acquire({ repo: 'octocat/missing' });
     expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/repo が見つかりません/);
+    }
+    // 後続の git clone は実行されない (= 1 回も spawnSync が呼ばれない)。
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('ghFetch 5xx で internal を返す (= GitHub 障害 / proxy 経路の問題)', async () => {
+    mockGhFetch.mockRejectedValue(new GhHttpError('acquire.check-repo', 503, '{"message":"Service Unavailable"}'));
+    const result = await acquire({ repo: 'octocat/hello' });
+    expect(result).toMatchObject({ ok: false, reason: 'internal' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/GitHub API エラー/);
+      expect(result.detail).toMatch(/status=503/);
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
+    // silent failure 防止のため log.error で出る (warn ではなく)。
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      'acquire: GitHub API error',
+      expect.objectContaining({ reason: 'internal', status: 503 }),
+    );
+  });
+
+  it('ghFetch が network エラー (= 非 GhHttpError) で throw したら internal を返す', async () => {
+    mockGhFetch.mockRejectedValue(new Error('fetch failed: ECONNREFUSED'));
+    const result = await acquire({ repo: 'octocat/hello' });
+    expect(result).toMatchObject({ ok: false, reason: 'internal' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/GitHub API への接続に失敗/);
+      expect(result.detail).toMatch(/ECONNREFUSED/);
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      'acquire: fetch error',
+      expect.objectContaining({ reason: 'internal' }),
+    );
   });
 
   it('clone 失敗で clone_failed を返し quarantine を残さない', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : 128, cmd === 'git' ? 'fatal: clone' : ''));
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'git' ? 128 : 0, cmd === 'git' ? 'fatal: clone' : ''));
     const result = await acquire({ repo: 'octocat/hello' });
     expect(result).toMatchObject({ ok: false, reason: 'clone_failed' });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello'))).toBe(false);
   });
 
   it('clone 成功だが manifest 不在で manifest_missing を返し quarantine を削除する', async () => {
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       // git clone: 空ディレクトリだけ作る (manifest なし)
       const dest = (args as string[])[4];
       fs.mkdirSync(path.join(dest, 'src'), { recursive: true });
@@ -141,8 +191,7 @@ describe('acquire', () => {
   });
 
   it('marketplace.json 有りで成功する', async () => {
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       const dest = (args as string[])[4];
       fs.mkdirSync(path.join(dest, '.claude-plugin'), { recursive: true });
       fs.writeFileSync(path.join(dest, '.claude-plugin', 'marketplace.json'), '{}');
@@ -155,11 +204,17 @@ describe('acquire', () => {
       quarantinePath: path.join(QUARANTINE, 'octocat--hello'),
     });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
+    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、undefined)。
+    expect(mockGhFetch).toHaveBeenCalledWith(
+      'acquire.check-repo',
+      expect.stringMatching(/\/repos\/octocat\/hello$/),
+      {},
+      undefined,
+    );
   });
 
   it('ネストした SKILL.md だけでも成功する', async () => {
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       const dest = (args as string[])[4];
       const deep = path.join(dest, 'plugins', 'sample', 'skills', 'sample');
       fs.mkdirSync(deep, { recursive: true });
@@ -174,8 +229,7 @@ describe('acquire', () => {
     const dest = path.join(QUARANTINE, 'octocat--hello');
     fs.mkdirSync(dest, { recursive: true });
     fs.writeFileSync(path.join(dest, 'stale.txt'), 'old');
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       const d = (args as string[])[4];
       fs.mkdirSync(path.join(d, '.claude-plugin'), { recursive: true });
       fs.writeFileSync(path.join(d, '.claude-plugin', 'marketplace.json'), '{}');

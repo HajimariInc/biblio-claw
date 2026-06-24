@@ -26,8 +26,14 @@ function resultText(biblioName: string, result: InspectResult): string {
 
 registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
   const rawName = typeof content.name === 'string' ? content.name.trim() : '';
+  const requestId = crypto.randomUUID();
   if (!rawName) {
-    log.warn('inspect_biblio missing name', { sessionId: session.id });
+    log.warn('inspect_biblio missing name', {
+      event: 'biblio.inspect',
+      outcome: 'failure',
+      session_id: session.id,
+      request_id: requestId,
+    });
     await writeBackMessage(
       inDb,
       '検品エラー (invalid_input): name が指定されていません。',
@@ -39,7 +45,13 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
   // path traversal 防御 + `owner--name` 形式の強制 (= inspect.ts が `quarantineRoot/biblioName`
   // を path.join するため、不正な値は弾く)。
   if (!BIBLIO_NAME_RE.test(rawName)) {
-    log.warn('inspect_biblio invalid name', { biblioName: rawName, sessionId: session.id });
+    log.warn('inspect_biblio invalid name', {
+      event: 'biblio.inspect',
+      outcome: 'failure',
+      biblioName: rawName,
+      session_id: session.id,
+      request_id: requestId,
+    });
     await writeBackMessage(
       inDb,
       `検品エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
@@ -49,15 +61,37 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
     return;
   }
 
-  log.info('inspect_biblio from agent', { biblioName: rawName, sessionId: session.id });
+  log.info('inspect_biblio from agent', {
+    event: 'biblio.inspect',
+    biblioName: rawName,
+    session_id: session.id,
+    request_id: requestId,
+  });
 
   try {
-    const result = await inspect({ biblioName: rawName });
+    const result = await inspect({ biblioName: rawName }, { ctx: { requestId, sessionId: session.id } });
     await writeBackMessage(inDb, resultText(rawName, result), 'inspect-resp', 'inspect_biblio');
-    log.info('inspect_biblio done', { biblioName: rawName, verdict: result.verdict, sessionId: session.id });
+    // verdict 3 値 (ACCEPT/HOLD/REJECT) を outcome 3 値 (success/hold/failure) に対応させる。
+    // HOLD は「判定保留」で失敗ではないため、BQ 集計で REJECT (失敗) と区別する。
+    const outcome = result.verdict === 'ACCEPT' ? 'success' : result.verdict === 'HOLD' ? 'hold' : 'failure';
+    log.info('inspect_biblio done', {
+      event: 'biblio.inspect',
+      outcome,
+      biblioName: rawName,
+      verdict: result.verdict,
+      session_id: session.id,
+      request_id: requestId,
+    });
   } catch (err) {
     // inspect() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('inspect_biblio threw', { biblioName: rawName, sessionId: session.id, err });
+    log.error('inspect_biblio threw', {
+      event: 'biblio.inspect',
+      outcome: 'failure',
+      biblioName: rawName,
+      session_id: session.id,
+      request_id: requestId,
+      err,
+    });
     const detail = err instanceof Error ? err.message : String(err);
     await writeBackMessage(inDb, `検品エラー (internal): 予期しない失敗 — ${detail}`, 'inspect-resp', 'inspect_biblio');
   }
