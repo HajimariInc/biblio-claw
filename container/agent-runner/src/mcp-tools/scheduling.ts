@@ -11,10 +11,7 @@ import { getSessionRouting } from '../db/session-routing.js';
 import { TIMEZONE, parseZonedToUtc } from '../timezone.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
-
-function log(msg: string): void {
-  console.error(`[mcp-tools] ${msg}`);
-}
+import { log } from '../log.js';
 
 function generateId(): string {
   return `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -95,7 +92,7 @@ export const scheduleTask: McpToolDefinition = {
       }),
     });
 
-    log(`schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}`);
+    log.info(`schedule_task: ${id} at ${processAfter}${recurrence ? ` (recurring: ${recurrence})` : ''}`);
     return ok(`Task scheduled (id: ${id}, runs at: ${processAfter}${recurrence ? `, recurrence: ${recurrence}` : ''})`);
   },
 };
@@ -181,7 +178,7 @@ export const cancelTask: McpToolDefinition = {
       content: JSON.stringify({ action: 'cancel_task', taskId }),
     });
 
-    log(`cancel_task: ${taskId}`);
+    log.info(`cancel_task: ${taskId}`);
     return ok(`Task cancellation requested: ${taskId}`);
   },
 };
@@ -208,7 +205,7 @@ export const pauseTask: McpToolDefinition = {
       content: JSON.stringify({ action: 'pause_task', taskId }),
     });
 
-    log(`pause_task: ${taskId}`);
+    log.info(`pause_task: ${taskId}`);
     return ok(`Task pause requested: ${taskId}`);
   },
 };
@@ -235,7 +232,7 @@ export const resumeTask: McpToolDefinition = {
       content: JSON.stringify({ action: 'resume_task', taskId }),
     });
 
-    log(`resume_task: ${taskId}`);
+    log.info(`resume_task: ${taskId}`);
     return ok(`Task resume requested: ${taskId}`);
   },
 };
@@ -294,7 +291,7 @@ export const updateTask: McpToolDefinition = {
       content: JSON.stringify({ action: 'update_task', ...update }),
     });
 
-    log(`update_task: ${taskId}`);
+    log.info(`update_task: ${taskId}`);
     return ok(`Task update requested: ${taskId}`);
   },
 };

@@ -2,11 +2,12 @@
  * 仕入れの決定的ロジックのユニットテスト。
  *
  * - normalizeRepo: 各入力形式 + 不正入力
- * - acquire: gh/git の spawnSync を mock し 4 分岐 (404 / clone失敗 / manifest不在 / 成功)
+ * - acquire: ghFetch (= shelf-gh) を mock + git の spawnSync を mock し 6 分岐
+ *   (ghFetch 404 / 5xx / network error / 成功 → さらに clone失敗 / manifest不在 / 成功)
  * - getChildProcEnv: initHostProxy 後に proxy env + CA が乗ること
  *
  * fs は /tmp の実ディレクトリ (DATA_DIR を mock で TEST_DIR に差し替え)、
- * child_process / log / secret provider は mock。circuit-breaker.test.ts を踏襲。
+ * child_process / shelf-gh / log / secret provider は mock。circuit-breaker.test.ts を踏襲。
  */
 import fs from 'fs';
 import path from 'path';
@@ -33,7 +34,7 @@ vi.mock('../adapters/secret/index.js', () => ({
   getSecretProvider: () => ({ ensureAgent: mockEnsureAgent, getProxyConfig: mockGetProxyConfig }),
 }));
 
-// child_process.spawnSync を mock。テストごとに mockImplementation を差し替える。
+// child_process.spawnSync は git clone 経路で残るため引き続き mock。
 vi.mock('node:child_process', () => ({ spawnSync: vi.fn() }));
 
 // Phase 2: readEnvFile を mock — `vi.stubEnv` は `.env` ファイル読み取りに効かない (key が `.env`
@@ -52,21 +53,33 @@ vi.mock('../env.js', () => ({
   readEnvFile: (keys: string[]) => mockReadEnvFile(keys),
 }));
 
-// Phase 2: undici.fetch を mock — shelve.ts は `import { fetch } from 'undici'` で named import
-// しているため、`vi.stubGlobal('fetch', ...)` (globalThis.fetch 差し替え) は効かない。undici
-// モジュール自体を mock し、他の export (Agent / EnvHttpProxyAgent 等) は実体を保つ。
+// Phase 2: undici.fetch を mock — acquire の閾値判定経路 (= `ghFetch('GET contents/marketplace.json
+// (acquire)', ..., { noAuth: true })` 等) が undici 経由で外部 repo に直接到達するため、これらの
+// 呼び出しは undici.fetch 差し替えで応答する。`vi.stubGlobal('fetch', ...)` は named import に
+// 効かないため、undici モジュール自体を mock + 他 export は実体保持。
 const { fetchMock } = vi.hoisted(() => ({ fetchMock: vi.fn() }));
 vi.mock('undici', async () => {
   const actual = await vi.importActual<typeof import('undici')>('undici');
   return { ...actual, fetch: (...args: unknown[]) => fetchMock(...args) };
 });
 
+// ghFetch のみ mock し GhHttpError クラスは実物のまま使う。acquire 内の存在確認経路
+// (= `ghFetch('acquire.check-repo', ...)`, PR #33 hotfix で gh CLI 撤廃) のテストに使う。
+// vi.mock で全上書きすると GhHttpError が別参照になり、acquire.ts の `err instanceof GhHttpError`
+// 判定がテスト環境で壊れるため、importActual で実物 module を取り込んで部分上書きする。
+vi.mock('./shelf-gh.js', async () => {
+  const actual = await vi.importActual<typeof import('./shelf-gh.js')>('./shelf-gh.js');
+  return { ...actual, ghFetch: vi.fn() };
+});
+
 import { spawnSync } from 'node:child_process';
 import { log } from '../log.js';
 import { normalizeRepo, acquire } from './acquire.js';
 import { getChildProcEnv, initHostProxy, _resetHostProxyForTesting } from './host-proxy.js';
+import { GhHttpError, ghFetch } from './shelf-gh.js';
 
 const mockSpawn = vi.mocked(spawnSync);
+const mockGhFetch = vi.mocked(ghFetch);
 const QUARANTINE = path.join(TEST_DIR, 'quarantine');
 
 /** spawnSync 戻り値のヘルパ (encoding:'utf-8' なので stdout/stderr は string)。 */
@@ -74,25 +87,27 @@ function spawnResult(status: number, stderr = ''): ReturnType<typeof spawnSync> 
   return { status, stdout: '', stderr, pid: 1, output: [], signal: null } as unknown as ReturnType<typeof spawnSync>;
 }
 
-// Phase 2: 既存テストへの影響を抑えるため、fetch を default で 404 にする。countSkillsInRepo は
-// marketplace 404 → git trees main 404 → master 404 → unknown となり閾値判定が skip され、
-// 後続の clone 経路 (= 既存挙動) に進む。Phase 2 テストは `fetchMock.mockResolvedValueOnce(...)`
-// で個別 response を上書きする。
-function mock404(): Response {
-  return { ok: false, status: 404, text: async () => 'not found' } as Response;
+// Phase 2: countSkillsInRepo は `ghFetch(..., { noAuth: true })` 経由なので mockGhFetch
+// で受ける。デフォルトの 404 fallback は beforeEach で mockGhFetch に対して設定する
+// (= marketplace 404 → git trees main 404 → master 404 → unknown となり閾値判定が skip され、
+// 後続の clone 経路 = 既存挙動 に進む)。
+function gh404(step = 'mock'): GhHttpError {
+  return new GhHttpError(step, 404, 'not found');
 }
 
 beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   mockSpawn.mockReset();
+  mockGhFetch.mockReset();
+  // 既定で存在確認は成功扱い (= 200 OK の repo metadata 相当)。各 test で個別 reject 上書き可。
+  mockGhFetch.mockResolvedValue({ full_name: 'octocat/hello' });
   mockEnsureAgent.mockReset();
   mockGetProxyConfig.mockReset();
   _resetHostProxyForTesting();
   mockReadEnvFile.mockReset();
   mockReadEnvFile.mockReturnValue({});
   fetchMock.mockReset();
-  fetchMock.mockResolvedValue(mock404());
 });
 
 afterEach(() => {
@@ -163,28 +178,64 @@ describe('normalizeRepo', () => {
 });
 
 describe('acquire', () => {
-  it('不正入力で invalid_input を返す (gh を呼ばない)', async () => {
+  it('不正入力で invalid_input を返す (ghFetch を呼ばない)', async () => {
     const result = await acquire({ repo: 'not a repo/x/y' });
     expect(result).toEqual({ ok: false, reason: 'invalid_input', detail: expect.any(String) });
+    expect(mockGhFetch).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it('gh 404 で not_found を返す', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 1 : 0, 'HTTP 404'));
+  it('ghFetch 404 で not_found を返す (= repo 不在 or private)', async () => {
+    mockGhFetch.mockRejectedValue(new GhHttpError('acquire.check-repo', 404, '{"message":"Not Found"}'));
     const result = await acquire({ repo: 'octocat/missing' });
     expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/repo が見つかりません/);
+    }
+    // 後続の git clone は実行されない (= 1 回も spawnSync が呼ばれない)。
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('ghFetch 5xx で internal を返す (= GitHub 障害 / proxy 経路の問題)', async () => {
+    mockGhFetch.mockRejectedValue(new GhHttpError('acquire.check-repo', 503, '{"message":"Service Unavailable"}'));
+    const result = await acquire({ repo: 'octocat/hello' });
+    expect(result).toMatchObject({ ok: false, reason: 'internal' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/GitHub API エラー/);
+      expect(result.detail).toMatch(/status=503/);
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
+    // silent failure 防止のため log.error で出る (warn ではなく)。
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      'acquire: GitHub API error',
+      expect.objectContaining({ reason: 'internal', status: 503 }),
+    );
+  });
+
+  it('ghFetch が network エラー (= 非 GhHttpError) で throw したら internal を返す', async () => {
+    mockGhFetch.mockRejectedValue(new Error('fetch failed: ECONNREFUSED'));
+    const result = await acquire({ repo: 'octocat/hello' });
+    expect(result).toMatchObject({ ok: false, reason: 'internal' });
+    if (result.ok === false) {
+      expect(result.detail).toMatch(/GitHub API への接続に失敗/);
+      expect(result.detail).toMatch(/ECONNREFUSED/);
+    }
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      'acquire: fetch error',
+      expect.objectContaining({ reason: 'internal' }),
+    );
   });
 
   it('clone 失敗で clone_failed を返し quarantine を残さない', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : 128, cmd === 'git' ? 'fatal: clone' : ''));
+    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'git' ? 128 : 0, cmd === 'git' ? 'fatal: clone' : ''));
     const result = await acquire({ repo: 'octocat/hello' });
     expect(result).toMatchObject({ ok: false, reason: 'clone_failed' });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello'))).toBe(false);
   });
 
   it('clone 成功だが manifest 不在で manifest_missing を返し quarantine を削除する', async () => {
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       // git clone: 空ディレクトリだけ作る (manifest なし)
       const dest = (args as string[])[4];
       fs.mkdirSync(path.join(dest, 'src'), { recursive: true });
@@ -197,8 +248,7 @@ describe('acquire', () => {
   });
 
   it('marketplace.json 有りで成功する', async () => {
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       const dest = (args as string[])[4];
       fs.mkdirSync(path.join(dest, '.claude-plugin'), { recursive: true });
       fs.writeFileSync(path.join(dest, '.claude-plugin', 'marketplace.json'), '{}');
@@ -211,11 +261,17 @@ describe('acquire', () => {
       quarantinePath: path.join(QUARANTINE, 'octocat--hello'),
     });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
+    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、{ ctx: undefined })。
+    expect(mockGhFetch).toHaveBeenCalledWith(
+      'acquire.check-repo',
+      expect.stringMatching(/\/repos\/octocat\/hello$/),
+      {},
+      { ctx: undefined },
+    );
   });
 
   it('ネストした SKILL.md だけでも成功する', async () => {
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       const dest = (args as string[])[4];
       const deep = path.join(dest, 'plugins', 'sample', 'skills', 'sample');
       fs.mkdirSync(deep, { recursive: true });
@@ -447,8 +503,7 @@ describe('acquire', () => {
     const dest = path.join(QUARANTINE, 'octocat--hello');
     fs.mkdirSync(dest, { recursive: true });
     fs.writeFileSync(path.join(dest, 'stale.txt'), 'old');
-    mockSpawn.mockImplementation((cmd, args) => {
-      if (cmd === 'gh') return spawnResult(0);
+    mockSpawn.mockImplementation((_cmd, args) => {
       const d = (args as string[])[4];
       fs.mkdirSync(path.join(d, '.claude-plugin'), { recursive: true });
       fs.writeFileSync(path.join(d, '.claude-plugin', 'marketplace.json'), '{}');
@@ -462,28 +517,37 @@ describe('acquire', () => {
 });
 
 describe('acquire — Phase 2 threshold-promote', () => {
-  /** marketplace.json fetch response を組む (= base64 + encoding)。 */
-  function mockMarketplaceResponse(plugins: unknown): Response {
+  /**
+   * countSkillsInRepo は `ghFetch(..., { noAuth: true })` 経路。`ghFetch` は内部で
+   * `await res.json()` まで実行して JSON object を返すため、mockGhFetch には
+   * 「parse 済みの object」を直接返却させる (= 旧 `Response` 返却から構造を変更)。
+   */
+
+  /** marketplace.json fetch の ghFetch 戻り値 (= base64 encode 済 JSON)。 */
+  function mockMarketplaceData(plugins: unknown): unknown {
     const json = JSON.stringify({ plugins });
     return {
-      ok: true,
-      json: async () => ({
-        content: Buffer.from(json).toString('base64'),
-        encoding: 'base64',
-        sha: 'mocksha',
-      }),
-    } as Response;
+      content: Buffer.from(json).toString('base64'),
+      encoding: 'base64',
+      sha: 'mocksha',
+    };
   }
 
-  /** Git Trees API response を組む (= path 配列、blob 限定)。 */
-  function mockGitTreesResponse(paths: string[], truncated = false): Response {
+  /** Git Trees API fetch の ghFetch 戻り値 (= path 配列、blob 限定)。 */
+  function mockGitTreesData(paths: string[], truncated = false): unknown {
     return {
-      ok: true,
-      json: async () => ({
-        truncated,
-        tree: paths.map((p) => ({ path: p, type: 'blob' as const })),
-      }),
-    } as Response;
+      truncated,
+      tree: paths.map((p) => ({ path: p, type: 'blob' as const })),
+    };
+  }
+
+  /**
+   * 各 Phase 2 test の mockGhFetch 設定の共通 prelude — 1 回目は存在確認 (= 成功)。
+   * 2 回目以降は countSkillsInRepo / Git Trees fallback 経路で個別に上書きする。
+   */
+  function setupExistenceCheckSuccess(): void {
+    mockGhFetch.mockReset();
+    mockGhFetch.mockResolvedValueOnce({ full_name: 'octocat/hello' });
   }
 
   /** 仕入れ成功用の spawnSync mock (gh 0 + git clone でマニフェスト作成)。 */
@@ -499,8 +563,8 @@ describe('acquire — Phase 2 threshold-promote', () => {
 
   it('marketplace.json 経路 — 閾値以内 (5 skill) なら clone 経路に進む', async () => {
     setupCloneSuccess();
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(mockMarketplaceResponse([{ skills: ['./a', './b', './c', './d', './e'] }]));
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(mockMarketplaceData([{ skills: ['./a', './b', './c', './d', './e'] }]));
     const result = await acquire({ repo: 'small/repo' });
     expect(result).toMatchObject({ ok: true, biblioName: 'small--repo' });
     // git clone が呼ばれている (= 閾値判定後に clone 経路に進んだ証拠)
@@ -509,11 +573,11 @@ describe('acquire — Phase 2 threshold-promote', () => {
   });
 
   it('marketplace.json 経路 — 閾値超過 (17 skill) で early return、clone 呼ばれない', async () => {
-    // gh は OK、git は呼ばれない想定
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(
-      mockMarketplaceResponse([{ skills: Array.from({ length: 17 }, (_, i) => `./skill-${i}`) }]),
+    // git は呼ばれない想定
+    mockSpawn.mockImplementation(() => spawnResult(-1));
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 17 }, (_, i) => `./skill-${i}`) }]),
     );
     const result = await acquire({ repo: 'large/repo' });
     expect(result.ok).toBe(false);
@@ -529,14 +593,12 @@ describe('acquire — Phase 2 threshold-promote', () => {
   });
 
   it('marketplace.json 不在 → Git Trees fallback (main) で閾値超過', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
-    fetchMock.mockReset();
-    fetchMock
-      .mockResolvedValueOnce(mock404()) // marketplace.json: 404 → fallback
+    mockSpawn.mockImplementation(() => spawnResult(-1));
+    setupExistenceCheckSuccess();
+    mockGhFetch
+      .mockRejectedValueOnce(gh404('GET contents/marketplace.json (acquire)')) // marketplace.json: 404 → fallback
       .mockResolvedValueOnce(
-        mockGitTreesResponse(
-          Array.from({ length: 15 }, (_, i) => `skill-${i}/SKILL.md`).concat(['README.md', 'LICENSE']),
-        ),
+        mockGitTreesData(Array.from({ length: 15 }, (_, i) => `skill-${i}/SKILL.md`).concat(['README.md', 'LICENSE'])),
       );
     const result = await acquire({ repo: 'no-marketplace/repo' });
     expect(result.ok).toBe(false);
@@ -547,8 +609,10 @@ describe('acquire — Phase 2 threshold-promote', () => {
 
   it('Git Trees truncated → unknown → 閾値判定 skip → clone 経路に進む (既存挙動維持)', async () => {
     setupCloneSuccess();
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(mock404()).mockResolvedValueOnce(mockGitTreesResponse(['skill-1/SKILL.md'], true));
+    setupExistenceCheckSuccess();
+    mockGhFetch
+      .mockRejectedValueOnce(gh404('GET contents/marketplace.json (acquire)'))
+      .mockResolvedValueOnce(mockGitTreesData(['skill-1/SKILL.md'], true));
     const result = await acquire({ repo: 'huge/repo' });
     // threshold_exceeded ではなく clone 経路 (= ok:true) に進んだ
     expect(result).toMatchObject({ ok: true, biblioName: 'huge--repo' });
@@ -557,20 +621,20 @@ describe('acquire — Phase 2 threshold-promote', () => {
   it('env ACQUIRE_SKILL_THRESHOLD=20 オーバーライド — 17 skill は通る', async () => {
     setupCloneSuccess();
     mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '20' });
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(
-      mockMarketplaceResponse([{ skills: Array.from({ length: 17 }, (_, i) => `./skill-${i}`) }]),
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 17 }, (_, i) => `./skill-${i}`) }]),
     );
     const result = await acquire({ repo: 'medium/repo' });
     expect(result).toMatchObject({ ok: true, biblioName: 'medium--repo' });
   });
 
   it('env ACQUIRE_SKILL_THRESHOLD=-5 (不正値) → default 10 に倒れ warn ログ', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    mockSpawn.mockImplementation(() => spawnResult(-1));
     mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '-5' });
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(
-      mockMarketplaceResponse([{ skills: Array.from({ length: 11 }, (_, i) => `./skill-${i}`) }]),
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 11 }, (_, i) => `./skill-${i}`) }]),
     );
     const result = await acquire({ repo: 'mid/repo' });
     expect(result.ok).toBe(false);
@@ -584,11 +648,11 @@ describe('acquire — Phase 2 threshold-promote', () => {
   });
 
   it('plugins[] 直配列 (claude-plugins-official 型) — 1 plugin = 1 skill で count', async () => {
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
-    fetchMock.mockReset();
+    mockSpawn.mockImplementation(() => spawnResult(-1));
+    setupExistenceCheckSuccess();
     // skills フィールド無し → 各 plugin を 1 skill として count
-    fetchMock.mockResolvedValueOnce(
-      mockMarketplaceResponse(Array.from({ length: 12 }, (_, i) => ({ name: `plugin-${i}` }))),
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData(Array.from({ length: 12 }, (_, i) => ({ name: `plugin-${i}` }))),
     );
     const result = await acquire({ repo: 'official/style' });
     expect(result.ok).toBe(false);
@@ -603,9 +667,9 @@ describe('acquire — Phase 2 threshold-promote', () => {
     // `count > threshold` 判定の境界仕様の明示化 (= 10 ちょうどは通る、11 で promote)。
     // 仕様変更時 (> → >=) の回帰を 1 件で検知する。
     setupCloneSuccess();
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(
-      mockMarketplaceResponse([{ skills: Array.from({ length: 10 }, (_, i) => `./s-${i}`) }]),
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 10 }, (_, i) => `./s-${i}`) }]),
     );
     const result = await acquire({ repo: 'boundary/repo' });
     expect(result).toMatchObject({ ok: true, biblioName: 'boundary--repo' });
@@ -614,12 +678,10 @@ describe('acquire — Phase 2 threshold-promote', () => {
   it('marketplace.json 500 エラー → unknown → clone 経路に進む (degraded 保護)', async () => {
     // rate limit / GitHub server error 時に閾値判定を skip して既存挙動を維持することを確認。
     setupCloneSuccess();
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce({
-      ok: false,
-      status: 500,
-      text: async () => 'internal server error',
-    } as Response);
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockRejectedValueOnce(
+      new GhHttpError('GET contents/marketplace.json (acquire)', 500, 'internal server error'),
+    );
     const result = await acquire({ repo: 'flaky/repo' });
     expect(result).toMatchObject({ ok: true, biblioName: 'flaky--repo' });
   });
@@ -627,15 +689,12 @@ describe('acquire — Phase 2 threshold-promote', () => {
   it('marketplace.json に plugins[] なし → unknown → clone 経路に進む', async () => {
     // marketplace.json は存在するが plugins フィールド欠落 (= biblio 仕様外形式) の防御確認。
     setupCloneSuccess();
-    fetchMock.mockReset();
+    setupExistenceCheckSuccess();
     const malformedJson = JSON.stringify({ version: '1.0' }); // plugins キーなし
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        content: Buffer.from(malformedJson).toString('base64'),
-        encoding: 'base64',
-      }),
-    } as Response);
+    mockGhFetch.mockResolvedValueOnce({
+      content: Buffer.from(malformedJson).toString('base64'),
+      encoding: 'base64',
+    });
     const result = await acquire({ repo: 'no-plugins/repo' });
     expect(result).toMatchObject({ ok: true, biblioName: 'no-plugins--repo' });
   });
@@ -643,14 +702,11 @@ describe('acquire — Phase 2 threshold-promote', () => {
   it('marketplace.json が不正 JSON → unknown → clone 経路 + warn ログ', async () => {
     // base64 decode 後の文字列が JSON parse 失敗するケース。silent failure 防止の確認。
     setupCloneSuccess();
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        content: Buffer.from('{ invalid json }').toString('base64'),
-        encoding: 'base64',
-      }),
-    } as Response);
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce({
+      content: Buffer.from('{ invalid json }').toString('base64'),
+      encoding: 'base64',
+    });
     const result = await acquire({ repo: 'malformed/repo' });
     expect(result).toMatchObject({ ok: true, biblioName: 'malformed--repo' });
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
@@ -662,12 +718,12 @@ describe('acquire — Phase 2 threshold-promote', () => {
   it('Git Trees fallback — main 404 → master 200 で閾値超過', async () => {
     // tryBranches ループの continue 経路 (= main を試した後 master に進む) の直接検証。
     // 既存テストは「main 200」または「main + master の両方 404 / truncated」しかカバーしていない。
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
-    fetchMock.mockReset();
-    fetchMock
-      .mockResolvedValueOnce(mock404()) // marketplace.json: 404
-      .mockResolvedValueOnce(mock404()) // git/trees/main: 404
-      .mockResolvedValueOnce(mockGitTreesResponse(Array.from({ length: 12 }, (_, i) => `skill-${i}/SKILL.md`))); // git/trees/master: 12 SKILL.md
+    mockSpawn.mockImplementation(() => spawnResult(-1));
+    setupExistenceCheckSuccess();
+    mockGhFetch
+      .mockRejectedValueOnce(gh404('GET contents/marketplace.json (acquire)')) // marketplace.json: 404
+      .mockRejectedValueOnce(gh404('GET git/trees (acquire)')) // git/trees/main: 404
+      .mockResolvedValueOnce(mockGitTreesData(Array.from({ length: 12 }, (_, i) => `skill-${i}/SKILL.md`))); // git/trees/master: 12 SKILL.md
     const result = await acquire({ repo: 'legacy/repo' });
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -678,32 +734,29 @@ describe('acquire — Phase 2 threshold-promote', () => {
   it('countSkillsInRepo は外部 repo に noAuth: true で fetch する (= Authorization ヘッダなし)', async () => {
     // OneCLI secret の pathPattern (`/repos/HajimariInc/*`) miss で `Bearer placeholder` を素通しすると
     // GitHub が invalid token として 401 を返す問題への対策。外部 repo (anthropics/skills 等) を呼ぶ
-    // countSkillsInRepo は ghFetch を `noAuth: true` で呼び出し、Authorization ヘッダを省略する。
-    // 本テストは fetchMock の引数を直接見て Authorization が含まれないことを assert する。
+    // countSkillsInRepo は ghFetch を `{ noAuth: true }` opts 付きで呼び出す。
+    // 本テストは mockGhFetch の引数を直接見て opts.noAuth が true であることを assert する。
     setupCloneSuccess();
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(mockMarketplaceResponse([{ skills: ['./a', './b'] }]));
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(mockMarketplaceData([{ skills: ['./a', './b'] }]));
     await acquire({ repo: 'small/repo' });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
-    expect(calledUrl).toContain('/repos/small/repo/contents/.claude-plugin/marketplace.json');
-    const headers = (calledInit as { headers?: Record<string, string> }).headers ?? {};
-    expect(headers).not.toHaveProperty('Authorization');
-    // Accept / X-GitHub-Api-Version は載っていることを確認 (= ghFetch の通常 header は維持)
-    expect(headers).toMatchObject({
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    });
+    // 1 回目: 存在確認 (acquire.check-repo)、2 回目: countSkillsInRepo (marketplace.json)
+    expect(mockGhFetch).toHaveBeenCalledTimes(2);
+    const [step, url, , opts] = mockGhFetch.mock.calls[1];
+    expect(step).toContain('GET contents/marketplace.json (acquire)');
+    expect(url).toContain('/repos/small/repo/contents/.claude-plugin/marketplace.json');
+    // noAuth: true で Authorization ヘッダを省略する経路
+    expect(opts).toMatchObject({ noAuth: true });
   });
 
   it('env ACQUIRE_SKILL_THRESHOLD="abc" (非数値) → default 10 に倒れ warn ログ', async () => {
     // `-5` は `< 1` 分岐で弾かれるが、`"abc"` は `parseInt → NaN` → `!Number.isFinite(NaN)`
     // 分岐で弾かれる別経路。両方の防御パスをカバーする。
-    mockSpawn.mockImplementation((cmd) => spawnResult(cmd === 'gh' ? 0 : -1));
+    mockSpawn.mockImplementation(() => spawnResult(-1));
     mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: 'abc' });
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValueOnce(
-      mockMarketplaceResponse([{ skills: Array.from({ length: 11 }, (_, i) => `./s-${i}`) }]),
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 11 }, (_, i) => `./s-${i}`) }]),
     );
     const result = await acquire({ repo: 'nan/repo' });
     expect(result.ok).toBe(false);

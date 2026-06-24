@@ -24,6 +24,7 @@ import { DATA_DIR } from '../config.js';
 import { deleteEquippedBiblioByName } from '../db/session-equipped-biblios.js';
 import { log } from '../log.js';
 import { unshelve } from './unshelve.js';
+import type { GhFetchCtx } from './shelf-gh.js';
 import type { BiblioCategory, ShokyakuResult } from './types.js';
 
 /** 焼却の入力 (= 棚から除去 + 装備源物理削除)。 */
@@ -36,6 +37,8 @@ export interface ShokyakuRequest {
 export interface ShokyakuOptions {
   /** 装備源 dir の root (`<root>/<biblioName>/` が削除対象)。省略時は `${DATA_DIR}/biblio-equipped`。 */
   equipmentRoot?: string;
+  /** Vertex / ghFetch 呼び出しに propagate する追跡 context。 */
+  ctx?: GhFetchCtx;
 }
 
 /**
@@ -67,12 +70,15 @@ export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Pr
   const { biblioName, category } = req;
   const equipmentRoot = opts?.equipmentRoot ?? path.join(DATA_DIR, 'biblio-equipped');
 
-  const unshelveResult = await unshelve({
-    biblioName,
-    category,
-    opLabel: '焼却',
-    branchPrefix: 'shokyaku',
-  });
+  const unshelveResult = await unshelve(
+    {
+      biblioName,
+      category,
+      opLabel: '焼却',
+      branchPrefix: 'shokyaku',
+    },
+    { ctx: opts?.ctx },
+  );
   if (!unshelveResult.ok) {
     return unshelveResult;
   }

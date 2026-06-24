@@ -2,7 +2,7 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
-> **ステータス**: M3 Phase 4 (catalog-slack) 完了 — M2 北極星到達済 (patron 1 通の依頼で外部 biblio を棚に並べる経路が動く) + M3 Phase 1-4 完了 (装備機構 + 蔵書一覧 Slack feature)。
+> **ステータス**: M3 全 Phase + init-project-gcp PRD 完了 — M2 北極星到達済 (patron 1 通の依頼で外部 biblio を棚に並べる経路が動く) + M3 Phase 1-5 完了 (装備機構 + 蔵書一覧 Slack feature) + init-project-gcp PRD 1-6 Phase 完了 (GKE 環境整備 + 観測 + slash command + Slack E2E verify、`M3 PASS (gke)` 取得済)。Slack ws E2E PASS (= MVP 達成判定) は OneCLI MITM injection の独立 bug ([#36](https://github.com/HajimariInc/biblio-claw/issues/36)) で blocking 中。
 >
 > - **PRD A 基盤**: GKE Autopilot (`biblio-prod`, asia-northeast1) 上で orchestrator StatefulSet が **Native sidecar 多コンテナ Pod** (initContainers: `fetch-pem` + `cloud-sql-proxy` + `onecli` / containers: `orchestrator` + `gh-token-rotator` + `vertex-token-rotator`) として稼働。OneCLI gateway / GH installation token / Vertex Bearer token / CA bundle はすべて Pod 内 sidecar + `ca-secret-sync` で自動投入され、起動コマンドは `kubectl apply -f k8s/` のみで完結する。Slack adapter は socket mode で接続成立 (A 案: orchestrator 統合)、agent は K8s Job として spawn され NetworkPolicy で egress 制限される。PVC + SQLite 永続化は boots カウンタで Pod 再作成跨ぎの monotonic increment を assertion (`scripts/verify-phase-m2-3.sh exit 0`)。
 > - **PRD B marketplace**: 仕入れ → 検品 → カテゴライズ (Vertex × Claude Sonnet-4.6) → 棚リポへの draft PR 作成 までの E2E が完成。M2 完成判定 verify (`scripts/verify-m2.sh <owner/repo>`) で **M2 PASS** を取得。OneCLI secret の `pathPattern=/repos/HajimariInc/*` で「棚 / 司書本体への operation のみ GH App auth が乗る、外部 public biblio の仕入れは無認証素通し」という最小権限経路を確立。
@@ -30,7 +30,11 @@ pnpm run chat "hello"      # smoke 用 CLI から司書と会話
 
 ## GKE 運用メモ (デプロイ後の bootstrap / メンテ)
 
-> ⚠️ **暫定セクション** — 日常運用の早見表は [`docs/operations-runbook.md`](docs/operations-runbook.md) に集約済。本セクションは初回デプロイ + 再構築時に **1 回だけ走らせる Bootstrap 手順** に絞って残置している。手順が枯れたら本セクションを最小化し詳細は runbook に転記する。
+> ⚠️ **暫定セクション** — 日常運用の早見表は [`docs/operations-runbook.md`](docs/operations-runbook.md) に集約済。本セクションは初回デプロイ + 再構築時に **1 回だけ走らせる Bootstrap 手順** に絞って残置している。
+>
+> **完全再構築時の Bootstrap GRANT は `bash scripts/init-project-gcp-pgsql-grant.sh` (= PR #23 で公式化、`gcloud sql connect` + IAP 経由) が正本**。以下の K8s Pod + psql 手順は **参考残置** で、特に **「既存 DB を新 GSA で引き継ぐ場合」(後述) の role membership 継承 GRANT** は新スクリプトに含まれていないため、空でない DB の移行ケースでは下記手順を参照する。
+>
+> 完全 teardown 後の空 DB 再構築 (= 通常の reset → 再構築) は新スクリプトのみで完結する。リセット運用の全体像は [`docs/operations-runbook.md` §GKE リセット手順](docs/operations-runbook.md#gke-リセット手順) を参照。
 
 ### Cloud SQL `postgres` user パスワード変更 (初回 Bootstrap GRANT)
 

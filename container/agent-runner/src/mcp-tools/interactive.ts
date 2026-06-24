@@ -9,10 +9,7 @@ import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
-
-function log(msg: string): void {
-  console.error(`[mcp-tools] ${msg}`);
-}
+import { log } from '../log.js';
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -105,7 +102,7 @@ export const askUserQuestion: McpToolDefinition = {
       }),
     });
 
-    log(`ask_user_question: ${questionId} → "${question}" [${options.join(', ')}]`);
+    log.info(`ask_user_question: ${questionId} → "${question}" [${options.join(', ')}]`);
 
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
@@ -117,14 +114,14 @@ export const askUserQuestion: McpToolDefinition = {
         // Mark the response as completed via processing_ack (outbound.db)
         markCompleted([response.id]);
 
-        log(`ask_user_question response: ${questionId} → ${parsed.selectedOption}`);
+        log.info(`ask_user_question response: ${questionId} → ${parsed.selectedOption}`);
         return ok(parsed.selectedOption);
       }
 
       await sleep(1000);
     }
 
-    log(`ask_user_question timeout: ${questionId}`);
+    log.warn(`ask_user_question timeout: ${questionId}`);
     return err(`Question timed out after ${timeout / 1000}s`);
   },
 };
@@ -161,7 +158,7 @@ export const sendCard: McpToolDefinition = {
       content: JSON.stringify({ type: 'card', card, fallbackText: (args.fallbackText as string) || '' }),
     });
 
-    log(`send_card: ${id}`);
+    log.info(`send_card: ${id}`);
     return ok(`Card sent (id: ${id})`);
   },
 };

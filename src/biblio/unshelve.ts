@@ -42,6 +42,7 @@ import {
   ghFetch,
   pluginsOf,
   readShelveEnv,
+  type GhFetchCtx,
   type ShelfEnv,
 } from './shelf-gh.js';
 import type { BiblioCategory, UnshelveFailureReason, UnshelveResult } from './types.js';
@@ -119,10 +120,11 @@ async function fetchTree(
   env: ShelfEnv,
   sha: string,
   recursive: boolean,
+  ctx?: GhFetchCtx,
 ): Promise<{ tree: Array<{ path: string; mode: string; type: string; sha: string }>; truncated: boolean }> {
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/trees/${sha}${recursive ? '?recursive=1' : ''}`;
   const step = `GET git/trees/${sha.slice(0, 7)}${recursive ? ' (recursive)' : ''}`;
-  const data = (await ghFetch(step, url)) as {
+  const data = (await ghFetch(step, url, {}, { ctx })) as {
     tree?: Array<{ path?: string; mode?: string; type?: string; sha?: string }>;
     truncated?: boolean;
   };
@@ -145,22 +147,26 @@ async function fetchTree(
  *
  * @param req biblioName / category / opLabel / branchPrefix
  */
-export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
+export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } = {}): Promise<UnshelveResult> {
   const { biblioName, category, opLabel, branchPrefix } = req;
+  const ctx = opts.ctx;
 
   let env: ShelfEnv;
   try {
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn('unshelve: env not ready', { biblioName, detail });
+    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
+    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
+    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
+    log.warn('unshelve: env not ready', { biblioName, detail, reason: 'config_error (mapped to github_api_error)' });
     return fail(biblioName, 'github_api_error', detail);
   }
 
   // 1. marketplace.json 取得 + entry 存在チェック
   let marketplace: Record<string, unknown>;
   try {
-    const fetched = await fetchMarketplace(env);
+    const fetched = await fetchMarketplace(env, ctx);
     if (!fetched.raw) {
       log.info('unshelve: marketplace.json 不在 (= not_shelved 早期 return)', { biblioName });
       return fail(biblioName, 'not_shelved', `marketplace.json が棚に存在しません (= 既に解除済 / 元から不在)`);
@@ -194,6 +200,8 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
     const refData = (await ghFetch(
       'GET git/ref/heads/main',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/ref/heads/main`,
+      {},
+      { ctx },
     )) as { object?: { sha?: string } };
     const baseCommitSha = refData.object?.sha;
     if (!baseCommitSha) throw new GhHttpError('GET git/ref/heads/main', 200, 'response missing object.sha');
@@ -201,6 +209,8 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
     const commitData = (await ghFetch(
       'GET git/commits/{base}',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/commits/${baseCommitSha}`,
+      {},
+      { ctx },
     )) as { tree?: { sha?: string } };
     const baseTreeSha = commitData.tree?.sha;
     if (!baseTreeSha) throw new GhHttpError('GET git/commits/{base}', 200, 'response missing tree.sha');
@@ -208,7 +218,7 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
     await sleep(GH_GET_SLEEP_MS);
 
     // 3. root tree → category entry の sha
-    const rootTree = await fetchTree(env, baseTreeSha, false);
+    const rootTree = await fetchTree(env, baseTreeSha, false, ctx);
     const categoryEntry = rootTree.tree.find((e) => e.path === category && e.type === 'tree');
     if (!categoryEntry) {
       log.info('unshelve: root tree に category entry なし (= not_shelved 早期 return)', { biblioName, category });
@@ -222,7 +232,7 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
     await sleep(GH_GET_SLEEP_MS);
 
     // 4. category tree → biblioName entry の sha
-    const categoryTree = await fetchTree(env, categoryEntry.sha, false);
+    const categoryTree = await fetchTree(env, categoryEntry.sha, false, ctx);
     const biblioDirEntry = categoryTree.tree.find((e) => e.path === biblioName && e.type === 'tree');
     if (!biblioDirEntry) {
       log.info('unshelve: category tree に biblio dir なし (= not_shelved 早期 return)', { biblioName, category });
@@ -236,7 +246,7 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
     await sleep(GH_GET_SLEEP_MS);
 
     // 5. biblio dir tree (recursive) → 配下全 blob path
-    const biblioDirTree = await fetchTree(env, biblioDirEntry.sha, true);
+    const biblioDirTree = await fetchTree(env, biblioDirEntry.sha, true, ctx);
     if (biblioDirTree.truncated) {
       log.warn('unshelve: biblio dir tree truncated (削除漏れの可能性)', {
         biblioName,
@@ -263,6 +273,7 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
         method: 'POST',
         body: JSON.stringify({ content: marketplaceContent, encoding: 'utf-8' }),
       },
+      { ctx },
     )) as { sha?: string };
     if (typeof mpBlobData.sha !== 'string') {
       throw new GhHttpError('POST git/blobs (marketplace)', 200, 'response missing sha');
@@ -280,6 +291,7 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
         method: 'POST',
         body: JSON.stringify({ base_tree: baseTreeSha, tree: treeEntries }),
       },
+      { ctx },
     )) as { sha?: string };
     if (typeof treeRes.sha !== 'string') throw new GhHttpError('POST git/trees', 200, 'response missing sha');
 
@@ -287,13 +299,16 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
     const message = buildCommitMessage(opLabel, category, biblioName);
     let commitSha: string;
     try {
-      const r = await createCommit({
-        env,
-        message,
-        treeSha: treeRes.sha,
-        parentSha: baseCommitSha,
-        author: { name: env.authorName, email: env.authorEmail },
-      });
+      const r = await createCommit(
+        {
+          env,
+          message,
+          treeSha: treeRes.sha,
+          parentSha: baseCommitSha,
+          author: { name: env.authorName, email: env.authorEmail },
+        },
+        ctx,
+      );
       commitSha = r.sha;
     } catch (err) {
       if (err instanceof GhHttpError && err.status >= 400 && err.status < 500 && env.fallbackAuthor) {
@@ -302,13 +317,16 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
           status: err.status,
           bodyPreview: err.body.slice(0, 200),
         });
-        const r = await createCommit({
-          env,
-          message,
-          treeSha: treeRes.sha,
-          parentSha: baseCommitSha,
-          author: env.fallbackAuthor,
-        });
+        const r = await createCommit(
+          {
+            env,
+            message,
+            treeSha: treeRes.sha,
+            parentSha: baseCommitSha,
+            author: env.fallbackAuthor,
+          },
+          ctx,
+        );
         commitSha = r.sha;
       } else {
         throw err;
@@ -317,22 +335,32 @@ export async function unshelve(req: UnshelveRequest): Promise<UnshelveResult> {
 
     // 9. branch 作成 (GOTCHA: refs/heads/ プレフィックス必須)
     const branchName = branchNameFor(branchPrefix, category, biblioName);
-    await ghFetch('POST git/refs', `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/refs`, {
-      method: 'POST',
-      body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: commitSha }),
-    });
+    await ghFetch(
+      'POST git/refs',
+      `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/refs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: commitSha }),
+      },
+      { ctx },
+    );
 
     // 10. draft PR 作成
-    const prData = (await ghFetch('POST pulls', `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/pulls`, {
-      method: 'POST',
-      body: JSON.stringify({
-        title: `${opLabel}(${category}): ${biblioName}`,
-        head: branchName,
-        base: 'main',
-        body: buildPrBody(opLabel, category, biblioName),
-        draft: true,
-      }),
-    })) as { html_url?: string; number?: number };
+    const prData = (await ghFetch(
+      'POST pulls',
+      `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/pulls`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          title: `${opLabel}(${category}): ${biblioName}`,
+          head: branchName,
+          base: 'main',
+          body: buildPrBody(opLabel, category, biblioName),
+          draft: true,
+        }),
+      },
+      { ctx },
+    )) as { html_url?: string; number?: number };
     if (typeof prData.html_url !== 'string' || typeof prData.number !== 'number') {
       throw new GhHttpError('POST pulls', 200, 'response missing html_url/number');
     }

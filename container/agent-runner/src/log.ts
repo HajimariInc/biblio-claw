@@ -21,13 +21,11 @@ const SEVERITY: Record<Level, string> = {
   fatal: 'CRITICAL',
 };
 
-// Cloud Logging が special field として扱うキー + Fluent Bit が予約する `stream`。
-// data に含まれていた場合は payload top-level に混ぜず drop する (後続ログのドロップ回避)。
 const RESERVED_KEYS = new Set(['severity', 'message', 'time', 'stream']);
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 const FORMAT = process.env.LOG_FORMAT === 'json' ? 'json' : 'text';
-const COMPONENT = process.env.LOG_COMPONENT ?? 'host';
+const COMPONENT = process.env.LOG_COMPONENT ?? 'agent-runner';
 
 function formatErr(err: unknown): string {
   if (err instanceof Error) {
@@ -106,12 +104,3 @@ export const log = {
   error: (msg: string, data?: Record<string, unknown>) => emit('error', msg, data),
   fatal: (msg: string, data?: Record<string, unknown>) => emit('fatal', msg, data),
 };
-
-process.on('uncaughtException', (err) => {
-  log.fatal('Uncaught exception', { err });
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason) => {
-  log.error('Unhandled rejection', { err: reason });
-});

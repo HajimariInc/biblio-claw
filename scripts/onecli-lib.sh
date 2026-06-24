@@ -79,7 +79,8 @@ set_all_agents_mode_all() {
       n=$((n + 1))
     else
       failed=$((failed + 1))
-      info "agent ${id} の secret-mode 更新に失敗 (継続)"
+      # LOG_LEVEL=warn 以上のフィルタ環境でも個別 agent ID 追跡可能にするため warn 昇格。
+      warn "agent ${id} の secret-mode=all 更新に失敗 (継続)"
     fi
   done <<< "$ids"
   if [ "$failed" -gt 0 ]; then

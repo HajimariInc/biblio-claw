@@ -4,18 +4,24 @@
  * action handler は `writeBackMessage` で patron に応答する形式。
  * `registerDeliveryAction` を mock して module load 時の handler を抜き、直接呼ぶ。
  *
- * カバレッジ:
- *  (Phase 1)
- *  - 入口 validate (repo 空)
- *  - 既存経路: repo 単独 (skill 未指定) で acquire を `{ repo }` だけで呼ぶ
- *  - 新規経路 (Phase 1): skill 指定で acquire を `{ repo, skill }` で呼び、受領通知文言を返す
- *  - 空文字 skill は undefined 扱い (= 全体仕入れに退化)
- *  - acquire 自体の throw を握って internal エラー文言で writeBack (host を落とさない)
- *  (Phase 2)
- *  - threshold_exceeded: detail (動的 promote 文言) を素通しで patron に返す
- *    (count + 上限 + 個別指定例 + ブラウザ確認案内が届く、「仕入れエラー」表記混入なし)
+ * カバレッジ (= 個別 skill 仕入れ Phase 1-3 + PR #37 review-agents I5 統合):
+ *  入口 validate
+ *   - repo 空 → invalid_input writeBack (acquire を呼ばない)
+ *  Phase 1-2 既存経路 (skill 未指定)
+ *   - happy: repo 単独 → 仕入れ完了 + quarantinePath
+ *     - 同時検証: acquire 呼出に ctx (= { requestId, sessionId }) が渡されている (I1 回帰防止)
+ *   - reason=not_found → 仕入れエラー (not_found)
+ *   - reason=internal → システム構成エラー (= 専用文言、再試行誘発しない)
+ *   - reason=clone_failed → 仕入れエラー (clone_failed)
+ *   - threshold_exceeded → detail (動的 promote 文言) を素通し
+ *  Phase 3 個別 skill 経路 (skill 指定)
+ *   - happy: skill 指定 → target = repo/skill 形式
+ *   - 空文字 / 空白のみ skill → undefined 扱い (= 全体仕入れに退化)
+ *   - skill 指定で clone_failed → detail を素通し
+ *  例外握り
+ *   - acquire 自体が throw → システム構成エラー (host を巻き込まない)
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // `registerDeliveryAction(action, handler)` の handler を抜き出すための receiver。
 // `vi.mock` は import 前に hoist されるため、receiver は `vi.hoisted` 内で初期化する。
@@ -76,19 +82,70 @@ describe('acquire_biblio handler — 入口 validate', () => {
     await handler({ repo: '' }, dummySession, dummyDb);
     expect(acquireMock).not.toHaveBeenCalled();
     expect(getWrittenText()).toContain('invalid_input');
+    expect(getWrittenText()).toContain('repo が指定されていません');
   });
 });
 
 describe('acquire_biblio handler — 既存経路 (skill 未指定)', () => {
-  it('repo 単独で acquire を `{ repo }` だけで呼ぶ (skill キーを含めない)', async () => {
+  it('repo 単独で acquire を `{ repo }` だけで呼ぶ + ctx (= { requestId, sessionId }) を伝搬', async () => {
     acquireMock.mockResolvedValue({
       ok: true,
-      biblioName: 'oct--hi',
-      quarantinePath: '/tmp/q/oct--hi',
+      biblioName: 'octocat--hello',
+      quarantinePath: '/tmp/q/octocat--hello',
     });
-    await handler({ repo: 'oct/hi' }, dummySession, dummyDb);
-    expect(acquireMock).toHaveBeenCalledWith({ repo: 'oct/hi' });
-    expect(getWrittenText()).toContain('仕入れ完了');
+    await handler({ repo: 'octocat/hello' }, dummySession, dummyDb);
+    // ctx 検証 (= I1 回帰防止、Phase 2 で確立した request_id propagation)
+    expect(acquireMock).toHaveBeenCalledWith(
+      { repo: 'octocat/hello' },
+      expect.objectContaining({
+        ctx: expect.objectContaining({
+          requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+          sessionId: 'sess-x',
+        }),
+      }),
+    );
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れ完了');
+    expect(text).toContain('/tmp/q/octocat--hello');
+    expect(text).toContain('inspect_biblio');
+  });
+
+  it('reason=not_found で「仕入れエラー (not_found)」を返す', async () => {
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'not_found',
+      detail: 'repo が見つかりません: foo/bar',
+    });
+    await handler({ repo: 'foo/bar' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れエラー (not_found)');
+    expect(text).toContain('repo が見つかりません');
+  });
+
+  it('reason=internal で「システム構成エラー」専用文言を返す (= 再試行を促さない)', async () => {
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'internal',
+      detail: 'OneCLI proxy への接続に失敗',
+    });
+    await handler({ repo: 'foo/bar' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('システム構成エラー');
+    expect(text).toContain('OneCLI proxy への接続に失敗');
+    // 再試行誘発の「仕入れエラー」文言ではないこと
+    expect(text).not.toContain('仕入れエラー (internal)');
+  });
+
+  it('reason=clone_failed で「仕入れエラー (clone_failed)」を返す', async () => {
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'clone_failed',
+      detail: 'git clone exit=128',
+    });
+    await handler({ repo: 'foo/bar' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れエラー (clone_failed)');
+    expect(text).toContain('exit=128');
   });
 });
 
@@ -100,7 +157,10 @@ describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
       quarantinePath: '/data/quarantine/anthropics--skills--algorithmic-art',
     });
     await handler({ repo: 'anthropics/skills', skill: 'algorithmic-art' }, dummySession, dummyDb);
-    expect(acquireMock).toHaveBeenCalledWith({ repo: 'anthropics/skills', skill: 'algorithmic-art' });
+    expect(acquireMock).toHaveBeenCalledWith(
+      { repo: 'anthropics/skills', skill: 'algorithmic-art' },
+      expect.objectContaining({ ctx: expect.any(Object) }),
+    );
     const text = getWrittenText() ?? '';
     expect(text).toContain('仕入れ完了');
     // target は `repo/skill` 形式 (= 個別 skill 経路、全体経路 `repo` 単独と区別可能)
@@ -117,7 +177,7 @@ describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
       quarantinePath: '/tmp/q/oct--hi',
     });
     await handler({ repo: 'oct/hi', skill: '   ' }, dummySession, dummyDb);
-    expect(acquireMock).toHaveBeenCalledWith({ repo: 'oct/hi' });
+    expect(acquireMock).toHaveBeenCalledWith({ repo: 'oct/hi' }, expect.objectContaining({ ctx: expect.any(Object) }));
   });
 
   it('skill 指定で clone_failed — detail を素通しで patron に返す ("仕入れエラー (clone_failed)" 形式)', async () => {
@@ -137,12 +197,13 @@ describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
 });
 
 describe('acquire_biblio handler — 例外を握って writeBack に倒す', () => {
-  it('acquire が throw しても host を巻き込まず internal エラー文言を返す', async () => {
-    acquireMock.mockRejectedValue(new Error('boom'));
+  it('acquire が throw しても host を巻き込まず「システム構成エラー: 予期しない失敗」を返す', async () => {
+    acquireMock.mockRejectedValue(new Error('unexpected fatal'));
     await expect(handler({ repo: 'oct/hi' }, dummySession, dummyDb)).resolves.toBeUndefined();
     const text = getWrittenText() ?? '';
-    expect(text).toContain('仕入れエラー (internal)');
-    expect(text).toContain('boom');
+    expect(text).toContain('システム構成エラー');
+    expect(text).toContain('予期しない失敗');
+    expect(text).toContain('unexpected fatal');
   });
 });
 

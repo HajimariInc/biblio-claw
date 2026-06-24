@@ -1,13 +1,16 @@
 /**
- * GitHub API 共通レイヤ — shelve.ts と unshelve.ts (= Phase 3 で追加) が両方使う raw fetch wrapper +
- * env 読み込み + marketplace.json fetch + commit 作成 helper を集約する。
+ * GitHub API 共通レイヤ — `shelve.ts` / `unshelve.ts` / `list-biblio.ts` / `acquire.ts` の
+ * 全 GitHub API 経路が使う raw fetch wrapper + env 読み込み + marketplace.json fetch +
+ * commit 作成 helper を集約する。
  *
- * 切り出し方針 (Phase 3 Task 1):
+ * 切り出し方針 (Phase 3 Task 1 で初出、その後 Phase 4 で list-biblio、PR #33 hotfix で
+ * acquire の `ghFetch` 流用が追加されて 4 caller に拡張):
  *   - `ghFetch` は OneCLI MITM 経由で Authorization を載せ、non-2xx は `GhHttpError` に変換
  *   - `fetchMarketplace` は marketplace.json を取得 (404 → null、それ以外は throw)
  *   - `pluginsOf` は plugins[] 配列を型保護して取り出す (= shelve の重複検知 + unshelve の entry 除去で共有)
  *   - `createCommit` は `POST /git/commits` の最小ラッパ (fallback author retry は呼び出し側で分岐)
- *   - `readShelveEnv` は棚リポ + author 情報の env を 1 箇所で読む (未設定は throw)
+ *   - `readListEnv` は棚 owner/repo のみ (= list-biblio 等 read-only 経路、author env 不要)
+ *   - `readShelveEnv` は棚リポ + author 情報の env を 1 箇所で読む (= shelve / unshelve など write 経路、未設定は throw)
  *
  * shelve.ts 固有 (= biblio dir 走査 / mergeMarketplace / commit message / PR body) は移さない。
  */
@@ -53,7 +56,32 @@ export class GhHttpError extends Error {
 }
 
 /**
- * ghFetch の拡張オプション (= UndiciRequestInit と別軸の挙動制御)。
+ * marketplace.json の parse 失敗 (= HTTP 200 だが content 欠落 / decode 後 invalid JSON)
+ * を `GhHttpError(200, ...)` の文脈不整合から分離するための例外型。
+ *
+ * 互換維持のため `extends GhHttpError` (= status=200 固定)。既存の caller が `instanceof
+ * GhHttpError` で catch している経路 (`shelve.ts` / `unshelve.ts` / `list-biblio.ts`) は
+ * 引き続き同経路で動く。新規 caller では `instanceof MarketplaceParseError` で別分岐
+ * できる (= 「HTTP 200 なのに GitHub API エラー?」と読者を混乱させない設計、PR #37
+ * review-agents silent-failure-hunter SH4 提案)。
+ */
+export class MarketplaceParseError extends GhHttpError {
+  constructor(step: string, body: string) {
+    super(step, 200, body);
+    this.name = 'MarketplaceParseError';
+  }
+}
+
+/**
+ * ghFetch を呼ぶ全 caller が 1 patron 依頼を跨いで追跡するための文脈。
+ */
+export interface GhFetchCtx {
+  requestId?: string;
+  sessionId?: string;
+}
+
+/**
+ * ghFetch の拡張オプション (= UndiciRequestInit と別軸の挙動制御 + 追跡 ctx)。
  *
  * `noAuth`: Authorization ヘッダを省略する。OneCLI secret の `pathPattern`
  * (`/repos/HajimariInc/*`) に match しない外部 repo (= biblio 仕入れ先の `anthropics/skills` 等)
@@ -61,9 +89,12 @@ export class GhHttpError extends Error {
  * invalid token として 401 を返すため (= public API は無認証で 200)、外部 repo 経路では本フラグ
  * を立てて Authorization 自体を省略する。内部 repo (= `HajimariInc/biblio-shelf`) 操作では未指定
  * (= 既存挙動 = MITM で token 置換) のままで OK。
+ *
+ * `ctx`: `GhFetchCtx` (= request_id / session_id) を伝搬し、構造化ログに乗せる。
  */
 export interface GhFetchOptions {
   noAuth?: boolean;
+  ctx?: GhFetchCtx;
 }
 
 export async function ghFetch(
@@ -72,37 +103,83 @@ export async function ghFetch(
   init: UndiciRequestInit = {},
   opts: GhFetchOptions = {},
 ): Promise<unknown> {
+  const ctx = opts.ctx;
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
-    // OneCLI MITM が wire で本物の installation token に置換 (acquire.ts:gh CLI と同じ経路)。
-    // 外部 repo (pathPattern miss) では `opts.noAuth: true` で Authorization 自体を省略する
-    // (placeholder 素通しを防ぐ = 無認証で public API に 200 で抜ける)。
+    // OneCLI MITM が wire で本物の installation token に置換 (shelve / unshelve /
+    // list-biblio / acquire 全 ghFetch 経路で共通)。OneCLI v1.30.0 の injection
+    // 経路依存仕様は issue #36 で検証中。
+    //
+    // 外部 repo (= OneCLI secret の `pathPattern` に match しない `anthropics/skills` 等)
+    // を fetch するときは `opts.noAuth: true` で Authorization 自体を省略する。
+    // pathPattern miss 時に placeholder を素通しすると GitHub が invalid token として
+    // 401 を返す (= public API は無認証で 200) ため、外部 repo 経路の安全弁。
     ...(opts.noAuth ? {} : { Authorization: 'Bearer placeholder' }),
     ...(init.headers as Record<string, string> | undefined),
   };
   if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
 
+  const t0 = performance.now();
   const res = await fetch(url, {
     ...init,
     headers,
     signal: AbortSignal.timeout(GH_FETCH_TIMEOUT_MS),
   });
+  const latency_ms = Math.round(performance.now() - t0);
+
   if (!res.ok) {
     let body = '';
     try {
       body = await res.text();
     } catch (bodyErr) {
+      // body 読み取り失敗時はマーカー文字列を入れる (= GhHttpError.body が caller の
+      // detail 整形 (= `err.body.slice(0, 200)`) で空文字になりデバッグ不能になる罠を回避)。
+      body = '(body read failed)';
       log.warn('gh: failed to read error body', { step, status: res.status, bodyErr });
+    }
+    const logData = {
+      event: 'github.fetch',
+      outcome: 'failure',
+      step,
+      status: res.status,
+      latency_ms,
+      error_body_preview: body.slice(0, 200),
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
+    };
+    // 404 は呼び出し側で expected fallback として扱う経路 (fetchMarketplace 等) がある。
+    // それ以外の non-2xx は warn で残す。
+    if (res.status === 404) {
+      log.debug('github.fetch failed', logData);
+    } else {
+      log.warn('github.fetch failed', logData);
     }
     throw new GhHttpError(step, res.status, body);
   }
+  log.debug('github.fetch ok', {
+    event: 'github.fetch',
+    outcome: 'success',
+    step,
+    status: res.status,
+    latency_ms,
+    request_id: ctx?.requestId,
+    session_id: ctx?.sessionId,
+  });
   return res.json();
 }
 
-export interface ShelfEnv {
+/**
+ * read-only 経路 (list-biblio など) で必要な最小 env のみを保持する型。
+ * `ShelfEnv` の subset (= 棚 owner/repo のみ)、author 情報は持たない。
+ * shelve/unshelve 系の write 経路は引き続き `ShelfEnv` を要求する。
+ */
+export interface ListEnv {
   shelfOwner: string;
   shelfRepo: string;
+}
+
+export interface ShelfEnv extends ListEnv {
   authorName: string;
   authorEmail: string;
   /** PR commit author の fallback (`Name <email>` 形式、未設定なら null)。 */
@@ -116,19 +193,39 @@ function parseAuthorString(s: string): { name: string; email: string } | null {
   return { name: m[1].trim(), email: m[2].trim() };
 }
 
+/**
+ * env キー定数 — 必須キー配列の逐語コピーを集約 (= `readListEnv` / `readShelveEnv` で 2 回登場)。
+ * 将来キー追加時の修正箇所を 1 箇所に絞る (= PR #37 code-simplifier S3 提案)。
+ *
+ * `SHELVE_ENV_KEYS_REQUIRED` は `LIST_ENV_KEYS` + author 2 件で、`SHELF_PR_AUTHOR_FALLBACK`
+ * は optional のため別配列。`readEnvFile` に渡す全キー集合は `[...SHELVE_ENV_KEYS_REQUIRED,
+ * ...SHELVE_ENV_KEYS_OPTIONAL]`。
+ */
+const LIST_ENV_KEYS = ['SHELF_REPO_OWNER', 'SHELF_REPO_NAME'] as const;
+const SHELVE_ENV_KEYS_REQUIRED = [...LIST_ENV_KEYS, 'SHELF_PR_AUTHOR_NAME', 'SHELF_PR_AUTHOR_EMAIL'] as const;
+const SHELVE_ENV_KEYS_OPTIONAL = ['SHELF_PR_AUTHOR_FALLBACK'] as const;
+
+/**
+ * read-only 経路 (list-biblio など) に必要な棚 owner/repo のみを読む。
+ * `readShelveEnv` の必須 env サブセット (= `SHELF_PR_AUTHOR_*` を要求しない) で、
+ * `@bot 蔵書` のような書き込みを伴わない経路を author env 不在でも通すためにある。
+ */
+export function readListEnv(): ListEnv {
+  const env = readEnvFile([...LIST_ENV_KEYS]);
+  const missing = LIST_ENV_KEYS.filter((k) => !env[k]);
+  if (missing.length > 0) {
+    throw new Error(`list: required env missing: ${missing.join(', ')}`);
+  }
+  return {
+    shelfOwner: env.SHELF_REPO_OWNER!,
+    shelfRepo: env.SHELF_REPO_NAME!,
+  };
+}
+
 /** shelf 経路に必要な env (棚リポ + author 情報) を読み、未設定はその場で throw (起動時に問題を即可視化)。 */
 export function readShelveEnv(): ShelfEnv {
-  const env = readEnvFile([
-    'SHELF_REPO_OWNER',
-    'SHELF_REPO_NAME',
-    'SHELF_PR_AUTHOR_NAME',
-    'SHELF_PR_AUTHOR_EMAIL',
-    'SHELF_PR_AUTHOR_FALLBACK',
-  ]);
-  const missing: string[] = [];
-  for (const k of ['SHELF_REPO_OWNER', 'SHELF_REPO_NAME', 'SHELF_PR_AUTHOR_NAME', 'SHELF_PR_AUTHOR_EMAIL'] as const) {
-    if (!env[k]) missing.push(k);
-  }
+  const env = readEnvFile([...SHELVE_ENV_KEYS_REQUIRED, ...SHELVE_ENV_KEYS_OPTIONAL]);
+  const missing = SHELVE_ENV_KEYS_REQUIRED.filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`shelve: required env missing: ${missing.join(', ')}`);
   }
@@ -150,17 +247,20 @@ export function readShelveEnv(): ShelfEnv {
 
 /** 既存 marketplace.json を取得する。404 なら null。それ以外の non-2xx は throw。 */
 export async function fetchMarketplace(
-  env: ShelfEnv,
+  env: ListEnv,
+  ctx?: GhFetchCtx,
 ): Promise<{ raw: Record<string, unknown> | null; sha: string | null }> {
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/contents/.claude-plugin/marketplace.json`;
   try {
-    const data = (await ghFetch('GET contents/marketplace.json', url)) as {
+    const data = (await ghFetch('GET contents/marketplace.json', url, {}, { ctx })) as {
       content?: string;
       encoding?: string;
       sha?: string;
     };
     if (typeof data.content !== 'string' || data.encoding !== 'base64') {
-      throw new GhHttpError('GET contents/marketplace.json', 200, 'response missing content/encoding');
+      // HTTP 200 だが content 欠落 = parse 失敗。GhHttpError(200) より MarketplaceParseError
+      // のほうが「HTTP 200 なのに API エラー?」と読者を混乱させない (= SH4)。
+      throw new MarketplaceParseError('GET contents/marketplace.json', 'response missing content/encoding');
     }
     // GitHub の base64 は MIME 風に改行が入る可能性があるため Buffer.from で安全に decode する。
     const decoded = Buffer.from(data.content, 'base64').toString('utf-8');
@@ -168,9 +268,8 @@ export async function fetchMarketplace(
     try {
       parsed = JSON.parse(decoded) as Record<string, unknown>;
     } catch (err) {
-      throw new GhHttpError(
+      throw new MarketplaceParseError(
         'GET contents/marketplace.json',
-        200,
         `existing marketplace.json is invalid JSON: ${err instanceof Error ? err.message : err}`,
       );
     }
@@ -199,19 +298,24 @@ export interface CommitArgs {
 }
 
 /** `POST /git/commits` を 1 author で叩く (PAT fallback は呼び出し側で分岐)。 */
-export async function createCommit(args: CommitArgs): Promise<{ sha: string }> {
+export async function createCommit(args: CommitArgs, ctx?: GhFetchCtx): Promise<{ sha: string }> {
   const { env, message, treeSha, parentSha, author } = args;
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/commits`;
-  const data = (await ghFetch('POST git/commits', url, {
-    method: 'POST',
-    body: JSON.stringify({
-      message,
-      tree: treeSha,
-      parents: [parentSha],
-      author,
-      committer: author,
-    }),
-  })) as { sha?: string };
+  const data = (await ghFetch(
+    'POST git/commits',
+    url,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        message,
+        tree: treeSha,
+        parents: [parentSha],
+        author,
+        committer: author,
+      }),
+    },
+    { ctx },
+  )) as { sha?: string };
   if (typeof data.sha !== 'string') {
     throw new GhHttpError('POST git/commits', 200, 'response missing sha');
   }

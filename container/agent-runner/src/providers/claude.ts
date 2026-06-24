@@ -7,10 +7,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
-
-function log(msg: string): void {
-  console.error(`[claude-provider] ${msg}`);
-}
+import { log } from '../log.js';
 
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
 // don't fit our async message-passing model (they're designed for Claude
@@ -174,7 +171,7 @@ const preToolUseHook: HookCallback = async (input) => {
   try {
     setContainerToolInFlight(toolName, declaredTimeoutMs);
   } catch (err) {
-    log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn('PreToolUse: failed to record container_state', { err });
   }
   return { continue: true };
 };
@@ -184,7 +181,7 @@ const postToolUseHook: HookCallback = async () => {
   try {
     clearContainerToolInFlight();
   } catch (err) {
-    log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn('PostToolUse: failed to clear container_state', { err });
   }
   return { continue: true };
 };
@@ -196,7 +193,7 @@ const postToolUseHook: HookCallback = async () => {
  */
 function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): boolean {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-    log('No transcript found for archiving');
+    log.info('No transcript found for archiving');
     return false;
   }
 
@@ -225,10 +222,10 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     fs.mkdirSync(conversationsDir, { recursive: true });
     const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
-    log(`Archived conversation to ${filename}`);
+    log.info(`Archived conversation to ${filename}`);
     return true;
   } catch (err) {
-    log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
+    log.warn('Failed to archive transcript', { err });
     return false;
   }
 }
@@ -385,7 +382,7 @@ export class ClaudeProvider implements AgentProvider {
     try {
       fs.renameSync(transcriptPath, `${transcriptPath}.rotated-${Date.now()}`);
     } catch (err) {
-      log(`Failed to move rotated transcript aside: ${err instanceof Error ? err.message : String(err)}`);
+      log.warn('Failed to move rotated transcript aside', { err });
     }
     return reason;
   }
@@ -455,7 +452,7 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'progress', message: tn.summary || 'Task notification' };
         }
       }
-      log(`Query completed after ${messageCount} SDK messages`);
+      log.info(`Query completed after ${messageCount} SDK messages`);
     }
 
     return {

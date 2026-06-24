@@ -15,7 +15,7 @@
  */
 import { log } from '../log.js';
 
-import { fetchMarketplace, pluginsOf, readShelveEnv } from './shelf-gh.js';
+import { fetchMarketplace, pluginsOf, readListEnv, type GhFetchCtx } from './shelf-gh.js';
 import {
   BIBLIO_CATEGORIES,
   type BiblioCategory,
@@ -61,12 +61,12 @@ function projectItem(plugin: Record<string, unknown>): ListBiblioItem {
  * @param params.category 絞り込みカテゴリ (未指定 = 全件)。`counts` は常に全件のカウントを返す
  *                       (= フィルタ前の俯瞰を patron が見たいケースがある)。`items` のみフィルタ適用。
  */
-export async function listBiblio(params: ListBiblioParams): Promise<ListBiblioResult> {
+export async function listBiblio(params: ListBiblioParams, opts: { ctx?: GhFetchCtx } = {}): Promise<ListBiblioResult> {
   // 404 経路と通常経路の両方で同じ値を返すため、関数先頭で 1 度だけ計算する
   // (= 2 つの return が同一式を重複記述するのを避ける)。
   const appliedFilter = params.category ?? null;
-  const env = readShelveEnv();
-  const { raw } = await fetchMarketplace(env);
+  const env = readListEnv();
+  const { raw } = await fetchMarketplace(env, opts.ctx);
   if (raw === null) {
     // 404 = marketplace.json 未存在 = 棚が空。
     return {

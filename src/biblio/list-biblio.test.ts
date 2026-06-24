@@ -11,18 +11,17 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// shelf-gh を partial mock — fetchMarketplace + readShelveEnv のみ差し替え、
+// shelf-gh を partial mock — fetchMarketplace + readListEnv のみ差し替え、
 // pluginsOf は本物 (= shelf-gh.ts の実装) をそのまま委譲する。
+// list-biblio.ts は read-only 経路のため readListEnv (owner/repo のみ) を mock する
+// (= Phase 4.6 で list-biblio.ts は readShelveEnv → readListEnv に切替済)。
 vi.mock('./shelf-gh.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./shelf-gh.js')>();
   return {
     ...actual,
-    readShelveEnv: vi.fn(() => ({
+    readListEnv: vi.fn(() => ({
       shelfOwner: 'HajimariInc',
       shelfRepo: 'biblio-shelf',
-      authorName: 'biblio-claw[bot]',
-      authorEmail: 'biblio-claw@example.com',
-      fallbackAuthor: null,
     })),
     fetchMarketplace: vi.fn(),
   };
