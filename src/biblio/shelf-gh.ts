@@ -1,13 +1,16 @@
 /**
- * GitHub API 共通レイヤ — shelve.ts と unshelve.ts (= Phase 3 で追加) が両方使う raw fetch wrapper +
- * env 読み込み + marketplace.json fetch + commit 作成 helper を集約する。
+ * GitHub API 共通レイヤ — `shelve.ts` / `unshelve.ts` / `list-biblio.ts` / `acquire.ts` の
+ * 全 GitHub API 経路が使う raw fetch wrapper + env 読み込み + marketplace.json fetch +
+ * commit 作成 helper を集約する。
  *
- * 切り出し方針 (Phase 3 Task 1):
+ * 切り出し方針 (Phase 3 Task 1 で初出、その後 Phase 4 で list-biblio、PR #33 hotfix で
+ * acquire の `ghFetch` 流用が追加されて 4 caller に拡張):
  *   - `ghFetch` は OneCLI MITM 経由で Authorization を載せ、non-2xx は `GhHttpError` に変換
  *   - `fetchMarketplace` は marketplace.json を取得 (404 → null、それ以外は throw)
  *   - `pluginsOf` は plugins[] 配列を型保護して取り出す (= shelve の重複検知 + unshelve の entry 除去で共有)
  *   - `createCommit` は `POST /git/commits` の最小ラッパ (fallback author retry は呼び出し側で分岐)
- *   - `readShelveEnv` は棚リポ + author 情報の env を 1 箇所で読む (未設定は throw)
+ *   - `readListEnv` は棚 owner/repo のみ (= list-biblio 等 read-only 経路、author env 不要)
+ *   - `readShelveEnv` は棚リポ + author 情報の env を 1 箇所で読む (= shelve / unshelve など write 経路、未設定は throw)
  *
  * shelve.ts 固有 (= biblio dir 走査 / mergeMarketplace / commit message / PR body) は移さない。
  */
