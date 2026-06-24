@@ -306,21 +306,24 @@ biblio-claw は `src/biblio/host-proxy.ts:initHostProxy()` で **OneCLI CA + Nod
 
 **agent コンテナ内の Go バイナリ (gh CLI 等)** は `HTTPS_PROXY` 経由で OneCLI proxy に接続し OneCLI の MITM 偽 cert を受け取る。Go の `crypto/x509` は `SSL_CERT_FILE` env を尊重するため、`container/Dockerfile` で `ENV SSL_CERT_FILE=/etc/ssl/certs/onecli/onecli-combined-ca.pem` を設定し、K8s Secret mount 済の combined CA bundle を信頼する経路を確立する (= GKE 経路では `K8sJobContainerRuntimeProvider.rewriteOneCLIEnv` が OneCLI SDK の `/tmp/...` 形式 env を Secret mount path に rewrite する。orchestrator container 側は `src/biblio/host-proxy.ts:getChildProcEnv()` が子プロセス起動時に動的 inject するため manifest / Dockerfile での ENV 設定は不要)。
 
-### 設計原則: secret の `pathPattern` で injection 範囲を最小化
+### 設計原則: secret は pathPattern を省略する (GKE 環境差分の回避)
 
-OneCLI secret は **`hostPattern` + `pathPattern` の 2 軸** で injection 対象を決定する (`pathPattern: null` = host 全パス inject = 最小権限原則違反)。biblio-claw では:
+OneCLI v1.30.0 では secret に `pathPattern` を string で明示すると、**GKE 環境で MITM Authorization injection logic が呼ばれずに 401 を返す** 不具合がある (= ローカル docker compose 経路では動くが、GKE では skip される。issue #36 で 2026-06-24 解析)。両環境で dependable な唯一の経路は **pathPattern を payload から省略すること** (= 全パスマッチ)。`pathPattern: null` も別経路で 400 reject (= `expected string, received null`、PoC-2 で実測) されるため、**省略以外の選択肢はない**。
 
-- **棚 / 司書本体** (`HajimariInc/biblio-{shelf,claw}`) への operation → `hostPattern=api.github.com` + `pathPattern=/repos/${SHELF_REPO_OWNER}/*` (= `.env` 由来で動的生成、既定 `HajimariInc`) で GH App auth inject
-- **外部 public biblio の仕入れ** (`/repos/<外部>/*`) → path match 外で素通し、無認証で 200
-- **private repo / 認証必要な外部 access が出てきたら DEN さん事前相談** (= 新規 hostPattern + pathPattern で別 secret を追加、scope を最小に保つ)
+biblio-claw では:
 
-glob `*` は複数 segment マッチ (実機検証済、`/repos/HajimariInc/biblio-shelf/git/blobs` まで届く)。`scripts/onecli-gh-secret.sh` が POST 経路 (= 初回作成) でも PATCH 経路 (= token refresh) でも `pathPattern=/repos/${SHELF_REPO_OWNER}/*` を投入するため、新規 setup でも refresh 後でも `pathPattern` は effective に保たれる (= null = 全パス inject の罠なし)。OneCLI `PATCH /v1/secrets/<id>` の partial update では `value` + `pathPattern` 以外のフィールド (`hostPattern`, `injectionConfig` 等) は OneCLI 側で保持される (M2 PRD B Phase 3 PR #8 で設計確立、PR #10 で `scripts/onecli-gh-secret.sh` への永続化完了)。
+- **GH App auth が必要な操作** (棚 / 司書本体 + 仕入れ対象 public repo) → `hostPattern=api.github.com` + **pathPattern 省略** で `api.github.com` の全パスに GH App installation token を inject
+- **scope 最小化** は GH App installation の repo 限定 (= biblio-shelf + biblio-claw の 2 repo のみ install 済) で担保。pathPattern による経路フィルタリングは採用しない
+- **外部 public biblio の仕入れ** (`/repos/<外部>/*`) も installation token が wire 上載るが、token scope を超えた WRITE は GitHub 側で拒否される (= 観察可能な漏洩リスクなし、rate limit は authenticated 5000/h 扱いに上がるだけ)
+- **private repo / 認証必要な外部 access が出てきたら DEN さん事前相談** (= 新規 hostPattern で別 secret を追加、host で分離)
+
+過去 (M2 PRD B Phase 3 PR #8 / PR #10) は「pathPattern 明示で最小権限」を採用していたが、**GKE で injection skip される** ことが 2026-06-24 に判明 (issue #36)、本知見で取り消し。`scripts/onecli-gh-secret.sh` は POST / PATCH 両経路で pathPattern を一切送らない。OneCLI `PATCH /v1/secrets/<id>` の partial update では `value` のみ送れば、`hostPattern` / `injectionConfig` / 既存 `pathPattern` は OneCLI 側で保持される (= 残置された旧 pathPattern を消す API は v1.30.0 観察上存在しないため、必要なら DELETE + POST 再作成)。
 
 ### GH installation token (GitHub App Sidecar 経路)
 
 司書 agent が `gh` で GitHub REST API に到達するための認可は、GitHub App PEM → RS256 JWT → installation access token を発行して OneCLI に投入する経路で行う。
 
-- **Local (docker compose 経路)**: `scripts/onecli-gh-secret.sh` を host OS 上のシェルスクリプトとして実行する。PEM はローカルファイル (`GH_APP_PEM_PATH`、`*.pem` で gitignore 済) から読む。同スクリプトは `scripts/sign_jwt.cjs` (Node 組み込み crypto / 依存ゼロ) を内部で呼ぶため、両ファイルは常にペアで存在する必要がある。token 有効期限は **~60min** なので、期限切れ時に同スクリプトを再実行すると `PATCH /v1/secrets/:id` で `value` + `pathPattern` partial update (id 保持、200) される (= token と最小権限経路 pathPattern が同時更新)。
+- **Local (docker compose 経路)**: `scripts/onecli-gh-secret.sh` を host OS 上のシェルスクリプトとして実行する。PEM はローカルファイル (`GH_APP_PEM_PATH`、`*.pem` で gitignore 済) から読む。同スクリプトは `scripts/sign_jwt.cjs` (Node 組み込み crypto / 依存ゼロ) を内部で呼ぶため、両ファイルは常にペアで存在する必要がある。token 有効期限は **~60min** なので、期限切れ時に同スクリプトを再実行すると `PATCH /v1/secrets/:id` で `value` のみ partial update (id 保持、200) される (= pathPattern は省略経路、issue #36 参照)。
 - **GKE 経路 (M2 PRD A Phase 3 以降)**: orchestrator Pod 内の `gh-token-rotator` Native sidecar (image は `k8s/10-orchestrator-statefulset.yaml` の `biblio-sidecar-gh:<tag>` 参照、tag は init-project-gcp Phase 4.5 image-sync で随時 bump) が `scripts/gh-rotate.sh` (= `scripts/onecli-gh-secret.sh` を `ROTATE_INTERVAL_SEC=3000` (= 50min) の sleep loop で wrap) を実行し、自動再投入する。PEM は別の `fetch-pem` initContainer が WI 経由 (orchestrator KSA → `biblio-orchestrator` GSA, `roles/secretmanager.secretAccessor` on `biblio-gh-app-pem`) で Secret Manager から取得し、tmpfs emptyDir (`medium: Memory`) に書き出して rotator container に読み取り専用 mount する。**rotator container の env に `SHELF_REPO_OWNER` が必須** (= `onecli-gh-secret.sh` の `need()` チェック対象、欠落すると起動直後に exit 1 → 50min ごとに silent fail を繰り返す、`k8s/10-orchestrator-statefulset.yaml` の rotator env block で literal 投入)。旧 `k8s/30-sidecar-cronjob.yaml` (`biblio-sidecar` CronJob `*/30`) は本 Phase で **廃止** された。
 
 ```bash
