@@ -226,7 +226,10 @@ export async function shelve(
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shelve: env not ready', { biblioName, detail });
+    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
+    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
+    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
+    log.warn('shelve: env not ready', { biblioName, detail, reason: 'config_error (mapped to github_api_error)' });
     return fail(biblioName, 'github_api_error', detail);
   }
 

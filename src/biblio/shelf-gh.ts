@@ -69,7 +69,9 @@ export async function ghFetch(
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
-    // OneCLI MITM が wire で本物の installation token に置換 (acquire.ts:gh CLI と同じ経路)。
+    // OneCLI MITM が wire で本物の installation token に置換 (shelve / unshelve /
+    // list-biblio / acquire 全 ghFetch 経路で共通)。OneCLI v1.30.0 の injection
+    // 経路依存仕様は issue #36 で検証中。
     Authorization: 'Bearer placeholder',
     ...(init.headers as Record<string, string> | undefined),
   };
@@ -88,6 +90,9 @@ export async function ghFetch(
     try {
       body = await res.text();
     } catch (bodyErr) {
+      // body 読み取り失敗時はマーカー文字列を入れる (= GhHttpError.body が caller の
+      // detail 整形 (= `err.body.slice(0, 200)`) で空文字になりデバッグ不能になる罠を回避)。
+      body = '(body read failed)';
       log.warn('gh: failed to read error body', { step, status: res.status, bodyErr });
     }
     const logData = {

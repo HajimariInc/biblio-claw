@@ -16,7 +16,7 @@ import path from 'node:path';
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
 import { getChildProcEnv } from './host-proxy.js';
-import { GITHUB_API, GhHttpError, ghFetch } from './shelf-gh.js';
+import { GITHUB_API, type GhFetchCtx, GhHttpError, ghFetch } from './shelf-gh.js';
 import type { AcquireRequest, AcquireResult, NormalizedRepo } from './types.js';
 
 /** owner / repo セグメントの許容文字 (GitHub の命名規則に準拠した安全側)。 */
@@ -129,8 +129,11 @@ function removeQuarantine(quarantinePath: string): void {
 /**
  * 外部 biblio を取得して quarantine に配置する。
  * 失敗は全て `{ ok:false, reason, detail }` で返す (throw しない / silent failure なし)。
+ *
+ * @param req repo (= `owner/repo` or GitHub URL)
+ * @param opts ctx (= request_id / session_id ログ伝搬、Phase 2 で確立した patron 依頼単位の trace 経路)
  */
-export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
+export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = {}): Promise<AcquireResult> {
   const normalized = normalizeRepo(req.repo);
   if (!normalized) {
     log.warn('acquire failed', { repo: req.repo, reason: 'invalid_input' });
@@ -152,7 +155,7 @@ export async function acquire(req: AcquireRequest): Promise<AcquireResult> {
   //    同じ)。401/403/5xx は OneCLI 認証経路 or GitHub 障害を示唆するため、patron
   //    に誤解させず `internal` で明示する (silent failure 防止)。
   try {
-    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`);
+    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`, {}, opts.ctx);
   } catch (err) {
     if (err instanceof GhHttpError) {
       if (err.status === 404) {
