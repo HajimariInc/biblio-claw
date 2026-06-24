@@ -21,7 +21,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { initTestDb, closeDb, runMigrations } from '../db/index.js';
+import { initTestDb, closeDb, runMigrations, getDb } from '../db/index.js';
 import { getAllBiblioSettings, getBiblioSetting } from '../db/biblio-settings.js';
 import type { Session } from '../types.js';
 
@@ -213,5 +213,57 @@ describe('update_config handler', () => {
       dummyDb,
     );
     expect(getBiblioSetting('ACQUIRE_SKILL_THRESHOLD')).toBe('25');
+  });
+
+  // ===== I1: key-specific value validation =====
+  // ACQUIRE_SKILL_THRESHOLD は正整数を要求。"abc" / "0" / "-5" 等の意味的に不正な値を
+  // 「設定完了」と返すと次回 acquire() で silent fallback (DEFAULT 10) が起き、patron 認知と
+  // DB 実態が乖離する。本セクションは書き込み前の reject 動作を固定する。
+
+  it('I1a: value "abc" (= 非数値) → invalid_value + 未書き込み', async () => {
+    seedAdmin();
+    await handler({ action: 'update_config', key: 'ACQUIRE_SKILL_THRESHOLD', value: 'abc' }, TEST_SESSION, dummyDb);
+    expect(getAllBiblioSettings()).toEqual([]);
+    expect(getWrittenText()).toContain('invalid_value');
+    expect(getWrittenText()).toContain('1 以上の整数');
+  });
+
+  it('I1b: value "0" (= 境界値、>= 1 で reject される) → invalid_value + 未書き込み', async () => {
+    seedAdmin();
+    await handler({ action: 'update_config', key: 'ACQUIRE_SKILL_THRESHOLD', value: '0' }, TEST_SESSION, dummyDb);
+    expect(getAllBiblioSettings()).toEqual([]);
+    expect(getWrittenText()).toContain('invalid_value');
+  });
+
+  it('I1c: value "-5" (= 負数) → invalid_value + 未書き込み', async () => {
+    seedAdmin();
+    await handler({ action: 'update_config', key: 'ACQUIRE_SKILL_THRESHOLD', value: '-5' }, TEST_SESSION, dummyDb);
+    expect(getAllBiblioSettings()).toEqual([]);
+    expect(getWrittenText()).toContain('invalid_value');
+  });
+
+  it('I1d: value "1" (= 境界値、>= 1 で受理) → 書き込み成功', async () => {
+    seedAdmin();
+    await handler({ action: 'update_config', key: 'ACQUIRE_SKILL_THRESHOLD', value: '1' }, TEST_SESSION, dummyDb);
+    expect(getBiblioSetting('ACQUIRE_SKILL_THRESHOLD')).toBe('1');
+    expect(getWrittenText()).toContain('設定完了');
+  });
+
+  // ===== I4: setBiblioSetting throw → internal err writeBack (= handler が throw しない) =====
+
+  it('I4: setBiblioSetting が throw (= biblio_settings table DROP) → internal err + handler は throw しない', async () => {
+    // seedAdmin で initTestDb + runMigrations + admin row 投入後、biblio_settings table を強制 DROP
+    // することで setBiblioSetting (= INSERT OR REPLACE) を SqliteError で throw させる。
+    seedAdmin();
+    getDb().exec('DROP TABLE biblio_settings');
+
+    // handler 自体は throw しない (= host 巻き込まない不変条件) + writeBack に internal が出る
+    await expect(
+      handler({ action: 'update_config', key: 'ACQUIRE_SKILL_THRESHOLD', value: '25' }, TEST_SESSION, dummyDb),
+    ).resolves.not.toThrow();
+
+    const text = getWrittenText();
+    expect(text).toContain('internal');
+    expect(text).toContain('設定エラー');
   });
 });

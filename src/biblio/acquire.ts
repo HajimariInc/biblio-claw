@@ -176,6 +176,8 @@ export function resolveSkillThreshold(): number {
     const parsed = Number.parseInt(fromDb, 10);
     if (Number.isFinite(parsed) && parsed >= 1) return parsed;
     log.warn('invalid ACQUIRE_SKILL_THRESHOLD in DB, falling back to env', {
+      event: 'acquire.threshold_invalid',
+      outcome: 'degraded',
       raw: fromDb,
     });
   }
@@ -185,6 +187,8 @@ export function resolveSkillThreshold(): number {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed < 1) {
     log.warn('invalid ACQUIRE_SKILL_THRESHOLD, using default', {
+      event: 'acquire.threshold_invalid',
+      outcome: 'degraded',
       raw,
       default: DEFAULT_ACQUIRE_SKILL_THRESHOLD,
     });
@@ -544,7 +548,24 @@ export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = 
   // `countSkillsInRepo` が unknown (= API 失敗 / Git Trees truncated) を返した場合は判定を
   // skip して全体仕入れに進む (= 既存挙動の維持。後段 `MAX_BLOBS_PER_PR=100` fail-closed が
   // backup として効くため、未知の repo を意図せず狭めるより保守的)。
-  const threshold = resolveSkillThreshold();
+  //
+  // `resolveSkillThreshold` は `getBiblioSetting` (= DB SELECT) を都度呼ぶため、DB 未初期化 /
+  // SQLITE_BUSY 等の DB ランタイムエラーで throw する可能性がある。throw すると `acquire()` 全体
+  // が `{ok:false}` ではなく例外として caller に抜けて設計契約 (= 必ず discriminated union を返す)
+  // を破るため、try/catch で囲んで DEFAULT に degraded fallback する。
+  let threshold: number;
+  try {
+    threshold = resolveSkillThreshold();
+  } catch (err) {
+    log.warn('acquire: resolveSkillThreshold threw, using default', {
+      event: 'acquire.threshold_resolve_failed',
+      outcome: 'degraded',
+      repo: `${owner}/${name}`,
+      default: DEFAULT_ACQUIRE_SKILL_THRESHOLD,
+      err,
+    });
+    threshold = DEFAULT_ACQUIRE_SKILL_THRESHOLD;
+  }
   const countResult = await countSkillsInRepo(owner, name);
   if (!countResult.ok) {
     // `countSkillsInRepo` 内で warn は出ているが、acquire() 側でも skip 事実を記録する。

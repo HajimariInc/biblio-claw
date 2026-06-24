@@ -332,14 +332,7 @@ export const updateConfig: McpToolDefinition = {
   tool: {
     name: 'update_config',
     description:
-      'biblio 設定値を動的変更する (= 個別 PRD Phase 5 dynamic-config)。' +
-      '**patron が「@bot 設定 KEY VALUE」「設定変更して」「閾値を 20 にして」「ACQUIRE_SKILL_THRESHOLD を 25 に変更」等の自然文で依頼したら呼ぶ**。' +
-      '変更は次の仕入れ依頼 (= `@bot 仕入れて`) から即時反映される (= 再起動不要)。' +
-      '**変更可能 key の allowlist** (whitelist 方式、これ以外は host 側で reject される): ' +
-      '`ACQUIRE_SKILL_THRESHOLD` (= 仕入先 repo の skill 数閾値、超過時は patron に個別指定を促す)。' +
-      '**権限**: 該当 agent group に admin / owner が紐づく場合のみ実行可能 (= 居なければ host 側で reject)。' +
-      'fire-and-forget — 設定完了 or 失敗理由は後続のメッセージで通知されるので、それを patron に渡すこと。' +
-      '**注意**: 他の設定 key (例: `MAX_BLOBS_PER_PR` / `CATEGORIZE_MODEL` 等) は本 tool 経由では変更できない (allowlist 外)。',
+      'biblio 設定値を動的変更する (= 個別 PRD Phase 5 dynamic-config)。**patron が「@bot 設定 KEY VALUE」「設定変更して」「閾値を 20 にして」「ACQUIRE_SKILL_THRESHOLD を 25 に変更」等の自然文で依頼したら呼ぶ**。変更は次の仕入れ依頼 (= `@bot 仕入れて`) から即時反映される (= 再起動不要)。**変更可能 key の allowlist** (whitelist 方式、これ以外は host 側で reject される): `ACQUIRE_SKILL_THRESHOLD` (= 仕入先 repo の skill 数閾値、超過時は patron に個別指定を促す)。`ACQUIRE_SKILL_THRESHOLD` の value は 1 以上の整数 string (例: "25")。**権限**: `user_roles` table が存在する場合は、該当 agent group に admin / owner が紐づくときのみ実行可能 (= 居なければ host 側で reject)。単独運用 / permissions モジュール未インストール環境 (= `user_roles` table 不在) では制限なし (allow-all)。fire-and-forget — 設定完了 or 失敗理由は後続のメッセージで通知されるので、それを patron に渡すこと。**注意**: 他の設定 key (例: `MAX_BLOBS_PER_PR` / `CATEGORIZE_MODEL` 等) は本 tool 経由では変更できない (allowlist 外)。',
     inputSchema: {
       type: 'object' as const,
       properties: {
