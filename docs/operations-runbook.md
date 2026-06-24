@@ -323,7 +323,7 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- node -e "
 # 不発: status=401 x-ratelimit-limit=null
 ```
 
-`x-ratelimit-limit=null` は GitHub の通常レスポンスには必ず付くヘッダで、null は **OneCLI 経由で素通しして無認証で GitHub に到達したシグナル**(= injection logic が呼ばれていない確定証拠)。
+`x-ratelimit-limit=null` は GitHub が **認証失敗時 (401) にレート制限ヘッダを返さない** ことによるシグナル。`Bearer placeholder` が wire 上そのまま GitHub に届いている (= OneCLI が installation token への置換を skip した) ことの確定証拠で、injection logic が呼ばれていないことを示す (= OneCLI proxy 経路自体は通っており、proxy bypass ではない)。
 
 ### 対処(本リポ採用済)
 

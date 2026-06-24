@@ -324,11 +324,12 @@ biblio-claw では:
 司書 agent が `gh` で GitHub REST API に到達するための認可は、GitHub App PEM → RS256 JWT → installation access token を発行して OneCLI に投入する経路で行う。
 
 - **Local (docker compose 経路)**: `scripts/onecli-gh-secret.sh` を host OS 上のシェルスクリプトとして実行する。PEM はローカルファイル (`GH_APP_PEM_PATH`、`*.pem` で gitignore 済) から読む。同スクリプトは `scripts/sign_jwt.cjs` (Node 組み込み crypto / 依存ゼロ) を内部で呼ぶため、両ファイルは常にペアで存在する必要がある。token 有効期限は **~60min** なので、期限切れ時に同スクリプトを再実行すると `PATCH /v1/secrets/:id` で `value` のみ partial update (id 保持、200) される (= pathPattern は省略経路、issue #36 参照)。
-- **GKE 経路 (M2 PRD A Phase 3 以降)**: orchestrator Pod 内の `gh-token-rotator` Native sidecar (image は `k8s/10-orchestrator-statefulset.yaml` の `biblio-sidecar-gh:<tag>` 参照、tag は init-project-gcp Phase 4.5 image-sync で随時 bump) が `scripts/gh-rotate.sh` (= `scripts/onecli-gh-secret.sh` を `ROTATE_INTERVAL_SEC=3000` (= 50min) の sleep loop で wrap) を実行し、自動再投入する。PEM は別の `fetch-pem` initContainer が WI 経由 (orchestrator KSA → `biblio-orchestrator` GSA, `roles/secretmanager.secretAccessor` on `biblio-gh-app-pem`) で Secret Manager から取得し、tmpfs emptyDir (`medium: Memory`) に書き出して rotator container に読み取り専用 mount する。**rotator container の env に `SHELF_REPO_OWNER` が必須** (= `onecli-gh-secret.sh` の `need()` チェック対象、欠落すると起動直後に exit 1 → 50min ごとに silent fail を繰り返す、`k8s/10-orchestrator-statefulset.yaml` の rotator env block で literal 投入)。旧 `k8s/30-sidecar-cronjob.yaml` (`biblio-sidecar` CronJob `*/30`) は本 Phase で **廃止** された。
+- **GKE 経路 (M2 PRD A Phase 3 以降)**: orchestrator Pod 内の `gh-token-rotator` Native sidecar (image は `k8s/10-orchestrator-statefulset.yaml` の `biblio-sidecar-gh:<tag>` 参照、tag は init-project-gcp Phase 4.5 image-sync で随時 bump) が `scripts/gh-rotate.sh` (= `scripts/onecli-gh-secret.sh` を `ROTATE_INTERVAL_SEC=3000` (= 50min) の sleep loop で wrap) を実行し、自動再投入する。PEM は別の `fetch-pem` initContainer が WI 経由 (orchestrator KSA → `biblio-orchestrator` GSA, `roles/secretmanager.secretAccessor` on `biblio-gh-app-pem`) で Secret Manager から取得し、tmpfs emptyDir (`medium: Memory`) に書き出して rotator container に読み取り専用 mount する。rotator container の env には **`SHELF_REPO_OWNER`** が literal 投入されている (= 本スクリプトの直接依存ではなく、verify-m2/m3/slack-e2e-gke の gh pr cleanup や運用一貫性 (= rotator pod debug 時に orchestrator と同 owner literal が grep で揃う) のため。issue #36 解消で `onecli-gh-secret.sh` の `need()` からは削除済)。旧 `k8s/30-sidecar-cronjob.yaml` (`biblio-sidecar` CronJob `*/30`) は本 Phase で **廃止** された。
 
 ```bash
 # Local 経路 (docker compose):
-# 前提: .env に GH_APP_ID / GH_INSTALLATION_ID / GH_APP_PEM_PATH / SHELF_REPO_OWNER を設定 + docker compose up -d --wait 済
+# 前提: .env に GH_APP_ID / GH_INSTALLATION_ID / GH_APP_PEM_PATH を設定 + docker compose up -d --wait 済
+# (SHELF_REPO_OWNER は本スクリプトの実行には不要、verify-m2/m3/slack-e2e-gke 等の他経路で参照されるので .env には残す)
 bash scripts/onecli-gh-secret.sh
 ```
 

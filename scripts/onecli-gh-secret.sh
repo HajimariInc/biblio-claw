@@ -30,7 +30,7 @@
 #   - agent mode=all: biblio-claw scripts/onecli-vertex-secret.sh:118-149 を自己完結で再実装
 #
 # 使い方: docker compose up -d --wait + .env
-#   (GH_APP_ID/GH_INSTALLATION_ID/GH_APP_PEM_PATH/SHELF_REPO_OWNER) 投入後に
+#   (GH_APP_ID/GH_INSTALLATION_ID/GH_APP_PEM_PATH) 投入後に
 #   bash scripts/onecli-gh-secret.sh
 
 set -euo pipefail
@@ -157,20 +157,24 @@ secret_id() {
 #   - scope 最小化は GH App installation の repo 限定 (= biblio-shelf + biblio-claw
 #     の 2 repo) で別経路担保。pathPattern による最小権限化は採用しない。
 #   - PATCH では value のみ送る (= hostPattern / injectionConfig / 既存 pathPattern
-#     は OneCLI 側で保持される)。「pathPattern を明示しない」を新規 / 既存両環境で
-#     貫くことで wildcard match に統一できる。
+#     は OneCLI 側で保持される)。**新規環境では POST 経路で pathPattern キーを送らない
+#     ことで wildcard match を確立できる**。ただし既存環境で旧 pathPattern が残置済の
+#     場合は、本スクリプトの再実行 (= PATCH partial update) だけでは null 化されない
+#     — `docs/operations-runbook.md` §「落とし穴: OneCLI pathPattern を string で
+#     明示すると GKE で injection skip」§既存環境の修復 の DELETE + POST 手順を参照。
 #
 #   jq | curl のパイプ全体はサブシェルで set -o pipefail を有効化。
 #   有効化しないと jq の失敗 (invalid JSON 生成) が curl の rc に隠れる。
 #   token は SECRET_TOKEN env 経由で jq に渡す (シェル変数 / argv 非経由)。
 #
-# response body 検証は意図的に行わない (curl `-fsS ... >/dev/null` で body 破棄)。
-# OneCLI v1.30.0 仕様では 2xx 応答 → injectionConfig / hostPattern が effective が保証されている。
-# 将来仕様変化で「2xx を返しながら設定を黙って無視」する silent regression が起きうる
-# リスクは残るが、現在の防衛線は `/init-project verify` の Section 1 (= GET /v1/secrets で
-# 設定 test) + scripts/verify-m2.sh の E2E (= 棚リポ操作が authenticated で通れば
-# secret が effective)。自動 assertion を入れるなら本関数末尾で GET /v1/secrets/<id>
-# 再取得 + jq assert する形 (= 別タスク、既存 vertex / GH 双方の curl 流儀を見直す範囲)。
+#   response body 検証は意図的に行わない (curl `-fsS ... >/dev/null` で body 破棄)。
+#   OneCLI v1.30.0 仕様では 2xx 応答 → injectionConfig / hostPattern が effective が
+#   保証されている。将来仕様変化で「2xx を返しながら設定を黙って無視」する silent
+#   regression が起きうるリスクは残るが、現在の防衛線は `/init-project verify` の
+#   Section 1 (= GET /v1/secrets で設定 test) + scripts/verify-m2.sh の E2E (= 棚リポ
+#   操作が authenticated で通れば secret が effective)。自動 assertion を入れるなら
+#   本関数末尾で GET /v1/secrets/<id> 再取得 + jq assert する形 (= 別タスク、既存
+#   vertex / GH 双方の curl 流儀を見直す範囲)。
 upsert_gh_secret() {
   local id
   id="$(secret_id)"
