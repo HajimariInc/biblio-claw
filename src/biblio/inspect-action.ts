@@ -31,7 +31,7 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
     log.warn('inspect_biblio missing name', {
       event: 'biblio.inspect',
       outcome: 'failure',
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
     await writeBackMessage(
@@ -49,7 +49,7 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
       event: 'biblio.inspect',
       outcome: 'failure',
       biblioName: rawName,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
     await writeBackMessage(
@@ -64,7 +64,7 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
   log.info('inspect_biblio from agent', {
     event: 'biblio.inspect',
     biblioName: rawName,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
@@ -79,7 +79,7 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
       outcome,
       biblioName: rawName,
       verdict: result.verdict,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
   } catch (err) {
@@ -88,7 +88,7 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
       event: 'biblio.inspect',
       outcome: 'failure',
       biblioName: rawName,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });

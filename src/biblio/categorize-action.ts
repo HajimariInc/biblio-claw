@@ -33,7 +33,7 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
     log.warn('categorize_biblio missing name', {
       event: 'biblio.categorize',
       outcome: 'failure',
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
     await writeBackMessage(
@@ -51,7 +51,7 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
       event: 'biblio.categorize',
       outcome: 'failure',
       biblioName: rawName,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
     await writeBackMessage(
@@ -66,7 +66,7 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
   log.info('categorize_biblio from agent', {
     event: 'biblio.categorize',
     biblioName: rawName,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
@@ -79,7 +79,7 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
       biblioName: rawName,
       ok: result.ok,
       category: result.ok ? result.category : null,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
   } catch (err) {
@@ -88,7 +88,7 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
       event: 'biblio.categorize',
       outcome: 'failure',
       biblioName: rawName,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });

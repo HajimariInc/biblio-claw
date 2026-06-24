@@ -89,9 +89,9 @@ slash command 本体は `.claude/commands/init-project.md` (ローカル) と `.
 
 ---
 
-## Phase 2 JSON ログの読み方(暫定メモ)
+## Phase 2 JSON ログの読み方
 
-> **正本化は init-project-gcp PRD Phase 5 で実施**。本セクションは Phase 2 完了時点の暫定メモで、ログ形式の合意確立までを担う。
+> Phase 5 (runbook-extension) で正本化済。LOG_FORMAT / LOG_LEVEL / LOG_COMPONENT の合意とフィルタ方針を本セクションに集約する。
 
 ### 切り替え
 
@@ -348,7 +348,7 @@ bash scripts/onecli-gh-secret.sh   # = 修正版で再投入 (POST 経路、path
 
 ## GKE リセット手順
 
-GKE 環境にトラブルが起きたとき / 完全再構築したいとき / ハッカソンデモ前の動作確認 に叩く手順を 1 箇所に集約する。本セクションは Phase 5 で本格拡張予定の骨格 (= 最低限)。
+GKE 環境にトラブルが起きたとき / 完全再構築したいとき / ハッカソンデモ前の動作確認 に叩く手順を 1 箇所に集約する。本セクションは Phase 5 (runbook-extension) で拡張済。
 
 > **1 発実行**: 本セクションの手順は `/init-project-gcp reset` (= 完全 teardown + 再構築) と `/init-project-gcp up` (= 不足リソースの起動・再 ready 確認、§手順 2 の `kubectl delete pod` とは別) に集約済。本セクションは **生コマンドの正本** として残置 (= slash command は wrapper)。手で再現する場合 / トラブル切り分けで個別コマンドを叩きたい場合はそのまま参照する。
 
@@ -398,7 +398,7 @@ bash scripts/teardown-phase-2.sh --dry-run
 bash scripts/teardown-phase-2.sh --confirm
 
 # 3. GKE / Cloud SQL / VPC / Artifact Registry を再作成
-#    (= 既存 M1 Phase 2 構築手順、本 Phase では未記載、Phase 5 で本格拡張予定)
+#    (= `/init-project-gcp reset` で完結。詳細手順は §/init-project-gcp サブコマンド利用ガイド §reset 参照)
 
 # 4. K8s manifest 再適用
 kubectl apply -f k8s/
@@ -704,7 +704,7 @@ bash scripts/verify-phase-4-deploy.sh
 - orchestrator container の直近 300s から JSON ログ 1 行以上観測 + `severity / message / time / component=host-orchestrator` 4 field の整合
 - gh-token-rotator container の直近 600s から JSON ログを取得(= 50min 周期のためなくても WARN)、出ていれば `component=gh-token-rotator` 整合
 
-> **Note**: 当初 plan は Block 2(M3 装備機構 GKE)+ Block 3(M3 蔵書リスト GKE)を含む 3 ブロック構成だったが、2026-06-23 実走で **M3 PRD GKE 経路 bug 群 5 件** が顕在化したため、Z+δ 案で Block 1 のみに縮小し、bug 3-5 を M3 PRD への申し送りとした(= 装備機構 + 蔵書リストの GKE E2E は未完了)。詳細は auto memory `m3-gke-completion-pending` 参照。
+> **Note**: 当初 plan は Block 2(M3 装備機構 GKE)+ Block 3(M3 蔵書リスト GKE)を含む 3 ブロック構成だったが、2026-06-23 実走で M3 PRD GKE 経路 bug 群 5 件が顕在化したため、Z+δ 案で Block 1 のみに縮小した経緯がある。後続の Phase 4.6 (PR #29) で全 bug 解消 + `M3 PASS (gke)` 取得済。装備機構 + 蔵書リストの GKE E2E は完了し、Phase 6 verify (`verify-slack-e2e-gke.sh`) に統合されている。
 
 ---
 

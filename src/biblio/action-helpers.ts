@@ -131,6 +131,30 @@ export interface BiblioNameCategoryValidated {
 }
 
 /**
+ * approval handler 共通の payload parser (= `enkin-action.ts` / `shokyaku-action.ts` で逐語コピー集約)。
+ *
+ * approval handler に届く `payload` は agent → delivery action handler → `requestApproval`
+ * を経由して JSON serialize/deserialize されているため、型として `Record<string, unknown>`。
+ * biblioName は string なら採用、category は string + `BIBLIO_CATEGORIES` 通過なら採用、
+ * それ以外は安全側のデフォルト `biblio-dev` に落とす。後段で `BIBLIO_CATEGORIES.includes(category)`
+ * の guard を呼べばデフォルトを含めて検証可能 (= 旧実装の動作互換)。
+ *
+ * 旧実装は enkin-action / shokyaku-action の 2 ファイルに 5 行ずつ逐語コピーされており、
+ * 将来 category 追加 / 既定値変更で 2 箇所同時修正が必要だった (= PR #37 code-simplifier S2 提案)。
+ */
+export function parseApprovalPayload(payload: Record<string, unknown>): {
+  biblioName: string;
+  category: BiblioCategory;
+} {
+  const biblioName = typeof payload.biblioName === 'string' ? payload.biblioName : '';
+  const category: BiblioCategory =
+    typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
+      ? (payload.category as BiblioCategory)
+      : 'biblio-dev';
+  return { biblioName, category };
+}
+
+/**
  * enkin / shokyaku / shelve delivery action handler 共通の name + category validate。
  *
  * 4 つの validate (name 不在 / `BIBLIO_NAME_RE` 不通過 / category 不在 / `BIBLIO_CATEGORIES`

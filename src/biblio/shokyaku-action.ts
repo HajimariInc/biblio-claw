@@ -16,18 +16,14 @@ import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import { shokyaku } from './shokyaku.js';
-import { safeNotify, validateBiblioInput, writeBackMessage } from './action-helpers.js';
-import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
+import { parseApprovalPayload, safeNotify, validateBiblioInput, writeBackMessage } from './action-helpers.js';
+import { BIBLIO_CATEGORIES } from './types.js';
 
 const APPROVAL_ACTION = 'shokyaku_confirm';
 
 registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
-  // category cast 明確化 (= enkin-action.ts と同形、PR #21 silent-failure-hunter 提案)。
-  const biblioName = typeof payload.biblioName === 'string' ? payload.biblioName : '';
-  const category: BiblioCategory =
-    typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
-      ? (payload.category as BiblioCategory)
-      : 'biblio-dev';
+  // payload parse を集約 helper に委譲 (= PR #37 code-simplifier S2、enkin-action.ts と逐語コピー解消)。
+  const { biblioName, category } = parseApprovalPayload(payload);
   // approval 後の境界 = 独立 request_id (= 申請境界とは別 trace)。
   const requestId = crypto.randomUUID();
   if (!biblioName || !BIBLIO_CATEGORIES.includes(category)) {
@@ -105,7 +101,7 @@ registerDeliveryAction('shokyaku_biblio', async (content, session, inDb) => {
     event: 'biblio.shokyaku_request',
     biblioName,
     category,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
@@ -130,7 +126,7 @@ registerDeliveryAction('shokyaku_biblio', async (content, session, inDb) => {
       outcome: 'failure',
       biblioName,
       category,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });
