@@ -204,8 +204,13 @@ describe('acquire', () => {
       quarantinePath: path.join(QUARANTINE, 'octocat--hello'),
     });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
-    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている。
-    expect(mockGhFetch).toHaveBeenCalledWith('acquire.check-repo', expect.stringMatching(/\/repos\/octocat\/hello$/));
+    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、undefined)。
+    expect(mockGhFetch).toHaveBeenCalledWith(
+      'acquire.check-repo',
+      expect.stringMatching(/\/repos\/octocat\/hello$/),
+      {},
+      undefined,
+    );
   });
 
   it('ネストした SKILL.md だけでも成功する', async () => {

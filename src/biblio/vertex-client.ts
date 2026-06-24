@@ -152,6 +152,30 @@ export interface VertexCallCtx {
   biblioName?: string;
 }
 
+/**
+ * Vertex 呼び出しログの共通フィールド (= `event` + `model` + ctx 由来 4 件) を集約するヘルパ。
+ *
+ * 失敗 / 成功 / メタデータ警告で `request_id` / `session_id` / `axis` / `biblio_name` が
+ * 4 関数 × 複数箇所で逐語コピーされていた payload を 1 箇所に集約 (= PR #37 code-simplifier
+ * S1 提案)。`extras` で `outcome` / `status` / `latency_ms` / `tokens_*` 等の個別フィールドを
+ * 上乗せする。
+ */
+function vertexLogFields(
+  ctx: VertexCallCtx | undefined,
+  model: string,
+  extras?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    event: 'vertex.call',
+    model,
+    request_id: ctx?.requestId,
+    session_id: ctx?.sessionId,
+    axis: ctx?.axis,
+    biblio_name: ctx?.biblioName,
+    ...extras,
+  };
+}
+
 /** `callVertexGemini` の引数。 */
 export interface VertexCallArgs {
   /** 入力テキスト (system 不要、user 1 turn 想定で十分)。 */
@@ -248,18 +272,15 @@ export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx
         bodyErr,
       });
     }
-    log.warn('vertex.call failed', {
-      event: 'vertex.call',
-      outcome: 'failure',
-      model: modelId,
-      status: res.status,
-      latency_ms: Math.round(performance.now() - t0),
-      error_body_preview: bodyText.slice(0, 200),
-      request_id: ctx?.requestId,
-      session_id: ctx?.sessionId,
-      axis: ctx?.axis,
-      biblio_name: ctx?.biblioName,
-    });
+    log.warn(
+      'vertex.call failed',
+      vertexLogFields(ctx, modelId, {
+        outcome: 'failure',
+        status: res.status,
+        latency_ms: Math.round(performance.now() - t0),
+        error_body_preview: bodyText.slice(0, 200),
+      }),
+    );
     throw new Error(`vertex-client: generateContent ${res.status} ${res.statusText} — ${bodyText}`);
   }
 
@@ -273,27 +294,17 @@ export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx
   // usageMetadata 不在 (= Vertex API バージョン差 / streaming 経路) は BQ cost 集計が silent
   // に 0 になる罠を生むため warn で可視化。`?? 0` fallback は維持し、ログ集約は崩さない。
   if (!json.usageMetadata) {
-    log.warn('vertex.call: usageMetadata absent', {
-      event: 'vertex.call',
-      model: modelId,
-      request_id: ctx?.requestId,
-      session_id: ctx?.sessionId,
-      axis: ctx?.axis,
-      biblio_name: ctx?.biblioName,
-    });
+    log.warn('vertex.call: usageMetadata absent', vertexLogFields(ctx, modelId));
   }
-  log.info('vertex.call', {
-    event: 'vertex.call',
-    outcome: 'success',
-    model: modelId,
-    tokens_in: json.usageMetadata?.promptTokenCount ?? 0,
-    tokens_out: json.usageMetadata?.candidatesTokenCount ?? 0,
-    latency_ms: Math.round(performance.now() - t0),
-    request_id: ctx?.requestId,
-    session_id: ctx?.sessionId,
-    axis: ctx?.axis,
-    biblio_name: ctx?.biblioName,
-  });
+  log.info(
+    'vertex.call',
+    vertexLogFields(ctx, modelId, {
+      outcome: 'success',
+      tokens_in: json.usageMetadata?.promptTokenCount ?? 0,
+      tokens_out: json.usageMetadata?.candidatesTokenCount ?? 0,
+      latency_ms: Math.round(performance.now() - t0),
+    }),
+  );
   return text;
 }
 
@@ -397,18 +408,15 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
         bodyErr,
       });
     }
-    log.warn('vertex.call failed', {
-      event: 'vertex.call',
-      outcome: 'failure',
-      model: modelId,
-      status: res.status,
-      latency_ms: Math.round(performance.now() - t0),
-      error_body_preview: bodyText.slice(0, 200),
-      request_id: ctx?.requestId,
-      session_id: ctx?.sessionId,
-      axis: ctx?.axis,
-      biblio_name: ctx?.biblioName,
-    });
+    log.warn(
+      'vertex.call failed',
+      vertexLogFields(ctx, modelId, {
+        outcome: 'failure',
+        status: res.status,
+        latency_ms: Math.round(performance.now() - t0),
+        error_body_preview: bodyText.slice(0, 200),
+      }),
+    );
     throw new Error(`vertex-client: rawPredict ${res.status} ${res.statusText} — ${bodyText}`);
   }
 
@@ -423,26 +431,16 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
     throw new Error(`vertex-client: response missing content[type=text].text — ${JSON.stringify(json).slice(0, 300)}`);
   }
   if (!json.usage) {
-    log.warn('vertex.call: usage absent', {
-      event: 'vertex.call',
-      model: modelId,
-      request_id: ctx?.requestId,
-      session_id: ctx?.sessionId,
-      axis: ctx?.axis,
-      biblio_name: ctx?.biblioName,
-    });
+    log.warn('vertex.call: usage absent', vertexLogFields(ctx, modelId));
   }
-  log.info('vertex.call', {
-    event: 'vertex.call',
-    outcome: 'success',
-    model: modelId,
-    tokens_in: json.usage?.input_tokens ?? 0,
-    tokens_out: json.usage?.output_tokens ?? 0,
-    latency_ms: Math.round(performance.now() - t0),
-    request_id: ctx?.requestId,
-    session_id: ctx?.sessionId,
-    axis: ctx?.axis,
-    biblio_name: ctx?.biblioName,
-  });
+  log.info(
+    'vertex.call',
+    vertexLogFields(ctx, modelId, {
+      outcome: 'success',
+      tokens_in: json.usage?.input_tokens ?? 0,
+      tokens_out: json.usage?.output_tokens ?? 0,
+      latency_ms: Math.round(performance.now() - t0),
+    }),
+  );
   return text;
 }

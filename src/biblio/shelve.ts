@@ -95,19 +95,30 @@ function isAlreadyShelved(marketplace: Record<string, unknown>, biblioName: stri
   return pluginsOf(marketplace).some((entry) => entry.name === biblioName);
 }
 
-/** plugin.json から description / version を読む (失敗時は既定値)。 */
+/**
+ * plugin.json から description / version を読む (失敗時は既定値)。
+ *
+ * ENOENT は biblio によっては自然 (= plugin.json 省略可)。それ以外の I/O 障害 (EACCES /
+ * EMFILE 等) や JSON 不正は warn で可視化する (silent skip 禁止、`categorize.ts:readPluginDescription`
+ * と同パターン)。返り値は既定値で継続するため陳列自体は止めない。
+ */
 function readPluginMeta(shelfPath: string): { description: string; version: string } {
   const p = path.join(shelfPath, '.claude-plugin', 'plugin.json');
   let raw: string;
   try {
     raw = fs.readFileSync(p, 'utf-8');
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code !== 'ENOENT') {
+      log.warn('shelve: plugin.json unreadable (using defaults)', { p, code, err });
+    }
     return { description: '', version: '0.0.0' };
   }
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
+  } catch (err) {
+    log.warn('shelve: plugin.json invalid JSON (using defaults)', { p, err });
     return { description: '', version: '0.0.0' };
   }
   return {
@@ -215,7 +226,10 @@ export async function shelve(
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shelve: env not ready', { biblioName, detail });
+    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
+    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
+    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
+    log.warn('shelve: env not ready', { biblioName, detail, reason: 'config_error (mapped to github_api_error)' });
     return fail(biblioName, 'github_api_error', detail);
   }
 

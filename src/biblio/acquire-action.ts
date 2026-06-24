@@ -35,7 +35,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
     log.warn('acquire_biblio missing repo', {
       event: 'biblio.acquire',
       outcome: 'failure',
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
     await writeBackMessage(
@@ -50,19 +50,21 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   log.info('acquire_biblio from agent', {
     event: 'biblio.acquire',
     repo,
-    sessionId: session.id,
+    session_id: session.id,
     request_id: requestId,
   });
 
   try {
-    const result = await acquire({ repo });
+    // ctx を渡して acquire 内の ghFetch ログに request_id / session_id を伝搬
+    // (= Phase 2 で確立した patron 依頼単位の trace 経路、shelve-action.ts と同流儀)。
+    const result = await acquire({ repo }, { ctx: { requestId, sessionId: session.id } });
     await writeBackMessage(inDb, resultText(repo, result), 'acquire-resp', 'acquire_biblio');
     log.info('acquire_biblio done', {
       event: 'biblio.acquire',
       outcome: result.ok ? 'success' : 'failure',
       repo,
       ok: result.ok,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
     });
   } catch (err) {
@@ -71,7 +73,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
       event: 'biblio.acquire',
       outcome: 'failure',
       repo,
-      sessionId: session.id,
+      session_id: session.id,
       request_id: requestId,
       err,
     });
