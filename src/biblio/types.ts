@@ -131,6 +131,19 @@ export const BIBLIO_CATEGORIES = ['biblio-dev', 'biblio-art', 'biblio-bf', 'bibl
 export type BiblioCategory = (typeof BIBLIO_CATEGORIES)[number];
 
 /**
+ * 動的変更可能な biblio 設定キーの allowlist (個別 PRD Phase 5 dynamic-config)。
+ *
+ * `@bot 設定 <KEY> <VALUE>` の経路で patron が変更できるのは本配列の値のみ。
+ * delivery action handler (`config-action.ts`) と MCP tool (`update_config`) は本配列を
+ * single source として参照する (= 3 箇所に複製しない、`BIBLIO_CATEGORIES` と同流儀)。
+ *
+ * 追加判断: 新しい key を動的変更対象にしたいときは本配列に追記 + `acquire.ts` 等の
+ * resolve 関数を DB → env → DEFAULT の 3 層に書き換える 2 箇所のみで完結する。
+ */
+export const BIBLIO_SETTING_KEYS = ['ACQUIRE_SKILL_THRESHOLD'] as const;
+export type BiblioSettingKey = (typeof BIBLIO_SETTING_KEYS)[number];
+
+/**
  * 蔵書一覧 (catalog) の型。
  *
  * `@bot 蔵書` で棚 (HajimariInc/biblio-shelf) の `marketplace.json` から取得した

@@ -328,6 +328,53 @@ export const shokyakuBiblio: McpToolDefinition = {
   },
 };
 
+export const updateConfig: McpToolDefinition = {
+  tool: {
+    name: 'update_config',
+    description:
+      'biblio 設定値を動的変更する (= 個別 PRD Phase 5 dynamic-config)。' +
+      '**patron が「@bot 設定 KEY VALUE」「設定変更して」「閾値を 20 にして」「ACQUIRE_SKILL_THRESHOLD を 25 に変更」等の自然文で依頼したら呼ぶ**。' +
+      '変更は次の仕入れ依頼 (= `@bot 仕入れて`) から即時反映される (= 再起動不要)。' +
+      '**変更可能 key の allowlist** (whitelist 方式、これ以外は host 側で reject される): ' +
+      '`ACQUIRE_SKILL_THRESHOLD` (= 仕入先 repo の skill 数閾値、超過時は patron に個別指定を促す)。' +
+      '**権限**: 該当 agent group に admin / owner が紐づく場合のみ実行可能 (= 居なければ host 側で reject)。' +
+      'fire-and-forget — 設定完了 or 失敗理由は後続のメッセージで通知されるので、それを patron に渡すこと。' +
+      '**注意**: 他の設定 key (例: `MAX_BLOBS_PER_PR` / `CATEGORIZE_MODEL` 等) は本 tool 経由では変更できない (allowlist 外)。',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        key: {
+          type: 'string',
+          enum: ['ACQUIRE_SKILL_THRESHOLD'],
+          description: '変更する設定キー。allowlist 内の値のみ受理 (現状は ACQUIRE_SKILL_THRESHOLD のみ)。',
+        },
+        value: {
+          type: 'string',
+          description:
+            '設定する値 (文字列。閾値の場合は正整数を string で渡す、例: "25")。空文字 / 空白のみは host 側で reject される。',
+        },
+      },
+      required: ['key', 'value'],
+    },
+  },
+  async handler(args) {
+    const key = ((args.key as string) || '').trim();
+    const value = ((args.value as string) || '').trim();
+    if (!key) return err('key を指定してください (allowlist: ACQUIRE_SKILL_THRESHOLD)。');
+    if (!value) return err('value を指定してください (= 空文字 / 空白は不可)。');
+
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({ action: 'update_config', key, value }),
+    });
+
+    log.info(`update_config: ${requestId} → ${key}=${value}`);
+    return ok(`設定変更リクエストを受け付けました: ${key} = ${value}。結果が確定したら通知します。`);
+  },
+};
+
 export const listBiblio: McpToolDefinition = {
   tool: {
     name: 'list_biblio',
@@ -371,4 +418,5 @@ registerTools([
   enkinBiblio,
   shokyakuBiblio,
   listBiblio,
+  updateConfig,
 ]);

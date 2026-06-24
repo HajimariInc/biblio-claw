@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR } from '../config.js';
+import { getBiblioSetting } from '../db/biblio-settings.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { getChildProcEnv } from './host-proxy.js';
@@ -152,16 +153,33 @@ function removeQuarantine(quarantinePath: string): void {
 }
 
 /**
- * `ACQUIRE_SKILL_THRESHOLD` を env から解決する (Phase 2)。
+ * `ACQUIRE_SKILL_THRESHOLD` を解決する (Phase 2 で env、個別 PRD Phase 5 で DB 優先に拡張)。
  *
- * - 未設定 → `DEFAULT_ACQUIRE_SKILL_THRESHOLD` (= 10)
- * - 解釈不能 / 0 以下 → default に倒し warn ログ (= silent failure 防止)
+ * 解決順 (DB → env → DEFAULT の 3 層 fallback):
+ *   1. `biblio_settings` table の `ACQUIRE_SKILL_THRESHOLD` 行 — patron が `@bot 設定`
+ *      で動的変更する経路 (= 即時反映、再起動不要)
+ *   2. `.env` / `process.env` の `ACQUIRE_SKILL_THRESHOLD` — 初期値 / 旧運用慣習
+ *   3. `DEFAULT_ACQUIRE_SKILL_THRESHOLD` (= 10) — どちらも未設定時の最終 fallback
  *
- * `readEnvFile` 都度読み (= `categorize.ts:CATEGORIZE_MODEL` 等と同じ慣習) のため、
- * individual-skill-shiire PRD Phase 5 (`dynamic-config` = DB プロパティ + Slack コマンド経路) と
- * 接続するときも本関数を touch しないで済む構造。
+ * 各層で値が「数値解釈不能 / 0 以下」なら warn ログを出して次層に降りる (= silent
+ * failure 防止、運用者が変な値を入れた場合の検知可能性を担保)。`readEnvFile` と
+ * `getBiblioSetting` はどちらも都度読み — キャッシュ層を持たないので、設定変更直後の
+ * 次の `acquire()` 呼び出しで即時反映される (= キャッシュ無効化機構不要)。
+ *
+ * 性能: `acquire()` は patron 発話起点で高頻度ではないため、DB SELECT 1 行 (= μs オーダー)
+ * の追加コストは問題にならない。
  */
-function resolveSkillThreshold(): number {
+export function resolveSkillThreshold(): number {
+  // 1. DB 優先 — `@bot 設定` で patron が動的変更した値を最優先で採用する。
+  const fromDb = getBiblioSetting('ACQUIRE_SKILL_THRESHOLD');
+  if (fromDb !== undefined && fromDb !== '') {
+    const parsed = Number.parseInt(fromDb, 10);
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed;
+    log.warn('invalid ACQUIRE_SKILL_THRESHOLD in DB, falling back to env', {
+      raw: fromDb,
+    });
+  }
+  // 2. env fallback (= 既存挙動維持、初期値 / 旧運用慣習)。
   const raw = readEnvFile(['ACQUIRE_SKILL_THRESHOLD']).ACQUIRE_SKILL_THRESHOLD;
   if (!raw) return DEFAULT_ACQUIRE_SKILL_THRESHOLD;
   const parsed = Number.parseInt(raw, 10);
