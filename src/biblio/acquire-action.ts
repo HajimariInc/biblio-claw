@@ -20,6 +20,11 @@ function resultText(repo: string, result: AcquireResult): string {
   if (result.ok) {
     return `仕入れ完了: ${repo} を quarantine に配置しました (${result.quarantinePath})。次は inspect_biblio で検品できます。`;
   }
+  // 'internal' は patron が手で対処できない構成不備 (詳細は types.ts AcquireFailureReason)。
+  // 再試行ではなく運用者への報告を促す文言にする。
+  if (result.reason === 'internal') {
+    return `システム構成エラー: ${result.detail}`;
+  }
   return `仕入れエラー (${result.reason}): ${result.detail}`;
 }
 
@@ -50,8 +55,6 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   });
 
   try {
-    // acquire() は内部で gh / git subprocess を使うため ctx propagate の経路はない。
-    // request_id は本 handler の entry/exit log にのみ載る (= patron 依頼 1 件の境界記録)。
     const result = await acquire({ repo });
     await writeBackMessage(inDb, resultText(repo, result), 'acquire-resp', 'acquire_biblio');
     log.info('acquire_biblio done', {
@@ -73,11 +76,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
       err,
     });
     const detail = err instanceof Error ? err.message : String(err);
-    await writeBackMessage(
-      inDb,
-      `仕入れエラー (internal): 予期しない失敗 — ${detail}`,
-      'acquire-resp',
-      'acquire_biblio',
-    );
+    // resultText() の 'internal' 分岐と同じ文言形式に揃える (patron へのメッセージ統一)。
+    await writeBackMessage(inDb, `システム構成エラー: 予期しない失敗 — ${detail}`, 'acquire-resp', 'acquire_biblio');
   }
 });

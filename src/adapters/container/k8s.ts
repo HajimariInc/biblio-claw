@@ -490,6 +490,11 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
       if (e.name === 'NODE_EXTRA_CA_CERTS' && e.value.includes('/tmp/')) {
         e.value = ONECLI_COMBINED_CA_PATH;
       }
+      // Go-based clients (gh CLI etc.) read SSL_CERT_FILE for the trust bundle.
+      // Same `/tmp/` → K8s Secret path rewrite as NODE_EXTRA_CA_CERTS above.
+      if (e.name === 'SSL_CERT_FILE' && e.value.includes('/tmp/')) {
+        e.value = ONECLI_COMBINED_CA_PATH;
+      }
     }
   }
 }

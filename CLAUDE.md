@@ -304,6 +304,8 @@ OneCLI proxy (v1.30.0) は secret の `hostPattern` にマッチしない宛先 
 
 biblio-claw は `src/biblio/host-proxy.ts:initHostProxy()` で **OneCLI CA + Node.js 組み込みの Mozilla root CA bundle (`tls.rootCertificates`)** を append した combined bundle を書き出すことで、MITM 経路 (= OneCLI 偽 cert) と tunnel 経路 (= 本物 cert chain) のどちらも trust 成立させる。詳細な切り分けデバッグ手順 (= `docker logs biblio-onecli | grep 'mode='` から始まる 3 ステップ) は `docs/operations-runbook.md` §「落とし穴: OneCLI MITM が `tunnel` mode で素通しになる」を参照。
 
+**agent コンテナ内の Go バイナリ (gh CLI 等)** は `HTTPS_PROXY` 経由で OneCLI proxy に接続し OneCLI の MITM 偽 cert を受け取る。Go の `crypto/x509` は `SSL_CERT_FILE` env を尊重するため、`container/Dockerfile` で `ENV SSL_CERT_FILE=/etc/ssl/certs/onecli/onecli-combined-ca.pem` を設定し、K8s Secret mount 済の combined CA bundle を信頼する経路を確立する (= GKE 経路では `K8sJobContainerRuntimeProvider.rewriteOneCLIEnv` が OneCLI SDK の `/tmp/...` 形式 env を Secret mount path に rewrite する。orchestrator container 側は `src/biblio/host-proxy.ts:getChildProcEnv()` が子プロセス起動時に動的 inject するため manifest / Dockerfile での ENV 設定は不要)。
+
 ### 設計原則: secret の `pathPattern` で injection 範囲を最小化
 
 OneCLI secret は **`hostPattern` + `pathPattern` の 2 軸** で injection 対象を決定する (`pathPattern: null` = host 全パス inject = 最小権限原則違反)。biblio-claw では:
@@ -319,7 +321,7 @@ glob `*` は複数 segment マッチ (実機検証済、`/repos/HajimariInc/bibl
 司書 agent が `gh` で GitHub REST API に到達するための認可は、GitHub App PEM → RS256 JWT → installation access token を発行して OneCLI に投入する経路で行う。
 
 - **Local (docker compose 経路)**: `scripts/onecli-gh-secret.sh` を host OS 上のシェルスクリプトとして実行する。PEM はローカルファイル (`GH_APP_PEM_PATH`、`*.pem` で gitignore 済) から読む。同スクリプトは `scripts/sign_jwt.cjs` (Node 組み込み crypto / 依存ゼロ) を内部で呼ぶため、両ファイルは常にペアで存在する必要がある。token 有効期限は **~60min** なので、期限切れ時に同スクリプトを再実行すると `PATCH /v1/secrets/:id` で `value` + `pathPattern` partial update (id 保持、200) される (= token と最小権限経路 pathPattern が同時更新)。
-- **GKE 経路 (M2 PRD A Phase 3 以降)**: orchestrator Pod 内の `gh-token-rotator` Native sidecar (image は `k8s/10-orchestrator-statefulset.yaml` の `biblio-sidecar-gh:<tag>` 参照、tag は init-project-gcp Phase 4.5 image-sync で随時 bump) が `scripts/gh-rotate.sh` (= `scripts/onecli-gh-secret.sh` を `ROTATE_INTERVAL_SEC=3000` (= 50min) の sleep loop で wrap) を実行し、自動再投入する。PEM は別の `fetch-pem` initContainer が WI 経由 (orchestrator KSA → `biblio-orchestrator` GSA, `roles/secretmanager.secretAccessor` on `biblio-gh-app-pem`) で Secret Manager から取得し、tmpfs emptyDir (`medium: Memory`) に書き出して rotator container に読み取り専用 mount する。旧 `k8s/30-sidecar-cronjob.yaml` (`biblio-sidecar` CronJob `*/30`) は本 Phase で **廃止** された。
+- **GKE 経路 (M2 PRD A Phase 3 以降)**: orchestrator Pod 内の `gh-token-rotator` Native sidecar (image は `k8s/10-orchestrator-statefulset.yaml` の `biblio-sidecar-gh:<tag>` 参照、tag は init-project-gcp Phase 4.5 image-sync で随時 bump) が `scripts/gh-rotate.sh` (= `scripts/onecli-gh-secret.sh` を `ROTATE_INTERVAL_SEC=3000` (= 50min) の sleep loop で wrap) を実行し、自動再投入する。PEM は別の `fetch-pem` initContainer が WI 経由 (orchestrator KSA → `biblio-orchestrator` GSA, `roles/secretmanager.secretAccessor` on `biblio-gh-app-pem`) で Secret Manager から取得し、tmpfs emptyDir (`medium: Memory`) に書き出して rotator container に読み取り専用 mount する。**rotator container の env に `SHELF_REPO_OWNER` が必須** (= `onecli-gh-secret.sh` の `need()` チェック対象、欠落すると起動直後に exit 1 → 50min ごとに silent fail を繰り返す、`k8s/10-orchestrator-statefulset.yaml` の rotator env block で literal 投入)。旧 `k8s/30-sidecar-cronjob.yaml` (`biblio-sidecar` CronJob `*/30`) は本 Phase で **廃止** された。
 
 ```bash
 # Local 経路 (docker compose):
