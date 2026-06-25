@@ -1,22 +1,30 @@
 /**
- * `acquire_biblio` delivery handler のユニットテスト (PR #37 review-agents Important I5、9/10)。
+ * acquire_biblio delivery handler のユニットテスト。
  *
- * action handler は writeBack (= insertMessage) を 1 度叩いて patron に応答する形式。
+ * action handler は `writeBackMessage` で patron に応答する形式。
  * `registerDeliveryAction` を mock して module load 時の handler を抜き、直接呼ぶ。
  *
- * カバレッジ (= 6 分岐):
- *   1. repo 欠落 → invalid_input writeBack (acquire は呼ばない)
- *   2. ok=true → 仕入れ完了 + quarantinePath writeBack
- *   3. ok=false reason=not_found → 仕入れエラー (not_found)
- *   4. ok=false reason=internal → システム構成エラー (= 専用文言)
- *   5. ok=false reason=clone_failed → 仕入れエラー (clone_failed)
- *   6. acquire throw → システム構成エラー: 予期しない失敗 (host を巻き込まない)
- *
- * 同時検証: acquire 呼出に ctx (= { requestId, sessionId }) が渡されていること
- * (= Phase 2 で確立した request_id propagation、I1 解消の回帰防止)。
+ * カバレッジ (= 個別 skill 仕入れ Phase 1-3 + PR #37 review-agents I5 統合):
+ *  入口 validate
+ *   - repo 空 → invalid_input writeBack (acquire を呼ばない)
+ *  Phase 1-2 既存経路 (skill 未指定)
+ *   - happy: repo 単独 → 仕入れ完了 + quarantinePath
+ *     - 同時検証: acquire 呼出に ctx (= { requestId, sessionId }) が渡されている (I1 回帰防止)
+ *   - reason=not_found → 仕入れエラー (not_found)
+ *   - reason=internal → システム構成エラー (= 専用文言、再試行誘発しない)
+ *   - reason=clone_failed → 仕入れエラー (clone_failed)
+ *   - threshold_exceeded → detail (動的 promote 文言) を素通し
+ *  Phase 3 個別 skill 経路 (skill 指定)
+ *   - happy: skill 指定 → target = repo/skill 形式
+ *   - 空文字 / 空白のみ skill → undefined 扱い (= 全体仕入れに退化)
+ *   - skill 指定で clone_failed → detail を素通し
+ *  例外握り
+ *   - acquire 自体が throw → システム構成エラー (host を巻き込まない)
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// `registerDeliveryAction(action, handler)` の handler を抜き出すための receiver。
+// `vi.mock` は import 前に hoist されるため、receiver は `vi.hoisted` 内で初期化する。
 const { registered } = vi.hoisted(() => ({
   registered: new Map<string, (content: Record<string, unknown>, session: unknown, inDb: unknown) => Promise<void>>(),
 }));
@@ -25,11 +33,6 @@ vi.mock('../delivery.js', () => ({
   registerDeliveryAction: (action: string, handler: (...args: unknown[]) => Promise<void>) => {
     registered.set(action, handler as never);
   },
-}));
-
-const insertMessageMock = vi.fn();
-vi.mock('../db/session-db.js', () => ({
-  insertMessage: (db: unknown, msg: unknown) => insertMessageMock(db, msg),
 }));
 
 vi.mock('../log.js', () => ({
@@ -41,6 +44,21 @@ vi.mock('./acquire.js', () => ({
   acquire: (...args: unknown[]) => acquireMock(...args),
 }));
 
+// action-helpers は partial mock — `writeBackMessage` だけ差し替え、`BIBLIO_NAME_RE`
+// など他の export はそのまま使えるようにする (= categorize-action.test.ts は
+// 一段下の `insertMessage` 経由で capture していたが、acquire-action.ts は
+// `writeBackMessage` のみ呼ぶため、上位で 1 段薄く mock する方が単純)。
+const writeBackCalls: Array<{ text: string; idPrefix: string; actionName: string }> = [];
+vi.mock('./action-helpers.js', async () => {
+  const actual = await vi.importActual<typeof import('./action-helpers.js')>('./action-helpers.js');
+  return {
+    ...actual,
+    writeBackMessage: async (_db: unknown, text: string, idPrefix: string, actionName: string) => {
+      writeBackCalls.push({ text, idPrefix, actionName });
+    },
+  };
+});
+
 // 副作用 import で `registerDeliveryAction('acquire_biblio', handler)` が走る
 import './acquire-action.js';
 
@@ -51,37 +69,34 @@ const dummyDb: unknown = {};
 const dummySession: unknown = { id: 'sess-x' };
 
 function getWrittenText(): string | undefined {
-  const lastCall = insertMessageMock.mock.calls.at(-1);
-  if (!lastCall) return undefined;
-  const msg = lastCall[1] as { content: string };
-  return (JSON.parse(msg.content) as { text: string }).text;
+  return writeBackCalls.at(-1)?.text;
 }
 
 beforeEach(() => {
-  insertMessageMock.mockReset();
   acquireMock.mockReset();
+  writeBackCalls.length = 0;
 });
 
 describe('acquire_biblio handler — 入口 validate', () => {
-  it('repo 欠落で「repo が指定されていません」を返す (acquire は呼ばない)', async () => {
-    await handler({}, dummySession, dummyDb);
+  it('repo が空なら invalid_input 文言を返す (acquire を呼ばない)', async () => {
+    await handler({ repo: '' }, dummySession, dummyDb);
     expect(acquireMock).not.toHaveBeenCalled();
     expect(getWrittenText()).toContain('invalid_input');
     expect(getWrittenText()).toContain('repo が指定されていません');
   });
 });
 
-describe('acquire_biblio handler — happy path', () => {
-  it('acquire 成功で「仕入れ完了」+ quarantinePath を返す', async () => {
+describe('acquire_biblio handler — 既存経路 (skill 未指定)', () => {
+  it('repo 単独で acquire を `{ repo }` だけで呼ぶ + ctx (= { requestId, sessionId }) を伝搬', async () => {
     acquireMock.mockResolvedValue({
       ok: true,
       biblioName: 'octocat--hello',
       quarantinePath: '/tmp/q/octocat--hello',
     });
     await handler({ repo: 'octocat/hello' }, dummySession, dummyDb);
+    // ctx 検証 (= I1 回帰防止、Phase 2 で確立した request_id propagation)
     expect(acquireMock).toHaveBeenCalledWith(
       { repo: 'octocat/hello' },
-      // I1 検証: ctx に requestId (UUID 形式) + sessionId が渡されている
       expect.objectContaining({
         ctx: expect.objectContaining({
           requestId: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
@@ -94,9 +109,7 @@ describe('acquire_biblio handler — happy path', () => {
     expect(text).toContain('/tmp/q/octocat--hello');
     expect(text).toContain('inspect_biblio');
   });
-});
 
-describe('acquire_biblio handler — fail path', () => {
   it('reason=not_found で「仕入れエラー (not_found)」を返す', async () => {
     acquireMock.mockResolvedValue({
       ok: false,
@@ -134,13 +147,86 @@ describe('acquire_biblio handler — fail path', () => {
     expect(text).toContain('仕入れエラー (clone_failed)');
     expect(text).toContain('exit=128');
   });
+});
 
-  it('acquire 自体が throw しても host を巻き込まず writeBack に倒す', async () => {
+describe('acquire_biblio handler — Phase 3 個別 skill 経路', () => {
+  it('skill 指定で成功時、仕入れ完了文言を返す (target = repo/skill 形式)', async () => {
+    acquireMock.mockResolvedValue({
+      ok: true,
+      biblioName: 'anthropics--skills--algorithmic-art',
+      quarantinePath: '/data/quarantine/anthropics--skills--algorithmic-art',
+    });
+    await handler({ repo: 'anthropics/skills', skill: 'algorithmic-art' }, dummySession, dummyDb);
+    expect(acquireMock).toHaveBeenCalledWith(
+      { repo: 'anthropics/skills', skill: 'algorithmic-art' },
+      expect.objectContaining({ ctx: expect.any(Object) }),
+    );
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れ完了');
+    // target は `repo/skill` 形式 (= 個別 skill 経路、全体経路 `repo` 単独と区別可能)
+    expect(text).toContain('anthropics/skills/algorithmic-art');
+    expect(text).toContain('inspect_biblio');
+    // 失敗系の「エラー」表記が混入しないことを確認 (= 成功経路では出さない設計判断)
+    expect(text).not.toContain('仕入れエラー');
+  });
+
+  it('skill 空文字 / 空白のみは undefined 扱い (= 全体仕入れ経路に退化)', async () => {
+    acquireMock.mockResolvedValue({
+      ok: true,
+      biblioName: 'oct--hi',
+      quarantinePath: '/tmp/q/oct--hi',
+    });
+    await handler({ repo: 'oct/hi', skill: '   ' }, dummySession, dummyDb);
+    expect(acquireMock).toHaveBeenCalledWith({ repo: 'oct/hi' }, expect.objectContaining({ ctx: expect.any(Object) }));
+  });
+
+  it('skill 指定で clone_failed — detail を素通しで patron に返す ("仕入れエラー (clone_failed)" 形式)', async () => {
+    // sparse-checkout 経路の clone / sparse init / sparse set / checkout のいずれかが失敗した時の handler 表現を固定。
+    // 文言は acquire.ts 側で組まれた detail を素通し、reason 名は括弧内に出る。
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'clone_failed',
+      detail: 'partial clone に失敗しました: anthropics/skills (fatal: repository not found)',
+    });
+    await handler({ repo: 'anthropics/skills', skill: 'bad-skill' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('仕入れエラー (clone_failed)');
+    expect(text).toContain('partial clone');
+    expect(text).not.toContain('仕入れ完了');
+  });
+});
+
+describe('acquire_biblio handler — 例外を握って writeBack に倒す', () => {
+  it('acquire が throw しても host を巻き込まず「システム構成エラー: 予期しない失敗」を返す', async () => {
     acquireMock.mockRejectedValue(new Error('unexpected fatal'));
-    await expect(handler({ repo: 'foo/bar' }, dummySession, dummyDb)).resolves.toBeUndefined();
+    await expect(handler({ repo: 'oct/hi' }, dummySession, dummyDb)).resolves.toBeUndefined();
     const text = getWrittenText() ?? '';
     expect(text).toContain('システム構成エラー');
     expect(text).toContain('予期しない失敗');
     expect(text).toContain('unexpected fatal');
+  });
+});
+
+describe('acquire_biblio handler — Phase 2 閾値超過 promote', () => {
+  it('threshold_exceeded — detail (動的 promote 文言) を素通しで patron に返す', async () => {
+    const promoteDetail = [
+      '仕入れる数が多い (17 個、上限 10 個) ため、欲しい skill を個別に指定してください。',
+      '例: `@bot 仕入れて large/repo/<skill-name>`',
+      '※ skill 一覧は仕入先 repo (https://github.com/large/repo) をブラウザでご確認ください。',
+    ].join('\n');
+    acquireMock.mockResolvedValue({
+      ok: false,
+      reason: 'threshold_exceeded',
+      detail: promoteDetail,
+    });
+    await handler({ repo: 'large/repo' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    // detail の核要素 (count + 上限 + 個別指定例 + ブラウザ確認案内) がそのまま patron に届く
+    expect(text).toContain('17 個');
+    expect(text).toContain('上限 10 個');
+    expect(text).toContain('large/repo/<skill-name>');
+    expect(text).toContain('skill 一覧は仕入先 repo');
+    // 「エラー」表記が混入しない (= UX 上「素のエラー」感を出さず、誘導文言に倒す設計判断)
+    expect(text).not.toContain('仕入れエラー');
   });
 });

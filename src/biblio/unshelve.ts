@@ -124,7 +124,7 @@ async function fetchTree(
 ): Promise<{ tree: Array<{ path: string; mode: string; type: string; sha: string }>; truncated: boolean }> {
   const url = `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/trees/${sha}${recursive ? '?recursive=1' : ''}`;
   const step = `GET git/trees/${sha.slice(0, 7)}${recursive ? ' (recursive)' : ''}`;
-  const data = (await ghFetch(step, url, {}, ctx)) as {
+  const data = (await ghFetch(step, url, {}, { ctx })) as {
     tree?: Array<{ path?: string; mode?: string; type?: string; sha?: string }>;
     truncated?: boolean;
   };
@@ -201,7 +201,7 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
       'GET git/ref/heads/main',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/ref/heads/main`,
       {},
-      ctx,
+      { ctx },
     )) as { object?: { sha?: string } };
     const baseCommitSha = refData.object?.sha;
     if (!baseCommitSha) throw new GhHttpError('GET git/ref/heads/main', 200, 'response missing object.sha');
@@ -210,7 +210,7 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
       'GET git/commits/{base}',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/commits/${baseCommitSha}`,
       {},
-      ctx,
+      { ctx },
     )) as { tree?: { sha?: string } };
     const baseTreeSha = commitData.tree?.sha;
     if (!baseTreeSha) throw new GhHttpError('GET git/commits/{base}', 200, 'response missing tree.sha');
@@ -273,7 +273,7 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
         method: 'POST',
         body: JSON.stringify({ content: marketplaceContent, encoding: 'utf-8' }),
       },
-      ctx,
+      { ctx },
     )) as { sha?: string };
     if (typeof mpBlobData.sha !== 'string') {
       throw new GhHttpError('POST git/blobs (marketplace)', 200, 'response missing sha');
@@ -291,7 +291,7 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
         method: 'POST',
         body: JSON.stringify({ base_tree: baseTreeSha, tree: treeEntries }),
       },
-      ctx,
+      { ctx },
     )) as { sha?: string };
     if (typeof treeRes.sha !== 'string') throw new GhHttpError('POST git/trees', 200, 'response missing sha');
 
@@ -342,7 +342,7 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
         method: 'POST',
         body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: commitSha }),
       },
-      ctx,
+      { ctx },
     );
 
     // 10. draft PR 作成
@@ -359,7 +359,7 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
           draft: true,
         }),
       },
-      ctx,
+      { ctx },
     )) as { html_url?: string; number?: number };
     if (typeof prData.html_url !== 'string' || typeof prData.number !== 'number') {
       throw new GhHttpError('POST pulls', 200, 'response missing html_url/number');

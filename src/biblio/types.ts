@@ -9,6 +9,12 @@
 /** patron からの生入力 (`owner/repo` 短縮形 or GitHub URL)。 */
 export interface AcquireRequest {
   repo: string;
+  /**
+   * 個別 skill 仕入れ指定 (任意、個別 PRD `individual-skill-shiire` Phase 1 で追加)。
+   * MCP tool `acquire_biblio` 経由で agent が `{ repo: 'owner/name', skill: '<skill>' }`
+   * の 2 arg 分離で渡したとき、または `acquire-action` 直叩き経路でここに来る。
+   */
+  skill?: string;
 }
 
 /** 正規化済みの取得対象。 */
@@ -17,6 +23,12 @@ export interface NormalizedRepo {
   name: string;
   /** HTTPS clone URL (`https://github.com/<owner>/<name>.git`)。SSH は使わない。 */
   cloneUrl: string;
+  /**
+   * 3 segments 入力 (`owner/repo/skill`) を normalizeRepo が直接受け取ったときのみ立つ。
+   * MCP tool 経由では `AcquireRequest.skill` に来るため通常未定義。
+   * `acquire()` では `req.skill ?? normalized.skill` でどちらの経路も吸収する。
+   */
+  skill?: string;
 }
 
 /** 取得失敗の分類。 */
@@ -29,6 +41,16 @@ export type AcquireFailureReason =
   | 'manifest_missing'
   /** git clone 自体が失敗 (network / proxy / 権限)。 */
   | 'clone_failed'
+  /**
+   * 仕入先 repo 内の skill 数が `ACQUIRE_SKILL_THRESHOLD` (既定 10) を超過 (Phase 2)。
+   * 全体仕入れすると後段 (`MAX_BLOBS_PER_PR=100`) で確実に拒否されるため、clone 前に
+   * early return する (= patron への promote 文言は `detail` に動的生成、
+   * `acquire-action.ts:resultText` がそのまま素通しで Slack に流す)。
+   * skill 数 count が unknown (= API 失敗 / Git Trees truncated) の repo は閾値判定を
+   * skip して clone 経路に倒すため、本理由で early return するのは「count に成功し
+   * かつ閾値超過」が確定したケースのみ。
+   */
+  | 'threshold_exceeded'
   /** GitHub API 経路の構成不備 (= 401/403/5xx、network エラー、proxy 到達不可、timeout 等)。
    *  patron は手で対処できず、運用者が OneCLI proxy / token / GitHub 障害を確認する必要がある。 */
   | 'internal';
@@ -107,6 +129,19 @@ export interface InspectOptions {
  */
 export const BIBLIO_CATEGORIES = ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'] as const;
 export type BiblioCategory = (typeof BIBLIO_CATEGORIES)[number];
+
+/**
+ * 動的変更可能な biblio 設定キーの allowlist (個別 PRD Phase 5 dynamic-config)。
+ *
+ * `@bot 設定 <KEY> <VALUE>` の経路で patron が変更できるのは本配列の値のみ。
+ * delivery action handler (`config-action.ts`) と MCP tool (`update_config`) は本配列を
+ * single source として参照する (= 3 箇所に複製しない、`BIBLIO_CATEGORIES` と同流儀)。
+ *
+ * 追加判断: 新しい key を動的変更対象にしたいときは本配列に追記 + `acquire.ts` 等の
+ * resolve 関数を DB → env → DEFAULT の 3 層に書き換える 2 箇所のみで完結する。
+ */
+export const BIBLIO_SETTING_KEYS = ['ACQUIRE_SKILL_THRESHOLD'] as const;
+export type BiblioSettingKey = (typeof BIBLIO_SETTING_KEYS)[number];
 
 /**
  * 蔵書一覧 (catalog) の型。
@@ -188,6 +223,51 @@ export type ShelveResult =
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
 
 /**
+ * 複数 (biblioName, category) を 1 PR にまとめる陳列リクエストの 1 件 (Phase 4 multi-category-shelve)。
+ *
+ * 1 仕入れリクエストで複数 skill が異なる category に分かれるケース (= PRD シナリオ A
+ * 「同一 repo 内で複数 category へ分散」) を表現する。`reason` は per-item の categorize 判定
+ * 理由 (= shelveMulti が commit message / PR body に category 別 section で展開する)。
+ */
+export interface MultiShelveItem {
+  biblioName: string;
+  category: BiblioCategory;
+  reason: string;
+}
+
+/**
+ * `shelveMulti()` 固有の失敗理由 + 既存 `ShelveFailureReason` の継承。
+ *
+ * - `empty_items`: 入力配列が空 (= 上位の orchestration 不具合、agent が空配列を送ったケース)
+ * - `duplicate_biblio_name`: 同一 biblioName が複数 item に含まれる (= per-req 物理移動が衝突するため pre-flight で fail)
+ * - それ以外は単一 `shelve()` と同じ分類 (= 1 PR 単位で原子的に成功/失敗、部分成功なし)
+ */
+export type MultiShelveFailureReason = ShelveFailureReason | 'empty_items' | 'duplicate_biblio_name';
+
+/**
+ * `shelveMulti()` の結果。discriminated union — `ok` で分岐する。
+ *
+ * 部分成功なし (= N 件すべて陳列 or 0 件陳列の二択) で原子性を確保する。
+ * 成功時は 1 PR URL + branch + 陳列された items 一覧、失敗時は reason + detail +
+ * 試行された items 一覧を返す (= empty_items の空配列入力でも `items: []` で固定。
+ * `failMulti` ヘルパが常に全件詰めるため、caller は ok=false 時も items に必ずアクセスできる)。
+ */
+export type MultiShelveResult =
+  | {
+      ok: true;
+      prUrl: string;
+      prNumber: number;
+      branchName: string;
+      items: Array<{ biblioName: string; category: BiblioCategory }>;
+    }
+  | {
+      ok: false;
+      reason: MultiShelveFailureReason;
+      detail: string;
+      items: Array<{ biblioName: string; category: BiblioCategory }>;
+    };
+
+/**
  * 解除 (kaijo / unshelve) の型 (M3 Phase 3)。
  *
  * 棚 (shelf) から biblio を除去する draft PR を作る `unshelve()` の入出力。
@@ -239,11 +319,12 @@ export type ShokyakuResult =
   | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
 
 /**
- * 装備機構 (souwa / equip) の型 (M3 Phase 1)。
+ * 装備機構 (souwa / equip) の型 (M3 Phase 1 で導入、Phase 2 で DB lookup 化済)。
  *
  * 司書が shelf clone を agent-container に取り込み実行する「装備」の
- * 物理配置 1 件を表す。install / cleanup ライフサイクルは Phase 2 以降。
- * Phase 1 は env-driven な mount 配線のみ (= `equip.ts` の stub)。
+ * 物理配置 1 件を表す。実装詳細は `equip.ts:resolveEquippedBiblios` を参照
+ * (Phase 2 で `session_equipped_biblios` テーブルから session 単位 lookup、
+ * env override は test only バックドアとして残置)。
  */
 
 /**
