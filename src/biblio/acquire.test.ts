@@ -53,6 +53,19 @@ vi.mock('../env.js', () => ({
   readEnvFile: (keys: string[]) => mockReadEnvFile(keys),
 }));
 
+// 個別 PRD Phase 5: getBiblioSetting を mock — `resolveSkillThreshold` の 3 層
+// (DB → env → DEFAULT) 解決経路を test で制御するため、DB 層を関数差し替えで切り離す。
+// in-memory DB を本 test ファイルで持ち回らないことで、acquire の振る舞いに集中する
+// (= DB 層の機械的 CRUD は `db/biblio-settings.test.ts` で固める分業)。
+const { mockGetBiblioSetting } = vi.hoisted(() => {
+  const fn = vi.fn<(key: string) => string | undefined>();
+  fn.mockReturnValue(undefined);
+  return { mockGetBiblioSetting: fn };
+});
+vi.mock('../db/biblio-settings.js', () => ({
+  getBiblioSetting: (key: string) => mockGetBiblioSetting(key),
+}));
+
 // Phase 2: undici.fetch を mock — acquire の閾値判定経路 (= `ghFetch('GET contents/marketplace.json
 // (acquire)', ..., { noAuth: true })` 等) が undici 経由で外部 repo に直接到達するため、これらの
 // 呼び出しは undici.fetch 差し替えで応答する。`vi.stubGlobal('fetch', ...)` は named import に
@@ -107,6 +120,8 @@ beforeEach(() => {
   _resetHostProxyForTesting();
   mockReadEnvFile.mockReset();
   mockReadEnvFile.mockReturnValue({});
+  mockGetBiblioSetting.mockReset();
+  mockGetBiblioSetting.mockReturnValue(undefined);
   fetchMock.mockReset();
 });
 
@@ -766,6 +781,100 @@ describe('acquire — Phase 2 threshold-promote', () => {
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
       'invalid ACQUIRE_SKILL_THRESHOLD, using default',
       expect.objectContaining({ raw: 'abc', default: 10 }),
+    );
+  });
+
+  // ===== 個別 PRD Phase 5: 3 層 fallback (DB → env → DEFAULT) =====
+
+  it('DB 優先 — getBiblioSetting が "25" を返す + env "20" でも DB 値 (25) が採用される', async () => {
+    setupCloneSuccess();
+    setupExistenceCheckSuccess();
+    mockGetBiblioSetting.mockReturnValue('25');
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '20' });
+    // 22 skill = env 20 なら超過するが DB 25 なら通る → clone 経路 (= ok:true) になることで DB 優先を検証
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 22 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'db-priority/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'db-priority--repo' });
+  });
+
+  it('DB 不正値 ("abc") → warn ログ + env fallback (20) に倒れる', async () => {
+    mockSpawn.mockImplementation(() => spawnResult(-1));
+    mockGetBiblioSetting.mockReturnValue('abc');
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '20' });
+    // 21 skill = env 20 なら超過 → DB 不正で env に降りた証拠
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 21 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'db-bad/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('上限 20 個');
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD in DB, falling back to env',
+      expect.objectContaining({ raw: 'abc' }),
+    );
+  });
+
+  it('DB + env 共に不正 → warn 2 件 + DEFAULT (10) に倒れる', async () => {
+    mockSpawn.mockImplementation(() => spawnResult(-1));
+    mockGetBiblioSetting.mockReturnValue('not-a-number');
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '-5' });
+    setupExistenceCheckSuccess();
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 11 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'all-bad/repo' });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('threshold_exceeded');
+    expect(result.detail).toContain('上限 10 個');
+    // DB 層の warn
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD in DB, falling back to env',
+      expect.objectContaining({ raw: 'not-a-number' }),
+    );
+    // env 層の warn
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD, using default',
+      expect.objectContaining({ raw: '-5', default: 10 }),
+    );
+  });
+
+  it('DB undefined → env fallback で既存挙動維持 (env 20 採用)', async () => {
+    setupCloneSuccess();
+    setupExistenceCheckSuccess();
+    mockGetBiblioSetting.mockReturnValue(undefined);
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '20' });
+    // 17 skill = env 20 以内 → 通る (= env が DB なしのフォールバックとして効いている証拠)
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 17 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'no-db/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'no-db--repo' });
+  });
+
+  it('DB 空文字 ("") → env fallback (= 空文字は未設定扱い、空文字を Number.parseInt すると NaN なので別経路を確実に取る)', async () => {
+    setupCloneSuccess();
+    setupExistenceCheckSuccess();
+    mockGetBiblioSetting.mockReturnValue('');
+    mockReadEnvFile.mockReturnValue({ ACQUIRE_SKILL_THRESHOLD: '20' });
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 17 }, (_, i) => `./s-${i}`) }]),
+    );
+    // beforeEach で log.warn mock が reset されない (= 別 test の warn が trailing で残る) ため、
+    // negative assertion 直前に local clear する。同 file の他 test は positive `toHaveBeenCalledWith`
+    // のみ使っているので clear せずに済む。
+    vi.mocked(log.warn).mockClear();
+    const result = await acquire({ repo: 'db-empty/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'db-empty--repo' });
+    // 空文字は invalid warn を出さずに env に降りる (= 未設定相当)
+    expect(vi.mocked(log.warn)).not.toHaveBeenCalledWith(
+      'invalid ACQUIRE_SKILL_THRESHOLD in DB, falling back to env',
+      expect.anything(),
     );
   });
 });
