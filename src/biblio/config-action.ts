@@ -35,10 +35,9 @@ import { registerDeliveryAction } from '../delivery.js';
 import { getDb, hasTable } from '../db/connection.js';
 import { setBiblioSetting } from '../db/biblio-settings.js';
 import { log } from '../log.js';
-import type { Session } from '../types.js';
-
 import { writeBackMessage } from './action-helpers.js';
 import { BIBLIO_SETTING_KEYS, type BiblioSettingKey } from './types.js';
+import type { Session } from '../types.js';
 
 /** `BIBLIO_SETTING_KEYS` allowlist の type guard (= 文字列 key を型レベルで絞り込む)。 */
 function isAllowlistedKey(key: string): key is BiblioSettingKey {
@@ -140,9 +139,7 @@ registerDeliveryAction('update_config', async (content, session, inDb) => {
       return;
     }
 
-    // 3. key-specific value validation (= ACQUIRE_SKILL_THRESHOLD は正整数のみ)。
-    //    silent fallback (= DB に "abc" を書いて resolve 側で DEFAULT に倒れる) で patron 認知と
-    //    DB 実態が乖離するのを防ぐため、書き込み前に reject する。
+    // 3. key-specific value validation (詳細は validateValueForKey の JSDoc 参照)。
     const valueErr = validateValueForKey(key, value);
     if (valueErr !== null) {
       log.warn('update_config: invalid value for key', {

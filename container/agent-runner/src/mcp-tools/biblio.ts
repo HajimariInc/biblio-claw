@@ -181,7 +181,7 @@ export const shelveBiblioMulti: McpToolDefinition = {
   tool: {
     name: 'shelve_biblio_multi',
     description:
-      'Phase 4 — **複数 skill を複数 category に跨って 1 PR で陳列**する。1 仕入れリクエスト内で各 skill のカテゴリ判定が異なるケース (例: 同じ repo 内に dev 系 + art 系が混在) に使う。`items` 配列の各要素に `name` (biblio 名、`<owner>--<repo>` または `<owner>--<repo>--<skill>` 形式) + `category` (biblio-dev|art|bf|ai) + `reason` (per-skill の categorize 判定理由) を渡す。**単一 skill / 単一 category なら `shelve_biblio` を使うこと** (= 既存単一 PR 経路で十分)。**運用上限**: `items` は最大 10 件 (= `ACQUIRE_SKILL_THRESHOLD` env の既定値と同数、合算 file 数も `MAX_BLOBS_PER_PR=100` 内に収まる目安)。**原子性**: N 件すべて陳列 or 0 件陳列の二択 (= 部分成功なし、重複検知 1 件でも全体 fail)。fire-and-forget — PR URL + 内訳は後続のメッセージで通知されるので、それを patron に渡し「手動 merge をお願いします」と伝える。',
+      'Phase 4 — **複数 skill を複数 category に跨って 1 PR で陳列**する。1 仕入れリクエスト内で各 skill のカテゴリ判定が異なるケース (例: 同じ repo 内に dev 系 + art 系が混在) に使う。`items` 配列の各要素に `name` (biblio 名、`<owner>--<repo>` または `<owner>--<repo>--<skill>` 形式) + `category` (biblio-dev|art|bf|ai) + `reason` (per-skill の categorize 判定理由) を渡す。**単一 skill / 単一 category なら `shelve_biblio` を使うこと** (= 既存単一 PR 経路で十分)。**運用上限**: `items` は最大 10 件目安 (= 合算 file 数が `MAX_BLOBS_PER_PR=100` 内に収まる目安。実際の hard limit は blob 数上限のみ、件数 hard limit はなし)。**原子性**: N 件すべて陳列 or 0 件陳列の二択 (= 部分成功なし、重複検知 1 件でも全体 fail)。fire-and-forget — PR URL + 内訳は後続のメッセージで通知されるので、それを patron に渡し「手動 merge をお願いします」と伝える。',
     inputSchema: {
       type: 'object' as const,
       properties: {

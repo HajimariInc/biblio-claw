@@ -108,8 +108,9 @@ export async function ghFetch(
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
     // OneCLI MITM が wire で本物の installation token に置換 (shelve / unshelve /
-    // list-biblio / acquire 全 ghFetch 経路で共通)。OneCLI v1.30.0 の injection
-    // 経路依存仕様は issue #36 で検証中。
+    // list-biblio / acquire 全 ghFetch 経路で共通)。OneCLI v1.30.0 で pathPattern
+    // 明示すると GKE で injection skip される不具合 (issue #36) は PR #38 で解消済 —
+    // secret には pathPattern を省略 (= 全パスマッチ) する運用に統一済。
     //
     // 外部 repo (= OneCLI secret の `pathPattern` に match しない `anthropics/skills` 等)
     // を fetch するときは `opts.noAuth: true` で Authorization 自体を省略する。

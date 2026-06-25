@@ -10,7 +10,7 @@
 export interface AcquireRequest {
   repo: string;
   /**
-   * 個別 skill 仕入れ指定 (任意、Phase 1 で追加)。
+   * 個別 skill 仕入れ指定 (任意、個別 PRD `individual-skill-shiire` Phase 1 で追加)。
    * MCP tool `acquire_biblio` 経由で agent が `{ repo: 'owner/name', skill: '<skill>' }`
    * の 2 arg 分離で渡したとき、または `acquire-action` 直叩き経路でここに来る。
    */
@@ -319,11 +319,12 @@ export type ShokyakuResult =
   | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
 
 /**
- * 装備機構 (souwa / equip) の型 (M3 Phase 1)。
+ * 装備機構 (souwa / equip) の型 (M3 Phase 1 で導入、Phase 2 で DB lookup 化済)。
  *
  * 司書が shelf clone を agent-container に取り込み実行する「装備」の
- * 物理配置 1 件を表す。install / cleanup ライフサイクルは Phase 2 以降。
- * Phase 1 は env-driven な mount 配線のみ (= `equip.ts` の stub)。
+ * 物理配置 1 件を表す。実装詳細は `equip.ts:resolveEquippedBiblios` を参照
+ * (Phase 2 で `session_equipped_biblios` テーブルから session 単位 lookup、
+ * env override は test only バックドアとして残置)。
  */
 
 /**
