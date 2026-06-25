@@ -485,10 +485,7 @@ export async function shelveMulti(
         quarantinePath,
         alreadyMoved: movedShelfPaths,
       });
-      const trail =
-        movedShelfPaths.length > 0
-          ? `\n既に shelf に移動済の残骸: ${movedShelfPaths.join(', ')} (= rm -rf で削除可)`
-          : '';
+      const trail = warnAndBuildResidualTrail('step 3 / quarantine missing', movedShelfPaths);
       return failMulti(
         'quarantine_missing',
         `quarantine 配下に biblio が存在しません: ${quarantinePath}${trail}`,
@@ -512,10 +509,7 @@ export async function shelveMulti(
         detail,
         alreadyMoved: movedShelfPaths,
       });
-      const trail =
-        movedShelfPaths.length > 0
-          ? `\n既に shelf に移動済の残骸: ${movedShelfPaths.join(', ')} (= rm -rf で削除可)`
-          : '';
+      const trail = warnAndBuildResidualTrail('step 3 / rename failed', movedShelfPaths);
       return failMulti('rename_error', `quarantine → shelf 移動に失敗 (${req.biblioName}): ${detail}${trail}`, reqs);
     }
   }
@@ -579,6 +573,10 @@ export async function shelveMulti(
   }
 
   // 5. GitHub Git Data API + Pulls API
+  // single/multi 経路分岐の共通フラグ — 4 箇所 (5d message / 5e branch / 5f title / 5f body)
+  // で同じ条件を評価するため step 5 入口で 1 度だけ判定 (= 変更時の修正箇所が 1 箇所に集約)。
+  // `reqs.length === 1` のとき旧 shelve() との完全互換を維持する (= 既存テスト / verify-m2 無変更)。
+  const isSingle = reqs.length === 1;
   try {
     // 5a. base SHA + tree SHA 取得
     const refData = (await ghFetch(
@@ -676,11 +674,10 @@ export async function shelveMulti(
     if (typeof treeRes.sha !== 'string') throw new GhHttpError('POST git/trees', 200, 'response missing sha');
 
     // 5d. commit 作成 (GH App identity → 4xx 時のみ PAT fallback 1 回)
-    // single 経路 (= reqs.length === 1) では旧 buildCommitMessage を使う (= 既存テスト互換)。
-    const message =
-      reqs.length === 1
-        ? buildCommitMessage(reqs[0].biblioName, reqs[0].category, reqs[0].reason)
-        : buildCommitMessageMulti(reqs);
+    // single 経路 (= isSingle) では旧 buildCommitMessage を使う (= 既存テスト互換)。
+    const message = isSingle
+      ? buildCommitMessage(reqs[0].biblioName, reqs[0].category, reqs[0].reason)
+      : buildCommitMessageMulti(reqs);
     let commitSha: string;
     try {
       const r = await createCommit(
@@ -719,8 +716,7 @@ export async function shelveMulti(
 
     // 5e. branch 作成 (GOTCHA-5: refs/heads/ プレフィックス必須)
     // single 経路では旧 branchNameFor で既存命名規約を維持。
-    const branchName =
-      reqs.length === 1 ? branchNameFor(reqs[0].category, reqs[0].biblioName) : branchNameForMulti(reqs);
+    const branchName = isSingle ? branchNameFor(reqs[0].category, reqs[0].biblioName) : branchNameForMulti(reqs);
     await ghFetch(
       'POST git/refs',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/git/refs`,
@@ -733,12 +729,12 @@ export async function shelveMulti(
 
     // 5f. draft PR 作成
     // single 経路では旧 title / body 形式を維持。
-    const prTitle =
-      reqs.length === 1
-        ? `shelve(${reqs[0].category}): ${reqs[0].biblioName}`
-        : `shelve(multi): ${reqs.length} biblios from ${extractOwnerRepo(reqs[0].biblioName)}`;
-    const prBody =
-      reqs.length === 1 ? buildPrBody(reqs[0].biblioName, reqs[0].category, reqs[0].reason) : buildPrBodyMulti(reqs);
+    const prTitle = isSingle
+      ? `shelve(${reqs[0].category}): ${reqs[0].biblioName}`
+      : `shelve(multi): ${reqs.length} biblios from ${extractOwnerRepo(reqs[0].biblioName)}`;
+    const prBody = isSingle
+      ? buildPrBody(reqs[0].biblioName, reqs[0].category, reqs[0].reason)
+      : buildPrBodyMulti(reqs);
     const prData = (await ghFetch(
       'POST pulls',
       `${GITHUB_API}/repos/${env.shelfOwner}/${env.shelfRepo}/pulls`,
