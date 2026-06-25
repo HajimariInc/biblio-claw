@@ -877,6 +877,35 @@ describe('acquire — Phase 2 threshold-promote', () => {
       expect.anything(),
     );
   });
+
+  // resolveSkillThreshold の DB throw 時 degraded fallback (= DB 未初期化 / SQLITE_BUSY 等)。
+  // try/catch (acquire.ts:556-568) で囲って DEFAULT に倒れることを unit で固定する。
+  // PR #48 review-agents (pr-test-analyzer 改善 1、6/10) 対応。
+  it('getBiblioSetting throw (= DB 未初期化等) → warn (acquire.threshold_resolve_failed) + DEFAULT(10) に degraded fallback', async () => {
+    setupCloneSuccess();
+    setupExistenceCheckSuccess();
+    // DB throw でも acquire は discriminated union を返し続ける (= not throw、設計契約維持)
+    mockGetBiblioSetting.mockImplementation(() => {
+      throw new Error('SQLITE_ERROR: no such table biblio_settings');
+    });
+    // env は未設定 = DEFAULT(10) を見るパターン
+    mockReadEnvFile.mockReturnValue({});
+    // 9 skill = DEFAULT(10) 以内 → 通る (= DEFAULT に倒れた証拠)
+    mockGhFetch.mockResolvedValueOnce(
+      mockMarketplaceData([{ skills: Array.from({ length: 9 }, (_, i) => `./s-${i}`) }]),
+    );
+    const result = await acquire({ repo: 'db-throw/repo' });
+    expect(result).toMatchObject({ ok: true, biblioName: 'db-throw--repo' });
+    // structured event で degraded fallback を可視化 (= Cloud Logging で検知可能)
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'acquire: resolveSkillThreshold threw, using default',
+      expect.objectContaining({
+        event: 'acquire.threshold_resolve_failed',
+        outcome: 'degraded',
+        default: 10,
+      }),
+    );
+  });
 });
 
 describe('getChildProcEnv / initHostProxy', () => {

@@ -762,4 +762,38 @@ describe('shelveMulti — single 経路 (reqs.length === 1) で既存 shelve と
     expect(commitMsg).toContain('理由: compat check');
     expect(commitMsg).not.toMatch(/^feat\(multi\)/); // multi 専用先頭が混入しない
   });
+
+  // listShelfFiles の ioErrorCount > 0 経路 (= shelve.ts:529-540 で fail-closed)。
+  // rename 完了後の shelf dir 走査で EACCES / EMFILE 等が起きると、
+  // 読み取りエラー件数を detail に含めて github_api_error reason で fail する経路。
+  // PR #48 review-agents (pr-test-analyzer 改善 2、5/10) 対応。
+  it('shelveMulti: shelf scan で ioErrorCount > 0 → github_api_error + 読み取りエラー件数を detail に', async () => {
+    setupQuarantine('owner--repo--ioerror');
+    fetchMock.mockImplementationOnce(async () => res(404, { message: 'Not Found' }));
+    // listShelfFiles (shelve.ts) が rename 後の shelf dir 入口 readdirSync で EACCES → ioErrorCount=1。
+    // 対象 path をピンポイントで絞ることで setupQuarantine 等の他の readdirSync は影響を受けない。
+    const shelfRoot = path.join(TEST_DIR, 'shelf');
+    const targetShelfPath = path.join(shelfRoot, 'biblio-dev', 'owner--repo--ioerror');
+    const originalReaddir = fs.readdirSync.bind(fs);
+    const readdirSpy = vi.spyOn(fs, 'readdirSync').mockImplementation(((dirPath: fs.PathLike, options?: unknown) => {
+      const pathStr = typeof dirPath === 'string' ? dirPath : dirPath.toString();
+      if (pathStr === targetShelfPath) {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return originalReaddir(dirPath, options as any);
+    }) as typeof fs.readdirSync);
+
+    const result = await shelveMulti([{ biblioName: 'owner--repo--ioerror', category: 'biblio-dev', reason: 'r' }], {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: 'github_api_error' });
+    if (!result.ok) {
+      expect(result.detail).toContain('読み取りエラー');
+      expect(result.detail).toContain('1 件'); // ioErrorCount=1
+    }
+    readdirSpy.mockRestore();
+  });
 });
