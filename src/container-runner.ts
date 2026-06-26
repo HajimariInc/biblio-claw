@@ -24,6 +24,7 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
+import { injectTraceContextToEnv } from './observability/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -528,6 +529,34 @@ async function buildContainerSpec(
     for (const [key, value] of Object.entries(providerContribution.env)) {
       env.push({ name: key, value });
     }
+  }
+
+  // OTel: active span の traceparent/tracestate を W3C Env Carriers Spec (UPPERCASE)
+  // で env に inject。active span 無し時は carrier 空 → push なし。agent (Bun) 側で
+  // extractTraceContextFromEnv が同 trace ID を復元する。
+  const traceEnvCarrier: Record<string, string> = {};
+  injectTraceContextToEnv(traceEnvCarrier);
+  for (const [name, value] of Object.entries(traceEnvCarrier)) {
+    env.push({ name, value });
+  }
+
+  // OTel: Bun の node:https.Agent partial 実装で HTTPS_PROXY (= OneCLI proxy) が
+  // 効かない可能性があるため、telemetry.googleapis.com への OTLP は proxy バイパス。
+  // OTLP は自前 Bearer (ADC) なので OneCLI MITM 認証注入は不要。
+  const existingNoProxy = providerContribution.env?.NO_PROXY ?? process.env.NO_PROXY ?? '';
+  const noProxyEntries = existingNoProxy
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!noProxyEntries.includes('telemetry.googleapis.com')) {
+    noProxyEntries.push('telemetry.googleapis.com');
+  }
+  // providerContribution.env で先に NO_PROXY が push されている可能性があるため、上書き
+  const noProxyIdx = env.findIndex((e) => e.name === 'NO_PROXY');
+  if (noProxyIdx >= 0) {
+    env[noProxyIdx] = { name: 'NO_PROXY', value: noProxyEntries.join(',') };
+  } else {
+    env.push({ name: 'NO_PROXY', value: noProxyEntries.join(',') });
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls

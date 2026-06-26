@@ -759,6 +759,61 @@ Phase 6 PASS (Slack E2E GKE) — PR URL=https://github.com/<owner>/<repo>/pull/<
 
 ---
 
+## M4-A Phase 1: OTel foundation 運用
+
+### 前提
+
+- GCP IAM:GSA `biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` に `roles/cloudtrace.agent`、DEN さん (`f.takematsu@hajimari.inc`) に `roles/cloudtrace.user`(2026-06-26 付与済)
+- Cloud Trace API は project default で有効。未有効なら `gcloud services enable cloudtrace.googleapis.com --project=hajimari-ai-hackathon-2026`
+- ローカル実行は `gcloud auth application-default login` 済前提(ADC)
+
+### 疎通確認(local)
+
+```bash
+GOOGLE_CLOUD_PROJECT=hajimari-ai-hackathon-2026 pnpm run otel-smoke-test
+# 出力: RESULT={"trace_id":"<32hex>"}
+
+TRACE_ID=<上記>
+sleep 30
+gcloud trace list --project=hajimari-ai-hackathon-2026 \
+  --filter="traceid=${TRACE_ID}" --format="value(traceId)"
+# 同 TRACE_ID 返れば PASS
+```
+
+UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-hackathon-2026>
+
+### shutdown 挙動
+
+- host は SIGTERM/SIGINT で `shutdownOtel()` 経由で BatchSpanProcessor を flush(`scheduledDelayMillis: 2000`、`exportTimeoutMillis: 10000`)
+- K8s grace period(30s)内に flush 完了する設計
+
+### Bun + OTLP HTTP 既知挙動
+
+- agent-runner(Bun)で `[otel] Request timed out` の warn が出ることがある([opentelemetry-js#5260](https://github.com/open-telemetry/opentelemetry-js/issues/5260))
+- **span 自体は届く**。warn は無視可能
+- 詳細診断が必要なら manifest env に `OTEL_DIAG=true` を一時投入
+
+### trace が届かない場合の切り分け順
+
+1. **smoke-test 起動時のログ**:`[otel] init failed` warn が出ているか → init 段階の失敗(projectId 不在 / ADC 不在 / network)
+2. **stdout の `RESULT={...}` 出力**:span 自体は生成されているか
+3. **`OTEL_DIAG=true` で再実行**:「Request timed out」が大量に出るか
+4. **30s 待って `gcloud trace list`**:検索ヒット = 成功
+5. **IAM 確認**:`gcloud projects get-iam-policy hajimari-ai-hackathon-2026 --flatten="bindings[].members" --filter="bindings.members:biblio-orchestrator"` で `roles/cloudtrace.agent` 存在
+6. **API enable 確認**:`gcloud services list --enabled --filter=cloudtrace --project=hajimari-ai-hackathon-2026`
+7. **agent 側のみ届かない場合**:`kubectl exec biblio-orchestrator-0 -c orchestrator -- printenv | grep -i otel` で env 確認、`NO_PROXY` に `telemetry.googleapis.com` が入っているか
+8. **HTTPS_PROXY 経由を疑う**:agent Pod 内で `bun -e "fetch('https://telemetry.googleapis.com/v1/traces')"` で直接接続テスト
+9. **Fallback**:本 Phase 1 plan §Fallback Knowledge Bank(`@google-cloud/opentelemetry-cloud-trace-exporter` への切替 / host 集約案)
+
+### 関連
+
+- `src/instrumentation.ts` / `src/observability/{otel,auth,env-propagation,index}.ts`(host)
+- `container/agent-runner/src/observability/{otel-init,auth,env-propagation,index}.ts`(agent)
+- `scripts/otel-smoke-test.ts`(疎通スクリプト)
+- 起動コマンド:host = `node --import ./dist/instrumentation.js dist/index.js`(`Dockerfile` で配線済)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

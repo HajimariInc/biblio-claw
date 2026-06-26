@@ -81,6 +81,7 @@ import { setupVertexProxy } from './biblio/vertex-client.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+import { shutdownOtel } from './observability/index.js';
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -259,6 +260,11 @@ async function shutdown(signal: string): Promise<void> {
   try {
     await teardownChannelAdapters();
   } finally {
+    try {
+      await shutdownOtel();
+    } catch (err) {
+      log.error('OTel shutdown failed', { err });
+    }
     // Always reset on graceful shutdown — even if teardown threw, we got here
     // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
     // as one.
