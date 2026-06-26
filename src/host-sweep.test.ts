@@ -10,6 +10,7 @@ import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-
 import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  IDLE_THRESHOLD_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   parseSqliteUtc,
@@ -149,6 +150,56 @@ describe('decideStuckAction', () => {
       heartbeatMtimeMs: BASE - 5_000,
       containerState: null,
       claims: [{ message_id: 'x', status_changed: 'not-a-date' }],
+    });
+    expect(res.action).toBe('ok');
+  });
+});
+
+describe('decideStuckAction: idle cleanup (issue #57)', () => {
+  it('returns kill-idle when heartbeat older than threshold and no claims pending', () => {
+    const heartbeatAge = IDLE_THRESHOLD_MS + 60_000;
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - heartbeatAge,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('kill-idle');
+    if (res.action === 'kill-idle') {
+      expect(res.heartbeatAgeMs).toBe(heartbeatAge);
+      expect(res.thresholdMs).toBe(IDLE_THRESHOLD_MS);
+    }
+  });
+
+  it('returns ok when heartbeat is within idle threshold', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS - 1_000),
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('defers to kill-claim path when claims are pending, even with old heartbeat', () => {
+    // heartbeat 古い (= idle 候補) だが claim が古く立っている場合は kill-claim が優先される。
+    // kill-ceiling は 30 min 未満なので発火しない。
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS + 60_000),
+      containerState: null,
+      claims: [claim('msg-1', CLAIM_STUCK_MS + 30_000)],
+    });
+    expect(res.action).toBe('kill-claim');
+  });
+
+  it('returns ok when heartbeat is absent (mtime=0), even past threshold', () => {
+    // 起動直後で heartbeat 未 touch のケースは idle 判定対象外。
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerState: null,
+      claims: [],
     });
     expect(res.action).toBe('ok');
   });

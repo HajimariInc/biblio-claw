@@ -66,13 +66,25 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
+// Idle threshold for "conversation completed, container resident" cleanup.
+// Distinct from ABSOLUTE_CEILING_MS (= stuck container last-resort). When the
+// heartbeat is older than this AND no claims are pending, we kill the
+// container so its memory is released — critical on GKE where agent Pods
+// inherit zonal PVC affinity (issue #57).
+export const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+export const IDLE_THRESHOLD_MS = (() => {
+  const raw = process.env.AGENT_IDLE_THRESHOLD_MS;
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_IDLE_THRESHOLD_MS;
+})();
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
 
 export type StuckDecision =
   | { action: 'ok' }
   | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
-  | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
+  | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number }
+  | { action: 'kill-idle'; heartbeatAgeMs: number; thresholdMs: number };
 
 /**
  * Pure decision for whether a running container should be killed this sweep
@@ -101,6 +113,20 @@ export function decideStuckAction(args: {
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
+    }
+  }
+
+  // Idle cleanup: when no messages are being processed and the heartbeat has
+  // gone quiet past IDLE_THRESHOLD_MS, release the container so its memory
+  // returns to the cluster. On GKE the agent Pod inherits orchestrator PVC
+  // zone affinity, so resident idle Pods starve new spawn requests in the
+  // same zone (issue #57). The next inbound message will re-spawn via
+  // wakeContainer. Skip when claims are pending (kill-claim path handles it)
+  // or when Bash is declared running with a long timeout (= intentional work).
+  if (heartbeatMtimeMs !== 0 && claims.length === 0 && declaredBashMs === null) {
+    const heartbeatAge = now - heartbeatMtimeMs;
+    if (heartbeatAge > IDLE_THRESHOLD_MS) {
+      return { action: 'kill-idle', heartbeatAgeMs: heartbeatAge, thresholdMs: IDLE_THRESHOLD_MS };
     }
   }
 
@@ -250,6 +276,17 @@ function enforceRunningContainerSla(
     });
     killContainer(session.id, 'absolute-ceiling');
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
+    return;
+  }
+
+  if (decision.action === 'kill-idle') {
+    log.info('Killing idle container to release memory', {
+      sessionId: session.id,
+      heartbeatAgeMs: decision.heartbeatAgeMs,
+      thresholdMs: decision.thresholdMs,
+    });
+    killContainer(session.id, 'idle-timeout');
+    // claims が空のため processing rows のリセットは不要 (= 対象行が存在しない)
     return;
   }
 
