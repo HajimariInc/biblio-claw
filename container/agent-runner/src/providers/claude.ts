@@ -322,8 +322,19 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  * Stale-session detection. Matches Claude Code's error text when a
  * resumed session can't be found — missing transcript .jsonl, unknown
  * session ID, etc.
+ *
+ * Also matches Vertex AI 401 ACCESS_TOKEN_EXPIRED / "invalid authentication
+ * credentials" (issue #49). When a session was resumed against a Vertex
+ * client whose ADC token expired mid-flight, the SDK's internal auth state
+ * sticks and every retry hits the same 401 — clearing the continuation
+ * forces a fresh session on the next patron message, which re-inits the
+ * Vertex client and picks up the (already-refreshed) token from OneCLI.
+ * Narrow to `401.*ACCESS_TOKEN_EXPIRED` (not bare 401) so transient 401s
+ * unrelated to auth (rate-limit variants, etc.) do not trigger continuation
+ * loss.
  */
-const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
+const STALE_SESSION_RE =
+  /no conversation found|ENOENT.*\.jsonl|session.*not found|401.*ACCESS_TOKEN_EXPIRED|invalid authentication credentials/i;
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;

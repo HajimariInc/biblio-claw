@@ -2,9 +2,11 @@
 # biblio-claw: vertex-token-rotator sidecar loop (M2 PRD A Phase 3、案 1A 採用)。
 #
 # orchestrator Pod 内の Native sidecar として動き、既存 1-shot script
-# `onecli-vertex-secret.sh` を ROTATE_INTERVAL_SEC (既定 3000s = 50min) 周期で
+# `onecli-vertex-secret.sh` を ROTATE_INTERVAL_SEC (既定 2400s = 40min) 周期で
 # 呼び出して ADC token を OneCLI に投入し続ける。ADC token TTL は ~1h なので
-# 50min 周期で安全マージン。
+# 40min 周期で安全マージン (issue #49: 50min 周期は 60min TTL との 10min gap
+# 帯に agent Pod spawn が当たると起動直後の Vertex 呼び出しで 401 を踏むため、
+# gap を ~0 に縮める = 60 - 40 = 20min margin)。
 #
 # 案 1A の意義は gh-rotate.sh と同じ — 既存 1-shot script を本 wrapper で
 # 包んで二重メンテを回避する (Phase 1/2.5 実機検証済資産を流用)。
@@ -22,7 +24,7 @@
 set -euo pipefail
 
 : "${ONECLI_URL:=http://localhost:10254}"
-: "${ROTATE_INTERVAL_SEC:=3000}"
+: "${ROTATE_INTERVAL_SEC:=2400}"
 : "${ROTATE_READY_RETRIES:=60}"
 : "${ROTATE_READY_INTERVAL_SEC:=2}"
 

@@ -272,7 +272,10 @@ spec:
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
             - { name: CLOUD_ML_REGION, value: global }
             - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
-            - { name: ROTATE_INTERVAL_SEC, value: '3000' }
+            # issue #49: 50min (3000s) は ADC token TTL ~60min との 10min gap 帯に
+            # agent Pod spawn が当たると起動直後の Vertex 呼び出しで 401 を踏むため、
+            # 40min 周期で gap を ~0min に縮小する (script 既定値とも同期)。
+            - { name: ROTATE_INTERVAL_SEC, value: '2400' }
             - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: vertex-token-rotator }

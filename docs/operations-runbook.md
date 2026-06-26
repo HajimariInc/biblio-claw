@@ -759,6 +759,56 @@ Phase 6 PASS (Slack E2E GKE) — PR URL=https://github.com/<owner>/<repo>/pull/<
 
 ---
 
+## Vertex 401 ACCESS_TOKEN_EXPIRED retry loop の対症手順
+
+### 症状
+
+- Slack で `@bot` に発話 → 応答無し
+- `kubectl get pods -n biblio-claw` で agent Pod は `Running`、`kubectl get jobs -n biblio-claw` は `COMPLETIONS=0/1` のまま分単位で滞留
+- agent Pod log に `Error: API retry (retryable: true)` が連続、最終的に `Result: Failed to authenticate. API Error: 401 ... ACCESS_TOKEN_EXPIRED` が出る
+
+### 自動復旧 (issue #49 Step 4 適用後の期待挙動)
+
+- 次の patron メッセージで `isSessionInvalid` (= `container/agent-runner/src/providers/claude.ts` の `STALE_SESSION_RE`) が 401 ACCESS_TOKEN_EXPIRED にマッチして true を返し、continuation がクリアされる
+- 次回 patron メッセージで SDK が新規 session を init → fresh Vertex client → OneCLI から (rotator が既に投入済の) fresh token を取得 → 401 自然回復
+- (注) `@anthropic-ai/claude-agent-sdk` が Vertex client を process-init 時に token cache する場合は session 再生成だけでは不十分。下記の手動復旧が必要
+
+### 手動復旧
+
+```bash
+# 1. stuck している agent Job を Job ごと削除 (= cascade で Pod も消える)。
+#    Pod 単独削除だと Job controller が即 respawn して race condition の温床になる。
+kubectl get jobs -n biblio-claw | grep -v COMPLETIONS  # → stuck job 名を確認
+kubectl delete job <stuck-job-name> -n biblio-claw
+
+# 2. Pod の完全削除を待機 (= 再 spawn race 防止)。
+kubectl wait --for=delete pod/<stuck-pod-name> -n biblio-claw --timeout=60s
+kubectl get pods -n biblio-claw -l 'job-name'   # → No resources found を確認
+
+# 3. (vault token も期限切れが疑わしい場合) rotator を即時に 1 周期回す。
+#    rotator sidecar 内で onecli-vertex-secret.sh を手動キックして fresh ADC token を OneCLI に PATCH。
+kubectl exec biblio-orchestrator-0 -c vertex-token-rotator -n biblio-claw -- \
+  bash /scripts/onecli-vertex-secret.sh
+
+# 4. Slack で再度 @bot に発話 → 新しい agent Pod が fresh token で spawn される
+```
+
+### 構造的予防 (issue #49 で実施済)
+
+| 経路 | 変更 | 効果 |
+|------|------|------|
+| rotator 周期 | 50min → 40min (`scripts/vertex-rotate.sh` + `k8s/10-orchestrator-statefulset.yaml`) | ADC token TTL ~60min との gap を 10min → ~0min に縮小 |
+| secret 投入流儀 | DELETE→POST → POST/PATCH 分岐 (`scripts/onecli-vertex-secret.sh`) | rotation 中の vault 不在 gap (= secondary 401 発火源) を消滅 |
+| continuation 固着 | `STALE_SESSION_RE` に `401.*ACCESS_TOKEN_EXPIRED` + `invalid authentication credentials` を追加 | 一度発火しても次の patron メッセージで自然回復 |
+
+### 関連
+
+- issue #49 (= 本セクションの直接元)
+- ルート `CLAUDE.md` の「シークレット / クレデンシャル / OneCLI」§GH installation token (GitHub App Sidecar 経路) — rotator sidecar 同型構造
+- `agent_pod_residual_race_condition` (= Pod 残置 race の親類、運用罠 memory)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

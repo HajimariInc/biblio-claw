@@ -15,9 +15,18 @@
 # 写経元: PoC-2 scripts/{secret.sh,onecli.sh,lib.sh} (v1.30.0 で実測確定)。
 #   - type は {anthropic, openai, generic}。任意 host に Authorization: Bearer を
 #     入れるには type:generic + injectionConfig が必須 (anthropic は x-api-key 固定)。
-#   - GET /v1/secrets は値を返さない (AES-256-GCM マスク)。更新は DELETE→POST。
+#   - GET /v1/secrets は値を返さない (AES-256-GCM マスク)。更新は PATCH で value のみ。
 #   - pathPattern は省略 (v1.30.0 は null を 400 で拒否。未指定で全パスにマッチ)。
-#   - ADC token は ~1h で失効 → 再実行で DELETE→POST フレッシュ化 (Phase 2 で Sidecar 自動化)。
+#   - ADC token は ~1h で失効 → 再実行で PATCH フレッシュ化 (Phase 2 で Sidecar 自動化)。
+#
+# 更新流儀 (issue #49 で DELETE→POST から PATCH/POST 分岐に変更):
+#   旧: 毎回 DELETE → POST で secret を完全再投入。DELETE と POST の隙間に
+#       Vertex リクエストが届くと vault に secret が一時不在で Authorization が
+#       注入されず 401 を踏む rotation gap が発生していた。
+#   新: gh-secret.sh と同じ upsert 流儀 (未存在: POST、既存: PATCH /v1/secrets/:id
+#       で value のみ partial update)。id 保持 + gap なし。OneCLI v1.30.0 で
+#       PATCH の partial update (value のみ送信、hostPattern / injectionConfig /
+#       既存 pathPattern は OneCLI 側保持) が動作することは gh-secret.sh で実証済。
 #
 # 重要: ADC token は argv / stdout / stderr / ファイルに残さない。jq へは env 経由
 #       (argv 非経由)、curl へは stdin (--data-binary @-) で渡す。
@@ -61,8 +70,7 @@ done
 
 # secret_id: name=VERTEX_SECRET_NAME の secret id を stdout に返す (無ければ空)。
 #   curl 出力を変数に受けてから jq に流す。curl 失敗を fail で止めないと、
-#   呼び出し側が「未存在」と誤判定する (Vertex は DELETE→POST 流儀のため
-#   GH ほど深刻ではないが、可観測性のため fail を発行する)。
+#   呼び出し側が「未存在」と誤判定して二重 POST 投入してしまうため明示 fail。
 secret_id() {
   local out
   out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
@@ -71,24 +79,18 @@ secret_id() {
     | jq -r --arg n "$VERTEX_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1
 }
 
-# delete_secret: 既存 Vertex secret を削除 (無ければ何もしない / 冪等)。
-#   curl 失敗時は素の set -e で「[FAIL] なしの silent 終了」になり、操作者が
-#   「DELETE 失敗 / DELETE 成功で次の POST がコケた」を判別できなくなるため、
-#   明示的に || fail を発行する (PR #6 レビュー I1)。
-delete_secret() {
-  local id
-  id="$(secret_id)"
-  if [ -n "$id" ] && [ "$id" != "null" ]; then
-    curl -fsS "${OC_AUTH[@]}" -X DELETE "${ONECLI_API}/secrets/${id}" >/dev/null \
-      || fail "DELETE /v1/secrets/${id} に失敗 — OneCLI ログを確認 (docker compose logs onecli)"
-  fi
-  return 0
-}
-
 # ensure_secret: ADC token を type:generic + authorization:Bearer の secret として投入。
-#   既存は DELETE してから POST (毎回フレッシュなトークンに更新)。token はログ/argv に残さない。
+#   未存在: POST /v1/secrets (期待 201、pathPattern は省略 = 全パスマッチ)
+#   既存:   PATCH /v1/secrets/:id で value のみ partial update
+#           (期待 200、id 保持 = hostPattern 解決の安定性 + rotation gap なし)
+#
+# issue #49 で DELETE→POST から本流儀に変更。DELETE と POST の隙間に Vertex
+# リクエストが届くと vault に secret が一時不在で Authorization 注入されず 401
+# を踏む rotation gap を消滅させるため。流儀は scripts/onecli-gh-secret.sh の
+# upsert_gh_secret パターンを写経 (= v1.30.0 で PATCH の value 単独更新が動作
+# することは GH 経路で実証済)。
 ensure_secret() {
-  local host token
+  local host token id
   host="$(vertex_host)"
   # gcloud の stderr は捨てない。失敗時の理由 (credential 破損 / permission /
   # クォータ等) がユーザーに見えないと debug 不能になる。ADC token 自体は
@@ -96,14 +98,25 @@ ensure_secret() {
   token="$(gcloud auth application-default print-access-token)" \
     || fail "ADC アクセストークン取得に失敗 (上の gcloud エラーを確認。未ログインなら: gcloud auth application-default login --project ${ANTHROPIC_VERTEX_PROJECT_ID})"
   [ -n "$token" ] || fail "ADC アクセストークンが空"
-  delete_secret
-  SECRET_TOKEN="$token" jq -n \
-      --arg name "$VERTEX_SECRET_NAME" --arg host "$host" \
-      '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
-        injectionConfig:{headerName:"authorization", valueFormat:"Bearer {value}"}}' \
-    | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
-        -H 'Content-Type: application/json' --data-binary @- >/dev/null \
-    || fail "secret 投入 (POST /v1/secrets) に失敗"
+  id="$(secret_id)"
+  if [ -z "$id" ] || [ "$id" = "null" ]; then
+    info "[secret] 未存在 → POST /v1/secrets で作成 (name=$VERTEX_SECRET_NAME / host=$host / pathPattern=omitted / header=authorization)"
+    ( set -o pipefail
+      SECRET_TOKEN="$token" jq -n \
+          --arg name "$VERTEX_SECRET_NAME" --arg host "$host" \
+          '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
+            injectionConfig:{headerName:"authorization", valueFormat:"Bearer {value}"}}' \
+        | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
+            -H 'Content-Type: application/json' --data-binary @- >/dev/null
+    ) || fail "secret 投入 (POST /v1/secrets) に失敗"
+  else
+    info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value のみ partial update (pathPattern は省略 = OneCLI 側保持、rotation gap なし)"
+    ( set -o pipefail
+      SECRET_TOKEN="$token" jq -n '{value:env.SECRET_TOKEN}' \
+        | curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
+            -H 'Content-Type: application/json' --data-binary @- >/dev/null
+    ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
+  fi
   unset SECRET_TOKEN token
   ok "Vertex secret 投入 OK (name=${VERTEX_SECRET_NAME} / type=generic / host=${host} / headerName=authorization / valueFormat=Bearer {value} / 値はマスク)"
 }
@@ -118,7 +131,7 @@ main() {
     || fail "OneCLI REST に到達できない (${ONECLI_API}) — 'docker compose up -d --wait' 済みか確認"
   ensure_secret
   set_all_agents_mode_all
-  ok "完了: Vertex Bearer secret 投入 + agent all 化 (ADC token は ~1h で失効 → 再実行でフレッシュ化)"
+  ok "完了: Vertex Bearer secret 投入 + agent all 化 (ADC token は ~1h で失効 → 再実行で PATCH フレッシュ化)"
 }
 
 main "$@"
