@@ -775,9 +775,12 @@ GOOGLE_CLOUD_PROJECT=hajimari-ai-hackathon-2026 pnpm run otel-smoke-test
 
 TRACE_ID=<上記>
 sleep 30
-gcloud trace list --project=hajimari-ai-hackathon-2026 \
-  --filter="traceid=${TRACE_ID}" --format="value(traceId)"
-# 同 TRACE_ID 返れば PASS
+# `gcloud trace` CLI は廃止済 (= "Invalid choice: 'trace'")。Cloud Trace v1 REST API を直叩き。
+TOKEN=$(gcloud auth application-default print-access-token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://cloudtrace.googleapis.com/v1/projects/hajimari-ai-hackathon-2026/traces/${TRACE_ID}" \
+  | jq '{traceId, spans: [.spans[] | {name, labels}]}'
+# 同 TRACE_ID と labels.gcp.project_id / service.name / biblio.phase が返れば PASS
 ```
 
 UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-hackathon-2026>
@@ -798,7 +801,7 @@ UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-h
 1. **smoke-test 起動時のログ**:`[otel] init failed` warn が出ているか → init 段階の失敗(projectId 不在 / ADC 不在 / network)
 2. **stdout の `RESULT={...}` 出力**:span 自体は生成されているか
 3. **`OTEL_DIAG=true` で再実行**:「Request timed out」が大量に出るか
-4. **30s 待って `gcloud trace list`**:検索ヒット = 成功
+4. **30s 待って Cloud Trace v1 REST API を直叩き** (`gcloud trace` CLI は廃止):`curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" "https://cloudtrace.googleapis.com/v1/projects/<project>/traces/<traceId>"` で span が返れば成功
 5. **IAM 確認**:`gcloud projects get-iam-policy hajimari-ai-hackathon-2026 --flatten="bindings[].members" --filter="bindings.members:biblio-orchestrator"` で `roles/cloudtrace.agent` 存在
 6. **API enable 確認**:`gcloud services list --enabled --filter=cloudtrace --project=hajimari-ai-hackathon-2026`
 7. **agent 側のみ届かない場合**:`kubectl exec biblio-orchestrator-0 -c orchestrator -- printenv | grep -i otel` で env 確認、`NO_PROXY` に `telemetry.googleapis.com` が入っているか
