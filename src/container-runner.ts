@@ -24,6 +24,8 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
+import { injectTraceContextToEnv } from './observability/index.js';
+import { buildNoProxyWithTelemetry } from './observability/no-proxy.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -528,6 +530,27 @@ async function buildContainerSpec(
     for (const [key, value] of Object.entries(providerContribution.env)) {
       env.push({ name: key, value });
     }
+  }
+
+  // OTel: active span の traceparent/tracestate を W3C Env Carriers Spec (UPPERCASE)
+  // で env に inject。active span 無し時は carrier 空 → push なし。agent (Bun) 側で
+  // extractTraceContextFromEnv が同 trace ID を復元する。
+  const traceEnvCarrier: Record<string, string> = {};
+  injectTraceContextToEnv(traceEnvCarrier);
+  for (const [name, value] of Object.entries(traceEnvCarrier)) {
+    env.push({ name, value });
+  }
+
+  // OTel: telemetry.googleapis.com への OTLP は OneCLI proxy をバイパスする
+  // (= 詳細根拠は src/observability/no-proxy.ts の WHY コメント)。
+  // providerContribution.env で先に NO_PROXY が push されている可能性があるため、
+  // env 配列内の既存エントリは findIndex 経由で上書きする (= push 重複防止)。
+  const noProxyValue = buildNoProxyWithTelemetry(providerContribution.env?.NO_PROXY, process.env.NO_PROXY);
+  const noProxyIdx = env.findIndex((e) => e.name === 'NO_PROXY');
+  if (noProxyIdx >= 0) {
+    env[noProxyIdx] = { name: 'NO_PROXY', value: noProxyValue };
+  } else {
+    env.push({ name: 'NO_PROXY', value: noProxyValue });
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls

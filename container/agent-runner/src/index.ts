@@ -21,9 +21,15 @@
  *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
  */
 
+// OTel: side-effect import で SDK init を main() より前に実施 (top-level await)。
+// init failure は warn して継続 (= telemetry なしで polling loop を生かす)。
+import './observability/otel-init.js';
+
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+import { context } from '@opentelemetry/api';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
@@ -33,10 +39,18 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { runPollLoop } from './poll-loop.js';
 import { log } from './log.js';
+import { extractTraceContextFromEnv, shutdownOtel } from './observability/index.js';
 
 const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
+  // host (orchestrator) が K8s Job env に inject した TRACEPARENT/TRACESTATE を
+  // 復元 → 以降の active context に乗せる。env 不在時は ROOT_CONTEXT (= no parent)。
+  const parentContext = extractTraceContextFromEnv(process.env);
+  return context.with(parentContext, () => mainInner());
+}
+
+async function mainInner(): Promise<void> {
   const config = loadConfig();
   const providerName = config.provider.toLowerCase() as ProviderName;
 
@@ -99,6 +113,19 @@ async function main(): Promise<void> {
     systemContext: { instructions },
   });
 }
+
+// OTel graceful shutdown — SIGTERM は host による killContainer (Docker stop /
+// K8s Job 削除) 経由が主経路。BatchSpanProcessor の queue を flush しないと
+// Phase 2 以降の実 span が無音で失われる。
+async function shutdown(signal: string): Promise<void> {
+  log.info('Shutdown signal received', { signal });
+  await shutdownOtel().catch((err: unknown) => {
+    log.warn('OTel shutdown failed', { error: String(err) });
+  });
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 
 main().catch((err) => {
   log.fatal('Fatal error', { err });
