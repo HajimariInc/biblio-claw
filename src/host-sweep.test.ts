@@ -203,6 +203,21 @@ describe('decideStuckAction: idle cleanup (issue #57)', () => {
     });
     expect(res.action).toBe('ok');
   });
+
+  it('returns ok when Bash tool is declared running, even with old heartbeat and no claims', () => {
+    // declaredBashMs !== null = 意図的な長時間処理中。kill-idle 対象外で誤 kill を防ぐ。
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS + 60_000),
+      containerState: {
+        current_tool: 'Bash',
+        tool_declared_timeout_ms: 10 * 60 * 1000,
+        tool_started_at: new Date(BASE - 6 * 60 * 1000).toISOString(),
+      },
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
