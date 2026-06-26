@@ -363,10 +363,16 @@ describe('poll loop — stale session recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    // Error was written to outbound
+    // Actionable recovery hint was written to outbound (issue #49 / poll-loop
+    // Important #2): when isSessionInvalid returns true the user sees a
+    // "もう一度メッセージを送ってください" prompt instead of the raw wire-
+    // format Error JSON, because the next message will spawn a fresh SDK
+    // session that picks up the rotator-refreshed token.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('もう一度メッセージを送ってください');
+    expect(text).not.toContain('Error:');
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
