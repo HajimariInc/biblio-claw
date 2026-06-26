@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { context, propagation, trace, ROOT_CONTEXT } from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import { BasicTracerProvider, AlwaysOnSampler, ParentBasedSampler } from '@opentelemetry/sdk-trace-base';
@@ -11,15 +11,28 @@ import { injectTraceContextToEnv, extractTraceContextFromEnv } from '../index.js
 // Setter/Getter の振る舞いのみで OTel propagation 統合は別途必要。
 
 describe('trace context env round-trip', () => {
+  let provider: BasicTracerProvider;
+
   beforeAll(() => {
     // active span を context.active() で参照できるよう ContextManager を設定
     context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
     propagation.setGlobalPropagator(new W3CTraceContextPropagator());
     // BasicTracerProvider (auto-instrumentations なし、起動軽量) で active span を作る
-    const provider = new BasicTracerProvider({
+    provider = new BasicTracerProvider({
       sampler: new ParentBasedSampler({ root: new AlwaysOnSampler() }),
     });
     trace.setGlobalTracerProvider(provider);
+  });
+
+  // OTel global state (context manager / propagator / tracer provider) を本テスト
+  // file が書き換えるため、他テスト (= otel.test.ts も startOtel 経由で同 global を
+  // 書き換える) との相互汚染を防ぐ。vitest pool: forks default でもファイル間順序
+  // 依存で flaky 化するリスクの予防。
+  afterAll(async () => {
+    await provider?.shutdown().catch(() => undefined);
+    trace.disable();
+    propagation.disable();
+    context.disable();
   });
 
   it('inject した active span の trace ID を extract で復元できる', () => {
