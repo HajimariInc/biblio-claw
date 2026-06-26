@@ -260,7 +260,8 @@ spec:
               memory: 64Mi
 
         # ---- vertex-token-rotator sidecar (Phase 3、案 1A: 既存 1-shot script を loop wrap) ----
-        # 50min 周期で onecli-vertex-secret.sh を呼んで ADC token を OneCLI に投入。
+        # 40min 周期で onecli-vertex-secret.sh を呼んで ADC token を OneCLI に投入
+        # (issue #49: 旧 50min 周期は ADC TTL ~60min と 10min gap、40min で 20min margin に拡大)。
         # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。

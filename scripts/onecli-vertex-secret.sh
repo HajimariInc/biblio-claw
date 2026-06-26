@@ -17,7 +17,7 @@
 #     入れるには type:generic + injectionConfig が必須 (anthropic は x-api-key 固定)。
 #   - GET /v1/secrets は値を返さない (AES-256-GCM マスク)。更新は PATCH で value のみ。
 #   - pathPattern は省略 (v1.30.0 は null を 400 で拒否。未指定で全パスにマッチ)。
-#   - ADC token は ~1h で失効 → 再実行で PATCH フレッシュ化 (Phase 2 で Sidecar 自動化)。
+#   - ADC token は ~1h で失効 → 再実行で PATCH フレッシュ化 (Phase 2 で Sidecar 化済 = vertex-token-rotator)。
 #
 # 更新流儀 (issue #49 で DELETE→POST から PATCH/POST 分岐に変更):
 #   旧: 毎回 DELETE → POST で secret を完全再投入。DELETE と POST の隙間に
@@ -72,11 +72,16 @@ done
 #   curl 出力を変数に受けてから jq に流す。curl 失敗を fail で止めないと、
 #   呼び出し側が「未存在」と誤判定して二重 POST 投入してしまうため明示 fail。
 secret_id() {
-  local out
+  local out id
   out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
     || fail "GET /v1/secrets への接続に失敗 (secret_id)"
-  printf '%s' "$out" \
-    | jq -r --arg n "$VERTEX_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1
+  # jq の失敗 (= OneCLI が HTML エラーページ等の非 JSON 200 を返した場合) は
+  # pipefail で非ゼロ伝播するが、`id="$(secret_id)"` 側の set -e 経由で
+  # 黙って exit してしまい [FAIL] 行が残らないため明示的に || fail を発行する。
+  id="$(printf '%s' "$out" \
+    | jq -r --arg n "$VERTEX_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1)" \
+    || fail "GET /v1/secrets のレスポンスが JSON パース不能 (OneCLI ログを確認: kubectl logs ... -c onecli)"
+  printf '%s' "$id"
 }
 
 # ensure_secret: ADC token を type:generic + authorization:Bearer の secret として投入。

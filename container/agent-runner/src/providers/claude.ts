@@ -329,12 +329,17 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  * sticks and every retry hits the same 401 — clearing the continuation
  * forces a fresh session on the next patron message, which re-inits the
  * Vertex client and picks up the (already-refreshed) token from OneCLI.
- * Narrow to `401.*ACCESS_TOKEN_EXPIRED` (not bare 401) so transient 401s
- * unrelated to auth (rate-limit variants, etc.) do not trigger continuation
- * loss.
+ *
+ * Both auth patterns are anchored with `401.*` so neither triggers
+ * continuation loss outside HTTP auth contexts:
+ *  - bare `401` (rate-limit variants etc.) → no match
+ *  - non-HTTP errors carrying "invalid authentication credentials" from
+ *    future MCP tools (e.g. Drive, BigQuery) → no match
+ * Only Vertex-shaped 401 bodies with one of the two canonical phrases
+ * actually drop the continuation.
  */
 const STALE_SESSION_RE =
-  /no conversation found|ENOENT.*\.jsonl|session.*not found|401.*ACCESS_TOKEN_EXPIRED|invalid authentication credentials/i;
+  /no conversation found|ENOENT.*\.jsonl|session.*not found|401.*ACCESS_TOKEN_EXPIRED|401.*invalid authentication credentials/i;
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;

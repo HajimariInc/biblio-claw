@@ -227,20 +227,30 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
       // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
+      const sessionInvalid = continuation && config.provider.isSessionInvalid(err);
+      if (sessionInvalid) {
         log.warn(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
+      // Write error response so the user knows something went wrong.
+      // When the continuation was just cleared (issue #49 path: Vertex 401
+      // ACCESS_TOKEN_EXPIRED / "invalid authentication credentials" on a
+      // resumed session), surface an actionable hint instead of the raw
+      // wire-format Error JSON — the next patron message will spawn a
+      // fresh SDK session that picks up the rotator-refreshed token, so
+      // "もう一度送ってください" is the user-visible recovery action.
+      const responseText = sessionInvalid
+        ? '一時的な認証エラーが発生しました。もう一度メッセージを送ってください (セッションをリセットして自動回復します)。'
+        : `Error: ${errMsg}`;
       writeMessageOut({
         id: generateId(),
         kind: 'chat',
         platform_id: routing.platformId,
         channel_type: routing.channelType,
         thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        content: JSON.stringify({ text: responseText }),
       });
     } finally {
       clearCurrentInReplyTo();

@@ -4,9 +4,10 @@
 # orchestrator Pod 内の Native sidecar として動き、既存 1-shot script
 # `onecli-vertex-secret.sh` を ROTATE_INTERVAL_SEC (既定 2400s = 40min) 周期で
 # 呼び出して ADC token を OneCLI に投入し続ける。ADC token TTL は ~1h なので
-# 40min 周期で安全マージン (issue #49: 50min 周期は 60min TTL との 10min gap
-# 帯に agent Pod spawn が当たると起動直後の Vertex 呼び出しで 401 を踏むため、
-# gap を ~0 に縮める = 60 - 40 = 20min margin)。
+# 40min 周期で安全マージンを 10min → 20min に拡大 (issue #49: 旧 50min 周期は
+# 60min TTL との 10min 余白しかなく、agent Pod spawn が rotation 直前に当たると
+# 起動直後の Vertex 呼び出しで token がほぼ expired で 401 を踏むため、
+# rotation を 40min に詰めて 20min margin にする = 60 - 40 = 20)。
 #
 # 案 1A の意義は gh-rotate.sh と同じ — 既存 1-shot script を本 wrapper で
 # 包んで二重メンテを回避する (Phase 1/2.5 実機検証済資産を流用)。

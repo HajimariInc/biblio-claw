@@ -40,11 +40,12 @@ describe('ClaudeProvider.isSessionInvalid', () => {
   });
 
   // issue #49 — Google API canonical phrasing for auth failure (used by
-  // Vertex even when the body shape varies).
-  it('returns true for "invalid authentication credentials" phrasing', () => {
+  // Vertex even when the body shape varies). Anchored with `401.*` so the
+  // raw HTTP status must precede the phrase.
+  it('returns true for 401 with "invalid authentication credentials"', () => {
     expect(
       provider.isSessionInvalid(
-        new Error('Request had invalid authentication credentials.'),
+        new Error('API Error: 401 Request had invalid authentication credentials.'),
       ),
     ).toBe(true);
   });
@@ -54,6 +55,29 @@ describe('ClaudeProvider.isSessionInvalid', () => {
   it('returns false for bare 401 without ACCESS_TOKEN_EXPIRED', () => {
     expect(
       provider.isSessionInvalid(new Error('HTTP 401 rate limit exceeded')),
+    ).toBe(false);
+  });
+
+  // Design boundary: ACCESS_TOKEN_EXPIRED without a preceding 401 must
+  // not drop continuation. Documents intent in case a future PR is tempted
+  // to relax the anchor.
+  it('returns false for ACCESS_TOKEN_EXPIRED without preceding 401', () => {
+    expect(
+      provider.isSessionInvalid(
+        new Error('{"reason":"ACCESS_TOKEN_EXPIRED","domain":"googleapis.com"}'),
+      ),
+    ).toBe(false);
+  });
+
+  // Design boundary: "invalid authentication credentials" without 401
+  // must not drop continuation. Protects against future MCP tools (Drive,
+  // BigQuery, etc.) that surface this canonical Google OAuth phrasing in
+  // non-Vertex contexts.
+  it('returns false for "invalid authentication credentials" without 401', () => {
+    expect(
+      provider.isSessionInvalid(
+        new Error('MCP tool error: invalid authentication credentials from drive.googleapis.com'),
+      ),
     ).toBe(false);
   });
 
