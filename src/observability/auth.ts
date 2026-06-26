@@ -1,3 +1,6 @@
+// NOTE: container/agent-runner/src/observability/auth.ts (agent) と対のファイル。
+// ロジックは同一に保つ。ただし setInterval の unref 呼び出しは Bun と Node で型が
+// 異なるため agent 側だけ二段キャスト。それ以外の振る舞いは一致させること。
 import { GoogleAuth } from 'google-auth-library';
 import { log } from '../log.js';
 

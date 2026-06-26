@@ -1,4 +1,7 @@
-// WARNING: src/observability/auth.ts (host) と同期させること
+// NOTE: src/observability/auth.ts (host) と対になるファイル。
+// ロジックは同一に保つ。ただし setInterval の unref 呼び出しは Bun と Node で型が
+// 異なる (Bun の戻り値は NodeJS.Timeout 互換でないため二段キャストが必要) ため
+// 意図的に実装が異なる。それ以外の振る舞いは host と一致させること。
 import { GoogleAuth } from 'google-auth-library';
 import { log } from '../log.js';
 
@@ -27,9 +30,10 @@ export async function initTokenRefresh(): Promise<string> {
       log.warn('OTel token refresh failed', { error: String(err) });
     }
   }, REFRESH_INTERVAL_MS);
-  if ((refreshTimer as unknown as { unref?: () => void })?.unref) {
-    (refreshTimer as unknown as { unref: () => void }).unref();
-  }
+  // Bun の setInterval 戻り値は NodeJS.Timeout 型を持たないため .unref() を型安全に
+  // 呼べない。unref() は daemon 化防止 (= プロセス終了を妨げない) のためだけなので、
+  // 存在しない場合は no-op で問題ない。
+  (refreshTimer as unknown as { unref?: () => void }).unref?.();
   return cachedToken;
 }
 

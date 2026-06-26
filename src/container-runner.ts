@@ -25,6 +25,7 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { injectTraceContextToEnv } from './observability/index.js';
+import { buildNoProxyWithTelemetry } from './observability/no-proxy.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -540,23 +541,16 @@ async function buildContainerSpec(
     env.push({ name, value });
   }
 
-  // OTel: Bun の node:https.Agent partial 実装で HTTPS_PROXY (= OneCLI proxy) が
-  // 効かない可能性があるため、telemetry.googleapis.com への OTLP は proxy バイパス。
-  // OTLP は自前 Bearer (ADC) なので OneCLI MITM 認証注入は不要。
-  const existingNoProxy = providerContribution.env?.NO_PROXY ?? process.env.NO_PROXY ?? '';
-  const noProxyEntries = existingNoProxy
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!noProxyEntries.includes('telemetry.googleapis.com')) {
-    noProxyEntries.push('telemetry.googleapis.com');
-  }
-  // providerContribution.env で先に NO_PROXY が push されている可能性があるため、上書き
+  // OTel: telemetry.googleapis.com への OTLP は OneCLI proxy をバイパスする
+  // (= 詳細根拠は src/observability/no-proxy.ts の WHY コメント)。
+  // providerContribution.env で先に NO_PROXY が push されている可能性があるため、
+  // env 配列内の既存エントリは findIndex 経由で上書きする (= push 重複防止)。
+  const noProxyValue = buildNoProxyWithTelemetry(providerContribution.env?.NO_PROXY, process.env.NO_PROXY);
   const noProxyIdx = env.findIndex((e) => e.name === 'NO_PROXY');
   if (noProxyIdx >= 0) {
-    env[noProxyIdx] = { name: 'NO_PROXY', value: noProxyEntries.join(',') };
+    env[noProxyIdx] = { name: 'NO_PROXY', value: noProxyValue };
   } else {
-    env.push({ name: 'NO_PROXY', value: noProxyEntries.join(',') });
+    env.push({ name: 'NO_PROXY', value: noProxyValue });
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls

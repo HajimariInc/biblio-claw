@@ -201,7 +201,8 @@ spec:
             - { name: LOG_COMPONENT, value: host-orchestrator }
             # === OTel (M4-A Phase 1) ===
             # OTLP endpoint はコードで hardcode (= telemetry.googleapis.com)。
-            # OTEL_DIAG=true は Bun "Request timed out" 診断時のみ Phase 2 で投入。
+            # OTEL_DIAG=true は常時 off。Bun "Request timed out" 診断が必要な場合
+            # のみ一時投入 (opentelemetry-js#5260: span は届く、warn は無視可能)。
             - { name: OTEL_SERVICE_NAME, value: biblio-claw }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: deployment.environment=gke }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入

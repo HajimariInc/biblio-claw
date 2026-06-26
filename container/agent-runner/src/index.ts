@@ -39,7 +39,7 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import { runPollLoop } from './poll-loop.js';
 import { log } from './log.js';
-import { extractTraceContextFromEnv } from './observability/index.js';
+import { extractTraceContextFromEnv, shutdownOtel } from './observability/index.js';
 
 const CWD = '/workspace/agent';
 
@@ -113,6 +113,19 @@ async function mainInner(): Promise<void> {
     systemContext: { instructions },
   });
 }
+
+// OTel graceful shutdown — SIGTERM は host による killContainer (Docker stop /
+// K8s Job 削除) 経由が主経路。BatchSpanProcessor の queue を flush しないと
+// Phase 2 以降の実 span が無音で失われる。
+async function shutdown(signal: string): Promise<void> {
+  log.info('Shutdown signal received', { signal });
+  await shutdownOtel().catch((err: unknown) => {
+    log.warn('OTel shutdown failed', { error: String(err) });
+  });
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 
 main().catch((err) => {
   log.fatal('Fatal error', { err });

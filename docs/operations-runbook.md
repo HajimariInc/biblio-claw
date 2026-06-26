@@ -803,7 +803,7 @@ UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-h
 6. **API enable 確認**:`gcloud services list --enabled --filter=cloudtrace --project=hajimari-ai-hackathon-2026`
 7. **agent 側のみ届かない場合**:`kubectl exec biblio-orchestrator-0 -c orchestrator -- printenv | grep -i otel` で env 確認、`NO_PROXY` に `telemetry.googleapis.com` が入っているか
 8. **HTTPS_PROXY 経由を疑う**:agent Pod 内で `bun -e "fetch('https://telemetry.googleapis.com/v1/traces')"` で直接接続テスト
-9. **Fallback**:本 Phase 1 plan §Fallback Knowledge Bank(`@google-cloud/opentelemetry-cloud-trace-exporter` への切替 / host 集約案)
+9. **Fallback 候補**:(a) `@google-cloud/opentelemetry-cloud-trace-exporter` (gRPC、Cloud Trace 専用 SDK) に host 側だけ切り替え(agent 側は Bun gRPC silent freeze のため不可)/(b) agent 側 export を諦め、span を `outbound.db` の新規テーブル経由で host に送って一元 export する architecture に変更
 
 ### 関連
 

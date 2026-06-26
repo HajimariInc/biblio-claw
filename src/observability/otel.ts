@@ -6,6 +6,7 @@ import { BatchSpanProcessor, ParentBasedSampler, AlwaysOnSampler } from '@opente
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { trace, diag, DiagConsoleLogger, DiagLogLevel, type Tracer } from '@opentelemetry/api';
 import { initTokenRefresh, getCachedToken, stopTokenRefresh } from './auth.js';
+import { log } from '../log.js';
 
 const OTLP_ENDPOINT = 'https://telemetry.googleapis.com/v1/traces';
 
@@ -63,6 +64,14 @@ export async function startOtel(): Promise<NodeSDK> {
   return sdkInstance;
 }
 
+// SDK 内部の private field `_headers` を直接書き換える hack。
+// OTLPTraceExporter は dynamic header 更新の公式 API を持たない
+// (= opentelemetry-js#4017)。SDK バージョンアップで `_headers` が rename/
+// 削除された場合は silent fail (= Authorization が初回 token で固定 → 1h で 401
+// retry-loop) になるため、検知用に warn ログを 1 回だけ出す + SDK upgrade 後は
+// smoke-test (scripts/otel-smoke-test.ts) を回して疎通確認すること。
+let headerRefreshWarned = false;
+
 function startHeaderRefresh(): void {
   if (headerRefreshTimer) return;
   headerRefreshTimer = setInterval(() => {
@@ -71,6 +80,12 @@ function startHeaderRefresh(): void {
     const exp = exporterRef as unknown as { _headers?: Record<string, string> };
     if (exp._headers) {
       exp._headers.Authorization = `Bearer ${token}`;
+    } else if (!headerRefreshWarned) {
+      log.warn('OTel header refresh skipped: _headers not accessible on exporter', {
+        event: 'otel.header_refresh.skipped',
+        outcome: 'degraded',
+      });
+      headerRefreshWarned = true;
     }
   }, 60 * 1000);
   if (headerRefreshTimer.unref) headerRefreshTimer.unref();
@@ -81,6 +96,7 @@ export async function shutdownOtel(): Promise<void> {
     clearInterval(headerRefreshTimer);
     headerRefreshTimer = null;
   }
+  headerRefreshWarned = false;
   stopTokenRefresh();
   if (!sdkInstance) return;
   await sdkInstance.shutdown();
