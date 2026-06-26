@@ -41,6 +41,10 @@ export async function startOtel(): Promise<NodeSDK> {
   const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? 'biblio-claw',
     [ATTR_SERVICE_VERSION]: process.env.OTEL_SERVICE_VERSION ?? '0.0.0',
+    // Cloud Trace OTLP 経路は Resource に gcp.project_id が必須
+    // (= 不在時 400 "Resource is missing required attribute"、
+    // x-goog-user-project header だけでは不足、smoke-test で実測)。
+    'gcp.project_id': projectId,
   });
 
   sdkInstance = new NodeSDK({

@@ -65,6 +65,9 @@ export async function startOtel(): Promise<BasicTracerProvider> {
 
   const resource = resourceFromAttributes({
     [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? 'biblio-claw-agent',
+    // Cloud Trace OTLP 経路は Resource に gcp.project_id が必須
+    // (= 詳細根拠は host 側 src/observability/otel.ts の同コメント参照)。
+    'gcp.project_id': projectId,
   });
   provider = new BasicTracerProvider({
     resource,
