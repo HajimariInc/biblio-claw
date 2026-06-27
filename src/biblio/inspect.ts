@@ -3,8 +3,9 @@
  *
  * cheap-to-expensive 順 (= fail-fast):
  *   1. 存在確認: quarantine が読めない                          → HOLD/inspect_error
- *   2. schema : `.claude-plugin/plugin.json` parse + 必須フィールド (name) → REJECT/schema_invalid
- *   3. license: `plugin.json.license` を allow/deny 照合         → HOLD/license_denied|license_unknown
+ *   2. schema : plugin metadata (`.claude-plugin/plugin.json` 優先、ENOENT なら `.claude-plugin/marketplace.json`
+ *               の plugins[] から該当 entry を fallback) parse + 必須フィールド (name) → REJECT/schema_invalid
+ *   3. license: plugin metadata の license を allow/deny 照合     → HOLD/license_denied|license_unknown
  *   4. dangerous: SKILL.md / *.sh / *.py / *.js を集約 → Vertex × Gemini に判定させる
  *                                                                → REJECT/dangerous_code or ACCEPT
  *                  parse 失敗・LLM 例外は HOLD/inspect_error (fail-closed)
@@ -151,6 +152,113 @@ function isLicenseDenied(license: string): boolean {
   return DENY_LICENSE_PATTERNS.some((pattern) => license.includes(pattern));
 }
 
+type ResolvePluginMetaOk = {
+  ok: true;
+  value: Record<string, unknown>;
+  source: 'plugin.json' | 'marketplace.json';
+};
+type ResolvePluginMetaFail = {
+  ok: false;
+  reason: 'missing' | 'io_error' | 'parse' | 'no_entry';
+  detail: string;
+};
+
+/**
+ * schema 軸の metadata source を解決する (issue #63)。
+ *
+ * 優先順位:
+ *   1. `.claude-plugin/plugin.json` が存在すれば parse して返す (= 単一 plugin 形式、従来挙動)
+ *   2. plugin.json が ENOENT なら `.claude-plugin/marketplace.json` を試す (marketplace 形式)
+ *      - 3-segment biblio (`<owner>--<name>--<skill>`): plugins[].name === skill で entry を引く
+ *      - 2-segment biblio: plugins[0] を代表として使う
+ *   3. どちらも不在 (`missing`) / 非 ENOENT I/O 障害 (`io_error`) / JSON parse 失敗 (`parse`) /
+ *      該当 entry なし (`no_entry`) は fail
+ *
+ * 成功時は `log.debug` で source を記録 (= 6 ヶ月後の運用調査で「どの metadata を採用したか」追跡可能)。
+ * plugins[] への安全アクセスは `Array.isArray` ガードで型保証する設計流儀
+ * (shelve / unshelve 系も同方針)。
+ */
+function resolvePluginMeta(targetPath: string, biblioName: string): ResolvePluginMetaOk | ResolvePluginMetaFail {
+  // 経路 1: plugin.json
+  const pluginJsonPath = path.join(targetPath, '.claude-plugin', 'plugin.json');
+  let pluginRaw: string | null = null;
+  try {
+    pluginRaw = fs.readFileSync(pluginJsonPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code !== 'ENOENT') {
+      // 非 ENOENT I/O 障害 (EACCES / EMFILE 等) は parse 失敗とは別 reason で集計可能にする (issue #63 PR review)。
+      return { ok: false, reason: 'io_error', detail: `.claude-plugin/plugin.json が読めません: ${code}` };
+    }
+    // ENOENT → 経路 2 へ
+  }
+  if (pluginRaw !== null) {
+    try {
+      const parsed = JSON.parse(pluginRaw) as Record<string, unknown>;
+      log.debug('inspect: schema resolved via plugin.json', { biblioName, targetPath });
+      return { ok: true, value: parsed, source: 'plugin.json' };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: 'parse', detail: `.claude-plugin/plugin.json が不正 JSON: ${detail}` };
+    }
+  }
+
+  // 経路 2: marketplace.json fallback
+  const marketplaceJsonPath = path.join(targetPath, '.claude-plugin', 'marketplace.json');
+  let marketplaceRaw: string;
+  try {
+    marketplaceRaw = fs.readFileSync(marketplaceJsonPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code === 'ENOENT') {
+      return {
+        ok: false,
+        reason: 'missing',
+        detail:
+          '.claude-plugin/plugin.json も marketplace.json も読めません (個別 skill 仕入れの場合は `<owner>/<repo>/<skill>` 形式で指定してください)',
+      };
+    }
+    return { ok: false, reason: 'io_error', detail: `.claude-plugin/marketplace.json が読めません: ${code}` };
+  }
+  let marketplace: { plugins?: unknown };
+  try {
+    marketplace = JSON.parse(marketplaceRaw) as { plugins?: unknown };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: 'parse', detail: `.claude-plugin/marketplace.json が不正 JSON: ${detail}` };
+  }
+  if (!Array.isArray(marketplace.plugins) || marketplace.plugins.length === 0) {
+    return {
+      ok: false,
+      reason: 'no_entry',
+      detail: 'marketplace.json に plugins[] が存在しません or 空です',
+    };
+  }
+  const plugins = marketplace.plugins as Record<string, unknown>[];
+  const segments = biblioName.split('--');
+  const skillSegment = segments.length === 3 ? segments[2] : null;
+
+  let entry: Record<string, unknown> | undefined;
+  if (skillSegment !== null) {
+    entry = plugins.find((p) => typeof p.name === 'string' && p.name === skillSegment);
+    if (entry === undefined) {
+      return {
+        ok: false,
+        reason: 'no_entry',
+        detail: `marketplace.json plugins[] に name="${skillSegment}" の entry が存在しません`,
+      };
+    }
+  } else {
+    entry = plugins[0];
+  }
+  log.debug('inspect: schema resolved via marketplace.json', {
+    biblioName,
+    targetPath,
+    entryName: typeof entry.name === 'string' ? entry.name : undefined,
+  });
+  return { ok: true, value: entry, source: 'marketplace.json' };
+}
+
 /**
  * 検品本体。
  *
@@ -175,38 +283,37 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
   }
 
   // --- 2. schema 軸 ---
-  const pluginJsonPath = path.join(targetPath, '.claude-plugin', 'plugin.json');
-  let pluginRaw: string;
-  try {
-    pluginRaw = fs.readFileSync(pluginJsonPath, 'utf-8');
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
-    log.warn('inspect: plugin.json unreadable', { biblioName, pluginJsonPath, code });
-    return fail('REJECT', biblioName, 'schema_invalid', `.claude-plugin/plugin.json が読めません: ${code}`);
+  // 優先: `.claude-plugin/plugin.json` (= 単一 plugin 形式)
+  // fallback: `.claude-plugin/marketplace.json` の plugins[] から該当 entry (issue #63)
+  const resolved = resolvePluginMeta(targetPath, biblioName);
+  if (!resolved.ok) {
+    log.warn('inspect: schema axis failed', { biblioName, reason: resolved.reason, detail: resolved.detail });
+    return fail('REJECT', biblioName, 'schema_invalid', resolved.detail);
   }
-  let plugin: Record<string, unknown>;
-  try {
-    plugin = JSON.parse(pluginRaw) as Record<string, unknown>;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    log.warn('inspect: plugin.json parse failed', { biblioName, detail });
-    return fail('REJECT', biblioName, 'schema_invalid', `.claude-plugin/plugin.json が不正 JSON: ${detail}`);
-  }
+  const plugin = resolved.value;
   if (typeof plugin.name !== 'string' || plugin.name.length === 0) {
-    log.warn('inspect: plugin.json missing required field "name"', { biblioName });
+    log.warn('inspect: plugin metadata missing required field "name"', {
+      biblioName,
+      source: resolved.source,
+    });
     return fail(
       'REJECT',
       biblioName,
       'schema_invalid',
-      '.claude-plugin/plugin.json に必須フィールド "name" がありません',
+      `plugin metadata (${resolved.source}) に必須フィールド "name" がありません`,
     );
   }
 
   // --- 3. license 軸 ---
   const licenseValue = plugin.license;
   if (typeof licenseValue !== 'string' || licenseValue.length === 0) {
-    log.warn('inspect: license missing', { biblioName });
-    return fail('HOLD', biblioName, 'license_unknown', 'plugin.json.license が指定されていません (allow リスト未照合)');
+    log.warn('inspect: license missing', { biblioName, source: resolved.source });
+    return fail(
+      'HOLD',
+      biblioName,
+      'license_unknown',
+      `plugin metadata (${resolved.source}) の license が指定されていません (allow リスト未照合)`,
+    );
   }
   if (isLicenseDenied(licenseValue)) {
     log.warn('inspect: license denied', { biblioName, license: licenseValue });

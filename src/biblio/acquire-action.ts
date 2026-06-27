@@ -34,6 +34,12 @@ function resultText(repo: string, skill: string | undefined, result: AcquireResu
     // 案内になる (= patron は次の手 = シナリオ B = `@bot 仕入れて <owner>/<repo>/<skill>` に進める)。
     return result.detail;
   }
+  // `marketplace_source_root` / `marketplace_source_external` は issue #63 PR 検証で追加。
+  // どちらも patron に「次の手」を提示する案内文を acquire.ts 側で detail に組み済 (= 2-segment で
+  // 叩いて / 別 repo を直接指定して) ため、素通しで Slack に流すと UX が親切になる。
+  if (result.reason === 'marketplace_source_root' || result.reason === 'marketplace_source_external') {
+    return result.detail;
+  }
   // 'internal' は patron が手で対処できない構成不備 (詳細は types.ts AcquireFailureReason)。
   // 再試行ではなく運用者への報告を促す文言にする。
   if (result.reason === 'internal') {
