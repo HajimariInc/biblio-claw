@@ -159,7 +159,7 @@ type ResolvePluginMetaOk = {
 };
 type ResolvePluginMetaFail = {
   ok: false;
-  reason: 'missing' | 'parse' | 'no_entry';
+  reason: 'missing' | 'io_error' | 'parse' | 'no_entry';
   detail: string;
 };
 
@@ -171,8 +171,10 @@ type ResolvePluginMetaFail = {
  *   2. plugin.json が ENOENT なら `.claude-plugin/marketplace.json` を試す (marketplace 形式)
  *      - 3-segment biblio (`<owner>--<name>--<skill>`): plugins[].name === skill で entry を引く
  *      - 2-segment biblio: plugins[0] を代表として使う
- *   3. どちらも不在 / parse 失敗 / 該当 entry なしは fail
+ *   3. どちらも不在 (`missing`) / 非 ENOENT I/O 障害 (`io_error`) / JSON parse 失敗 (`parse`) /
+ *      該当 entry なし (`no_entry`) は fail
  *
+ * 成功時は `log.debug` で source を記録 (= 6 ヶ月後の運用調査で「どの metadata を採用したか」追跡可能)。
  * plugins[] への安全アクセスは `Array.isArray` ガードで型保証する設計流儀
  * (shelve / unshelve 系も同方針)。
  */
@@ -185,13 +187,15 @@ function resolvePluginMeta(targetPath: string, biblioName: string): ResolvePlugi
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
     if (code !== 'ENOENT') {
-      return { ok: false, reason: 'parse', detail: `.claude-plugin/plugin.json が読めません: ${code}` };
+      // 非 ENOENT I/O 障害 (EACCES / EMFILE 等) は parse 失敗とは別 reason で集計可能にする (issue #63 PR review)。
+      return { ok: false, reason: 'io_error', detail: `.claude-plugin/plugin.json が読めません: ${code}` };
     }
     // ENOENT → 経路 2 へ
   }
   if (pluginRaw !== null) {
     try {
       const parsed = JSON.parse(pluginRaw) as Record<string, unknown>;
+      log.debug('inspect: schema resolved via plugin.json', { biblioName, targetPath });
       return { ok: true, value: parsed, source: 'plugin.json' };
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -214,7 +218,7 @@ function resolvePluginMeta(targetPath: string, biblioName: string): ResolvePlugi
           '.claude-plugin/plugin.json も marketplace.json も読めません (個別 skill 仕入れの場合は `<owner>/<repo>/<skill>` 形式で指定してください)',
       };
     }
-    return { ok: false, reason: 'parse', detail: `.claude-plugin/marketplace.json が読めません: ${code}` };
+    return { ok: false, reason: 'io_error', detail: `.claude-plugin/marketplace.json が読めません: ${code}` };
   }
   let marketplace: { plugins?: unknown };
   try {
@@ -247,6 +251,11 @@ function resolvePluginMeta(targetPath: string, biblioName: string): ResolvePlugi
   } else {
     entry = plugins[0];
   }
+  log.debug('inspect: schema resolved via marketplace.json', {
+    biblioName,
+    targetPath,
+    entryName: typeof entry.name === 'string' ? entry.name : undefined,
+  });
   return { ok: true, value: entry, source: 'marketplace.json' };
 }
 
