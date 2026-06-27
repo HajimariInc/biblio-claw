@@ -809,6 +809,64 @@ kubectl exec biblio-orchestrator-0 -c vertex-token-rotator -n biblio-claw -- \
 
 ---
 
+## Pending Pod の対症手順 (GKE 経路、issue #57)
+
+### 背景
+
+biblio-claw の orchestrator PVC は zonal Persistent Disk (`standard-rwo`) で固定 zone (`asia-northeast1-b`) に縛られ、agent Pod は同 PVC を subPath マウントするため b zone の node でしか spawn できない。b zone の memory が稼働中 agent Pod で埋まると、新規 spawn 要求が `Pending` で固まり、cluster autoscaler も `NotTriggerScaleUp` を返す。patron からは「応答無し」に見える。
+
+### 自動 cleanup (M4 系列以降の標準動作)
+
+`src/host-sweep.ts` の host-sweep が 60 秒 tick で agent session を監視し、次の条件を満たす session の agent container を自動 kill する:
+
+1. heartbeat ファイルが `AGENT_IDLE_THRESHOLD_MS` (デフォルト 5 分) 以上更新されていない
+2. processing 中のメッセージ (claims) が存在しない
+
+kill 後、次の inbound message で `wakeContainer` が新 container を spawn する (= 既存 wake 経路、追加配線なし)。`ABSOLUTE_CEILING_MS` (30 分、stuck container 用) は最後の砦として温存。
+
+### threshold tuning
+
+`AGENT_IDLE_THRESHOLD_MS` env で閾値を ms 単位で上書き可能。manifest 例:
+
+```yaml
+# k8s/10-orchestrator-statefulset.yaml の orchestrator container env block
+- name: AGENT_IDLE_THRESHOLD_MS
+  value: '600000'  # 10 分 (= prod 負荷状況に応じて調整)
+```
+
+短すぎる (1-2 分) と patron 発話の間隔で spawn-kill が反復し体感遅延が増える、長すぎる (15 分以上) と本対症の効きが薄い。default 5 分は trade-off の中間案。
+
+### 手動対症 (緊急時、auto cleanup が間に合わない場合)
+
+```bash
+# 1. Pending Pod の特定
+kubectl get pods -n biblio-claw -l 'job-name'
+kubectl describe pod <pending-pod> -n biblio-claw | grep -A 5 Events
+
+# 2. 既存 agent Pod の idle 時間確認
+kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- \
+  pnpm run ncl sessions list | tail -10
+
+# 3. idle session の Job 削除 → memory 解放
+kubectl delete job <oldest-idle-job> -n biblio-claw
+kubectl wait --for=delete pod/<oldest-pod> -n biblio-claw --timeout=60s
+
+# 4. Pending Pod の schedule 再評価 (10-30 秒で Running になる見込み)
+kubectl get pod <pending-pod> -n biblio-claw
+```
+
+### 構造的解消 (中期、別 PRD)
+
+orchestrator PVC を Regional Persistent Disk に切替えることで agent Pod が両 zone (`asia-northeast1-a` / `-b`) の node に乗れるようになり、Pending 確率を構造的に下げる。disk cost が約 2 倍 + PVC 移行手順 (snapshot → restore or 再構築) の検証が必要なため、本 idle cleanup のリリース後 1 週間程度観測してから判断する。
+
+### 関連
+
+- issue #57 (= 本セクションの直接元、PVC zonal disk 由来の構造制約)
+- `agent_pod_residual_race_condition` (= Pod 残置 race、本 cleanup で観測症状が緩和される)
+- ルート `CLAUDE.md` §Two-DB セッション分割 / §コンテナ再起動 (= kill 経路の wake 周辺)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

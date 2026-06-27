@@ -10,8 +10,10 @@ import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-
 import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  IDLE_THRESHOLD_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
+  parseIdleThresholdMs,
   parseSqliteUtc,
 } from './host-sweep.js';
 import type { Session } from './types.js';
@@ -151,6 +153,112 @@ describe('decideStuckAction', () => {
       claims: [{ message_id: 'x', status_changed: 'not-a-date' }],
     });
     expect(res.action).toBe('ok');
+  });
+});
+
+describe('decideStuckAction: idle cleanup', () => {
+  it('returns kill-idle when heartbeat older than threshold and no claims pending', () => {
+    const heartbeatAge = IDLE_THRESHOLD_MS + 60_000;
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - heartbeatAge,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('kill-idle');
+    if (res.action !== 'kill-idle') return;
+    expect(res.heartbeatAgeMs).toBe(heartbeatAge);
+    expect(res.thresholdMs).toBe(IDLE_THRESHOLD_MS);
+  });
+
+  it('returns ok when heartbeat is within idle threshold', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS - 1_000),
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('defers to kill-claim path when claims are pending, even with old heartbeat', () => {
+    // Heartbeat older than IDLE_THRESHOLD_MS (would qualify as idle) but a
+    // stuck claim is present — kill-claim takes precedence because kill-idle
+    // is gated by claims.length === 0. kill-ceiling does not fire (under 30 min).
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS + 60_000),
+      containerState: null,
+      claims: [claim('msg-1', CLAIM_STUCK_MS + 30_000)],
+    });
+    expect(res.action).toBe('kill-claim');
+  });
+
+  it('returns ok when heartbeat is absent (mtime=0), even past threshold', () => {
+    // Freshly-spawned containers have no heartbeat file yet — excluded from
+    // idle judgment to avoid killing every container within seconds of spawn.
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerState: null,
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('returns ok when Bash tool is declared running with a numeric timeout', () => {
+    // declaredBashMs !== null means agent has explicitly declared a long-running
+    // tool window — exclude from idle kill so a slow git clone / npm install
+    // is not interrupted.
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS + 60_000),
+      containerState: {
+        current_tool: 'Bash',
+        tool_declared_timeout_ms: 10 * 60 * 1000,
+        tool_started_at: new Date(BASE - 6 * 60 * 1000).toISOString(),
+      },
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('still fires kill-idle when current_tool is Bash but tool_declared_timeout_ms is null', () => {
+    // bashTimeoutMs returns null when tool_declared_timeout_ms is not a number,
+    // so declaredBashMs === null and the Bash guard does not apply. In practice
+    // this state is unreachable because an active Bash tool implies a claim is
+    // in flight (= claims.length > 0). This test documents the contract:
+    // protection against kill-idle relies on the agent-runner emitting a
+    // numeric tool_declared_timeout_ms whenever Bash is current_tool. If that
+    // contract is ever weakened, the claims-guard alone protects in-flight work.
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - (IDLE_THRESHOLD_MS + 60_000),
+      containerState: {
+        current_tool: 'Bash',
+        tool_declared_timeout_ms: null,
+        tool_started_at: new Date(BASE - 6 * 60 * 1000).toISOString(),
+      },
+      claims: [],
+    });
+    expect(res.action).toBe('kill-idle');
+  });
+});
+
+describe('parseIdleThresholdMs', () => {
+  it('returns the parsed number when input is a positive numeric string', () => {
+    expect(parseIdleThresholdMs('600000')).toBe(600_000);
+    expect(parseIdleThresholdMs('1')).toBe(1);
+  });
+
+  it('returns null for undefined / empty / zero / negative / non-numeric input', () => {
+    expect(parseIdleThresholdMs(undefined)).toBeNull();
+    expect(parseIdleThresholdMs('')).toBeNull();
+    expect(parseIdleThresholdMs('0')).toBeNull();
+    expect(parseIdleThresholdMs('-1')).toBeNull();
+    expect(parseIdleThresholdMs('5min')).toBeNull();
+    expect(parseIdleThresholdMs('abc')).toBeNull();
+    expect(parseIdleThresholdMs('NaN')).toBeNull();
   });
 });
 
