@@ -491,9 +491,10 @@ systemctl --user start|stop|restart nanoclaw
 | [docs/build-and-runtime.md](docs/build-and-runtime.md) | ランタイムの分割(Node host + Bun container)、lockfile、イメージビルド表面、CI、主要な不変条件 |
 | [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 のアーキテクチャ差分 — v1 のものが v2 のどこへ移ったかの語彙 |
 | [docs/migration-dev.md](docs/migration-dev.md) | マイグレーション開発ガイド — テスト、デバッグ、開発ループ |
-| [docs/operations-runbook.md](docs/operations-runbook.md) | **biblio-claw 運用早見表** (local / GCP)。orchestrator / agent / OneCLI の起動・ログ所在・M2/M3 verify 前提セットアップ表 + OneCLI tunnel 罠の対処 + §GKE リセット手順 (部分 reset / 完全 teardown + 再構築 + Cloud SQL Bootstrap GRANT) + /init-project / /init-project-gcp サブコマンドカタログ |
+| [docs/operations-runbook.md](docs/operations-runbook.md) | **biblio-claw 運用早見表** (local / GCP)。orchestrator / agent / OneCLI の起動・ログ所在・M2/M3 verify 前提セットアップ表 + OneCLI tunnel 罠の対処 + §GKE リセット手順 (部分 reset / 完全 teardown + 再構築 + Cloud SQL Bootstrap GRANT) + /init-project / /init-project-gcp サブコマンドカタログ + §M4-A Phase 1-3 OTel 運用 (Cloud Logging → BigQuery sink Terraform 管理) |
 | [docs/equip-physical.md](docs/equip-physical.md) | 装備機構の物理配置規約 / mount トポロジ / Docker+K8s 両 runtime 透過の仕組み / spawn-time install lifecycle / Phase 1-3 完了 (物理配置 + 自律呼び出し + 禁書/焼却) + Phase 5 完了 (m3-verify で消化済) + Phase 3.5 申し送り (M3 全体) |
 | [docs/slack-environments-setup.md](docs/slack-environments-setup.md) | Slack 2 環境分離 (GCP=本番 ws / local=開発 ws) の App セットアップ手順 |
+| [terraform/m4-a-observability/](terraform/m4-a-observability/) | BigQuery sink + dataset + IAM の Terraform 宣言 (M4-A Phase 3)。apply / clustering 後追い / teardown / 既知の罠は `docs/operations-runbook.md` §M4-A Phase 3 を参照 |
 
 ## コンテナビルドキャッシュ
 
