@@ -1,5 +1,5 @@
 .terraform/
-.terraform.lock.hcl
+# .terraform.lock.hcl は commit する (provider version pin、CLAUDE.md supply-chain 方針と整合)
 *.tfstate
 *.tfstate.backup
 *.tfvars
