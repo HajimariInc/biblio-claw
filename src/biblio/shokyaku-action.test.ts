@@ -100,7 +100,8 @@ describe('shokyaku_biblio handler — HITL 経路', () => {
     expect(requestApprovalMock).toHaveBeenCalledTimes(1);
     const opts = requestApprovalMock.mock.calls[0][0] as RequestApprovalOptions;
     expect(opts.action).toBe('shokyaku_confirm');
-    expect(opts.payload).toEqual({ biblioName: 'owner--repo', category: 'biblio-ai' });
+    expect(opts.payload).toMatchObject({ biblioName: 'owner--repo', category: 'biblio-ai' });
+    expect((opts.payload as Record<string, unknown>).originating_request_id).toEqual(expect.any(String));
     expect(opts.title).toBe('焼却の承認');
     expect(getWrittenText()).toContain('焼却承認を申請しました');
   });
@@ -196,5 +197,55 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     const notifiedText = notifyMock.mock.calls[0][0] as string;
     expect(notifiedText).toContain('焼却エラー (internal)');
     expect(notifiedText).toContain('unexpected');
+  });
+});
+
+/**
+ * HITL 2 span 連結検証 (= Phase 2 review B1)。enkin-action.test.ts と同流儀。
+ */
+describe('shokyaku approval handler — HITL 2 span 連結 (originating_request_id)', () => {
+  it('payload.originating_request_id を span 属性 biblio.originating_request_id に設定する', async () => {
+    const otelApi = await import('@opentelemetry/api');
+    const sdk = await import('@opentelemetry/sdk-trace-base');
+    const alsHooks = await import('@opentelemetry/context-async-hooks');
+    const memoryExporter = new sdk.InMemorySpanExporter();
+    otelApi.context.setGlobalContextManager(new alsHooks.AsyncLocalStorageContextManager().enable());
+    const provider = new sdk.BasicTracerProvider({
+      sampler: new sdk.ParentBasedSampler({ root: new sdk.AlwaysOnSampler() }),
+      spanProcessors: [new sdk.SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+
+    shokyakuMock.mockResolvedValueOnce({
+      ok: true,
+      biblioName: 'owner--repo',
+      category: 'biblio-ai',
+      prUrl: 'https://github.com/owner/biblio-shelf/pull/10',
+      prNumber: 10,
+      branchName: 'shokyaku/owner--repo',
+      cleanupWarning: null,
+    });
+
+    const notifyMock = vi.fn();
+    await approvalHandler({
+      session: { id: 'sess-x' } as never,
+      payload: {
+        biblioName: 'owner--repo',
+        category: 'biblio-ai',
+        originating_request_id: 'req-shokyaku-original-uuid',
+      },
+      userId: 'slack:U-DEN',
+      notify: notifyMock,
+    });
+
+    const spans = memoryExporter.getFinishedSpans();
+    const approvalSpan = spans.find((s) => s.name === 'biblio.shokyaku');
+    expect(approvalSpan).toBeDefined();
+    expect(approvalSpan?.attributes['biblio.originating_request_id']).toBe('req-shokyaku-original-uuid');
+
+    memoryExporter.reset();
+    await provider.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
   });
 });

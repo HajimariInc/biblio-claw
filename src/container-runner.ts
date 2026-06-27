@@ -24,7 +24,8 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
-import { injectTraceContextToEnv } from './observability/index.js';
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { getTracer, injectTraceContextToEnv } from './observability/index.js';
 import { buildNoProxyWithTelemetry } from './observability/no-proxy.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -104,95 +105,119 @@ export function wakeContainer(session: Session): Promise<boolean> {
 }
 
 async function spawnContainer(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
-  if (!agentGroup) {
-    // throw して wakeContainer の .catch に拾わせる (= false 返却)。
-    // 旧実装は `return` で void 完了 → wakeContainer が `true` を返してしまい、
-    // caller が「コンテナ起動成功」と誤解する経路があった (M3 Phase 2 spawn-verify で表面化)。
-    throw new Error(`Agent group not found: ${session.agent_group_id}`);
-  }
+  const tracer = getTracer();
+  return tracer.startActiveSpan(
+    'agent.spawn',
+    {
+      kind: SpanKind.PRODUCER,
+      attributes: {
+        'agent.session_id': session.id,
+        'agent.group_id': session.agent_group_id,
+      },
+    },
+    async (span) => {
+      try {
+        const agentGroup = getAgentGroup(session.agent_group_id);
+        if (!agentGroup) {
+          // throw して wakeContainer の .catch に拾わせる (= false 返却)。
+          // 旧実装は `return` で void 完了 → wakeContainer が `true` を返してしまい、
+          // caller が「コンテナ起動成功」と誤解する経路があった (M3 Phase 2 spawn-verify で表面化)。
+          throw new Error(`Agent group not found: ${session.agent_group_id}`);
+        }
+        span.setAttribute('agent.group_name', agentGroup.name);
 
-  // Refresh the destination map and default reply routing so any admin
-  // changes take effect on wake. Destinations come from the agent-to-agent
-  // module — skip when the module isn't installed (table absent).
-  if (hasTable(getDb(), 'agent_destinations')) {
-    const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
-    writeDestinations(agentGroup.id, session.id);
-  }
-  writeSessionRouting(agentGroup.id, session.id);
+        // Refresh the destination map and default reply routing so any admin
+        // changes take effect on wake. Destinations come from the agent-to-agent
+        // module — skip when the module isn't installed (table absent).
+        if (hasTable(getDb(), 'agent_destinations')) {
+          const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
+          writeDestinations(agentGroup.id, session.id);
+        }
+        writeSessionRouting(agentGroup.id, session.id);
 
-  // Materialize container.json from DB — writes fresh file and returns
-  // the config object, threaded through provider resolution, buildMounts,
-  // and buildContainerSpec so we don't re-read.
-  const containerConfig = materializeContainerJson(agentGroup.id);
+        // Materialize container.json from DB — writes fresh file and returns
+        // the config object, threaded through provider resolution, buildMounts,
+        // and buildContainerSpec so we don't re-read.
+        const containerConfig = materializeContainerJson(agentGroup.id);
 
-  // Resolve the effective provider + any host-side contribution it declares
-  // (extra mounts, env passthrough). Computed once and threaded through both
-  // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
-  const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
+        // Resolve the effective provider + any host-side contribution it declares
+        // (extra mounts, env passthrough). Computed once and threaded through both
+        // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
+        const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
-  const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
-  // OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
-  const agentIdentifier = agentGroup.id;
-  const spec = await buildContainerSpec(
-    mounts,
-    containerName,
-    agentGroup,
-    session,
-    containerConfig,
-    provider,
-    contribution,
-    agentIdentifier,
+        const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
+        const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+        // OneCLI agent identifier is always the agent group id — stable across
+        // sessions and reversible via getAgentGroup() for approval routing.
+        const agentIdentifier = agentGroup.id;
+        const spec = await buildContainerSpec(
+          mounts,
+          containerName,
+          agentGroup,
+          session,
+          containerConfig,
+          provider,
+          contribution,
+          agentIdentifier,
+        );
+
+        span.setAttribute('agent.container_name', containerName);
+        span.setAttribute('agent.runtime', process.env.CONTAINER_PROVIDER ?? 'docker');
+        log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+
+        // Clear any orphan heartbeat from a previous container instance — the
+        // sweep's ceiling check treats a missing file as "fresh spawn, give grace"
+        // (host-sweep.ts line 87). Without this, the stale mtime can trigger an
+        // immediate kill before the new container touches the file itself.
+        fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
+
+        const runtime = getContainerRuntimeProvider();
+        const handle = await runtime.spawn(spec);
+
+        activeContainers.set(session.id, { handle, agentGroupId: agentGroup.id });
+        markContainerRunning(session.id);
+
+        // No host-side idle timeout. Stale/stuck detection is driven by the host
+        // sweep reading heartbeat mtime + processing_ack claim age + container_state
+        // (see src/host-sweep.ts). This avoids killing long-running legitimate work
+        // on a wall-clock timer.
+
+        // waitForExit() is contracted never to reject, but the .then() body itself
+        // (markContainerStopped, stopTypingRefresh) could throw on DB lock or
+        // similar — without a .catch(), Node turns that into an unhandledRejection
+        // and the cleanup silently skips, leaving zombie entries in activeContainers.
+        handle
+          .waitForExit()
+          .then((info) => {
+            activeContainers.delete(session.id);
+            markContainerStopped(session.id);
+            stopTypingRefresh(session.id);
+            log.info('Container exited', {
+              sessionId: session.id,
+              code: info.code,
+              reason: info.reason,
+              handleId: handle.id,
+            });
+          })
+          .catch((err) => {
+            // Last-resort: drop the activeContainers entry so the next wake doesn't
+            // skip spawn due to a stuck zombie, then surface the failure.
+            activeContainers.delete(session.id);
+            log.error('Container exit handler failed', {
+              sessionId: session.id,
+              handleId: handle.id,
+              err,
+            });
+          });
+      } catch (err) {
+        span.recordException(err as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
   );
-
-  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
-
-  // Clear any orphan heartbeat from a previous container instance — the
-  // sweep's ceiling check treats a missing file as "fresh spawn, give grace"
-  // (host-sweep.ts line 87). Without this, the stale mtime can trigger an
-  // immediate kill before the new container touches the file itself.
-  fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
-
-  const runtime = getContainerRuntimeProvider();
-  const handle = await runtime.spawn(spec);
-
-  activeContainers.set(session.id, { handle, agentGroupId: agentGroup.id });
-  markContainerRunning(session.id);
-
-  // No host-side idle timeout. Stale/stuck detection is driven by the host
-  // sweep reading heartbeat mtime + processing_ack claim age + container_state
-  // (see src/host-sweep.ts). This avoids killing long-running legitimate work
-  // on a wall-clock timer.
-
-  // waitForExit() is contracted never to reject, but the .then() body itself
-  // (markContainerStopped, stopTypingRefresh) could throw on DB lock or
-  // similar — without a .catch(), Node turns that into an unhandledRejection
-  // and the cleanup silently skips, leaving zombie entries in activeContainers.
-  handle
-    .waitForExit()
-    .then((info) => {
-      activeContainers.delete(session.id);
-      markContainerStopped(session.id);
-      stopTypingRefresh(session.id);
-      log.info('Container exited', {
-        sessionId: session.id,
-        code: info.code,
-        reason: info.reason,
-        handleId: handle.id,
-      });
-    })
-    .catch((err) => {
-      // Last-resort: drop the activeContainers entry so the next wake doesn't
-      // skip spawn due to a stuck zombie, then surface the failure.
-      activeContainers.delete(session.id);
-      log.error('Container exit handler failed', {
-        sessionId: session.id,
-        handleId: handle.id,
-        err,
-      });
-    });
 }
 
 /** Kill a container for a session. */

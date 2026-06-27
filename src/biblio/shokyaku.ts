@@ -52,7 +52,13 @@ function removeEquipDir(equipDir: string, biblioName: string): string | null {
     return null;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shokyaku: equip dir cleanup failed', { biblioName, equipDir, err });
+    log.warn('shokyaku: equip dir cleanup failed', {
+      event: 'biblio.shokyaku',
+      outcome: 'failure',
+      biblio_name: biblioName,
+      equipDir,
+      err,
+    });
     return `装備源 dir の物理削除に失敗 (${equipDir}): ${detail}`;
   }
 }
@@ -91,18 +97,33 @@ export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Pr
   if (equipWarning) {
     warnings.push(equipWarning);
   } else {
-    log.info('shokyaku: equip dir removed', { biblioName, equipDir });
+    log.info('shokyaku: equip dir removed', {
+      event: 'biblio.shokyaku',
+      outcome: 'success',
+      biblio_name: biblioName,
+      equipDir,
+    });
   }
 
   // 全 session の装備リストから個別削除 (= equip.ts の skip warn ノイズ抑制)
   try {
     const changes = deleteEquippedBiblioByName(biblioName);
     if (changes > 0) {
-      log.info('shokyaku: removed from N session equip lists', { biblioName, changes });
+      log.info('shokyaku: removed from N session equip lists', {
+        event: 'biblio.shokyaku',
+        outcome: 'success',
+        biblio_name: biblioName,
+        changes,
+      });
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shokyaku: DB delete from session_equipped_biblios failed', { biblioName, err });
+    log.warn('shokyaku: DB delete from session_equipped_biblios failed', {
+      event: 'biblio.shokyaku',
+      outcome: 'failure',
+      biblio_name: biblioName,
+      err,
+    });
     warnings.push(`装備リスト DB の個別削除に失敗: ${detail}`);
   }
 

@@ -13,13 +13,85 @@
  */
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import { SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
 import type Database from 'better-sqlite3';
 
 import { insertMessage } from '../db/session-db.js';
 import { log } from '../log.js';
+import { getTracer } from '../observability/index.js';
 import type { Session } from '../types.js';
 
 import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
+
+/**
+ * biblio action handler の span 名を closed union で固定する。
+ * acquire / inspect / categorize / shelve / multi-shelve / enkin / shokyaku /
+ * list-biblio / config の 9 handler が共通で使う + HITL 2 経路 (enkin_request /
+ * shokyaku_request = delivery 申請境界、enkin / shokyaku = approval 承認境界) を
+ * 区別する。新 handler 追加時は本 union を必ず拡張する (= 拡張なしで呼び出すと
+ * compile error)。
+ */
+export type BiblioActionName =
+  | 'acquire'
+  | 'inspect'
+  | 'categorize'
+  | 'shelve'
+  | 'shelve_multi'
+  | 'list'
+  | 'enkin'
+  | 'enkin_request'
+  | 'shokyaku'
+  | 'shokyaku_request'
+  | 'config';
+
+/**
+ * biblio action handler 共通の span ラッパ。
+ *
+ * acquire / inspect / categorize / shelve / multi-shelve / enkin / shokyaku /
+ * list-biblio / config の 9 handler が共通で使う (= 11 span 名は [[BiblioActionName]]
+ * で固定)。`biblio.${action}` 名で span を開始し、`biblio.request_id` /
+ * `biblio.session_id` / `biblio.action` を属性として記録する。exception は
+ * recordException + ERROR status で記録、span は finally で必ず end する。
+ *
+ * @note approval handler 経路 (enkin / shokyaku の confirm) では sessionId に
+ *       空文字列が渡される (= approval 後の境界は session を持たない、申請境界の
+ *       `enkin_request` / `shokyaku_request` 側が `session_id` を保持する)。
+ */
+export async function withBiblioActionSpan<T>(
+  action: BiblioActionName,
+  requestId: string,
+  sessionId: string,
+  fn: (span: Span) => Promise<T>,
+  extraAttributes?: Record<string, string | number | boolean>,
+): Promise<T> {
+  const tracer = getTracer();
+  return tracer.startActiveSpan(
+    `biblio.${action}`,
+    {
+      kind: SpanKind.INTERNAL,
+      attributes: {
+        'biblio.request_id': requestId,
+        'biblio.session_id': sessionId,
+        'biblio.action': action,
+        ...(extraAttributes ?? {}),
+      },
+    },
+    async (span) => {
+      try {
+        return await fn(span);
+      } catch (err) {
+        // err が non-Error (= string/number throw) の場合に Cloud Trace の例外イベントと
+        // ERROR status message が undefined にならないよう instanceof guard で分岐。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}
 
 /** writeBack の SQLITE_BUSY 等への小規模リトライ回数 (1 + 2 = 計 3 attempts)。 */
 const WRITEBACK_MAX_RETRIES = 2;
@@ -193,7 +265,11 @@ export async function validateBiblioInput(
   const rawCategory = typeof content.category === 'string' ? content.category.trim() : '';
 
   if (!rawName) {
-    log.warn(`${actionName} missing name`, { sessionId: session.id });
+    log.warn(`${actionName} missing name`, {
+      event: 'biblio.validate',
+      outcome: 'failure',
+      session_id: session.id,
+    });
     await writeBackMessage(
       inDb,
       `${errorLabel}エラー (invalid_input): name が指定されていません。`,
@@ -203,7 +279,12 @@ export async function validateBiblioInput(
     return null;
   }
   if (!BIBLIO_NAME_RE.test(rawName)) {
-    log.warn(`${actionName} invalid name`, { biblioName: rawName, sessionId: session.id });
+    log.warn(`${actionName} invalid name`, {
+      event: 'biblio.validate',
+      outcome: 'failure',
+      biblio_name: rawName,
+      session_id: session.id,
+    });
     await writeBackMessage(
       inDb,
       `${errorLabel}エラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
@@ -213,7 +294,11 @@ export async function validateBiblioInput(
     return null;
   }
   if (!rawCategory) {
-    log.warn(`${actionName} missing category`, { sessionId: session.id });
+    log.warn(`${actionName} missing category`, {
+      event: 'biblio.validate',
+      outcome: 'failure',
+      session_id: session.id,
+    });
     await writeBackMessage(
       inDb,
       `${errorLabel}エラー (invalid_input): category が指定されていません。`,
@@ -223,7 +308,12 @@ export async function validateBiblioInput(
     return null;
   }
   if (!BIBLIO_CATEGORIES.includes(rawCategory as BiblioCategory)) {
-    log.warn(`${actionName} invalid category`, { category: rawCategory, sessionId: session.id });
+    log.warn(`${actionName} invalid category`, {
+      event: 'biblio.validate',
+      outcome: 'failure',
+      category: rawCategory,
+      session_id: session.id,
+    });
     await writeBackMessage(
       inDb,
       `${errorLabel}エラー (invalid_category): category は biblio-dev|biblio-art|biblio-bf|biblio-ai のいずれかである必要があります: "${rawCategory}"`,

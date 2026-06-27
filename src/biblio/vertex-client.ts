@@ -26,10 +26,24 @@
  */
 import fs from 'node:fs';
 
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import { EnvHttpProxyAgent, fetch, setGlobalDispatcher } from 'undici';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import {
+  GEN_AI_OPERATION_NAME,
+  GEN_AI_PROVIDER_NAME,
+  GEN_AI_REQUEST_MODEL,
+  GEN_AI_USAGE_INPUT_TOKENS,
+  GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+  SERVER_ADDRESS,
+  GEN_AI_PROVIDER_GCP_VERTEX_AI,
+  GEN_AI_OPERATION_CHAT,
+  extractVertexUsage,
+} from '../observability/genai.js';
+import { getTracer } from '../observability/index.js';
 import { getProxyState } from './host-proxy.js';
 
 /** region 既定値 — providers/claude.ts と同値 (CLOUD_ML_REGION 未設定なら global)。 */
@@ -231,81 +245,112 @@ export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx
     throw new Error('vertex-client: INSPECT_DANGEROUS_MODEL is not set (.env / process.env both empty)');
   }
   const url = vertexUrl(project, region, modelId, 'google', 'generateContent');
-  const t0 = performance.now();
-
-  // Gemini 2.5 系は thinking がデフォルト ON で `thoughtsTokenCount` に予算を喰われる
-  // (= maxOutputTokens を thinking が先食いし、テキスト出力が截切れる)。検品 dangerous 軸の
-  // 用途は「VERDICT: DANGEROUS|CLEAN」1 行判定で、推論連鎖は不要なため明示的に OFF にする
-  // (`thinkingBudget: 0`)。
-  // 参考: cloud.google.com/vertex-ai/generative-ai/docs/thinking
-  const body = {
-    contents: [{ role: 'user', parts: [{ text: args.prompt }] }],
-    generationConfig: {
-      temperature: args.temperature,
-      maxOutputTokens: args.maxOutputTokens,
-      responseMimeType: 'text/plain',
-      thinkingConfig: { thinkingBudget: 0 },
+  const tracer = getTracer();
+  return tracer.startActiveSpan(
+    `${GEN_AI_OPERATION_CHAT} ${modelId}`,
+    {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        [GEN_AI_OPERATION_NAME]: GEN_AI_OPERATION_CHAT,
+        [GEN_AI_PROVIDER_NAME]: GEN_AI_PROVIDER_GCP_VERTEX_AI,
+        [GEN_AI_REQUEST_MODEL]: modelId,
+        [SERVER_ADDRESS]: vertexHost(region),
+        'biblio.request_id': ctx?.requestId,
+        'biblio.session_id': ctx?.sessionId,
+        'biblio.axis': ctx?.axis,
+      },
     },
-  };
+    async (span) => {
+      const t0 = performance.now();
+      try {
+        // Gemini 2.5 系は thinking がデフォルト ON で `thoughtsTokenCount` に予算を喰われる
+        // (= maxOutputTokens を thinking が先食いし、テキスト出力が截切れる)。検品 dangerous 軸の
+        // 用途は「VERDICT: DANGEROUS|CLEAN」1 行判定で、推論連鎖は不要なため明示的に OFF にする
+        // (`thinkingBudget: 0`)。
+        // 参考: cloud.google.com/vertex-ai/generative-ai/docs/thinking
+        const body = {
+          contents: [{ role: 'user', parts: [{ text: args.prompt }] }],
+          generationConfig: {
+            temperature: args.temperature,
+            maxOutputTokens: args.maxOutputTokens,
+            responseMimeType: 'text/plain',
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        };
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // OneCLI MITM が wire で本物の ADC Bearer に置き換える。host 側は placeholder で良い。
-      Authorization: 'Bearer placeholder',
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            // OneCLI MITM が wire で本物の ADC Bearer に置き換える。host 側は placeholder で良い。
+            Authorization: 'Bearer placeholder',
+          },
+          body: JSON.stringify(body),
+          // 無期限ブロック防止 (VERTEX_TIMEOUT_MS 超過で AbortError → 呼び出し側 inspect() が HOLD)。
+          signal: AbortSignal.timeout(VERTEX_TIMEOUT_MS),
+        });
+
+        if (!res.ok) {
+          let bodyText = '';
+          try {
+            bodyText = (await res.text()).slice(0, 500);
+          } catch (bodyErr) {
+            // body 読み失敗自体を握り潰すと最終 error message が "— " (空) になり debug 不能。
+            // エラー生成は続けるが、何が起きたかは warn で残す (silent failure 防止)。
+            log.warn('vertex-client: failed to read error response body', {
+              status: res.status,
+              bodyErr,
+            });
+          }
+          log.warn(
+            'vertex.call failed',
+            vertexLogFields(ctx, modelId, {
+              outcome: 'failure',
+              status: res.status,
+              latency_ms: Math.round(performance.now() - t0),
+              error_body_preview: bodyText.slice(0, 200),
+            }),
+          );
+          throw new Error(`vertex-client: generateContent ${res.status} ${res.statusText} — ${bodyText}`);
+        }
+
+        const json = (await res.json()) as VertexGeminiResponse;
+        const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof text !== 'string' || text.length === 0) {
+          throw new Error(
+            `vertex-client: response missing candidates[0].content.parts[0].text — ${JSON.stringify(json).slice(0, 300)}`,
+          );
+        }
+        // usageMetadata 不在 (= Vertex API バージョン差 / streaming 経路) は BQ cost 集計が silent
+        // に 0 になる罠を生むため warn で可視化。`?? 0` fallback は維持し、ログ集約は崩さない。
+        if (!json.usageMetadata) {
+          log.warn('vertex.call: usageMetadata absent', vertexLogFields(ctx, modelId));
+        }
+        log.info(
+          'vertex.call',
+          vertexLogFields(ctx, modelId, {
+            outcome: 'success',
+            tokens_in: json.usageMetadata?.promptTokenCount ?? 0,
+            tokens_out: json.usageMetadata?.candidatesTokenCount ?? 0,
+            latency_ms: Math.round(performance.now() - t0),
+          }),
+        );
+        const usage = extractVertexUsage(json, 'gemini');
+        if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
+        if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
+        return text;
+      } catch (err) {
+        // err が non-Error の場合に Cloud Trace の例外イベント / ERROR status の
+        // message が undefined にならないよう instanceof guard で分岐。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+        throw err;
+      } finally {
+        span.end();
+      }
     },
-    body: JSON.stringify(body),
-    // 無期限ブロック防止 (VERTEX_TIMEOUT_MS 超過で AbortError → 呼び出し側 inspect() が HOLD)。
-    signal: AbortSignal.timeout(VERTEX_TIMEOUT_MS),
-  });
-
-  if (!res.ok) {
-    let bodyText = '';
-    try {
-      bodyText = (await res.text()).slice(0, 500);
-    } catch (bodyErr) {
-      // body 読み失敗自体を握り潰すと最終 error message が "— " (空) になり debug 不能。
-      // エラー生成は続けるが、何が起きたかは warn で残す (silent failure 防止)。
-      log.warn('vertex-client: failed to read error response body', {
-        status: res.status,
-        bodyErr,
-      });
-    }
-    log.warn(
-      'vertex.call failed',
-      vertexLogFields(ctx, modelId, {
-        outcome: 'failure',
-        status: res.status,
-        latency_ms: Math.round(performance.now() - t0),
-        error_body_preview: bodyText.slice(0, 200),
-      }),
-    );
-    throw new Error(`vertex-client: generateContent ${res.status} ${res.statusText} — ${bodyText}`);
-  }
-
-  const json = (await res.json()) as VertexGeminiResponse;
-  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof text !== 'string' || text.length === 0) {
-    throw new Error(
-      `vertex-client: response missing candidates[0].content.parts[0].text — ${JSON.stringify(json).slice(0, 300)}`,
-    );
-  }
-  // usageMetadata 不在 (= Vertex API バージョン差 / streaming 経路) は BQ cost 集計が silent
-  // に 0 になる罠を生むため warn で可視化。`?? 0` fallback は維持し、ログ集約は崩さない。
-  if (!json.usageMetadata) {
-    log.warn('vertex.call: usageMetadata absent', vertexLogFields(ctx, modelId));
-  }
-  log.info(
-    'vertex.call',
-    vertexLogFields(ctx, modelId, {
-      outcome: 'success',
-      tokens_in: json.usageMetadata?.promptTokenCount ?? 0,
-      tokens_out: json.usageMetadata?.candidatesTokenCount ?? 0,
-      latency_ms: Math.round(performance.now() - t0),
-    }),
   );
-  return text;
 }
 
 /** `callVertexAnthropic` の引数。 */
@@ -368,79 +413,115 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
     throw new Error('vertex-client: CATEGORIZE_MODEL is not set (.env / process.env both empty)');
   }
   const url = vertexUrl(project, region, modelId, 'anthropic', 'rawPredict');
-  const t0 = performance.now();
-
-  // Anthropic on Vertex の body 必須フィールド (docs.anthropic.com/en/api/claude-on-vertex-ai):
-  //   - anthropic_version: "vertex-2023-10-16" がリリース時点の固定値 (= バージョニング rail)
-  //   - messages: 通常の Anthropic Messages API と同形 (user/assistant role の turn 配列)
-  //   - system: 任意 (役割定義)。空のときは省略する (空文字を渡すと proxy 経路で 400 が出るケースあり)
-  // GOTCHA-3 で書いた通り、response 構造は Gemini と完全に別物 (`candidates[]` ではなく `content[]`)。
-  const body: Record<string, unknown> = {
-    anthropic_version: 'vertex-2023-10-16',
-    messages: [{ role: 'user', content: args.prompt }],
-    max_tokens: args.maxTokens,
-    temperature: args.temperature,
-  };
-  if (args.system) {
-    body.system = args.system;
-  }
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // OneCLI MITM が wire で本物の ADC Bearer に置き換える (callVertexGemini と同じ流儀)。
-      Authorization: 'Bearer placeholder',
+  const tracer = getTracer();
+  return tracer.startActiveSpan(
+    `${GEN_AI_OPERATION_CHAT} ${modelId}`,
+    {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        [GEN_AI_OPERATION_NAME]: GEN_AI_OPERATION_CHAT,
+        [GEN_AI_PROVIDER_NAME]: GEN_AI_PROVIDER_GCP_VERTEX_AI,
+        [GEN_AI_REQUEST_MODEL]: modelId,
+        [SERVER_ADDRESS]: vertexHost(region),
+        'biblio.request_id': ctx?.requestId,
+        'biblio.session_id': ctx?.sessionId,
+        'biblio.axis': ctx?.axis,
+      },
     },
-    body: JSON.stringify(body),
-    // 無期限ブロック防止 (callVertexGemini と同じ VERTEX_TIMEOUT_MS を共有)。
-    signal: AbortSignal.timeout(VERTEX_TIMEOUT_MS),
-  });
+    async (span) => {
+      const t0 = performance.now();
+      try {
+        // Anthropic on Vertex の body 必須フィールド (docs.anthropic.com/en/api/claude-on-vertex-ai):
+        //   - anthropic_version: "vertex-2023-10-16" がリリース時点の固定値 (= バージョニング rail)
+        //   - messages: 通常の Anthropic Messages API と同形 (user/assistant role の turn 配列)
+        //   - system: 任意 (役割定義)。空のときは省略する (空文字を渡すと proxy 経路で 400 が出るケースあり)
+        // GOTCHA-3 で書いた通り、response 構造は Gemini と完全に別物 (`candidates[]` ではなく `content[]`)。
+        const body: Record<string, unknown> = {
+          anthropic_version: 'vertex-2023-10-16',
+          messages: [{ role: 'user', content: args.prompt }],
+          max_tokens: args.maxTokens,
+          temperature: args.temperature,
+        };
+        if (args.system) {
+          body.system = args.system;
+        }
 
-  if (!res.ok) {
-    let bodyText = '';
-    try {
-      bodyText = (await res.text()).slice(0, 500);
-    } catch (bodyErr) {
-      // body 読み失敗自体を握り潰さない (callVertexGemini と同じ silent failure 防止)。
-      log.warn('vertex-client: failed to read anthropic error response body', {
-        status: res.status,
-        bodyErr,
-      });
-    }
-    log.warn(
-      'vertex.call failed',
-      vertexLogFields(ctx, modelId, {
-        outcome: 'failure',
-        status: res.status,
-        latency_ms: Math.round(performance.now() - t0),
-        error_body_preview: bodyText.slice(0, 200),
-      }),
-    );
-    throw new Error(`vertex-client: rawPredict ${res.status} ${res.statusText} — ${bodyText}`);
-  }
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            // OneCLI MITM が wire で本物の ADC Bearer に置き換える (callVertexGemini と同じ流儀)。
+            Authorization: 'Bearer placeholder',
+          },
+          body: JSON.stringify(body),
+          // 無期限ブロック防止 (callVertexGemini と同じ VERTEX_TIMEOUT_MS を共有)。
+          signal: AbortSignal.timeout(VERTEX_TIMEOUT_MS),
+        });
 
-  const json = (await res.json()) as VertexAnthropicResponse;
-  // `content[].type === 'text'` の最初の要素を採用する (`tool_use` 等の非テキスト turn が
-  // 混ざる可能性に備える)。`stop_reason: 'max_tokens'` で切れているケースもここでは値を
-  // そのまま返し、呼び出し側 (categorize.ts) が CATEGORY/REASON 2 行を抽出できなかった
-  // ときに `parse_error` で fail-closed に倒す = 責務分離。
-  const textBlock = json.content?.find((c) => c?.type === 'text');
-  const text = textBlock?.text;
-  if (typeof text !== 'string' || text.length === 0) {
-    throw new Error(`vertex-client: response missing content[type=text].text — ${JSON.stringify(json).slice(0, 300)}`);
-  }
-  if (!json.usage) {
-    log.warn('vertex.call: usage absent', vertexLogFields(ctx, modelId));
-  }
-  log.info(
-    'vertex.call',
-    vertexLogFields(ctx, modelId, {
-      outcome: 'success',
-      tokens_in: json.usage?.input_tokens ?? 0,
-      tokens_out: json.usage?.output_tokens ?? 0,
-      latency_ms: Math.round(performance.now() - t0),
-    }),
+        if (!res.ok) {
+          let bodyText = '';
+          try {
+            bodyText = (await res.text()).slice(0, 500);
+          } catch (bodyErr) {
+            // body 読み失敗自体を握り潰さない (callVertexGemini と同じ silent failure 防止)。
+            log.warn('vertex-client: failed to read anthropic error response body', {
+              status: res.status,
+              bodyErr,
+            });
+          }
+          log.warn(
+            'vertex.call failed',
+            vertexLogFields(ctx, modelId, {
+              outcome: 'failure',
+              status: res.status,
+              latency_ms: Math.round(performance.now() - t0),
+              error_body_preview: bodyText.slice(0, 200),
+            }),
+          );
+          throw new Error(`vertex-client: rawPredict ${res.status} ${res.statusText} — ${bodyText}`);
+        }
+
+        const json = (await res.json()) as VertexAnthropicResponse;
+        // `content[].type === 'text'` の最初の要素を採用する (`tool_use` 等の非テキスト turn が
+        // 混ざる可能性に備える)。`stop_reason: 'max_tokens'` で切れているケースもここでは値を
+        // そのまま返し、呼び出し側 (categorize.ts) が CATEGORY/REASON 2 行を抽出できなかった
+        // ときに `parse_error` で fail-closed に倒す = 責務分離。
+        const textBlock = json.content?.find((c) => c?.type === 'text');
+        const text = textBlock?.text;
+        if (typeof text !== 'string' || text.length === 0) {
+          throw new Error(
+            `vertex-client: response missing content[type=text].text — ${JSON.stringify(json).slice(0, 300)}`,
+          );
+        }
+        if (!json.usage) {
+          log.warn('vertex.call: usage absent', vertexLogFields(ctx, modelId));
+        }
+        log.info(
+          'vertex.call',
+          vertexLogFields(ctx, modelId, {
+            outcome: 'success',
+            tokens_in: json.usage?.input_tokens ?? 0,
+            tokens_out: json.usage?.output_tokens ?? 0,
+            latency_ms: Math.round(performance.now() - t0),
+          }),
+        );
+        const usage = extractVertexUsage(json, 'anthropic');
+        if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
+        if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
+        if (usage.cache_read_input_tokens != null) {
+          span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage.cache_read_input_tokens);
+        }
+        return text;
+      } catch (err) {
+        // err が non-Error の場合に Cloud Trace の例外イベント / ERROR status の
+        // message が undefined にならないよう instanceof guard で分岐。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
   );
-  return text;
 }

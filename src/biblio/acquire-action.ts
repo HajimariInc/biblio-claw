@@ -12,7 +12,7 @@
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { acquire } from './acquire.js';
-import { writeBackMessage } from './action-helpers.js';
+import { withBiblioActionSpan, writeBackMessage } from './action-helpers.js';
 import type { AcquireResult } from './types.js';
 
 /**
@@ -49,57 +49,64 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
   // `mcp-tools/biblio.ts` と同じ `trim() || undefined` イディオムに統一。
   const skill = typeof content.skill === 'string' ? content.skill.trim() || undefined : undefined;
   const requestId = crypto.randomUUID();
-  if (!repo) {
-    log.warn('acquire_biblio missing repo', {
+  await withBiblioActionSpan('acquire', requestId, session.id, async (span) => {
+    if (!repo) {
+      log.warn('acquire_biblio missing repo', {
+        event: 'biblio.acquire',
+        outcome: 'failure',
+        session_id: session.id,
+        request_id: requestId,
+      });
+      await writeBackMessage(
+        inDb,
+        '仕入れエラー (invalid_input): repo が指定されていません。',
+        'acquire-resp',
+        'acquire_biblio',
+      );
+      return;
+    }
+
+    log.info('acquire_biblio from agent', {
       event: 'biblio.acquire',
-      outcome: 'failure',
+      repo,
+      skill,
       session_id: session.id,
       request_id: requestId,
     });
-    await writeBackMessage(
-      inDb,
-      '仕入れエラー (invalid_input): repo が指定されていません。',
-      'acquire-resp',
-      'acquire_biblio',
-    );
-    return;
-  }
 
-  log.info('acquire_biblio from agent', {
-    event: 'biblio.acquire',
-    repo,
-    skill,
-    session_id: session.id,
-    request_id: requestId,
+    try {
+      // ctx を渡して acquire 内の ghFetch ログに request_id / session_id を伝搬
+      // (= Phase 2 で確立した patron 依頼単位の trace 経路、shelve-action.ts と同流儀)。
+      const result = await acquire(
+        { repo, ...(skill ? { skill } : {}) },
+        { ctx: { requestId, sessionId: session.id } },
+      );
+      await writeBackMessage(inDb, resultText(repo, skill, result), 'acquire-resp', 'acquire_biblio');
+      log.info('acquire_biblio done', {
+        event: 'biblio.acquire',
+        outcome: result.ok ? 'success' : 'failure',
+        repo,
+        skill,
+        ok: result.ok,
+        session_id: session.id,
+        request_id: requestId,
+      });
+      span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
+    } catch (err) {
+      // 想定外例外も握って patron に通知する (host を落とさない)。
+      log.error('acquire_biblio threw', {
+        event: 'biblio.acquire',
+        outcome: 'failure',
+        repo,
+        skill,
+        session_id: session.id,
+        request_id: requestId,
+        err,
+      });
+      const detail = err instanceof Error ? err.message : String(err);
+      // resultText() の 'internal' 分岐と同じ文言形式に揃える (patron へのメッセージ統一)。
+      await writeBackMessage(inDb, `システム構成エラー: 予期しない失敗 — ${detail}`, 'acquire-resp', 'acquire_biblio');
+      span.setAttribute('biblio.outcome', 'failure');
+    }
   });
-
-  try {
-    // ctx を渡して acquire 内の ghFetch ログに request_id / session_id を伝搬
-    // (= Phase 2 で確立した patron 依頼単位の trace 経路、shelve-action.ts と同流儀)。
-    const result = await acquire({ repo, ...(skill ? { skill } : {}) }, { ctx: { requestId, sessionId: session.id } });
-    await writeBackMessage(inDb, resultText(repo, skill, result), 'acquire-resp', 'acquire_biblio');
-    log.info('acquire_biblio done', {
-      event: 'biblio.acquire',
-      outcome: result.ok ? 'success' : 'failure',
-      repo,
-      skill,
-      ok: result.ok,
-      session_id: session.id,
-      request_id: requestId,
-    });
-  } catch (err) {
-    // 想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('acquire_biblio threw', {
-      event: 'biblio.acquire',
-      outcome: 'failure',
-      repo,
-      skill,
-      session_id: session.id,
-      request_id: requestId,
-      err,
-    });
-    const detail = err instanceof Error ? err.message : String(err);
-    // resultText() の 'internal' 分岐と同じ文言形式に揃える (patron へのメッセージ統一)。
-    await writeBackMessage(inDb, `システム構成エラー: 予期しない失敗 — ${detail}`, 'acquire-resp', 'acquire_biblio');
-  }
 });

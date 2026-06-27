@@ -6,6 +6,7 @@
  * 「装備源残置」は **物理的に何もしない** ことで実現される (= `<DATA_DIR>/biblio-equipped/<name>/` を
  * 削除しない、shokyaku.ts との対称設計)。
  */
+import { log } from '../log.js';
 import { unshelve } from './unshelve.js';
 import type { GhFetchCtx } from './shelf-gh.js';
 import type { BiblioCategory, EnkinResult } from './types.js';
@@ -22,13 +23,42 @@ export interface EnkinRequest {
  * `<DATA_DIR>/biblio-equipped/<biblioName>/` は **意図的に残置** する (= 再装備可)。
  */
 export async function enkin(req: EnkinRequest, opts: { ctx?: GhFetchCtx } = {}): Promise<EnkinResult> {
-  return unshelve(
-    {
-      biblioName: req.biblioName,
+  log.info('enkin start', {
+    event: 'biblio.enkin',
+    biblio_name: req.biblioName,
+    category: req.category,
+    request_id: opts.ctx?.requestId,
+    session_id: opts.ctx?.sessionId,
+  });
+  try {
+    const result = await unshelve(
+      {
+        biblioName: req.biblioName,
+        category: req.category,
+        opLabel: '禁書',
+        branchPrefix: 'enkin',
+      },
+      { ctx: opts.ctx },
+    );
+    log.info('enkin done', {
+      event: 'biblio.enkin',
+      outcome: result.ok ? 'success' : 'failure',
+      biblio_name: req.biblioName,
       category: req.category,
-      opLabel: '禁書',
-      branchPrefix: 'enkin',
-    },
-    { ctx: opts.ctx },
-  );
+      request_id: opts.ctx?.requestId,
+      session_id: opts.ctx?.sessionId,
+    });
+    return result;
+  } catch (err) {
+    log.error('enkin threw', {
+      event: 'biblio.enkin',
+      outcome: 'failure',
+      biblio_name: req.biblioName,
+      category: req.category,
+      request_id: opts.ctx?.requestId,
+      session_id: opts.ctx?.sessionId,
+      err,
+    });
+    throw err;
+  }
 }

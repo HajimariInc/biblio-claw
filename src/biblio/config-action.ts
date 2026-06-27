@@ -35,7 +35,7 @@ import { registerDeliveryAction } from '../delivery.js';
 import { getDb, hasTable } from '../db/connection.js';
 import { setBiblioSetting } from '../db/biblio-settings.js';
 import { log } from '../log.js';
-import { writeBackMessage } from './action-helpers.js';
+import { withBiblioActionSpan, writeBackMessage } from './action-helpers.js';
 import { BIBLIO_SETTING_KEYS, type BiblioSettingKey } from './types.js';
 import type { Session } from '../types.js';
 
@@ -89,112 +89,115 @@ registerDeliveryAction('update_config', async (content, session, inDb) => {
   const key = typeof content.key === 'string' ? content.key.trim() : '';
   const value = typeof content.value === 'string' ? content.value.trim() : '';
   const requestId = crypto.randomUUID();
+  await withBiblioActionSpan('config', requestId, session.id, async (span) => {
+    log.info('update_config from agent', {
+      event: 'biblio.config',
+      key,
+      value,
+      session_id: session.id,
+      request_id: requestId,
+    });
 
-  log.info('update_config from agent', {
-    event: 'biblio.config',
-    key,
-    value,
-    session_id: session.id,
-    request_id: requestId,
+    // handler 全体を try/catch で囲む — admin check / allowlist check / value validation 等の
+    // 経路で `getDb()` 等が throw した場合に host を巻き込まないように、writeBackMessage まで
+    // 必ず完結させる (= delivery action handler は絶対に throw しない不変条件)。
+    try {
+      // 1. validate (= key/value 空チェック)
+      if (!key || !value) {
+        log.warn('update_config: missing key or value', {
+          event: 'biblio.config',
+          outcome: 'failure',
+          key,
+          value,
+          session_id: session.id,
+          request_id: requestId,
+        });
+        await writeBackMessage(
+          inDb,
+          '設定エラー (invalid_input): key と value を両方指定してください。',
+          'config-resp',
+          'update_config',
+        );
+        return;
+      }
+
+      // 2. allowlist check (whitelist 方式 — `BIBLIO_SETTING_KEYS` に無い key は全 reject)
+      if (!isAllowlistedKey(key)) {
+        log.warn('update_config: key not in allowlist', {
+          event: 'biblio.config',
+          outcome: 'failure',
+          key,
+          session_id: session.id,
+          request_id: requestId,
+        });
+        await writeBackMessage(
+          inDb,
+          `設定エラー (invalid_key): 設定可能な key は ${BIBLIO_SETTING_KEYS.join(', ')} のみです (指定: "${key}")。`,
+          'config-resp',
+          'update_config',
+        );
+        return;
+      }
+
+      // 3. key-specific value validation (詳細は validateValueForKey の JSDoc 参照)。
+      const valueErr = validateValueForKey(key, value);
+      if (valueErr !== null) {
+        log.warn('update_config: invalid value for key', {
+          event: 'biblio.config',
+          outcome: 'failure',
+          key,
+          value,
+          session_id: session.id,
+          request_id: requestId,
+        });
+        await writeBackMessage(inDb, `設定エラー (invalid_value): ${valueErr}`, 'config-resp', 'update_config');
+        return;
+      }
+
+      // 4. admin check (= 該当 agent_group に admin/owner が紐づくか、user_roles 不在なら allow-all)
+      if (!isConfigChangeAllowed(session)) {
+        log.warn('update_config: not allowed (no admin/owner in agent group)', {
+          event: 'biblio.config',
+          outcome: 'failure',
+          key,
+          agent_group_id: session.agent_group_id,
+          session_id: session.id,
+          request_id: requestId,
+        });
+        await writeBackMessage(
+          inDb,
+          '設定エラー (permission_denied): 設定変更は admin / owner のみ可能です。',
+          'config-resp',
+          'update_config',
+        );
+        return;
+      }
+
+      // 5. apply — DB upsert + 完了通知 + 構造化 log
+      setBiblioSetting(key, value);
+      await writeBackMessage(inDb, `設定完了: ${key} = ${value}`, 'config-resp', 'update_config');
+      log.info('update_config done', {
+        event: 'biblio.config',
+        outcome: 'success',
+        key,
+        value,
+        session_id: session.id,
+        request_id: requestId,
+      });
+      span.setAttribute('biblio.outcome', 'success');
+    } catch (err) {
+      log.error('update_config threw', {
+        event: 'biblio.config',
+        outcome: 'failure',
+        key,
+        value,
+        session_id: session.id,
+        request_id: requestId,
+        err,
+      });
+      const detail = err instanceof Error ? err.message : String(err);
+      await writeBackMessage(inDb, `設定エラー (internal): 予期しない失敗 — ${detail}`, 'config-resp', 'update_config');
+      span.setAttribute('biblio.outcome', 'failure');
+    }
   });
-
-  // handler 全体を try/catch で囲む — admin check / allowlist check / value validation 等の
-  // 経路で `getDb()` 等が throw した場合に host を巻き込まないように、writeBackMessage まで
-  // 必ず完結させる (= delivery action handler は絶対に throw しない不変条件)。
-  try {
-    // 1. validate (= key/value 空チェック)
-    if (!key || !value) {
-      log.warn('update_config: missing key or value', {
-        event: 'biblio.config',
-        outcome: 'failure',
-        key,
-        value,
-        session_id: session.id,
-        request_id: requestId,
-      });
-      await writeBackMessage(
-        inDb,
-        '設定エラー (invalid_input): key と value を両方指定してください。',
-        'config-resp',
-        'update_config',
-      );
-      return;
-    }
-
-    // 2. allowlist check (whitelist 方式 — `BIBLIO_SETTING_KEYS` に無い key は全 reject)
-    if (!isAllowlistedKey(key)) {
-      log.warn('update_config: key not in allowlist', {
-        event: 'biblio.config',
-        outcome: 'failure',
-        key,
-        session_id: session.id,
-        request_id: requestId,
-      });
-      await writeBackMessage(
-        inDb,
-        `設定エラー (invalid_key): 設定可能な key は ${BIBLIO_SETTING_KEYS.join(', ')} のみです (指定: "${key}")。`,
-        'config-resp',
-        'update_config',
-      );
-      return;
-    }
-
-    // 3. key-specific value validation (詳細は validateValueForKey の JSDoc 参照)。
-    const valueErr = validateValueForKey(key, value);
-    if (valueErr !== null) {
-      log.warn('update_config: invalid value for key', {
-        event: 'biblio.config',
-        outcome: 'failure',
-        key,
-        value,
-        session_id: session.id,
-        request_id: requestId,
-      });
-      await writeBackMessage(inDb, `設定エラー (invalid_value): ${valueErr}`, 'config-resp', 'update_config');
-      return;
-    }
-
-    // 4. admin check (= 該当 agent_group に admin/owner が紐づくか、user_roles 不在なら allow-all)
-    if (!isConfigChangeAllowed(session)) {
-      log.warn('update_config: not allowed (no admin/owner in agent group)', {
-        event: 'biblio.config',
-        outcome: 'failure',
-        key,
-        agent_group_id: session.agent_group_id,
-        session_id: session.id,
-        request_id: requestId,
-      });
-      await writeBackMessage(
-        inDb,
-        '設定エラー (permission_denied): 設定変更は admin / owner のみ可能です。',
-        'config-resp',
-        'update_config',
-      );
-      return;
-    }
-
-    // 5. apply — DB upsert + 完了通知 + 構造化 log
-    setBiblioSetting(key, value);
-    await writeBackMessage(inDb, `設定完了: ${key} = ${value}`, 'config-resp', 'update_config');
-    log.info('update_config done', {
-      event: 'biblio.config',
-      outcome: 'success',
-      key,
-      value,
-      session_id: session.id,
-      request_id: requestId,
-    });
-  } catch (err) {
-    log.error('update_config threw', {
-      event: 'biblio.config',
-      outcome: 'failure',
-      key,
-      value,
-      session_id: session.id,
-      request_id: requestId,
-      err,
-    });
-    const detail = err instanceof Error ? err.message : String(err);
-    await writeBackMessage(inDb, `設定エラー (internal): 予期しない失敗 — ${detail}`, 'config-resp', 'update_config');
-  }
 });
