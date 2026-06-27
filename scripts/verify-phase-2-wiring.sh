@@ -141,23 +141,26 @@ esac
 
 # === 9. Slack adapter 起動 (orchestrator 統合パターン、A 案) ===
 # M1 Acceptance に「Slack 接続成立」が明記されているため、本 verify では Slack adapter
-# 起動を必須条件として fail 判定する。判定ロジックは "Channel adapter started" + 'channel="slack"'
-# の 2 条件共起 — 単純な /slack/ では `Channel credentials missing, skipping channel="slack"`
-# (= adapter skip = 偽陽性) と区別できない。
-# 起動成功ログ形式: src/channels/channel-registry.ts:89 の `log.info('Channel adapter started', { channel, type })`
-# src/log.ts:26 の formatter が `KEY_COLOR + key + RESET + '='` を出すため
-# (`\x1b[35mchannel\x1b[39m="slack"`)、ANSI escape を剥がさないと regex の
-# `started.*channel=` 連続にマッチしない silent failure を起こす。
+# 起動を必須条件として fail 判定する。判定ロジックは "Channel adapter started" + '"channel":"slack"'
+# の 2 条件共起 — 単純な /slack/ では `Channel credentials missing, skipping` (= adapter
+# skip = 偽陽性) と区別できない。
+#
+# GKE 経路のログ形式: orchestrator は `LOG_FORMAT=json` (k8s/10-orchestrator-statefulset.yaml:200)
+# で動くため、src/log.ts:75-91 の `emitJson` が JSON 1 行を吐く。例:
+#   {"severity":"INFO","message":"Channel adapter started","time":"...","component":"host-orchestrator","channel":"slack","type":"slack"}
+# キーは colon 区切りの `"channel":"slack"` 形式 (= 旧 text logger の key=value `channel="slack"`
+# 形式から init-project-gcp Phase 2 で切替済 = commit 9c113f0)。ANSI escape は JSON
+# 経路では一切出力されないため剥離は不要。
 #
 # 判定対象は直近 120s のログのみに絞る = "起動 → credentials missing で再起動"
 # のような複合履歴が tail に残っているとき、古い起動成功ログに先にマッチして
 # 最新の credentials missing 状態を見落とす偽陽性を防ぐ (--since=120s)。
 # kubectl logs が空 (Pod 異常 / ログ未生成) と取得失敗を fail メッセージで
 # 区別できるよう、Pod phase も読む。
-orch_logs="$(kubectl logs "$orch_pod" -n "$NS" --since=120s 2>/dev/null | sed -r 's/\x1b\[[0-9;]*m//g' || true)"
-if echo "$orch_logs" | grep -E 'Channel adapter started.*channel="slack"' >/dev/null; then
-  ok "[slack] Slack adapter 起動済 (Channel adapter started + channel=\"slack\" 両一致)"
-elif echo "$orch_logs" | grep -E 'Channel credentials missing.*channel="slack"' >/dev/null; then
+orch_logs="$(kubectl logs "$orch_pod" -n "$NS" --since=120s 2>/dev/null || true)"
+if echo "$orch_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
+  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致)"
+elif echo "$orch_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
   fail "[slack] Slack credentials が adapter から見えていない — env.ts の process.env fallback 動作 + biblio-slack-tokens Secret 投入 (kubectl get secret biblio-slack-tokens -n $NS) を確認"
 else
   pod_phase="$(kubectl get pod "$orch_pod" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo 'unknown')"
