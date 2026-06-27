@@ -205,6 +205,8 @@ spec:
             # のみ一時投入 (opentelemetry-js#5260: span は届く、warn は無視可能)。
             - { name: OTEL_SERVICE_NAME, value: biblio-claw }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: deployment.environment=gke }
+            # Phase 2: GenAI semconv (Development) の受容を明示。
+            - { name: OTEL_SEMCONV_STABILITY_OPT_IN, value: gen_ai_latest_experimental }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:

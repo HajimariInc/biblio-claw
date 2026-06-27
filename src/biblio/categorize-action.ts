@@ -12,7 +12,7 @@
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { categorize } from './categorize.js';
-import { BIBLIO_NAME_RE, writeBackMessage } from './action-helpers.js';
+import { BIBLIO_NAME_RE, withBiblioActionSpan, writeBackMessage } from './action-helpers.js';
 import type { CategoryResult } from './types.js';
 
 /** カテゴライズ結果を patron 向けの 1-2 行テキストに整形する。 */
@@ -29,75 +29,79 @@ function resultText(biblioName: string, result: CategoryResult): string {
 registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
   const rawName = typeof content.name === 'string' ? content.name.trim() : '';
   const requestId = crypto.randomUUID();
-  if (!rawName) {
-    log.warn('categorize_biblio missing name', {
+  await withBiblioActionSpan('categorize', requestId, session.id, async (span) => {
+    if (!rawName) {
+      log.warn('categorize_biblio missing name', {
+        event: 'biblio.categorize',
+        outcome: 'failure',
+        session_id: session.id,
+        request_id: requestId,
+      });
+      await writeBackMessage(
+        inDb,
+        'カテゴライズエラー (invalid_input): name が指定されていません。',
+        'categorize-resp',
+        'categorize_biblio',
+      );
+      return;
+    }
+    // path traversal 防御 + `owner--name` 形式の強制 (= categorize.ts が
+    // `quarantineRoot/biblioName` を path.join するため、不正な値は弾く)。
+    if (!BIBLIO_NAME_RE.test(rawName)) {
+      log.warn('categorize_biblio invalid name', {
+        event: 'biblio.categorize',
+        outcome: 'failure',
+        biblioName: rawName,
+        session_id: session.id,
+        request_id: requestId,
+      });
+      await writeBackMessage(
+        inDb,
+        `カテゴライズエラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
+        'categorize-resp',
+        'categorize_biblio',
+      );
+      return;
+    }
+
+    log.info('categorize_biblio from agent', {
       event: 'biblio.categorize',
-      outcome: 'failure',
-      session_id: session.id,
-      request_id: requestId,
-    });
-    await writeBackMessage(
-      inDb,
-      'カテゴライズエラー (invalid_input): name が指定されていません。',
-      'categorize-resp',
-      'categorize_biblio',
-    );
-    return;
-  }
-  // path traversal 防御 + `owner--name` 形式の強制 (= categorize.ts が
-  // `quarantineRoot/biblioName` を path.join するため、不正な値は弾く)。
-  if (!BIBLIO_NAME_RE.test(rawName)) {
-    log.warn('categorize_biblio invalid name', {
-      event: 'biblio.categorize',
-      outcome: 'failure',
       biblioName: rawName,
       session_id: session.id,
       request_id: requestId,
     });
-    await writeBackMessage(
-      inDb,
-      `カテゴライズエラー (invalid_input): name が \`owner--name\` 形式ではありません: "${rawName}"`,
-      'categorize-resp',
-      'categorize_biblio',
-    );
-    return;
-  }
 
-  log.info('categorize_biblio from agent', {
-    event: 'biblio.categorize',
-    biblioName: rawName,
-    session_id: session.id,
-    request_id: requestId,
+    try {
+      const result = await categorize({ biblioName: rawName }, { ctx: { requestId, sessionId: session.id } });
+      await writeBackMessage(inDb, resultText(rawName, result), 'categorize-resp', 'categorize_biblio');
+      log.info('categorize_biblio done', {
+        event: 'biblio.categorize',
+        outcome: result.ok ? 'success' : 'failure',
+        biblioName: rawName,
+        ok: result.ok,
+        category: result.ok ? result.category : null,
+        session_id: session.id,
+        request_id: requestId,
+      });
+      span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
+    } catch (err) {
+      // categorize() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+      log.error('categorize_biblio threw', {
+        event: 'biblio.categorize',
+        outcome: 'failure',
+        biblioName: rawName,
+        session_id: session.id,
+        request_id: requestId,
+        err,
+      });
+      const detail = err instanceof Error ? err.message : String(err);
+      await writeBackMessage(
+        inDb,
+        `カテゴライズエラー (internal): 予期しない失敗 — ${detail}`,
+        'categorize-resp',
+        'categorize_biblio',
+      );
+      span.setAttribute('biblio.outcome', 'failure');
+    }
   });
-
-  try {
-    const result = await categorize({ biblioName: rawName }, { ctx: { requestId, sessionId: session.id } });
-    await writeBackMessage(inDb, resultText(rawName, result), 'categorize-resp', 'categorize_biblio');
-    log.info('categorize_biblio done', {
-      event: 'biblio.categorize',
-      outcome: result.ok ? 'success' : 'failure',
-      biblioName: rawName,
-      ok: result.ok,
-      category: result.ok ? result.category : null,
-      session_id: session.id,
-      request_id: requestId,
-    });
-  } catch (err) {
-    // categorize() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-    log.error('categorize_biblio threw', {
-      event: 'biblio.categorize',
-      outcome: 'failure',
-      biblioName: rawName,
-      session_id: session.id,
-      request_id: requestId,
-      err,
-    });
-    const detail = err instanceof Error ? err.message : String(err);
-    await writeBackMessage(
-      inDb,
-      `カテゴライズエラー (internal): 予期しない失敗 — ${detail}`,
-      'categorize-resp',
-      'categorize_biblio',
-    );
-  }
 });

@@ -817,6 +817,70 @@ UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-h
 
 ---
 
+## M4-A Phase 2: GenAI semconv + boundary spans + log↔trace 連携
+
+### 観測体験
+
+Phase 2 で 1 patron リクエストの **全境界** に手動 span が立ち、Cloud Trace UI で親子関係つきで開ける。Cloud Logging UI からは「Trace を表示」リンクで 1-click 遷移できる。
+
+- **Slack inbound** (= `chat-sdk-bridge.ts` の各 callback) → `slack.event` span (`messaging.system='slack'` / `slack.event.type` / `slack.channel.id` / `slack.thread.ts`)
+- **9 action handler** (acquire / inspect / categorize / shelve / shelve_multi / list / enkin / shokyaku / config) → `biblio.${action}` span (`biblio.request_id` / `biblio.session_id` / `biblio.action` / `biblio.outcome`)
+- **LLM 呼び出し** (= `vertex-client.ts:callVertexGemini` / `callVertexAnthropic`) → `chat ${modelId}` span (GenAI semconv: `gen_ai.provider.name='gcp.vertex_ai'` / `gen_ai.request.model` / `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` / `gen_ai.usage.cache_read.input_tokens` / `server.address`)
+- **K8s Job spawn** (= `container-runner.ts:spawnContainer`) → `agent.spawn` span (`agent.session_id` / `agent.group_id` / `agent.group_name` / `agent.container_name` / `agent.runtime` / `k8s.job.name` / `k8s.namespace.name`)
+
+### log↔trace 連携 (Preferred Format)
+
+`src/log.ts` / `container/agent-runner/src/log.ts` の `emitJson` が active span から自動注入する:
+
+- `logging.googleapis.com/trace`: trace_id (32-hex そのまま、Preferred Format)
+- `logging.googleapis.com/spanId`: span_id (16-hex)
+- `logging.googleapis.com/trace_sampled`: boolean
+
+projectId 解決ロジックは持たない (= Cloud Logging UI が現在の project context で resolve する設計、`projects/<project>/traces/<id>` の Legacy full path 経路は採用していない。UI 遷移が立たない事象が出たら plan §Fallback Option G に切替判断)。
+
+### GenAI semconv の Development ステータス
+
+`gen_ai.*` 属性は OTel 仕様で **Development** ステータス。将来の変更を受容するため manifest env で明示している:
+
+```yaml
+- { name: OTEL_SEMCONV_STABILITY_OPT_IN, value: gen_ai_latest_experimental }
+```
+
+WARNING: `gen_ai.system` を見ているクライアント (旧仕様) は **`gen_ai.provider.name`** を見るよう更新が必要 (Vertex 経由 = `gcp.vertex_ai`、直接 Anthropic API = `anthropic`)。
+
+### Cloud Trace UI 検索フィルタ例
+
+```
+gen_ai.provider.name="gcp.vertex_ai"
+gen_ai.usage.input_tokens>1000
+biblio.action="acquire"
+biblio.outcome="failure"
+agent.runtime="k8s"
+```
+
+### debug 切り分け — Phase 2 追加分
+
+trace は届くが gen_ai 属性が空 / 期待外れの場合:
+
+1. `OTEL_SEMCONV_STABILITY_OPT_IN` env が manifest に投入されているか確認 (= `kubectl exec biblio-orchestrator-0 -c orchestrator -- env | grep OTEL_SEMCONV`)
+2. dummy `gen_ai` span を smoke-test で送出 → Cloud Trace REST API で取得し `labels.["gen_ai.provider.name"]` を目視
+   ```bash
+   gcloud auth application-default print-access-token | \
+     xargs -I{} curl -H "Authorization: Bearer {}" \
+       "https://cloudtrace.googleapis.com/v1/projects/<proj>/traces/<traceId>" | \
+     jq '.spans[].labels'
+   ```
+3. log↔trace UI 遷移が立たない場合: `gcloud logging read 'jsonPayload."logging.googleapis.com/trace"=*'` で jsonPayload に trace_id が乗っているか確認。空なら active span 不在経路 (= span ラップの外で log が出ている、bug)
+
+### Phase 2 で実装しなかったもの (= Out of Scope)
+
+- LLM prompt / completion 全文の span attribute / event 記録 (PII リスク、Phase 5+ で別途検討)
+- BigQuery sink (Phase 3 専任)
+- `scripts/verify-m4-a.sh` 統合 verify (Phase 4 専任)
+- `agent.lifecycle.{pending,ready,first_response}` の span (Phase 5+ で寄り道予定、plan §補足参照)
+
+---
+
 ## Vertex 401 ACCESS_TOKEN_EXPIRED retry loop の対症手順
 
 ### 症状

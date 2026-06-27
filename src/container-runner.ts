@@ -24,7 +24,8 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
-import { injectTraceContextToEnv } from './observability/index.js';
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { getTracer, injectTraceContextToEnv } from './observability/index.js';
 import { buildNoProxyWithTelemetry } from './observability/no-proxy.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -104,6 +105,18 @@ export function wakeContainer(session: Session): Promise<boolean> {
 }
 
 async function spawnContainer(session: Session): Promise<void> {
+  const tracer = getTracer();
+  return tracer.startActiveSpan(
+    'agent.spawn',
+    {
+      kind: SpanKind.PRODUCER,
+      attributes: {
+        'agent.session_id': session.id,
+        'agent.group_id': session.agent_group_id,
+      },
+    },
+    async (span) => {
+      try {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     // throw して wakeContainer の .catch に拾わせる (= false 返却)。
@@ -111,6 +124,7 @@ async function spawnContainer(session: Session): Promise<void> {
     // caller が「コンテナ起動成功」と誤解する経路があった (M3 Phase 2 spawn-verify で表面化)。
     throw new Error(`Agent group not found: ${session.agent_group_id}`);
   }
+  span.setAttribute('agent.group_name', agentGroup.name);
 
   // Refresh the destination map and default reply routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
@@ -147,6 +161,8 @@ async function spawnContainer(session: Session): Promise<void> {
     agentIdentifier,
   );
 
+  span.setAttribute('agent.container_name', containerName);
+  span.setAttribute('agent.runtime', process.env.CONTAINER_PROVIDER ?? 'docker');
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
   // Clear any orphan heartbeat from a previous container instance — the
@@ -193,6 +209,15 @@ async function spawnContainer(session: Session): Promise<void> {
         err,
       });
     });
+      } catch (err) {
+        span.recordException(err as Error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
+  );
 }
 
 /** Kill a container for a session. */

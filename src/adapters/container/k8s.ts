@@ -33,6 +33,7 @@
  * shared Volume.
  */
 import * as k8s from '@kubernetes/client-node';
+import { trace } from '@opentelemetry/api';
 
 import { log } from '../../log.js';
 import type { AgentExitInfo, AgentHandle, AgentSpawnSpec, ContainerRuntimeProvider } from './types.js';
@@ -201,6 +202,11 @@ export class K8sJobContainerRuntimeProvider implements ContainerRuntimeProvider 
       agentGroup: spec.agentGroupName,
       sessionId: spec.sessionId,
     });
+    const activeSpan = trace.getActiveSpan();
+    if (activeSpan) {
+      activeSpan.setAttribute('k8s.job.name', jobName);
+      activeSpan.setAttribute('k8s.namespace.name', this.namespace);
+    }
 
     const pending: Pending = { resolve: () => undefined, killed: false };
     const exitPromise = new Promise<AgentExitInfo>((resolve) => {

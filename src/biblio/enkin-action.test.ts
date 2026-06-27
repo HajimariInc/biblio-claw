@@ -106,7 +106,8 @@ describe('enkin_biblio handler — HITL 経路', () => {
     expect(requestApprovalMock).toHaveBeenCalledTimes(1);
     const opts = requestApprovalMock.mock.calls[0][0] as RequestApprovalOptions;
     expect(opts.action).toBe('enkin_confirm');
-    expect(opts.payload).toEqual({ biblioName: 'owner--repo', category: 'biblio-dev' });
+    expect(opts.payload).toMatchObject({ biblioName: 'owner--repo', category: 'biblio-dev' });
+    expect((opts.payload as Record<string, unknown>).originating_request_id).toEqual(expect.any(String));
     expect(opts.title).toBe('禁書の承認');
     expect(getWrittenText()).toContain('禁書承認を申請しました');
   });

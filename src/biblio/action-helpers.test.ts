@@ -137,3 +137,70 @@ describe('writeBackMessage retry', () => {
     expect(lostCall?.[1]).toMatchObject({ retries: 3, textPreview: expect.stringContaining('hello') });
   });
 });
+
+/**
+ * withBiblioActionSpan: Phase 2 Task 9 で追加した biblio.${action} span ヘルパ
+ * (InMemorySpanExporter で name + 主要属性を assert)。
+ */
+describe('withBiblioActionSpan', () => {
+  it('biblio.${action} span を立て、属性 (request_id / session_id / action) を付与する', async () => {
+    const otelApi = await import('@opentelemetry/api');
+    const sdk = await import('@opentelemetry/sdk-trace-base');
+    const alsHooks = await import('@opentelemetry/context-async-hooks');
+    const memoryExporter = new sdk.InMemorySpanExporter();
+    otelApi.context.setGlobalContextManager(new alsHooks.AsyncLocalStorageContextManager().enable());
+    const provider = new sdk.BasicTracerProvider({
+      sampler: new sdk.ParentBasedSampler({ root: new sdk.AlwaysOnSampler() }),
+      spanProcessors: [new sdk.SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+
+    const { withBiblioActionSpan } = await import('./action-helpers.js');
+    await withBiblioActionSpan('acquire', 'req-123', 'sess-abc', async (span) => {
+      span.setAttribute('biblio.outcome', 'success');
+    });
+
+    const spans = memoryExporter.getFinishedSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0].name).toBe('biblio.acquire');
+    expect(spans[0].attributes['biblio.request_id']).toBe('req-123');
+    expect(spans[0].attributes['biblio.session_id']).toBe('sess-abc');
+    expect(spans[0].attributes['biblio.action']).toBe('acquire');
+    expect(spans[0].attributes['biblio.outcome']).toBe('success');
+
+    memoryExporter.reset();
+    await provider.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
+  });
+
+  it('callback throw 時に ERROR status + recordException + 再 throw する', async () => {
+    const otelApi = await import('@opentelemetry/api');
+    const sdk = await import('@opentelemetry/sdk-trace-base');
+    const alsHooks = await import('@opentelemetry/context-async-hooks');
+    const memoryExporter = new sdk.InMemorySpanExporter();
+    otelApi.context.setGlobalContextManager(new alsHooks.AsyncLocalStorageContextManager().enable());
+    const provider = new sdk.BasicTracerProvider({
+      sampler: new sdk.ParentBasedSampler({ root: new sdk.AlwaysOnSampler() }),
+      spanProcessors: [new sdk.SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+
+    const { withBiblioActionSpan } = await import('./action-helpers.js');
+    await expect(
+      withBiblioActionSpan('inspect', 'r', 's', async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+
+    const spans = memoryExporter.getFinishedSpans();
+    expect(spans.length).toBe(1);
+    expect(spans[0].status.code).toBe(otelApi.SpanStatusCode.ERROR);
+    expect(spans[0].events.some((e) => e.name === 'exception')).toBe(true);
+
+    memoryExporter.reset();
+    await provider.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
+  });
+});
