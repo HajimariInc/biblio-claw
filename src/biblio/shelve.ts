@@ -204,6 +204,22 @@ function readPluginMeta(shelfPath: string, biblioName: string): { description: s
           version: typeof entry.version === 'string' ? entry.version : '0.0.0',
         };
       }
+      // 3-segment で plugins[] に該当 entry 不在 → silent fall-through 禁止 (docblock 「無音劣化禁止」)。
+      // 通常フローでは inspect.ts:resolvePluginMeta が同条件で REJECT 済のためここに到達しないが、
+      // 別経路で shelve に直接到達するケースの診断情報として warn を残す。
+      if (skillSegment !== null) {
+        log.warn('shelve: marketplace.json に該当 skill entry 不在 (using defaults)', {
+          biblioName,
+          skillSegment,
+          p: marketplaceJsonPath,
+        });
+      }
+    } else {
+      // plugins[] 自体が空 / 非配列 — 同じく silent skip 禁止
+      log.warn('shelve: marketplace.json plugins[] が空 or 不正 (using defaults)', {
+        biblioName,
+        p: marketplaceJsonPath,
+      });
     }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
