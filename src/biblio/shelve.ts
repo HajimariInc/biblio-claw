@@ -157,17 +157,31 @@ function isAlreadyShelved(marketplace: Record<string, unknown>, biblioName: stri
 }
 
 /**
- * plugin.json から description / version を読む (失敗時は既定値)。
+ * plugin metadata (description / version) を読む (失敗時は既定値)。
  *
- * ENOENT は biblio によっては自然 (= plugin.json 省略可)。それ以外の I/O 障害 (EACCES /
- * EMFILE 等) や JSON 不正は warn で可視化する (silent skip 禁止、`categorize.ts:readPluginDescription`
- * と同パターン)。返り値は既定値で継続するため陳列自体は止めない。multi 経路 (Phase 4
- * `shelveMulti`) で呼ばれる件数が増えるため、shelf 上の marketplace.json entry 品質が
- * 無音で劣化する経路にしないことが重要。
+ * 経路 1: `.claude-plugin/plugin.json` (= 単一 plugin 形式、従来挙動)
+ * 経路 2: plugin.json ENOENT / parse 失敗 / 非 ENOENT I/O 障害なら `.claude-plugin/marketplace.json`
+ *        の plugins[] から fallback (issue #63):
+ *        - 3-segment biblio (`<owner>--<name>--<skill>`): plugins[].name === skill で entry を引く
+ *        - 2-segment biblio: plugins[0] を代表として使う
+ *
+ * @param shelfPath  shelve 先 (or quarantine) の物理 path
+ * @param biblioName `<owner>--<name>` または `<owner>--<name>--<skill>` (3-segment 時に経路 2 で使用)
+ *
+ * silent skip 禁止 (CLAUDE.md / `categorize.ts:readPluginDescription` と同パターン):
+ * - ENOENT は biblio によっては自然なため経路 1 / 経路 2 とも silent fall-through (= 自然な不在)
+ * - それ以外の I/O 障害 (EACCES / EMFILE 等) や JSON 不正は warn で可視化
+ * - 両ファイル不在 / 該当 entry 不在 / plugins[] 空も warn で可視化 (= 通常フローでは inspect.ts:resolvePluginMeta
+ *   が REJECT 済だが、直接 shelve に到達する経路の診断情報)
+ *
+ * 返り値は既定値で継続するため陳列自体は止めない。multi 経路 (Phase 4 `shelveMulti`) で
+ * 呼ばれる件数が増えるため、shelf 上の marketplace.json entry 品質が無音で劣化する経路に
+ * しないことが重要。
  */
 function readPluginMeta(shelfPath: string, biblioName: string): { description: string; version: string } {
   // 経路 1: plugin.json (= 単一 plugin 形式、従来挙動)
   const pluginJsonPath = path.join(shelfPath, '.claude-plugin', 'plugin.json');
+  let pluginJsonEnoent = false;
   try {
     const raw = fs.readFileSync(pluginJsonPath, 'utf-8');
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -181,14 +195,17 @@ function readPluginMeta(shelfPath: string, biblioName: string): { description: s
       log.warn('shelve: plugin.json invalid JSON (trying marketplace.json)', { p: pluginJsonPath, err });
     } else if (code !== 'ENOENT') {
       log.warn('shelve: plugin.json unreadable (trying marketplace.json)', { p: pluginJsonPath, code, err });
+    } else {
+      pluginJsonEnoent = true;
     }
-    // ENOENT or parse error → 経路 2 へ
+    // いずれのエラーも経路 2 へ (ENOENT は silent、SyntaxError / 非 ENOENT I/O は上記 warn 済み)
   }
 
   // 経路 2: marketplace.json fallback (issue #63)
   //   3-segment biblio (`<owner>--<name>--<skill>`): plugins[].name === skill で entry を引く
   //   2-segment biblio: plugins[0] を代表として使う
   const marketplaceJsonPath = path.join(shelfPath, '.claude-plugin', 'marketplace.json');
+  let marketplaceEnoent = false;
   try {
     const raw2 = fs.readFileSync(marketplaceJsonPath, 'utf-8');
     const marketplace = JSON.parse(raw2) as { plugins?: unknown };
@@ -227,7 +244,20 @@ function readPluginMeta(shelfPath: string, biblioName: string): { description: s
       log.warn('shelve: marketplace.json invalid JSON (using defaults)', { p: marketplaceJsonPath, err });
     } else if (code !== 'ENOENT') {
       log.warn('shelve: marketplace.json unreadable (using defaults)', { p: marketplaceJsonPath, code, err });
+    } else {
+      marketplaceEnoent = true;
     }
+  }
+
+  // 両ファイル ENOENT (経路 1 ENOENT + 経路 2 ENOENT) は完全 silent fall-through を許さない
+  // (docblock 「無音劣化禁止」)。通常フローでは inspect.ts:resolvePluginMeta が同条件で REJECT 済だが、
+  // 直接 shelve 経路 (CLI ハーネス等) の診断として warn を残す。
+  // ※ 経路 1 が SyntaxError / 非 ENOENT I/O だった場合は既に warn 済みのため二重通知は出さない。
+  if (pluginJsonEnoent && marketplaceEnoent) {
+    log.warn('shelve: .claude-plugin/ に plugin.json も marketplace.json も無い (using defaults)', {
+      biblioName,
+      shelfPath,
+    });
   }
 
   return { description: '', version: '0.0.0' };

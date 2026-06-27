@@ -334,6 +334,15 @@ describe('acquire', () => {
     // gh api は個別経路では呼ばれない (= sparse-checkout の git clone 自体が repo 存在確認を兼ねる)
     const ghCalls = mockSpawn.mock.calls.filter((c) => c[0] === 'gh');
     expect(ghCalls).toHaveLength(0);
+    // sparse-checkout set には skill dir + `.claude-plugin` の両方が渡されること (issue #63 regression 防止)。
+    // `.claude-plugin` 不在の場合 marketplace 形式 repo の検品 / 陳列が壊れる。
+    const sparseSetCall = mockSpawn.mock.calls.find(
+      (c) => c[0] === 'git' && (c[1] as string[])[2] === 'sparse-checkout' && (c[1] as string[])[3] === 'set',
+    );
+    expect(sparseSetCall).toBeDefined();
+    const sparsePatterns = (sparseSetCall![1] as string[]).slice(4);
+    expect(sparsePatterns).toContain('algorithmic-art');
+    expect(sparsePatterns).toContain('.claude-plugin');
   });
 
   it('req.skill が SEGMENT_RE 不一致 (不正文字) なら invalid_input を返す (Phase 3 fetch パス踏み抜き防衛)', async () => {

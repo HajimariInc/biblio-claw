@@ -3,8 +3,9 @@
  *
  * cheap-to-expensive 順 (= fail-fast):
  *   1. 存在確認: quarantine が読めない                          → HOLD/inspect_error
- *   2. schema : `.claude-plugin/plugin.json` parse + 必須フィールド (name) → REJECT/schema_invalid
- *   3. license: `plugin.json.license` を allow/deny 照合         → HOLD/license_denied|license_unknown
+ *   2. schema : plugin metadata (`.claude-plugin/plugin.json` 優先、ENOENT なら `.claude-plugin/marketplace.json`
+ *               の plugins[] から該当 entry を fallback) parse + 必須フィールド (name) → REJECT/schema_invalid
+ *   3. license: plugin metadata の license を allow/deny 照合     → HOLD/license_denied|license_unknown
  *   4. dangerous: SKILL.md / *.sh / *.py / *.js を集約 → Vertex × Gemini に判定させる
  *                                                                → REJECT/dangerous_code or ACCEPT
  *                  parse 失敗・LLM 例外は HOLD/inspect_error (fail-closed)
@@ -172,8 +173,8 @@ type ResolvePluginMetaFail = {
  *      - 2-segment biblio: plugins[0] を代表として使う
  *   3. どちらも不在 / parse 失敗 / 該当 entry なしは fail
  *
- * `acquire.ts:countSkillsInRepo` の marketplace.json parse パターンと
- * `shelf-gh.ts:pluginsOf` の Array.isArray ガード流儀を踏襲。
+ * plugins[] への安全アクセスは `Array.isArray` ガードで型保証する設計流儀
+ * (shelve / unshelve 系も同方針)。
  */
 function resolvePluginMeta(targetPath: string, biblioName: string): ResolvePluginMetaOk | ResolvePluginMetaFail {
   // 経路 1: plugin.json
@@ -297,8 +298,13 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
   // --- 3. license 軸 ---
   const licenseValue = plugin.license;
   if (typeof licenseValue !== 'string' || licenseValue.length === 0) {
-    log.warn('inspect: license missing', { biblioName });
-    return fail('HOLD', biblioName, 'license_unknown', 'plugin.json.license が指定されていません (allow リスト未照合)');
+    log.warn('inspect: license missing', { biblioName, source: resolved.source });
+    return fail(
+      'HOLD',
+      biblioName,
+      'license_unknown',
+      `plugin metadata (${resolved.source}) の license が指定されていません (allow リスト未照合)`,
+    );
   }
   if (isLicenseDenied(licenseValue)) {
     log.warn('inspect: license denied', { biblioName, license: licenseValue });
