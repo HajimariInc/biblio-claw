@@ -24,13 +24,41 @@ import type { Session } from '../types.js';
 import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
 
 /**
- * biblio action handler 共通の span ラッパ (Phase 2 Task 9)。
+ * biblio action handler の span 名を closed union で固定する。
+ * acquire / inspect / categorize / shelve / multi-shelve / enkin / shokyaku /
+ * list-biblio / config の 9 handler が共通で使う + HITL 2 経路 (enkin_request /
+ * shokyaku_request = delivery 申請境界、enkin / shokyaku = approval 承認境界) を
+ * 区別する。新 handler 追加時は本 union を必ず拡張する (= 拡張なしで呼び出すと
+ * compile error)。
+ */
+export type BiblioActionName =
+  | 'acquire'
+  | 'inspect'
+  | 'categorize'
+  | 'shelve'
+  | 'shelve_multi'
+  | 'list'
+  | 'enkin'
+  | 'enkin_request'
+  | 'shokyaku'
+  | 'shokyaku_request'
+  | 'config';
+
+/**
+ * biblio action handler 共通の span ラッパ。
  *
- * `biblio.${action}` 名 + `biblio.request_id` / `biblio.session_id` / `biblio.action` 属性を
- * 立てる + exception を recordException + ERROR status で記録する。9 handler 統一の構造化トレース。
+ * acquire / inspect / categorize / shelve / multi-shelve / enkin / shokyaku /
+ * list-biblio / config の 9 handler が共通で使う (= 11 span 名は [[BiblioActionName]]
+ * で固定)。`biblio.${action}` 名で span を開始し、`biblio.request_id` /
+ * `biblio.session_id` / `biblio.action` を属性として記録する。exception は
+ * recordException + ERROR status で記録、span は finally で必ず end する。
+ *
+ * @note approval handler 経路 (enkin / shokyaku の confirm) では sessionId に
+ *       空文字列が渡される (= approval 後の境界は session を持たない、申請境界の
+ *       `enkin_request` / `shokyaku_request` 側が `session_id` を保持する)。
  */
 export async function withBiblioActionSpan<T>(
-  action: string,
+  action: BiblioActionName,
   requestId: string,
   sessionId: string,
   fn: (span: Span) => Promise<T>,
@@ -52,8 +80,11 @@ export async function withBiblioActionSpan<T>(
       try {
         return await fn(span);
       } catch (err) {
-        span.recordException(err as Error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        // err が non-Error (= string/number throw) の場合に Cloud Trace の例外イベントと
+        // ERROR status message が undefined にならないよう instanceof guard で分岐。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
         throw err;
       } finally {
         span.end();

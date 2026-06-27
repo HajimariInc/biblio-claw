@@ -12,6 +12,8 @@
  * shelve-action.ts と同形 (= 入口 validate + try/catch + writeBackMessage)。差分は HITL approval を
  * 挟む点と、`enkin()` の実行を approval handler 内に移す点のみ。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
@@ -35,7 +37,10 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
   const { biblioName, category } = parseApprovalPayload(payload);
   // approval 後の実処理は「承認申請」とは別境界 → 独立 request_id を生成。
   const requestId = crypto.randomUUID();
-  // 申請時の request_id を payload から取り出して 2 span を連結 (Phase 2)。
+  // 申請時の request_id を payload から取り出して biblio.originating_request_id 属性に
+  // 設定する。申請 span (enkin_request) と本 approval span (enkin) は別 trace だが、
+  // この属性経由でログ検索や BQ 集計により申請→承認を遡れる。OTel SpanLink は使わない
+  // (= Cloud Trace UI の SpanLink 描画未確認、属性連結で十分とした)。
   const originatingRequestId =
     typeof (payload as Record<string, unknown>).originating_request_id === 'string'
       ? ((payload as Record<string, unknown>).originating_request_id as string)
@@ -49,6 +54,8 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
         payload,
         request_id: requestId,
       });
+      span.setStatus({ code: SpanStatusCode.ERROR, message: 'invalid approval payload' });
+      span.setAttribute('biblio.outcome', 'failure');
       safeNotify(notify, `禁書エラー: 承認 payload が壊れています (biblioName=${biblioName}, category=${category})`, {
         action: APPROVAL_ACTION,
         biblioName,

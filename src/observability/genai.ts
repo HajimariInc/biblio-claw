@@ -1,4 +1,11 @@
-// gen_ai.* semconv (semantic-conventions@1.41.1 incubating、定数 hardcode で /incubating import 不使用)
+// gen_ai.* semconv 定数 (hardcode)。
+//
+// @opentelemetry/semantic-conventions/incubating の export は **マイナーリリースで
+// 破壊的変更** が入る可能性があり (= GenAI semconv は Development ステータス)、SDK の
+// 1.41.1 で動いた import path が 1.42.0 で消える経路がある。文字列 hardcode +
+// 本コメントの公式参照で「将来 spec 変更を踏んだら定数文字列を直に書き換える」
+// 追従義務を明示する方が、import で silent に破壊変更を吸い込むより安全。
+//
 // 参照: https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/
 //       https://opentelemetry.io/docs/specs/semconv/gen-ai/anthropic/
 export const GEN_AI_OPERATION_NAME = 'gen_ai.operation.name';

@@ -192,3 +192,58 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     expect(notifiedText).toContain('payload が壊れています');
   });
 });
+
+/**
+ * HITL 2 span 連結検証 (= Phase 2 review B1)。
+ *
+ * 申請 span (enkin_request、delivery handler) は申請時の request_id を
+ * `pending_approvals.payload.originating_request_id` に埋め、承認 span (enkin、
+ * approval handler) はそれを `biblio.originating_request_id` 属性に立てる。
+ * 申請側 payload 検証は既存テストで網羅されているが、承認側で属性が立つことの
+ * 直接検証が欠けていたため追加 (= 設計意図 = HITL 申請 → 承認の trace 連結の回帰防止)。
+ */
+describe('enkin approval handler — HITL 2 span 連結 (originating_request_id)', () => {
+  it('payload.originating_request_id を span 属性 biblio.originating_request_id に設定する', async () => {
+    const otelApi = await import('@opentelemetry/api');
+    const sdk = await import('@opentelemetry/sdk-trace-base');
+    const alsHooks = await import('@opentelemetry/context-async-hooks');
+    const memoryExporter = new sdk.InMemorySpanExporter();
+    otelApi.context.setGlobalContextManager(new alsHooks.AsyncLocalStorageContextManager().enable());
+    const provider = new sdk.BasicTracerProvider({
+      sampler: new sdk.ParentBasedSampler({ root: new sdk.AlwaysOnSampler() }),
+      spanProcessors: [new sdk.SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+
+    enkinMock.mockResolvedValueOnce({
+      ok: true,
+      biblioName: 'owner--repo',
+      category: 'biblio-dev',
+      prUrl: 'https://github.com/owner/biblio-shelf/pull/9',
+      prNumber: 9,
+      branchName: 'enkin/owner--repo',
+    });
+
+    const notifyMock = vi.fn();
+    await approvalHandler({
+      session: { id: 'sess-x' } as never,
+      payload: {
+        biblioName: 'owner--repo',
+        category: 'biblio-dev',
+        originating_request_id: 'req-original-uuid-xyz',
+      },
+      userId: 'slack:U-DEN',
+      notify: notifyMock,
+    });
+
+    const spans = memoryExporter.getFinishedSpans();
+    const approvalSpan = spans.find((s) => s.name === 'biblio.enkin');
+    expect(approvalSpan).toBeDefined();
+    expect(approvalSpan?.attributes['biblio.originating_request_id']).toBe('req-original-uuid-xyz');
+
+    memoryExporter.reset();
+    await provider.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
+  });
+});

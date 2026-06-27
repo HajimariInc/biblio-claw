@@ -340,8 +340,11 @@ export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx
         if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
         return text;
       } catch (err) {
-        span.recordException(err as Error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        // err が non-Error の場合に Cloud Trace の例外イベント / ERROR status の
+        // message が undefined にならないよう instanceof guard で分岐。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
         throw err;
       } finally {
         span.end();
@@ -510,8 +513,11 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
         }
         return text;
       } catch (err) {
-        span.recordException(err as Error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        // err が non-Error の場合に Cloud Trace の例外イベント / ERROR status の
+        // message が undefined にならないよう instanceof guard で分岐。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
         throw err;
       } finally {
         span.end();

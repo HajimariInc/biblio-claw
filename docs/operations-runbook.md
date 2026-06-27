@@ -1,6 +1,6 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-06-23
+最終更新:2026-06-27
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
 
@@ -878,6 +878,17 @@ trace は届くが gen_ai 属性が空 / 期待外れの場合:
 - BigQuery sink (Phase 3 専任)
 - `scripts/verify-m4-a.sh` 統合 verify (Phase 4 専任)
 - `agent.lifecycle.{pending,ready,first_response}` の span (Phase 5+ で寄り道予定、plan §補足参照)
+
+### 関連
+
+- `src/observability/{genai,trace-fields}.ts` (host 側 Phase 2 追加 = GenAI semconv 定数 + Cloud Logging reserved field 生成)
+- `container/agent-runner/src/observability/trace-fields.ts` (agent 側 Phase 2 追加、host と実装同一を維持 = ファイル先頭の同期義務コメント参照)
+- `src/biblio/action-helpers.ts` (`withBiblioActionSpan` ヘルパ + `BiblioActionName` closed union)
+- `src/channels/chat-sdk-bridge.ts` (4 callback を `${adapter.name}.event` span 起点に)
+- `src/container-runner.ts` (`spawnContainer` を `agent.spawn` span でラップ)
+- `src/adapters/container/k8s.ts` (`k8s.job.name` / `k8s.namespace.name` 属性追加)
+- `src/biblio/vertex-client.ts` (`callVertexGemini` / `callVertexAnthropic` を `chat ${modelId}` span でラップ + `gen_ai.*` 属性)
+- `container/agent-runner/src/mcp-tools/biblio.ts` (9 tool の log を structured form = `mcp.biblio.*` event に)
 
 ---
 
