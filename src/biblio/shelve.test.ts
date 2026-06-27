@@ -186,6 +186,91 @@ describe('shelve — 初回成功 (marketplace 不在 → 新規作成)', () => 
   });
 });
 
+describe('shelve — marketplace 形式 quarantine (readPluginMeta marketplace.json fallback、issue #63)', () => {
+  /** marketplace.json のみ (= plugin.json 不在) の quarantine を作る。3-segment biblioName 用。 */
+  function setupMarketplaceOnlyQuarantine(biblioName: string, plugins: Array<Record<string, unknown>>): string {
+    const dir = path.join(TEST_DIR, 'quarantine', biblioName);
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({ name: 'test-marketplace', owner: { name: 'vendor' }, plugins }),
+    );
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '# test skill body');
+    return dir;
+  }
+
+  /** POST /git/blobs の全 body から marketplace.json blob (= biblioName を含む plugins[] 持ち) を探す (encoding=utf-8)。 */
+  function findShelfMarketplaceBlob(biblioName: string): { plugins: Array<Record<string, unknown>> } | null {
+    for (const [url, init] of fetchMock.mock.calls as Array<[string, { method?: string; body?: string }]>) {
+      if (!url.endsWith('/git/blobs') || init?.method !== 'POST' || !init.body) continue;
+      const blobBody = JSON.parse(init.body) as { content: string; encoding?: string };
+      try {
+        const decoded = JSON.parse(blobBody.content) as { plugins?: Array<Record<string, unknown>> };
+        if (Array.isArray(decoded.plugins) && decoded.plugins.some((p) => p.name === biblioName)) {
+          return { plugins: decoded.plugins };
+        }
+      } catch {
+        // 非 JSON blob (= SKILL.md 等) は skip
+      }
+    }
+    return null;
+  }
+
+  it('3-segment biblio: marketplace.json entry の description / version が shelf entry に反映される', async () => {
+    // marketplace 形式 repo の 3-segment 個別 skill 仕入れ → 検品 ACCEPT → 陳列経路。
+    // shelve.ts:readPluginMeta が経路 2 (marketplace.json fallback) で正しく description/version を引き、
+    // shelf 側 marketplace.json entry に空文字 / "0.0.0" の degraded value が入らないことを確認 (issue #63)。
+    const biblioName = 'vercel-labs--agent-browser--agent-browser';
+    setupMarketplaceOnlyQuarantine(biblioName, [
+      {
+        name: 'agent-browser', // 3 segment 目と一致
+        source: './agent-browser',
+        description: 'Headless browser tool for agents',
+        version: '1.2.3',
+        license: 'MIT',
+      },
+    ]);
+    setupHappyPath({ marketplaceExists: false });
+    const result = await shelve(
+      { biblioName, category: 'biblio-dev', reason: 'test marketplace fallback' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result.ok).toBe(true);
+    const shelfMp = findShelfMarketplaceBlob(biblioName);
+    expect(shelfMp).not.toBeNull();
+    const entry = shelfMp!.plugins.find((p) => p.name === biblioName);
+    expect(entry).toBeDefined();
+    expect(entry!.description).toBe('Headless browser tool for agents');
+    expect(entry!.version).toBe('1.2.3');
+  });
+
+  it('2-segment biblio: plugins[0] の description / version が代表として採用される', async () => {
+    // 2-segment 全体仕入れで plugin.json 不在 + marketplace.json のみのケース。
+    // readPluginMeta は plugins[0] を代表として使う (= 1 plugin marketplace なら自然)。
+    const biblioName = 'vendor--single-plugin-marketplace';
+    setupMarketplaceOnlyQuarantine(biblioName, [
+      {
+        name: 'represent-me',
+        source: './represent-me',
+        description: 'representative entry',
+        version: '0.5.0',
+        license: 'MIT',
+      },
+    ]);
+    setupHappyPath({ marketplaceExists: false });
+    const result = await shelve(
+      { biblioName, category: 'biblio-dev', reason: 'test 2-segment marketplace fallback' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result.ok).toBe(true);
+    const shelfMp = findShelfMarketplaceBlob(biblioName);
+    expect(shelfMp).not.toBeNull();
+    const entry = shelfMp!.plugins.find((p) => p.name === biblioName);
+    expect(entry!.description).toBe('representative entry');
+    expect(entry!.version).toBe('0.5.0');
+  });
+});
+
 describe('shelve — quarantine 不在', () => {
   it('quarantine dir が無いと quarantine_missing で early return (rename 試行しない)', async () => {
     // 重複検知は通って (marketplace 404)、その後の存在確認で落ちる経路
