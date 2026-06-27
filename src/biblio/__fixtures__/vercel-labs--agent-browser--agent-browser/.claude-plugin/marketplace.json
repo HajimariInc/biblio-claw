@@ -1,0 +1,13 @@
+{
+  "name": "vercel-labs-marketplace",
+  "owner": { "name": "vercel-labs", "email": "noreply@vercel.com" },
+  "plugins": [
+    {
+      "name": "agent-browser",
+      "source": "./agent-browser",
+      "description": "Headless browser tool for agents",
+      "version": "0.1.0",
+      "license": "MIT"
+    }
+  ]
+}

@@ -151,6 +151,104 @@ function isLicenseDenied(license: string): boolean {
   return DENY_LICENSE_PATTERNS.some((pattern) => license.includes(pattern));
 }
 
+type ResolvePluginMetaOk = {
+  ok: true;
+  value: Record<string, unknown>;
+  source: 'plugin.json' | 'marketplace.json';
+};
+type ResolvePluginMetaFail = {
+  ok: false;
+  reason: 'missing' | 'parse' | 'no_entry';
+  detail: string;
+};
+
+/**
+ * schema 軸の metadata source を解決する (issue #63)。
+ *
+ * 優先順位:
+ *   1. `.claude-plugin/plugin.json` が存在すれば parse して返す (= 単一 plugin 形式、従来挙動)
+ *   2. plugin.json が ENOENT なら `.claude-plugin/marketplace.json` を試す (marketplace 形式)
+ *      - 3-segment biblio (`<owner>--<name>--<skill>`): plugins[].name === skill で entry を引く
+ *      - 2-segment biblio: plugins[0] を代表として使う
+ *   3. どちらも不在 / parse 失敗 / 該当 entry なしは fail
+ *
+ * `acquire.ts:countSkillsInRepo` の marketplace.json parse パターンと
+ * `shelf-gh.ts:pluginsOf` の Array.isArray ガード流儀を踏襲。
+ */
+function resolvePluginMeta(targetPath: string, biblioName: string): ResolvePluginMetaOk | ResolvePluginMetaFail {
+  // 経路 1: plugin.json
+  const pluginJsonPath = path.join(targetPath, '.claude-plugin', 'plugin.json');
+  let pluginRaw: string | null = null;
+  try {
+    pluginRaw = fs.readFileSync(pluginJsonPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code !== 'ENOENT') {
+      return { ok: false, reason: 'parse', detail: `.claude-plugin/plugin.json が読めません: ${code}` };
+    }
+    // ENOENT → 経路 2 へ
+  }
+  if (pluginRaw !== null) {
+    try {
+      const parsed = JSON.parse(pluginRaw) as Record<string, unknown>;
+      return { ok: true, value: parsed, source: 'plugin.json' };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: 'parse', detail: `.claude-plugin/plugin.json が不正 JSON: ${detail}` };
+    }
+  }
+
+  // 経路 2: marketplace.json fallback
+  const marketplaceJsonPath = path.join(targetPath, '.claude-plugin', 'marketplace.json');
+  let marketplaceRaw: string;
+  try {
+    marketplaceRaw = fs.readFileSync(marketplaceJsonPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code === 'ENOENT') {
+      return {
+        ok: false,
+        reason: 'missing',
+        detail:
+          '.claude-plugin/plugin.json も marketplace.json も読めません (個別 skill 仕入れの場合は `<owner>/<repo>/<skill>` 形式で指定してください)',
+      };
+    }
+    return { ok: false, reason: 'parse', detail: `.claude-plugin/marketplace.json が読めません: ${code}` };
+  }
+  let marketplace: { plugins?: unknown };
+  try {
+    marketplace = JSON.parse(marketplaceRaw) as { plugins?: unknown };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: 'parse', detail: `.claude-plugin/marketplace.json が不正 JSON: ${detail}` };
+  }
+  if (!Array.isArray(marketplace.plugins) || marketplace.plugins.length === 0) {
+    return {
+      ok: false,
+      reason: 'no_entry',
+      detail: 'marketplace.json に plugins[] が存在しません or 空です',
+    };
+  }
+  const plugins = marketplace.plugins as Record<string, unknown>[];
+  const segments = biblioName.split('--');
+  const skillSegment = segments.length === 3 ? segments[2] : null;
+
+  let entry: Record<string, unknown> | undefined;
+  if (skillSegment !== null) {
+    entry = plugins.find((p) => typeof p.name === 'string' && p.name === skillSegment);
+    if (entry === undefined) {
+      return {
+        ok: false,
+        reason: 'no_entry',
+        detail: `marketplace.json plugins[] に name="${skillSegment}" の entry が存在しません`,
+      };
+    }
+  } else {
+    entry = plugins[0];
+  }
+  return { ok: true, value: entry, source: 'marketplace.json' };
+}
+
 /**
  * 検品本体。
  *
@@ -175,30 +273,24 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
   }
 
   // --- 2. schema 軸 ---
-  const pluginJsonPath = path.join(targetPath, '.claude-plugin', 'plugin.json');
-  let pluginRaw: string;
-  try {
-    pluginRaw = fs.readFileSync(pluginJsonPath, 'utf-8');
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
-    log.warn('inspect: plugin.json unreadable', { biblioName, pluginJsonPath, code });
-    return fail('REJECT', biblioName, 'schema_invalid', `.claude-plugin/plugin.json が読めません: ${code}`);
+  // 優先: `.claude-plugin/plugin.json` (= 単一 plugin 形式)
+  // fallback: `.claude-plugin/marketplace.json` の plugins[] から該当 entry (issue #63)
+  const resolved = resolvePluginMeta(targetPath, biblioName);
+  if (!resolved.ok) {
+    log.warn('inspect: schema axis failed', { biblioName, reason: resolved.reason, detail: resolved.detail });
+    return fail('REJECT', biblioName, 'schema_invalid', resolved.detail);
   }
-  let plugin: Record<string, unknown>;
-  try {
-    plugin = JSON.parse(pluginRaw) as Record<string, unknown>;
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    log.warn('inspect: plugin.json parse failed', { biblioName, detail });
-    return fail('REJECT', biblioName, 'schema_invalid', `.claude-plugin/plugin.json が不正 JSON: ${detail}`);
-  }
+  const plugin = resolved.value;
   if (typeof plugin.name !== 'string' || plugin.name.length === 0) {
-    log.warn('inspect: plugin.json missing required field "name"', { biblioName });
+    log.warn('inspect: plugin metadata missing required field "name"', {
+      biblioName,
+      source: resolved.source,
+    });
     return fail(
       'REJECT',
       biblioName,
       'schema_invalid',
-      '.claude-plugin/plugin.json に必須フィールド "name" がありません',
+      `plugin metadata (${resolved.source}) に必須フィールド "name" がありません`,
     );
   }
 

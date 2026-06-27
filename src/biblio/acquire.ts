@@ -397,8 +397,11 @@ async function fetchSkillSubtree(owner: string, name: string, skill: string, clo
     };
   }
 
-  // 4. sparse-checkout set <skill>
-  const sparseSet = spawnSync('git', ['-C', quarantinePath, 'sparse-checkout', 'set', skill], {
+  // 4. sparse-checkout set <skill> + `.claude-plugin`
+  //    `.claude-plugin` を含めるのは marketplace 形式 repo の metadata 源 (marketplace.json) を
+  //    検品 / 陳列段階で物理可視化するため (issue #63)。cone mode では root-level entry 単位で
+  //    指定する。`.claude-plugin` 不在 repo では pattern miss として silent に抜ける (= status 0)。
+  const sparseSet = spawnSync('git', ['-C', quarantinePath, 'sparse-checkout', 'set', skill, '.claude-plugin'], {
     ...baseSpawn,
     timeout: GH_TIMEOUT_MS,
   });
@@ -430,8 +433,9 @@ async function fetchSkillSubtree(owner: string, name: string, skill: string, clo
   }
 
   // 6. manifest 存在チェック (= skill dir 直下 + 任意階層に SKILL.md がある = agentskills.io spec)。
-  //    全体経路の hasManifest は marketplace.json + SKILL.md だが、sparse 経路では
-  //    marketplace.json は (skill dir に無いため) 探索対象外。SKILL.md 存在のみ確認する。
+  //    sparse-checkout に `.claude-plugin` を含めるため (issue #63)、marketplace 形式 repo では
+  //    `quarantinePath/.claude-plugin/marketplace.json` が worktree に存在する。ただし manifest
+  //    判定は SKILL.md の有無のみで行う (= biblio の本質は実行可能な skill 本体)。
   const skillDir = path.join(quarantinePath, skill);
   if (!fs.existsSync(skillDir)) {
     removeQuarantine(quarantinePath);

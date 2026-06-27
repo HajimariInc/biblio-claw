@@ -165,29 +165,56 @@ function isAlreadyShelved(marketplace: Record<string, unknown>, biblioName: stri
  * `shelveMulti`) で呼ばれる件数が増えるため、shelf 上の marketplace.json entry 品質が
  * 無音で劣化する経路にしないことが重要。
  */
-function readPluginMeta(shelfPath: string): { description: string; version: string } {
-  const p = path.join(shelfPath, '.claude-plugin', 'plugin.json');
-  let raw: string;
+function readPluginMeta(shelfPath: string, biblioName: string): { description: string; version: string } {
+  // 経路 1: plugin.json (= 単一 plugin 形式、従来挙動)
+  const pluginJsonPath = path.join(shelfPath, '.claude-plugin', 'plugin.json');
   try {
-    raw = fs.readFileSync(p, 'utf-8');
+    const raw = fs.readFileSync(pluginJsonPath, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      description: typeof parsed.description === 'string' ? parsed.description : '',
+      version: typeof parsed.version === 'string' ? parsed.version : '0.0.0',
+    };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
-    if (code !== 'ENOENT') {
-      log.warn('shelve: plugin.json unreadable (using defaults)', { p, code, err });
+    if (err instanceof SyntaxError) {
+      log.warn('shelve: plugin.json invalid JSON (trying marketplace.json)', { p: pluginJsonPath, err });
+    } else if (code !== 'ENOENT') {
+      log.warn('shelve: plugin.json unreadable (trying marketplace.json)', { p: pluginJsonPath, code, err });
     }
-    return { description: '', version: '0.0.0' };
+    // ENOENT or parse error → 経路 2 へ
   }
-  let parsed: Record<string, unknown>;
+
+  // 経路 2: marketplace.json fallback (issue #63)
+  //   3-segment biblio (`<owner>--<name>--<skill>`): plugins[].name === skill で entry を引く
+  //   2-segment biblio: plugins[0] を代表として使う
+  const marketplaceJsonPath = path.join(shelfPath, '.claude-plugin', 'marketplace.json');
   try {
-    parsed = JSON.parse(raw) as Record<string, unknown>;
+    const raw2 = fs.readFileSync(marketplaceJsonPath, 'utf-8');
+    const marketplace = JSON.parse(raw2) as { plugins?: unknown };
+    if (Array.isArray(marketplace.plugins) && marketplace.plugins.length > 0) {
+      const plugins = marketplace.plugins as Record<string, unknown>[];
+      const segments = biblioName.split('--');
+      const skillSegment = segments.length === 3 ? segments[2] : null;
+      const entry =
+        skillSegment !== null ? plugins.find((p) => typeof p.name === 'string' && p.name === skillSegment) : plugins[0];
+      if (entry !== undefined) {
+        return {
+          description: typeof entry.description === 'string' ? entry.description : '',
+          version: typeof entry.version === 'string' ? entry.version : '0.0.0',
+        };
+      }
+    }
   } catch (err) {
-    log.warn('shelve: plugin.json invalid JSON (using defaults)', { p, err });
-    return { description: '', version: '0.0.0' };
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (err instanceof SyntaxError) {
+      log.warn('shelve: marketplace.json invalid JSON (using defaults)', { p: marketplaceJsonPath, err });
+    } else if (code !== 'ENOENT') {
+      log.warn('shelve: marketplace.json unreadable (using defaults)', { p: marketplaceJsonPath, code, err });
+    }
   }
-  return {
-    description: typeof parsed.description === 'string' ? parsed.description : '',
-    version: typeof parsed.version === 'string' ? parsed.version : '0.0.0',
-  };
+
+  return { description: '', version: '0.0.0' };
 }
 
 /**
@@ -563,7 +590,7 @@ export async function shelveMulti(
   }
   let updatedMarketplace = marketplace;
   for (const { req, shelfPath } of perReqFiles) {
-    const meta = readPluginMeta(shelfPath);
+    const meta = readPluginMeta(shelfPath, req.biblioName);
     updatedMarketplace = mergeMarketplace(updatedMarketplace, {
       name: req.biblioName,
       source: `./${req.category}/${req.biblioName}`,
