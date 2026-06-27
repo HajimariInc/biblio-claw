@@ -146,7 +146,7 @@ esac
 # skip = 偽陽性) と区別できない。
 #
 # GKE 経路のログ形式: orchestrator は `LOG_FORMAT=json` (k8s/10-orchestrator-statefulset.yaml:200)
-# で動くため、src/log.ts:77-94 の `emitJson` が JSON 1 行を吐く。例:
+# で動くため、src/log.ts:75-91 の `emitJson` が JSON 1 行を吐く。例:
 #   {"severity":"INFO","message":"Channel adapter started","time":"...","component":"host-orchestrator","channel":"slack","type":"slack"}
 # キーは colon 区切りの `"channel":"slack"` 形式 (= 旧 text logger の key=value `channel="slack"`
 # 形式から init-project-gcp Phase 2 で切替済 = commit 9c113f0)。ANSI escape は JSON
