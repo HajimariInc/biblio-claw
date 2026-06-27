@@ -892,6 +892,108 @@ trace は届くが gen_ai 属性が空 / 期待外れの場合:
 
 ---
 
+## M4-A Phase 3: Cloud Logging → BigQuery sink
+
+### 概要
+
+biblio-claw の構造化ログ (GKE Fluent Bit 経由で Cloud Logging に到達済) を BigQuery dataset `llm_observability` に sink し、`request_id` 1 つで SQL 集計可能にする。Terraform で sink + dataset + IAM を宣言的に管理 (`terraform/m4-a-observability/`)。clustering は sink 経由作成テーブルへの後追い `bq update` で適用 — `CREATE OR REPLACE TABLE ... CLUSTER BY` は全ログ消滅の罠なので使わない。
+
+### 前提
+
+- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済 (memory `gcp_iam_secret_manager_pattern` 参照)
+- GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中 (= Phase 1+2 完了)
+- keyless: `gcloud auth application-default login` 済 (ADC)、SA key を使わない
+
+### Apply
+
+```bash
+cd terraform/m4-a-observability
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+作成リソース (5 個):
+
+- `google_bigquery_dataset.logs` (`llm_observability`、location `asia-northeast1`、90 日 expiration)
+- `google_logging_project_sink.biblio` (`biblio-claw-to-bq`、filter = `k8s_container` + namespace `biblio-claw`)
+- `google_bigquery_dataset_iam_member.sink_writer` (sink writer identity → `roles/bigquery.dataEditor`)
+- `google_project_service.{bigquery,logging}` (API 有効化、`disable_on_destroy=false` で API は destroy 時も残置)
+
+### Verify(手動 1 回確認)
+
+1. biblio-claw で任意の biblio action を 1 回実行 (Slack で `@bot 蔵書` 等)
+2. ~5 分待ち、`bq ls hajimari-ai-hackathon-2026:llm_observability` でテーブル materialize 確認
+3. 実テーブル名は GKE container の logName 直接由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 Phase 3 apply 時に実測確認)
+4. 以下を実行 (`sql/summary.sql` は実テーブル名 `stdout` で書かれている):
+   ```bash
+   bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false \
+     < terraform/m4-a-observability/sql/summary.sql
+   ```
+   `hit_count >= 1` の行が複数 event / outcome で返れば OK
+5. `request_id` 1 つを取り出し、`SELECT * WHERE jsonPayload.request_id='<UUID>'` で全境界ログが取得できることを確認
+
+> **TZ bug 回避**: `WHERE DATE(timestamp) = CURRENT_DATE('Asia/Tokyo')` は UTC 評価 vs JST date 比較で時差ズレ (= 朝の時間帯に 0 件症状)。`DATE(timestamp, 'Asia/Tokyo')` を使う。`summary.sql` は対応済
+
+### Clustering 後追い(初回 emit 後に 1 回)
+
+sink 経由作成テーブルは Terraform 管理外 (sink writer SA に `tables.delete` 権限なし、`CREATE OR REPLACE` 罠回避)。`bq update` で後追い適用:
+
+```bash
+bq update \
+  --clustering_fields=severity \
+  hajimari-ai-hackathon-2026:llm_observability.stdout
+
+bq show --format=json \
+  hajimari-ai-hackathon-2026:llm_observability.stdout \
+  | jq .clustering
+# → {"fields": ["severity"]}
+```
+
+- **BQ 仕様: clustering は top-level column のみ**。`jsonPayload.event` 等の nested field は `Fields specified for clustering can only be top-level fields` で reject される。`severity` 単独で WHERE 句頻出ケースをカバー
+- 新規行のみ clustering 対象 (既存行は再クラスタなし)。biblio-claw の運用量 (~100 req/day) では DML UPDATE 再クラスタは不要
+- 罠: `CREATE OR REPLACE TABLE ... CLUSTER BY` は全ログ消滅。絶対に使わない
+
+### Teardown
+
+`delete_contents_on_destroy = false` のため、`terraform destroy` 単独では dataset 削除に失敗する。順序固定:
+
+```bash
+cd terraform/m4-a-observability
+terraform plan -destroy                                       # dry-run
+bq rm -r -f -d hajimari-ai-hackathon-2026:llm_observability   # dataset + 全テーブル削除
+terraform destroy -auto-approve                                # sink + IAM 削除
+```
+
+`google_project_service` は `disable_on_destroy=false` で API 残置 (他リソース影響回避)。
+
+### 既知の罠 / gotcha
+
+- **BQ location ≠ GKE region で無音 drop**: `variables.tf` default で `asia-northeast1` 固定。GKE cluster region と一致必須
+- **`_iam_binding` 罠**: 他 principal を退出させる authoritative。`_iam_member` (additive) を使う
+- **`unique_writer_identity = true` 必須**: `bigquery_options` 使用時。v5+ デフォルト true だが明示
+- **テーブル名 (GKE)**: `stdout` / `stderr` (logName 直接由来)。Cloud Run などの別環境では `run_googleapis_com_stdout` 系になる
+- **`DATE(timestamp)` の TZ bug**: デフォルト UTC 評価。JST date と比較する SQL は `DATE(timestamp, 'Asia/Tokyo')` を使う。PoC-10 写経起点で同 bug 継承していたため Phase 3 で修正済
+- **clustering は top-level column のみ**: `jsonPayload.event` 等 nested は reject。`severity` 単独運用
+- **log には latency/tokens が載らない**: span attribute としてのみ記録 (Cloud Trace 側で見る設計)。BQ サマリは event/outcome/component/action の境界集計に絞る
+- **`default_table_expiration_ms` 単位はミリ秒**: 7776000000 = 90 日
+
+### Phase 3 で実装しなかったもの (= Out of Scope)
+
+- `scripts/verify-m4-a.sh` 自動化 (Phase 4 任意で扱う、Phase 3 は手動 1 回確認)
+- BQ Dashboard / Looker Studio 連携 (M4-C 責務)
+- log filter の細分化 (`namespace_name="biblio-claw"` で十分、BQ 側で `component` 列 WHERE 絞り込み)
+- multi-environment (dev/prod 分離) 対応 (現状 ハッカソン GCP 1 project のみ)
+
+### 関連
+
+- `terraform/m4-a-observability/{versions,providers,variables,main,outputs}.tf` (sink + dataset + IAM 宣言)
+- `terraform/m4-a-observability/sql/summary.sql` (request_id 集計 SQL 雛形)
+- `terraform/m4-a-observability/README.md` (Terraform dir ローカルの apply / clustering / teardown 詳細)
+- PoC-10 `/home/proj/wforest/repos/PoC/biblio-poc-10-logging-bigquery/` (写経元)
+
+---
+
 ## Vertex 401 ACCESS_TOKEN_EXPIRED retry loop の対症手順
 
 ### 症状
