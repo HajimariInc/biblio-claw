@@ -66,16 +66,37 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
+export const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Parse the idle threshold from a raw env value. Pure helper so the
+ * fallback path is unit-testable without module re-import gymnastics.
+ * Invalid input (non-numeric, non-positive, undefined) returns `null` —
+ * the caller decides whether to log + fall back.
+ */
+export function parseIdleThresholdMs(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
 // Idle threshold for "conversation completed, container resident" cleanup.
 // Distinct from ABSOLUTE_CEILING_MS (= stuck container last-resort). When the
-// heartbeat is older than this AND no claims are pending, we kill the
-// container so its memory is released — critical on GKE where agent Pods
-// inherit zonal PVC affinity (issue #57).
-export const DEFAULT_IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+// heartbeat is older than this AND no claims are pending AND no Bash tool is
+// declared running, kill the container so its memory is released — critical
+// on GKE where agent Pods inherit zonal PVC affinity, so resident idle Pods
+// starve new spawn requests in the same zone.
 export const IDLE_THRESHOLD_MS = (() => {
   const raw = process.env.AGENT_IDLE_THRESHOLD_MS;
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_IDLE_THRESHOLD_MS;
+  if (raw === undefined) return DEFAULT_IDLE_THRESHOLD_MS;
+  const parsed = parseIdleThresholdMs(raw);
+  if (parsed !== null) return parsed;
+  log.warn('AGENT_IDLE_THRESHOLD_MS is invalid, falling back to default', {
+    raw,
+    defaultMs: DEFAULT_IDLE_THRESHOLD_MS,
+  });
+  return DEFAULT_IDLE_THRESHOLD_MS;
 })();
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
@@ -120,9 +141,10 @@ export function decideStuckAction(args: {
   // gone quiet past IDLE_THRESHOLD_MS, release the container so its memory
   // returns to the cluster. On GKE the agent Pod inherits orchestrator PVC
   // zone affinity, so resident idle Pods starve new spawn requests in the
-  // same zone (issue #57). The next inbound message will re-spawn via
+  // same zone. The next inbound message re-spawns the container via
   // wakeContainer. Skip when claims are pending (kill-claim path handles it)
-  // or when Bash is declared running with a long timeout (= intentional work).
+  // or when Bash is declared running with any declared timeout (= intentional
+  // long-running work).
   if (heartbeatMtimeMs !== 0 && claims.length === 0 && declaredBashMs === null) {
     const heartbeatAge = now - heartbeatMtimeMs;
     if (heartbeatAge > IDLE_THRESHOLD_MS) {
@@ -280,24 +302,36 @@ function enforceRunningContainerSla(
   }
 
   if (decision.action === 'kill-idle') {
-    log.info('Killing idle container to release memory', {
+    // Match kill-ceiling / kill-claim at warn level so monitoring greps that
+    // alert on container-kill events see this path too.
+    log.warn('Killing idle container to release memory', {
       sessionId: session.id,
       heartbeatAgeMs: decision.heartbeatAgeMs,
       thresholdMs: decision.thresholdMs,
     });
     killContainer(session.id, 'idle-timeout');
-    // claims が空のため processing rows のリセットは不要 (= 対象行が存在しない)
+    // No processing rows to reset: kill-idle is gated by claims.length === 0
+    // in decideStuckAction. The next sweep tick's "container not running"
+    // cleanup path covers any claim that races in after the snapshot.
     return;
   }
 
-  log.warn('Killing container — message claimed then silent', {
-    sessionId: session.id,
-    messageId: decision.messageId,
-    claimAgeMs: decision.claimAgeMs,
-    toleranceMs: decision.toleranceMs,
-  });
-  killContainer(session.id, 'claim-stuck');
-  resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
+  if (decision.action === 'kill-claim') {
+    log.warn('Killing container — message claimed then silent', {
+      sessionId: session.id,
+      messageId: decision.messageId,
+      claimAgeMs: decision.claimAgeMs,
+      toleranceMs: decision.toleranceMs,
+    });
+    killContainer(session.id, 'claim-stuck');
+    resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
+    return;
+  }
+
+  // Unreachable: TypeScript flags this if a new StuckDecision variant is
+  // added without a matching dispatch branch above.
+  const _exhaustive: never = decision;
+  void _exhaustive;
 }
 
 export function _resetStuckProcessingRowsForTesting(
