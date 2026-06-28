@@ -125,8 +125,7 @@ export function createPendingQuestion(pq: PendingQuestion): boolean {
 
 export function getPendingQuestion(questionId: string): PendingQuestion | undefined {
   const row = getDb().prepare('SELECT * FROM pending_questions WHERE question_id = ?').get(questionId) as
-    | (Omit<PendingQuestion, 'options'> & { options_json: string })
-    | undefined;
+    (Omit<PendingQuestion, 'options'> & { options_json: string }) | undefined;
   if (!row) return undefined;
   const { options_json, ...rest } = row;
   return { ...rest, options: JSON.parse(options_json) };
@@ -176,8 +175,7 @@ export function createPendingApproval(
 
 export function getPendingApproval(approvalId: string): PendingApproval | undefined {
   return getDb().prepare('SELECT * FROM pending_approvals WHERE approval_id = ?').get(approvalId) as
-    | PendingApproval
-    | undefined;
+    PendingApproval | undefined;
 }
 
 export function updatePendingApprovalStatus(approvalId: string, status: PendingApproval['status']): void {
@@ -203,8 +201,7 @@ export function getAskQuestionRender(
   const q = getPendingQuestion(id);
   if (q) return { title: q.title, options: q.options };
   const a = getDb().prepare('SELECT title, options_json FROM pending_approvals WHERE approval_id = ?').get(id) as
-    | { title: string; options_json: string }
-    | undefined;
+    { title: string; options_json: string } | undefined;
   if (a?.title) return { title: a.title, options: JSON.parse(a.options_json) };
 
   // Channel-registration + unknown-sender approvals persist title/options_json
@@ -218,8 +215,7 @@ export function getAskQuestionRender(
 
   if (hasTable(getDb(), 'pending_sender_approvals')) {
     const s = getDb().prepare('SELECT title, options_json FROM pending_sender_approvals WHERE id = ?').get(id) as
-      | { title: string; options_json: string }
-      | undefined;
+      { title: string; options_json: string } | undefined;
     if (s?.title) return { title: s.title, options: JSON.parse(s.options_json) };
   }
 

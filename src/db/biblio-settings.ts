@@ -21,8 +21,7 @@ export interface BiblioSettingRow {
 /** key に対応する value を返す。未存在は undefined。 */
 export function getBiblioSetting(key: string): string | undefined {
   const row = getDb().prepare('SELECT value FROM biblio_settings WHERE key = ?').get(key) as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   return row?.value;
 }
 
