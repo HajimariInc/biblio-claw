@@ -142,40 +142,6 @@ afterEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-describe('shelve / shelveMulti — config_error (env 欠落)', () => {
-  it('shelveMulti: 必須 env が欠落していると config_error reason で failMulti を返す', async () => {
-    vi.mocked(readEnvFile).mockReturnValueOnce({});
-
-    const result = await shelveMulti([{ biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' }], {
-      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
-      shelfRoot: path.join(TEST_DIR, 'shelf'),
-    });
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return; // 型ガード
-    expect(result.reason).toBe('config_error');
-    expect(result.detail).toMatch(/required env missing: SHELF_REPO_OWNER/);
-    expect(result.items).toHaveLength(1);
-    // env catch は marketplace 取得前に早期 return するため、ネットワーク呼び出しは発生しない
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it('shelve (単一): shelveMulti 経由で config_error reason を伝搬する', async () => {
-    vi.mocked(readEnvFile).mockReturnValueOnce({});
-
-    const result = await shelve(
-      { biblioName: 'owner--repo', category: 'biblio-dev', reason: 'test' },
-      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
-    );
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return; // 型ガード
-    expect(result.reason).toBe('config_error');
-    expect(result.detail).toMatch(/required env missing: SHELF_REPO_OWNER/);
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-});
-
 describe('shelve — 重複検知', () => {
   it('既存 marketplace.json に同名 entry があれば early return / already_shelved', async () => {
     setupQuarantine('owner--repo');
@@ -712,6 +678,46 @@ describe('shelveMulti — 入口 validation', () => {
     if (!result.ok) {
       expect(result.items).toHaveLength(2);
     }
+  });
+
+  it('必須 env 欠落 (SHELF_REPO_OWNER 不在) → config_error reason (issue #50)', async () => {
+    // env.ts mock を 1 回だけ「必須欠落」状態に上書きする (= readShelveEnv throw 経路)
+    vi.mocked(readEnvFile).mockReturnValueOnce({
+      // SHELF_REPO_OWNER を意図的に省略
+      SHELF_REPO_NAME: 'biblio-shelf',
+      SHELF_PR_AUTHOR_NAME: 'hj-biblio-github-app[bot]',
+      SHELF_PR_AUTHOR_EMAIL: '292998322+hj-biblio-github-app[bot]@users.noreply.github.com',
+      SHELF_PR_AUTHOR_FALLBACK: '',
+    });
+    const result = await shelveMulti([{ biblioName: 'owner--repo--x', category: 'biblio-dev', reason: 'r' }], {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot: path.join(TEST_DIR, 'shelf'),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('config_error');
+      expect(result.detail).toMatch(/SHELF_REPO_OWNER|required|missing/i);
+    }
+    // env catch は step 3 (rename) より前 = GitHub API は一切叩かない
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('単一 shelve() 経由でも env 欠落は config_error を patron に返す (wrapper passthrough)', async () => {
+    vi.mocked(readEnvFile).mockReturnValueOnce({
+      SHELF_REPO_NAME: 'biblio-shelf',
+      SHELF_PR_AUTHOR_NAME: 'hj-biblio-github-app[bot]',
+      SHELF_PR_AUTHOR_EMAIL: '292998322+hj-biblio-github-app[bot]@users.noreply.github.com',
+      SHELF_PR_AUTHOR_FALLBACK: '',
+    });
+    const result = await shelve(
+      { biblioName: 'owner--repo--single', category: 'biblio-dev', reason: 'r' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('config_error');
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

@@ -62,6 +62,8 @@ slash command 本体は `.claude/commands/init-project.md` (ローカル) と `.
 
 > **Phase 2 ログを読む**: §Phase 2 JSON ログの読み方 参照(フィルタ:`LOG_COMPONENT=agent-runner`、host orchestrator の `LOG_FORMAT` を伝搬)。
 
+> **patron 通知消失のシグナル**: agent-runner から `severity=ERROR` で `writeMessageOut: patron notification lost after all retries` が出た場合、outbound.db への INSERT が SQLITE_BUSY 等で 3 回 retry 後も失敗したことを示す。MCP tool handler から throw が伝播し `dispatchTool` 経由で `mcp tool handler threw` ERROR が続いて出る (= agent reply 経由で patron に間接通知される救済経路はあるが、host delivery poll 経由の system action 通知は失われている)。発生時は同 session の `inbound.db` / `outbound.db` のロック競合状況を採取する (issue #51 で導入)。
+
 ### 3. OneCLI gateway
 
 | 操作 | ローカル | GCP |
