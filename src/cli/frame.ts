@@ -18,8 +18,7 @@ export type RequestFrame = {
 };
 
 export type ResponseFrame =
-  | { id: string; ok: true; data: unknown }
-  | { id: string; ok: false; error: { code: ErrorCode; message: string } };
+  { id: string; ok: true; data: unknown } | { id: string; ok: false; error: { code: ErrorCode; message: string } };
 
 export type ErrorCode =
   | 'unknown-command'

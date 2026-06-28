@@ -6,3 +6,9 @@ onlyBuiltDependencies:
 
 pnpm:
   minimumReleaseAge: 4320
+
+overrides:
+  form-data: ^4.0.6
+  js-yaml: ^4.2.0
+  vite: ^8.0.16
+  chat: 4.30.0
