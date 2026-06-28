@@ -123,7 +123,55 @@ describe('inspect — schema 軸', () => {
     expect(result).toMatchObject({
       verdict: 'REJECT',
       reason: 'schema_invalid',
-      detail: expect.stringContaining('読めません'),
+      // issue #63: plugin.json も marketplace.json も両方不在の場合の案内文言
+      detail: expect.stringContaining('marketplace.json'),
+    });
+    expect(mockLlm).not.toHaveBeenCalled();
+  });
+
+  it('ACCEPT (marketplace.json fallback, 3-segment skill)', async () => {
+    // marketplace 形式 repo (= `.claude-plugin/marketplace.json` のみ存在、plugin.json 不在) の
+    // 個別 skill 仕入れ (3-segment) で schema 軸 + license 軸を通過することを確認 (issue #63)。
+    // dangerous 軸通過のため LLM=CLEAN を mock。fixture の SKILL.md が scan targets に拾われる。
+    mockClean();
+    const result = await inspect(
+      { biblioName: 'vercel-labs--agent-browser--agent-browser' },
+      { quarantineRoot: FIXTURES_ROOT },
+    );
+    // ACCEPT まで到達することを直接 assert (HOLD/inspect_error に倒れる regression も検知)。
+    expect(result).toEqual({ verdict: 'ACCEPT', biblioName: 'vercel-labs--agent-browser--agent-browser' });
+  });
+
+  it('REJECT (marketplace.json plugins[] が空配列、3-segment skill)', async () => {
+    // plugins[] 自体が空配列のケース (entry 不在とは別 branch、issue #63)。
+    const biblioName = 'foo--bar--some-skill';
+    const dir = path.join(TEST_DIR, biblioName);
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.claude-plugin', 'marketplace.json'), JSON.stringify({ name: 'mp', plugins: [] }));
+    const result = await inspect({ biblioName }, { quarantineRoot: TEST_DIR });
+    expect(result).toMatchObject({
+      verdict: 'REJECT',
+      reason: 'schema_invalid',
+      detail: expect.stringContaining('plugins[]'),
+    });
+    expect(mockLlm).not.toHaveBeenCalled();
+  });
+
+  it('REJECT (marketplace.json plugins[] に該当 entry 不在、3-segment skill)', async () => {
+    // 動的 fixture: TEST_DIR 内に marketplace.json のみ持つディレクトリを作り、
+    // biblioName の 3 segment 目が plugins[].name と一致しないケースを構成する。
+    const biblioName = 'foo--bar--missing-skill';
+    const dir = path.join(TEST_DIR, biblioName);
+    fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({ name: 'mp', plugins: [{ name: 'other-skill', license: 'MIT' }] }),
+    );
+    const result = await inspect({ biblioName }, { quarantineRoot: TEST_DIR });
+    expect(result).toMatchObject({
+      verdict: 'REJECT',
+      reason: 'schema_invalid',
+      detail: expect.stringContaining('missing-skill'),
     });
     expect(mockLlm).not.toHaveBeenCalled();
   });

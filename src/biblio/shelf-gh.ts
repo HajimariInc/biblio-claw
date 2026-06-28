@@ -83,12 +83,12 @@ export interface GhFetchCtx {
 /**
  * ghFetch の拡張オプション (= UndiciRequestInit と別軸の挙動制御 + 追跡 ctx)。
  *
- * `noAuth`: Authorization ヘッダを省略する。OneCLI secret の `pathPattern`
- * (`/repos/HajimariInc/*`) に match しない外部 repo (= biblio 仕入れ先の `anthropics/skills` 等)
- * を fetch するときに必須。pathPattern miss 時に `Bearer placeholder` を素通しすると GitHub が
- * invalid token として 401 を返すため (= public API は無認証で 200)、外部 repo 経路では本フラグ
- * を立てて Authorization 自体を省略する。内部 repo (= `HajimariInc/biblio-shelf`) 操作では未指定
- * (= 既存挙動 = MITM で token 置換) のままで OK。
+ * `noAuth`: Authorization ヘッダを省略する。外部 repo (= biblio 仕入れ先の `anthropics/skills` 等
+ * GH App installation scope 外) を fetch するときに必須。OneCLI MITM は全 `api.github.com` パスで
+ * `Bearer placeholder` を実 installation token に置換するが、外部 repo は GH App scope 外で
+ * GitHub が 401 Bad credentials を返すため、本フラグで Authorization 自体を省略して無認証
+ * public API 200 を取る経路に倒す。内部 repo (= `HajimariInc/biblio-shelf` / `HajimariInc/biblio-claw`)
+ * 操作では未指定 (= 既存挙動 = MITM で token 置換) のままで OK。
  *
  * `ctx`: `GhFetchCtx` (= request_id / session_id) を伝搬し、構造化ログに乗せる。
  */
@@ -107,15 +107,14 @@ export async function ghFetch(
   const headers: Record<string, string> = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
-    // OneCLI MITM が wire で本物の installation token に置換 (shelve / unshelve /
-    // list-biblio / acquire 全 ghFetch 経路で共通)。OneCLI v1.30.0 で pathPattern
-    // 明示すると GKE で injection skip される不具合 (issue #36) は PR #38 で解消済 —
-    // secret には pathPattern を省略 (= 全パスマッチ) する運用に統一済。
+    // OneCLI MITM が wire で `Bearer placeholder` を実 installation token に置換する
+    // (shelve / unshelve / list-biblio / acquire 全 ghFetch 経路で共通、全 `api.github.com`
+    // パスを対象)。
     //
-    // 外部 repo (= OneCLI secret の `pathPattern` に match しない `anthropics/skills` 等)
-    // を fetch するときは `opts.noAuth: true` で Authorization 自体を省略する。
-    // pathPattern miss 時に placeholder を素通しすると GitHub が invalid token として
-    // 401 を返す (= public API は無認証で 200) ため、外部 repo 経路の安全弁。
+    // 外部 repo (= GH App installation scope 外、`anthropics/skills` 等) を fetch するときは
+    // `opts.noAuth: true` で Authorization 自体を省略する。MITM が token 注入しても scope 外
+    // repo は GitHub が 401 Bad credentials を返すため、無認証で public API 200 を取る経路に
+    // 倒すのが外部 repo 経路の安全弁。
     ...(opts.noAuth ? {} : { Authorization: 'Bearer placeholder' }),
     ...(init.headers as Record<string, string> | undefined),
   };

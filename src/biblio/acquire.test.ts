@@ -276,12 +276,33 @@ describe('acquire', () => {
       quarantinePath: path.join(QUARANTINE, 'octocat--hello'),
     });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
-    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、{ ctx: undefined })。
+    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、{ ctx: undefined, noAuth: true })。
+    // noAuth: true は外部 repo 対応 (issue #46 fix)。countSkillsInRepo (marketplace.json / git/trees) と対称。
     expect(mockGhFetch).toHaveBeenCalledWith(
       'acquire.check-repo',
       expect.stringMatching(/\/repos\/octocat\/hello$/),
       {},
-      { ctx: undefined },
+      { ctx: undefined, noAuth: true },
+    );
+  });
+
+  it('外部 public repo (scope 外) でも check-repo が noAuth: true で通る (issue #46)', async () => {
+    // 外部 repo (= GH App installation scope 外) でも check-repo が 200 を返せる
+    // ことを assert。実装の noAuth: true により Authorization header が省略され、
+    // OneCLI MITM の installation token inject 経路を bypass する (= 401 にならない)。
+    mockSpawn.mockImplementation((_cmd, args) => {
+      const dest = (args as string[])[4];
+      fs.mkdirSync(path.join(dest, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(path.join(dest, '.claude-plugin', 'marketplace.json'), '{}');
+      return spawnResult(0);
+    });
+    const result = await acquire({ repo: 'example-org/test-biblio-minimal' });
+    expect(result.ok).toBe(true);
+    expect(mockGhFetch).toHaveBeenCalledWith(
+      'acquire.check-repo',
+      expect.stringMatching(/\/repos\/example-org\/test-biblio-minimal$/),
+      {},
+      expect.objectContaining({ noAuth: true }),
     );
   });
 
@@ -334,6 +355,148 @@ describe('acquire', () => {
     // gh api は個別経路では呼ばれない (= sparse-checkout の git clone 自体が repo 存在確認を兼ねる)
     const ghCalls = mockSpawn.mock.calls.filter((c) => c[0] === 'gh');
     expect(ghCalls).toHaveLength(0);
+    // sparse-checkout set には skill dir + `.claude-plugin` の両方が渡されること (issue #63 regression 防止)。
+    // `.claude-plugin` 不在の場合 marketplace 形式 repo の検品 / 陳列が壊れる。
+    const sparseSetCall = mockSpawn.mock.calls.find(
+      (c) => c[0] === 'git' && (c[1] as string[])[2] === 'sparse-checkout' && (c[1] as string[])[3] === 'set',
+    );
+    expect(sparseSetCall).toBeDefined();
+    const sparsePatterns = (sparseSetCall![1] as string[]).slice(4);
+    expect(sparsePatterns).toContain('algorithmic-art');
+    expect(sparsePatterns).toContain('.claude-plugin');
+  });
+
+  it('marketplace.json の source="./<dir>/<skill>" 形式で subdir 再 sparse-checkout して成功 (issue #63 PR review)', async () => {
+    // anthropics/claude-plugins-official で観察された `./plugins/<skill>` 形式を mock。
+    // sparse-checkout は 1 回目 = [skill, .claude-plugin] / 2 回目 = [skill, .claude-plugin, plugins/<skill>] と再実行。
+    let sparseSetCallNo = 0;
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'git') {
+        const a = args as string[];
+        if (a[0] === 'clone') {
+          const dest = a[a.length - 1];
+          fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+          return spawnResult(0);
+        }
+        if (a[2] === 'sparse-checkout' && a[3] === 'init') return spawnResult(0);
+        if (a[2] === 'sparse-checkout' && a[3] === 'set') {
+          sparseSetCallNo++;
+          const qpath = a[1];
+          // 1 回目: marketplace.json を `.claude-plugin/` に置く (= step 5.5 で読まれる)
+          if (sparseSetCallNo === 1) {
+            const mpDir = path.join(qpath, '.claude-plugin');
+            fs.mkdirSync(mpDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(mpDir, 'marketplace.json'),
+              JSON.stringify({
+                name: 'mp',
+                plugins: [{ name: 'api-security-testing', source: './plugins/api-security-testing' }],
+              }),
+            );
+          }
+          // 2 回目: subdir 経路で skill 本体を出現させる
+          if (sparseSetCallNo === 2) {
+            const skillBodyDir = path.join(qpath, 'plugins', 'api-security-testing');
+            fs.mkdirSync(skillBodyDir, { recursive: true });
+            fs.writeFileSync(path.join(skillBodyDir, 'SKILL.md'), '# subdir skill');
+          }
+          return spawnResult(0);
+        }
+        if (a[2] === 'checkout') return spawnResult(0);
+      }
+      return spawnResult(1);
+    });
+    const result = await acquire({ repo: '42crunch/marketplace-mock', skill: 'api-security-testing' });
+    expect(result).toEqual({
+      ok: true,
+      biblioName: '42crunch--marketplace-mock--api-security-testing',
+      quarantinePath: path.join(QUARANTINE, '42crunch--marketplace-mock--api-security-testing'),
+    });
+    // sparse-checkout set が 2 回呼ばれ、2 回目に `plugins/api-security-testing` が渡されている
+    expect(sparseSetCallNo).toBe(2);
+    const sparseSetCalls = mockSpawn.mock.calls.filter(
+      (c) => c[0] === 'git' && (c[1] as string[])[2] === 'sparse-checkout' && (c[1] as string[])[3] === 'set',
+    );
+    const patterns2 = (sparseSetCalls[1][1] as string[]).slice(4);
+    expect(patterns2).toContain('plugins/api-security-testing');
+  });
+
+  it('marketplace.json の source="./" なら marketplace_source_root REJECT (= 2-segment 推奨)', async () => {
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'git') {
+        const a = args as string[];
+        if (a[0] === 'clone') {
+          const dest = a[a.length - 1];
+          fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+          return spawnResult(0);
+        }
+        if (a[2] === 'sparse-checkout' && a[3] === 'init') return spawnResult(0);
+        if (a[2] === 'sparse-checkout' && a[3] === 'set') {
+          const qpath = a[1];
+          const mpDir = path.join(qpath, '.claude-plugin');
+          fs.mkdirSync(mpDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(mpDir, 'marketplace.json'),
+            JSON.stringify({ name: 'mp', plugins: [{ name: 'agent-browser', source: './' }] }),
+          );
+          return spawnResult(0);
+        }
+        if (a[2] === 'checkout') return spawnResult(0);
+      }
+      return spawnResult(1);
+    });
+    const result = await acquire({ repo: 'vercel-labs/agent-browser', skill: 'agent-browser' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('marketplace_source_root');
+      expect(result.detail).toContain('2-segment');
+      expect(result.detail).toContain('vercel-labs/agent-browser');
+    }
+  });
+
+  it('marketplace.json の source object 形式 (git-subdir) なら marketplace_source_external REJECT', async () => {
+    mockSpawn.mockImplementation((cmd, args) => {
+      if (cmd === 'git') {
+        const a = args as string[];
+        if (a[0] === 'clone') {
+          const dest = a[a.length - 1];
+          fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
+          return spawnResult(0);
+        }
+        if (a[2] === 'sparse-checkout' && a[3] === 'init') return spawnResult(0);
+        if (a[2] === 'sparse-checkout' && a[3] === 'set') {
+          const qpath = a[1];
+          const mpDir = path.join(qpath, '.claude-plugin');
+          fs.mkdirSync(mpDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(mpDir, 'marketplace.json'),
+            JSON.stringify({
+              name: 'mp',
+              plugins: [
+                {
+                  name: 'external-skill',
+                  source: {
+                    source: 'git-subdir',
+                    url: 'https://github.com/other/repo.git',
+                    path: 'plugins/external-skill',
+                  },
+                },
+              ],
+            }),
+          );
+          return spawnResult(0);
+        }
+        if (a[2] === 'checkout') return spawnResult(0);
+      }
+      return spawnResult(1);
+    });
+    const result = await acquire({ repo: 'anthropics/claude-plugins-official', skill: 'external-skill' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('marketplace_source_external');
+      expect(result.detail).toContain('別 repo');
+      expect(result.detail).toContain('git-subdir');
+    }
   });
 
   it('req.skill が SEGMENT_RE 不一致 (不正文字) なら invalid_input を返す (Phase 3 fetch パス踏み抜き防衛)', async () => {
@@ -355,6 +518,7 @@ describe('acquire', () => {
           fs.mkdirSync(path.join(dest, '.git'), { recursive: true });
           return spawnResult(0);
         }
+        if (a[2] === 'sparse-checkout' && a[3] === 'init') return spawnResult(0);
         if (a[2] === 'sparse-checkout' && a[3] === 'set') {
           const qpath = a[1];
           const skill = a[4];
@@ -747,9 +911,9 @@ describe('acquire — Phase 2 threshold-promote', () => {
   });
 
   it('countSkillsInRepo は外部 repo に noAuth: true で fetch する (= Authorization ヘッダなし)', async () => {
-    // OneCLI secret の pathPattern (`/repos/HajimariInc/*`) miss で `Bearer placeholder` を素通しすると
-    // GitHub が invalid token として 401 を返す問題への対策。外部 repo (anthropics/skills 等) を呼ぶ
-    // countSkillsInRepo は ghFetch を `{ noAuth: true }` opts 付きで呼び出す。
+    // 外部 repo (= GH App installation scope 外、anthropics/skills 等) は OneCLI MITM が token 注入
+    // しても GitHub が 401 Bad credentials を返すため、countSkillsInRepo は ghFetch を
+    // `{ noAuth: true }` opts 付きで呼び出して無認証 public API 200 を取る経路に倒す。
     // 本テストは mockGhFetch の引数を直接見て opts.noAuth が true であることを assert する。
     setupCloneSuccess();
     setupExistenceCheckSuccess();

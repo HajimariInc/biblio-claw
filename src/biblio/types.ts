@@ -53,7 +53,22 @@ export type AcquireFailureReason =
   | 'threshold_exceeded'
   /** GitHub API 経路の構成不備 (= 401/403/5xx、network エラー、proxy 到達不可、timeout 等)。
    *  patron は手で対処できず、運用者が OneCLI proxy / token / GitHub 障害を確認する必要がある。 */
-  | 'internal';
+  | 'internal'
+  /**
+   * 3-segment 個別 skill 仕入れで、marketplace.json plugins[] 該当 entry の `source` が `"./"`
+   * (= repo root 全体が 1 skill) の場合。3-segment 経路では sparse-checkout で root を引けない
+   * (= 2-segment 全体仕入れすべき)。patron 向けに「2-segment で叩いて」と promote する文言を
+   * `detail` に動的生成。issue #63 検証で実例検出 (= `vercel-labs/agent-browser`)。
+   */
+  | 'marketplace_source_root'
+  /**
+   * 3-segment 個別 skill 仕入れで、marketplace.json plugins[] 該当 entry の `source` が
+   * object 型 (= `{ source: 'git-subdir', url, path, ... }` or `{ source: 'url', url, ... }` 等の
+   * **別 repo 参照** 形式) の場合。本 PR では sparse-checkout 単純経路で引けないため REJECT。
+   * patron 向け文言を `detail` に動的生成 (= 別 repo を直接指定するよう促す)。
+   * issue #63 検証で実例検出 (= `anthropics/claude-plugins-official` の plugins 多数)。
+   */
+  | 'marketplace_source_external';
 
 /**
  * 取得結果。discriminated union — `ok` で分岐する。

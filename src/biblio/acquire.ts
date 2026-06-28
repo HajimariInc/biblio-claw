@@ -216,10 +216,11 @@ export function resolveSkillThreshold(): number {
  *     後段の `MAX_BLOBS_PER_PR=100` fail-closed に倒す方が UX 影響が小さい)
  *
  * GitHub API call は最大 3 回 (= marketplace.json + git/trees/main + git/trees/master)。
- * いずれも `ghFetch(..., { noAuth: true })` で Authorization ヘッダを省略する (= OneCLI secret の
- * pathPattern `/repos/HajimariInc/*` に外部 repo は match せず、`Bearer placeholder` を素通しすると
- * GitHub が invalid token として 401 を返すため。`shelve.ts` の HajimariInc 系経路とは非対称)。
- * よって rate limit は IP 単位の無認証 60 req/h が上限だが、本関数は 1 仕入れあたり 1-3 回しか
+ * いずれも `ghFetch(..., { noAuth: true })` で Authorization ヘッダを省略する (= OneCLI MITM は
+ * 全 `api.github.com` パスで `Bearer placeholder` を実 installation token に置換するが、外部 repo は
+ * GH App installation scope 外 = GitHub が 401 Bad credentials を返すため。無認証で public API
+ * 200 を取る経路に倒す。`shelve.ts` の HajimariInc 系経路は scope 内なので非対称)。
+ * rate limit は IP 単位の無認証 60 req/h が上限だが、本関数は 1 仕入れあたり 1-3 回しか
  * 呼ばないため余裕十分。
  */
 async function countSkillsInRepo(
@@ -227,8 +228,8 @@ async function countSkillsInRepo(
   name: string,
 ): Promise<{ ok: true; count: number } | { ok: false; reason: 'unknown' }> {
   // 段 (1): marketplace.json 経路 — `noAuth: true` で Authorization 省略 (= 外部 repo は
-  // OneCLI secret の pathPattern `/repos/HajimariInc/*` に match しないため、`Bearer placeholder`
-  // を素通しすると GitHub が invalid token として 401 を返す → 無認証で public API 200 を取る)。
+  // GH App installation scope 外で、OneCLI MITM が token 注入しても GitHub が 401 を返す。
+  // 無認証で public API 200 を取る経路に倒す)。
   try {
     const url = `${GITHUB_API}/repos/${owner}/${name}/contents/.claude-plugin/marketplace.json`;
     const data = (await ghFetch('GET contents/marketplace.json (acquire)', url, {}, { noAuth: true })) as {
@@ -281,7 +282,7 @@ async function countSkillsInRepo(
   for (const branch of tryBranches) {
     try {
       const url = `${GITHUB_API}/repos/${owner}/${name}/git/trees/${branch}?recursive=1`;
-      // `noAuth: true` の理由は段 (1) と同じ (= 外部 repo の pathPattern miss 対策)。
+      // `noAuth: true` の理由は段 (1) と同じ (= 外部 repo の GH App scope 外 401 回避)。
       const data = (await ghFetch('GET git/trees (acquire)', url, {}, { noAuth: true })) as {
         truncated?: boolean;
         tree?: Array<{ path?: string; type?: string }>;
@@ -397,8 +398,11 @@ async function fetchSkillSubtree(owner: string, name: string, skill: string, clo
     };
   }
 
-  // 4. sparse-checkout set <skill>
-  const sparseSet = spawnSync('git', ['-C', quarantinePath, 'sparse-checkout', 'set', skill], {
+  // 4. sparse-checkout set <skill> + `.claude-plugin`
+  //    `.claude-plugin` を含めるのは marketplace 形式 repo の metadata 源 (marketplace.json) を
+  //    検品 / 陳列段階で物理可視化するため (issue #63)。cone mode では root-level entry 単位で
+  //    指定する。`.claude-plugin` 不在 repo では pattern miss として silent に抜ける (= status 0)。
+  const sparseSet = spawnSync('git', ['-C', quarantinePath, 'sparse-checkout', 'set', skill, '.claude-plugin'], {
     ...baseSpawn,
     timeout: GH_TIMEOUT_MS,
   });
@@ -429,10 +433,152 @@ async function fetchSkillSubtree(owner: string, name: string, skill: string, clo
     };
   }
 
+  // 5.5. marketplace.json 解析による source path 解決 (issue #63 PR 検証で実例検出)。
+  //      marketplace 形式 repo では skill 本体が必ずしも root 直下 `<skill>/` にあるとは限らず、
+  //      `./plugins/<skill>` のような subdir に居る場合がある。`.claude-plugin/marketplace.json` を
+  //      読んで該当 plugin entry の `source` を解析し、subdir 階層なら sparse-checkout を再実行する。
+  //
+  //      source 形式と対応:
+  //        - `"./"` → repo root 全体 = 2-segment 全体仕入れすべき (= `marketplace_source_root` REJECT)
+  //        - `"./<skill>"` → 既存経路 (root 直下 dir、追加 sparse-checkout 不要)
+  //        - `"./<dir...>/<skill>"` → subdir に skill 本体、sparse-checkout に `<dir...>/<skill>`
+  //          を追加して再 checkout、`skillDir` を解決後 path に切替
+  //        - object 型 (= `{ source: 'git-subdir'|'url', url, ... }`) → 別 repo 参照 = REJECT
+  //          (本 PR スコープ外、`marketplace_source_external`)
+  //      marketplace.json 不在 or plugins[] に該当 entry なしの場合は従来挙動 (= root 直下想定)。
+  let skillDir = path.join(quarantinePath, skill);
+  const marketplaceJsonPath = path.join(quarantinePath, '.claude-plugin', 'marketplace.json');
+  let marketplaceRaw: string | null = null;
+  try {
+    marketplaceRaw = fs.readFileSync(marketplaceJsonPath, 'utf-8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'EUNKNOWN';
+    if (code !== 'ENOENT') {
+      log.warn('acquire: marketplace.json unreadable (falling back to root-dir assumption)', {
+        repo: `${owner}/${name}`,
+        skill,
+        marketplaceJsonPath,
+        code,
+      });
+    }
+    // ENOENT or 他 I/O 障害 → 従来挙動 (= root 直下 `<skill>/` 想定) で続行
+  }
+  if (marketplaceRaw !== null) {
+    let marketplace: { plugins?: unknown } | null = null;
+    try {
+      marketplace = JSON.parse(marketplaceRaw) as { plugins?: unknown };
+    } catch (err) {
+      log.warn('acquire: marketplace.json invalid JSON (falling back to root-dir assumption)', {
+        repo: `${owner}/${name}`,
+        skill,
+        err,
+      });
+    }
+    if (marketplace !== null && Array.isArray(marketplace.plugins)) {
+      const plugins = marketplace.plugins as Record<string, unknown>[];
+      const entry = plugins.find((p) => typeof p.name === 'string' && p.name === skill);
+      if (entry !== undefined) {
+        const source = entry.source;
+        // source = object → 別 repo 参照、本 PR では非対応
+        if (source !== null && typeof source === 'object') {
+          const sourceKind =
+            typeof (source as { source?: unknown }).source === 'string'
+              ? (source as { source: string }).source
+              : 'unknown';
+          removeQuarantine(quarantinePath);
+          log.warn('acquire failed (skill)', {
+            repo: `${owner}/${name}`,
+            skill,
+            reason: 'marketplace_source_external',
+            sourceKind,
+          });
+          return {
+            ok: false,
+            reason: 'marketplace_source_external',
+            detail: `${owner}/${name} の "${skill}" は別 repo 参照 (source=${sourceKind}) で、本仕入れ経路では取得できません。entry の url 先 repo を直接指定してください。`,
+          };
+        }
+        // source = string `"./"` → root 全体 = 2-segment 経由を促す
+        if (typeof source === 'string') {
+          const trimmed = source.replace(/^\.\/?/, '').replace(/\/+$/, '');
+          if (trimmed === '') {
+            removeQuarantine(quarantinePath);
+            log.warn('acquire failed (skill)', {
+              repo: `${owner}/${name}`,
+              skill,
+              reason: 'marketplace_source_root',
+            });
+            return {
+              ok: false,
+              reason: 'marketplace_source_root',
+              detail: `${owner}/${name} の "${skill}" は repo root 全体が 1 skill (source="./") のため、3-segment ではなく 2-segment (\`${owner}/${name}\`) で仕入れてください。`,
+            };
+          }
+          // source = `"./<dir.../skill>"` 形式 — 末尾 segment が skill 名なら subdir 対応
+          const sourcePath = trimmed;
+          const sourceLastSegment = sourcePath.split('/').pop();
+          if (sourceLastSegment === skill && sourcePath !== skill) {
+            // subdir 経路: sparse-checkout に source path を追加して再 checkout
+            const sparseAdd = spawnSync(
+              'git',
+              ['-C', quarantinePath, 'sparse-checkout', 'set', skill, '.claude-plugin', sourcePath],
+              { ...baseSpawn, timeout: GH_TIMEOUT_MS },
+            );
+            if (sparseAdd.status !== 0) {
+              const detail = spawnDetail(sparseAdd, 'git');
+              removeQuarantine(quarantinePath);
+              log.warn('acquire failed (skill)', {
+                repo: `${owner}/${name}`,
+                skill,
+                reason: 'clone_failed',
+                detail,
+                sourcePath,
+              });
+              return {
+                ok: false,
+                reason: 'clone_failed',
+                detail: `sparse-checkout set (subdir=${sourcePath}) に失敗しました: ${owner}/${name} (${detail})`,
+              };
+            }
+            const checkout2 = spawnSync('git', ['-C', quarantinePath, 'checkout'], {
+              ...baseSpawn,
+              timeout: CLONE_TIMEOUT_MS,
+            });
+            if (checkout2.status !== 0) {
+              const detail = spawnDetail(checkout2, 'git');
+              removeQuarantine(quarantinePath);
+              log.warn('acquire failed (skill)', {
+                repo: `${owner}/${name}`,
+                skill,
+                reason: 'clone_failed',
+                detail,
+                sourcePath,
+              });
+              return {
+                ok: false,
+                reason: 'clone_failed',
+                detail: `checkout (subdir=${sourcePath}) に失敗しました: ${owner}/${name} (${detail})`,
+              };
+            }
+            skillDir = path.join(quarantinePath, sourcePath);
+            log.info('acquire: resolved subdir source via marketplace.json', {
+              repo: `${owner}/${name}`,
+              skill,
+              sourcePath,
+            });
+          }
+          // sourcePath === skill (= `"./<skill>"`) なら既存経路、何もしない
+        }
+        // source 無し or 型不明 → 従来挙動 (= root 直下 `<skill>/` 想定)
+      }
+    }
+  }
+
   // 6. manifest 存在チェック (= skill dir 直下 + 任意階層に SKILL.md がある = agentskills.io spec)。
-  //    全体経路の hasManifest は marketplace.json + SKILL.md だが、sparse 経路では
-  //    marketplace.json は (skill dir に無いため) 探索対象外。SKILL.md 存在のみ確認する。
-  const skillDir = path.join(quarantinePath, skill);
+  //    sparse-checkout に `.claude-plugin` を含めるため (issue #63)、marketplace 形式 repo では
+  //    `quarantinePath/.claude-plugin/marketplace.json` が worktree に存在する。さらに上記 step
+  //    5.5 で source 解決済の場合は `skillDir` が `<sourcePath>` を指す。manifest 判定は SKILL.md
+  //    の有無のみで行う (= biblio の本質は実行可能な skill 本体)。
   if (!fs.existsSync(skillDir)) {
     removeQuarantine(quarantinePath);
     log.warn('acquire failed (skill)', {
@@ -440,6 +586,7 @@ async function fetchSkillSubtree(owner: string, name: string, skill: string, clo
       skill,
       reason: 'manifest_missing',
       detail: 'skill dir not found',
+      skillDir,
     });
     return {
       ok: false,
@@ -505,17 +652,20 @@ export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = 
   const baseSpawn = { env, stdio: 'pipe' as const, encoding: 'utf-8' as const };
 
   // 1. 存在確認 (= GET /repos/{owner}/{name})。`ghFetch` は undici fetch + global
-  //    ProxyAgent (= `initHostProxy` で設定) 経由で OneCLI proxy に乗り、proxy 側で
-  //    Authorization: Bearer <installation-token> を wire 置換する (= shelve /
-  //    unshelve / list-biblio で本番動作実証済の経路)。orchestrator container 内に
-  //    gh CLI の local credential (`gh auth login` / `GH_TOKEN`) を持つ必要が無い。
+  //    ProxyAgent (= `initHostProxy` で設定) 経由で OneCLI proxy に乗る。本 step は
+  //    `noAuth: true` で Authorization ヘッダを省略する (= 後段 `countSkillsInRepo`
+  //    の marketplace.json / git/trees 経路と同流儀)。理由は外部 repo (= GH App
+  //    installation scope 外、例: `example-org/*`) の場合、placeholder を素通しすると
+  //    OneCLI MITM が installation token に置換 → GitHub が scope 外として 401 を
+  //    返すため (= public API は無認証で 200、rate limit は IP 単位 60 req/h で本 step
+  //    は 1 acquire = 1 回呼出のため余裕)。HajimariInc 系 public repo も無認証 200。
   //
   //    分岐: 404 → not_found / 他 status → internal / network エラー (timeout 含む)
   //    → internal。GitHub は private/不在いずれも 404 を返す仕様 (= 旧 gh api 経路と
   //    同じ)。401/403/5xx は OneCLI 認証経路 or GitHub 障害を示唆するため、patron
   //    に誤解させず `internal` で明示する (silent failure 防止)。
   try {
-    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`, {}, { ctx: opts.ctx });
+    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`, {}, { ctx: opts.ctx, noAuth: true });
   } catch (err) {
     if (err instanceof GhHttpError) {
       if (err.status === 404) {

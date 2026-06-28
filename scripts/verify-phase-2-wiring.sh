@@ -95,9 +95,24 @@ info "[boots] 現在値: $boots_before"
 info "[boots] Pod 再作成 → 再 attach + boots increment を確認"
 kubectl delete pod "$orch_pod" -n "$NS"
 kubectl wait --for=condition=Ready pod/"$orch_pod" -n "$NS" --timeout=180s
-sleep 5  # incrementBootCounter の log が回るのを待つ
-boots_after="$(read_boots)"
-[ "$boots_after" -gt "$boots_before" ] || fail "[boots] 再作成後 ($boots_after) が以前 ($boots_before) より増えていない — PVC 再 attach 失敗 or migration016 未適用"
+
+# orchestrator container に readinessProbe が無いため `condition=Ready` は
+# container Started (= node プロセス spawn) 直後に成立する。一方
+# incrementBootCounter は instrumentation.js (OTel init) + enforceStartupBackoff
+# + initDb + runMigrations の後 (src/index.ts:110) で呼ばれるため、Ready 成立から
+# +1 完了まで秒オーダーの lag がある。固定 sleep では cold-start tail latency に
+# 取りこぼされる (issue #72) ため、boots 値が boots_before を超えるまで polling する。
+# 60s 上限は OTel init + migration 18 件適用 + log I/O の最悪値を観察上の余裕含めて。
+boots_after=""
+deadline=$(( $(date +%s) + 60 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  boots_after="$(read_boots)"
+  if [ "$boots_after" -gt "$boots_before" ]; then
+    break
+  fi
+  sleep 2
+done
+[ "$boots_after" -gt "$boots_before" ] || fail "[boots] 60s 以内に増分されない (before=$boots_before / after=$boots_after) — orchestrator 起動失敗の可能性、kubectl logs $orch_pod -n $NS -c orchestrator で確認 (本体正常時は 'Boot counter incremented' ログが見える)"
 ok "[boots] $boots_before → $boots_after (= PVC + SQLite 永続化が機能)"
 
 # === 8. gh-token-rotator sidecar (M2 PRD A Phase 3: 旧 CronJob を廃止) ===
@@ -141,23 +156,26 @@ esac
 
 # === 9. Slack adapter 起動 (orchestrator 統合パターン、A 案) ===
 # M1 Acceptance に「Slack 接続成立」が明記されているため、本 verify では Slack adapter
-# 起動を必須条件として fail 判定する。判定ロジックは "Channel adapter started" + 'channel="slack"'
-# の 2 条件共起 — 単純な /slack/ では `Channel credentials missing, skipping channel="slack"`
-# (= adapter skip = 偽陽性) と区別できない。
-# 起動成功ログ形式: src/channels/channel-registry.ts:89 の `log.info('Channel adapter started', { channel, type })`
-# src/log.ts:26 の formatter が `KEY_COLOR + key + RESET + '='` を出すため
-# (`\x1b[35mchannel\x1b[39m="slack"`)、ANSI escape を剥がさないと regex の
-# `started.*channel=` 連続にマッチしない silent failure を起こす。
+# 起動を必須条件として fail 判定する。判定ロジックは "Channel adapter started" + '"channel":"slack"'
+# の 2 条件共起 — 単純な /slack/ では `Channel credentials missing, skipping` (= adapter
+# skip = 偽陽性) と区別できない。
+#
+# GKE 経路のログ形式: orchestrator は `LOG_FORMAT=json` (k8s/10-orchestrator-statefulset.yaml:200)
+# で動くため、src/log.ts:75-91 の `emitJson` が JSON 1 行を吐く。例:
+#   {"severity":"INFO","message":"Channel adapter started","time":"...","component":"host-orchestrator","channel":"slack","type":"slack"}
+# キーは colon 区切りの `"channel":"slack"` 形式 (= 旧 text logger の key=value `channel="slack"`
+# 形式から init-project-gcp Phase 2 で切替済 = commit 9c113f0)。ANSI escape は JSON
+# 経路では一切出力されないため剥離は不要。
 #
 # 判定対象は直近 120s のログのみに絞る = "起動 → credentials missing で再起動"
 # のような複合履歴が tail に残っているとき、古い起動成功ログに先にマッチして
 # 最新の credentials missing 状態を見落とす偽陽性を防ぐ (--since=120s)。
 # kubectl logs が空 (Pod 異常 / ログ未生成) と取得失敗を fail メッセージで
 # 区別できるよう、Pod phase も読む。
-orch_logs="$(kubectl logs "$orch_pod" -n "$NS" --since=120s 2>/dev/null | sed -r 's/\x1b\[[0-9;]*m//g' || true)"
-if echo "$orch_logs" | grep -E 'Channel adapter started.*channel="slack"' >/dev/null; then
-  ok "[slack] Slack adapter 起動済 (Channel adapter started + channel=\"slack\" 両一致)"
-elif echo "$orch_logs" | grep -E 'Channel credentials missing.*channel="slack"' >/dev/null; then
+orch_logs="$(kubectl logs "$orch_pod" -n "$NS" --since=120s 2>/dev/null || true)"
+if echo "$orch_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
+  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致)"
+elif echo "$orch_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
   fail "[slack] Slack credentials が adapter から見えていない — env.ts の process.env fallback 動作 + biblio-slack-tokens Secret 投入 (kubectl get secret biblio-slack-tokens -n $NS) を確認"
 else
   pod_phase="$(kubectl get pod "$orch_pod" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo 'unknown')"
