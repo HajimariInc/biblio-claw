@@ -216,10 +216,11 @@ export function resolveSkillThreshold(): number {
  *     後段の `MAX_BLOBS_PER_PR=100` fail-closed に倒す方が UX 影響が小さい)
  *
  * GitHub API call は最大 3 回 (= marketplace.json + git/trees/main + git/trees/master)。
- * いずれも `ghFetch(..., { noAuth: true })` で Authorization ヘッダを省略する (= OneCLI secret の
- * pathPattern `/repos/HajimariInc/*` に外部 repo は match せず、`Bearer placeholder` を素通しすると
- * GitHub が invalid token として 401 を返すため。`shelve.ts` の HajimariInc 系経路とは非対称)。
- * よって rate limit は IP 単位の無認証 60 req/h が上限だが、本関数は 1 仕入れあたり 1-3 回しか
+ * いずれも `ghFetch(..., { noAuth: true })` で Authorization ヘッダを省略する (= OneCLI MITM は
+ * 全 `api.github.com` パスで `Bearer placeholder` を実 installation token に置換するが、外部 repo は
+ * GH App installation scope 外 = GitHub が 401 Bad credentials を返すため。無認証で public API
+ * 200 を取る経路に倒す。`shelve.ts` の HajimariInc 系経路は scope 内なので非対称)。
+ * rate limit は IP 単位の無認証 60 req/h が上限だが、本関数は 1 仕入れあたり 1-3 回しか
  * 呼ばないため余裕十分。
  */
 async function countSkillsInRepo(
@@ -227,8 +228,8 @@ async function countSkillsInRepo(
   name: string,
 ): Promise<{ ok: true; count: number } | { ok: false; reason: 'unknown' }> {
   // 段 (1): marketplace.json 経路 — `noAuth: true` で Authorization 省略 (= 外部 repo は
-  // OneCLI secret の pathPattern `/repos/HajimariInc/*` に match しないため、`Bearer placeholder`
-  // を素通しすると GitHub が invalid token として 401 を返す → 無認証で public API 200 を取る)。
+  // GH App installation scope 外で、OneCLI MITM が token 注入しても GitHub が 401 を返す。
+  // 無認証で public API 200 を取る経路に倒す)。
   try {
     const url = `${GITHUB_API}/repos/${owner}/${name}/contents/.claude-plugin/marketplace.json`;
     const data = (await ghFetch('GET contents/marketplace.json (acquire)', url, {}, { noAuth: true })) as {
@@ -281,7 +282,7 @@ async function countSkillsInRepo(
   for (const branch of tryBranches) {
     try {
       const url = `${GITHUB_API}/repos/${owner}/${name}/git/trees/${branch}?recursive=1`;
-      // `noAuth: true` の理由は段 (1) と同じ (= 外部 repo の pathPattern miss 対策)。
+      // `noAuth: true` の理由は段 (1) と同じ (= 外部 repo の GH App scope 外 401 回避)。
       const data = (await ghFetch('GET git/trees (acquire)', url, {}, { noAuth: true })) as {
         truncated?: boolean;
         tree?: Array<{ path?: string; type?: string }>;
