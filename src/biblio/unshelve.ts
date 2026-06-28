@@ -161,6 +161,8 @@ export async function unshelve(req: UnshelveRequest, opts: { ctx?: GhFetchCtx } 
       outcome: 'config_error',
       biblioName,
       detail,
+      request_id: ctx?.requestId,
+      session_id: ctx?.sessionId,
     });
     return fail(biblioName, 'config_error', detail);
   }

@@ -225,7 +225,7 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
   継続利用、`list-biblio.ts` は `readListEnv` (owner/repo のみ) に切替済。`fetchMarketplace`
   の引数型も `ShelfEnv` → `ListEnv` に変更 (= list-biblio 経路で author env 不在でも呼出可)。
 - **`UnshelveResult` + `EnkinResult` / `ShokyakuResult`**: `src/biblio/types.ts` に追加。
-  失敗分類 `UnshelveFailureReason` (`not_shelved` / `github_api_error` / `invalid_category`)
+  失敗分類 `UnshelveFailureReason` (`not_shelved` / `github_api_error` / `invalid_category` / `config_error`)
   + 成功時 `{ ok: true, biblioName, category, prUrl, prNumber, branchName }`。enkin /
   shokyaku は `UnshelveResult` の type alias (= 挙動が完全に同 shape)。
 - **`enkin_biblio` / `shokyaku_biblio` MCP tool** (3 段経路 = MCP tool → action handler →

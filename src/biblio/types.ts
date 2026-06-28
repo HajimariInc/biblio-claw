@@ -300,7 +300,7 @@ export type UnshelveFailureReason =
   | 'github_api_error'
   /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
   | 'invalid_category'
-  /** 必須 env (SHELF_REPO_OWNER 等) 欠落 = 設定不備 (ShelveFailureReason と同義、対称性確保)。 */
+  /** 必須 env 欠落 = 設定不備 (shelve 経路の同 reason と同義、`readShelveEnv()` throw = GitHub 呼出前のため `github_api_error` と mutually-exclusive)。env 4 件の具体名は `ShelveFailureReason.config_error` 参照 (issue #50)。 */
   | 'config_error';
 
 /**

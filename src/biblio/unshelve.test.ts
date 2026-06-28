@@ -30,6 +30,7 @@ vi.mock('undici', () => ({
   fetch: (url: string, init?: { method?: string; body?: string }) => fetchMock(url, init),
 }));
 
+import { log } from '../log.js';
 import { readEnvFile } from '../env.js';
 import { unshelve } from './unshelve.js';
 
@@ -207,6 +208,7 @@ describe('unshelve — config_error (env 欠落)', () => {
     // readEnvFile が空オブジェクトを返すと shelf-gh.ts:readShelveEnv が
     // `shelve: required env missing: SHELF_REPO_OWNER, ...` を throw する。
     vi.mocked(readEnvFile).mockReturnValueOnce({});
+    vi.mocked(log.warn).mockClear();
 
     const result = await unshelve({
       biblioName: 'owner--repo',
@@ -222,6 +224,15 @@ describe('unshelve — config_error (env 欠落)', () => {
     expect(result.biblioName).toBe('owner--repo');
     // env catch は marketplace 取得前に早期 return するため、ネットワーク呼び出しは発生しない
     expect(fetchMock).not.toHaveBeenCalled();
+    // 構造化ログキー (= BQ sink の event/outcome 集計に乗ること) の永続 guard
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'unshelve: env not ready',
+      expect.objectContaining({
+        event: 'biblio.unshelve',
+        outcome: 'config_error',
+        biblioName: 'owner--repo',
+      }),
+    );
   });
 });
 
