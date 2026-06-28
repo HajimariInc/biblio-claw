@@ -95,9 +95,24 @@ info "[boots] 現在値: $boots_before"
 info "[boots] Pod 再作成 → 再 attach + boots increment を確認"
 kubectl delete pod "$orch_pod" -n "$NS"
 kubectl wait --for=condition=Ready pod/"$orch_pod" -n "$NS" --timeout=180s
-sleep 5  # incrementBootCounter の log が回るのを待つ
-boots_after="$(read_boots)"
-[ "$boots_after" -gt "$boots_before" ] || fail "[boots] 再作成後 ($boots_after) が以前 ($boots_before) より増えていない — PVC 再 attach 失敗 or migration016 未適用"
+
+# orchestrator container に readinessProbe が無いため `condition=Ready` は
+# container Started (= node プロセス spawn) 直後に成立する。一方
+# incrementBootCounter は instrumentation.js (OTel init) + enforceStartupBackoff
+# + initDb + runMigrations の後 (src/index.ts:110) で呼ばれるため、Ready 成立から
+# +1 完了まで秒オーダーの lag がある。固定 sleep では cold-start tail latency に
+# 取りこぼされる (issue #72) ため、boots 値が boots_before を超えるまで polling する。
+# 60s 上限は OTel init + migration 18 件適用 + log I/O の最悪値を観察上の余裕含めて。
+boots_after=""
+deadline=$(( $(date +%s) + 60 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  boots_after="$(read_boots)"
+  if [ "$boots_after" -gt "$boots_before" ]; then
+    break
+  fi
+  sleep 2
+done
+[ "$boots_after" -gt "$boots_before" ] || fail "[boots] 60s 以内に増分されない (before=$boots_before / after=$boots_after) — orchestrator 起動失敗の可能性、kubectl logs $orch_pod -n $NS -c orchestrator で確認 (本体正常時は 'Boot counter incremented' ログが見える)"
 ok "[boots] $boots_before → $boots_after (= PVC + SQLite 永続化が機能)"
 
 # === 8. gh-token-rotator sidecar (M2 PRD A Phase 3: 旧 CronJob を廃止) ===
