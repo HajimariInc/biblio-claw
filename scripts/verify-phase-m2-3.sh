@@ -179,12 +179,14 @@ case "$np_target" in
 esac
 
 # === 7. Slack adapter 起動 (回帰、A 案踏襲) ===
-# verify-phase-2-wiring.sh §9 と同じロジック。Phase 3 で orchestrator container 名が
-# 明示できるようになったので -c orchestrator を指定する。
-orch_logs="$(kubectl logs "$ORCH_POD" -c orchestrator -n "$NS" --since=120s 2>/dev/null | sed -r 's/\x1b\[[0-9;]*m//g' || true)"
-if echo "$orch_logs" | grep -E 'Channel adapter started.*channel="slack"' >/dev/null; then
-  ok "[slack] Slack adapter 起動済"
-elif echo "$orch_logs" | grep -E 'Channel credentials missing.*channel="slack"' >/dev/null; then
+# verify-phase-2-wiring.sh §9 と同じロジック (PR #69 / issue #55 で JSON 化済)。
+# GKE 経路の orchestrator は LOG_FORMAT=json (k8s/10-orchestrator-statefulset.yaml:200)
+# で動き emitJson が JSON 1 行を吐く (キーは "channel":"slack")。ANSI escape は JSON
+# 経路では出力されないため sed 剥離は不要。
+orch_logs="$(kubectl logs "$ORCH_POD" -c orchestrator -n "$NS" --since=120s 2>/dev/null || true)"
+if echo "$orch_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
+  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致)"
+elif echo "$orch_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
   fail "[slack] Slack credentials が見えていない — biblio-slack-tokens Secret を確認"
 else
   pod_phase="$(kubectl get pod "$ORCH_POD" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo 'unknown')"
