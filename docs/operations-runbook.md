@@ -1019,33 +1019,46 @@ bash scripts/verify-m4-a.sh
 
 `.env` 不在は warn 継続 (= GKE / CI 経路想定)。
 
+### 設計判断 — 案 C 採用 (= TRACE_ID 個別マッチ諦め)
+
+Phase 4 当初は「emit-test-span の TRACE_ID と BQ row を個別マッチ」設計だったが、PR #75 実機 verify で **host stdout は Cloud Logging に流れない = BQ sink に永久に届かない** plan 欠陥が判明 (= host = WSL 上に logging agent なし、sink filter は `k8s_container` 専用)。案 A (kubectl exec で orchestrator Pod 内で fixture 実行) / 案 B (Slack 経由 read-only action) は将来 phase で別途検討、Phase 4 では:
+
+- **Section 4 (Cloud Trace)**: emit-test-span は host → 直接 OTLP HTTP export → Cloud Trace に到達するため **TRACE_ID 個別マッチを assert** (元設計通り)
+- **Section 5-6 (BQ sink)**: TRACE_ID 個別マッチを諦め、**「過去 1h に GKE 起源の biblio.* event log が >= 1 件 BQ 到達」だけ assert** (= sink 疎通の証跡、M4-A Phase 3 deliverable の動作確認として value 十分、本番副作用なし)
+- **Section 7 (静的反証)**: 動的ネガティブ対照は TRACE_ID 個別マッチ前提のため案 C ではスコープ外、sink filter の `k8s_container` + `namespace` 縛り保持の静的 grep のみ
+
 ### 内部フロー (7 セクション)
 
-1. **preflight** — `.env` 読み + 必須 env + CLI 存在 (gcloud / bq / jq / node)
+1. **preflight** — `.env` 読み + 必須 env (`GCP_PROJECT_ID` / `BQ_DATASET_ID`) + CLI 存在 (gcloud / bq / jq / node)
 2. **keyless 4 面** — `GOOGLE_APPLICATION_CREDENTIALS` 未設定 / ADC type が authorized_user|external_account|impersonated_service_account / repo 内に SA key json 不在 / TF に `google_service_account_key` resource 不在
-3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag、PR #75 提案 D)
-4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert
-5. **BQ poll** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE JSON_VALUE(jsonPayload, '$["logging.googleapis.com/trace"]') = 'projects/<PROJECT>/traces/<TRACE_ID>' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` (= partition pruning) で sleep 10 × 30 (5 min) ポーリング、count >= 1 で break
+3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag)
+4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert (= TRACE_ID 個別マッチ)
+5. **BQ sink 疎通確認** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND jsonPayload.event LIKE 'biblio.%'` で sleep 10 × 6 (1 min) ポーリング、count >= 1 で break (= 過去 1h に biblio action 由来 log が sink 到達している証跡)
 6. **summary SQL** — `sed` で `<PROJECT_ID>` / `<DATASET_ID>` を置換した `terraform/m4-a-observability/sql/summary.sql` を実行、`hit_count >= 1` + `marker = 'M4A_OK'` を assert
-7. **ネガティブ対照** — random GHOST_TRACE_ID (128-bit) で BQ 0 行を assert + `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを静的反証
+7. **静的反証** — `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを grep で確認 (= sink の責任範囲縛りが消失していないことの証跡)
 
 ### 既知の罠 / 解釈
 
 - **Cloud Trace 90s timeout で偽 fail** — 多くは下記 2 つの原因。fail メッセージ内の "対処" 案内も同じ順で参照する:
-  1. **`roles/cloudtrace.user` 不足** — 30 回 retry でほぼ全て 403 を返す。Section 4 の poll ループは attempt 3 で warn を 1 度出す設計 (PR #75 提案 A-1)
-  2. **OTLP export 失敗** — `BatchSpanProcessor` が export エラーを内部 catch して `shutdownOtel()` が resolve する OTel SDK 仕様の限界 (PR #75 Important 問題 3)。verify は `OTEL_DIAG=true` を emit-test-span に渡して export エラーを stderr に流し、`LAST_HARNESS_STDERR` 経由で fail 時に展開する (PR #75 提案 D 対症)
+  1. **`roles/cloudtrace.user` 不足** — 30 回 retry でほぼ全て 403 を返す。Section 4 の poll ループは attempt 3 で warn を 1 度出す設計
+  2. **OTLP export 失敗** — `BatchSpanProcessor` が export エラーを内部 catch して `shutdownOtel()` が resolve する OTel SDK 仕様の限界。verify は `OTEL_DIAG=true` を emit-test-span に渡して export エラーを stderr に流し、`LAST_HARNESS_STDERR` 経由で fail 時に展開する
   3. それ以外: ネットワーク不調 / `BatchSpanProcessor` flush 遅延 — 再実行で多くは解決
-- **BQ 5 min timeout で偽 fail** — sink lag 通常 30s 程度だが、初動直後や高負荷時は数分かかる。fail メッセージで sink writer_identity の `roles/bigquery.dataEditor` 付与 + filter の k8s_container/namespace 整合を案内
-- **BQ poll の auth-fail early abort** — outer 反復 3 連続で全テーブル query 失敗時 (= persistent な auth 切れ / 権限不足 / network 障害) は 5 分待たず 30s で fail する設計 (PR #75 提案 silent-failure 問題 2)。fail メッセージで `gcloud auth application-default print-access-token` と `roles/bigquery.dataViewer` 付与の確認を案内
-- **BQ poll の partition pruning** — verify は `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` で過去 1h に絞った partition のみ scan する設計 (sink の `use_partitioned_tables=true` で生成される DAY partition を効かせ、cost + 性能を担保)。emit-test-span → BQ 到達まで通常 30s 程度のため 1h で十分
+- **Section 5 で「過去 1h に biblio.* event 0 件」fail** — 多くは下記 2 つ:
+  1. **GKE で直近 1h に biblio action が動いていない** — Slack で `@bot 蔵書` 等 read-only action を 1 件発射すれば即解決
+  2. **GKE orchestrator Pod が停止中** — `kubectl get pods -n biblio-claw` で確認
+- **BQ poll の auth-fail early abort** — outer 反復 3 連続で全テーブル query 失敗時 (= persistent な auth 切れ / 権限不足 / SQL 型エラー / network 障害) は 1 min 待たず 30s で fail する設計。fail メッセージで `gcloud auth application-default print-access-token` と `roles/bigquery.dataViewer` 付与 + SQL 型エラーの可能性を案内
+- **BQ poll の partition pruning** — verify は `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` で過去 1h に絞った partition のみ scan する設計 (sink の `use_partitioned_tables=true` で生成される DAY partition を効かせ、cost + 性能を担保)
 - **`stdout` / `stderr` テーブル不在** — Phase 3 sink がまだ初動していない可能性。biblio action を 1 回実行して 5 分待ってから再実行 (= テーブルは sink が最初の log 流入時に自動生成、`terraform apply` 単独では作られない)
-- **`JSON_VALUE` の JSON path 構文** — フィールド名にドット (`logging.googleapis.com/trace`) を含むため bracketed 形式 `'$["logging.googleapis.com/trace"]'` が必須。`jsonPayload.foo.bar` のドット記法では拾えない
-- **ネガティブ対照の意義** — random trace_id で BQ に 0 行 = sink filter が「無関係な trace を黙って通していない」証跡。1 行でも hit したら sink filter または BQ schema を疑う (衝突確率 ~2^-128 = 事実上ゼロ)
-- **冪等性** — 2 連続実行で両方 PASS する設計。各実行で新規 trace_id を発射、summary `hit_count` は過去 1h 集計に積算される (= 2 回目で増えるのは正常)
+- **BQ スキーマ仕様** (PR #75 実機 verify で判明) — Cloud Logging → BQ export は以下のスキーマ:
+  - **`trace` / `spanId` / `traceSampled`** はトップレベル STRING / STRING / BOOL カラム (= `WHERE trace = 'projects/PROJECT/traces/TRACE_ID'` で個別 trace 検索)
+  - **`jsonPayload`** は RECORD (STRUCT) 型 → **ドット記法 `jsonPayload.event`** でアクセス、`JSON_VALUE(jsonPayload, ...)` は型エラーで失敗
+- **冪等性** — 連続実行可。各実行で新規 trace_id を Cloud Trace に発射 (= 過去 30 日で別 trace として保持)、BQ sink 側は過去 1h 集計のため 1 件以上 hit 状態が続く限り PASS 継続
 
 ### test fixture (`scripts/emit-test-span.ts`)
 
-`withBiblioActionSpan('acquire', requestId, sessionId, fn)` を直接呼ぶ test fixture。本番 `acquire()` ロジック (GitHub clone 等) は起こさない = 外部依存をパイプ疎通のみに絞り、verify を deterministic に保つ。span 属性は `biblio.request_id` / `biblio.session_id` / `biblio.action='acquire'` + `biblio.test_fixture=true` + event `verify-m4-a.fixture.emitted`。
+`withBiblioActionSpan('acquire', requestId, sessionId, fn)` を直接呼ぶ test fixture。本番 `acquire()` ロジック (GitHub clone 等) は起こさない = 外部依存を Cloud Trace export 経路のみに絞り、verify を deterministic に保つ。span 属性は `biblio.request_id` / `biblio.session_id` / `biblio.action='acquire'` + `biblio.test_fixture=true` + event `verify-m4-a.fixture.emitted`。
+
+**注**: 案 C 設計では fixture span は **Section 4 (Cloud Trace) でのみ assert** される。host stdout は Cloud Logging に流れないため Section 5 (BQ) には届かない (= sink filter は `k8s_container` 専用、host = WSL は対象外)。BQ 経路の E2E は GKE 上で稼働する本番 biblio action 由来の log で代替確認する。
 
 ### Teardown
 

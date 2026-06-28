@@ -15,11 +15,16 @@
 --   sample_component   流入の代表 component (host-orchestrator / agent-runner / 他)
 --   marker             固定 'M4A_OK' (= SQL 自体の到達性 assert 用)
 --
--- 設計上の注:
+-- 設計上の注 (= Phase 4 verify 実機検証で判明したスキーマ仕様):
 -- - テーブルは Cloud Logging sink の `use_partitioned_tables = true` 設定により
 --   `stdout` / `stderr` の単独形 (= terraform/m4-a-observability/main.tf:39)。日次 sharded
---   ではない。`timestamp` 列で DAY partition、partition pruning には WHERE timestamp >= ...
---   または DATE(timestamp, 'Asia/Tokyo') = ... を使う。
+--   ではない。`timestamp` 列で DAY partition。
+-- - `jsonPayload` は **RECORD (STRUCT) 型** で展開される (= bq show --schema 実測)。
+--   `JSON_VALUE(jsonPayload, '$.event')` は型エラーで失敗。**ドット記法 `jsonPayload.event`**
+--   でアクセスする。STRUCT field 不在の場合は NULL で安全に返る (= IFNULL 不要)。
+-- - 一方、Cloud Logging reserved field の `trace` / `spanId` / `traceSampled` は **トップレベル**
+--   STRING / STRING / BOOL カラムに展開される (= `WHERE trace = 'projects/.../traces/...'`)。
+--   個別 trace 検索は `jsonPayload` ではなく top-level `trace` カラムを使う。
 -- - `DATE(timestamp, 'Asia/Tokyo')` で JST 基準 (auto memory m4-a-phase-3-bq-sink-lessons.md
 --   「DATE(timestamp) TZ bug」回避、デフォルト UTC 評価で朝の時間帯に 0 件症状を防ぐ)。
 -- - latency / token usage は span attribute としてのみ記録 (Cloud Trace 側)。
@@ -35,11 +40,11 @@ WITH unioned AS (
   WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
 )
 SELECT
-  COUNT(*)                                                       AS hit_count,
-  MAX(timestamp)                                                 AS latest_ts,
-  COUNTIF(JSON_VALUE(jsonPayload, '$.event') LIKE 'biblio.%')    AS biblio_event_count,
-  ANY_VALUE(JSON_VALUE(jsonPayload, '$.component'))              AS sample_component,
-  'M4A_OK'                                                       AS marker
+  COUNT(*)                                            AS hit_count,
+  MAX(timestamp)                                      AS latest_ts,
+  COUNTIF(jsonPayload.event LIKE 'biblio.%')          AS biblio_event_count,
+  ANY_VALUE(jsonPayload.component)                    AS sample_component,
+  'M4A_OK'                                            AS marker
 FROM unioned
 WHERE TIMESTAMP_TRUNC(timestamp, HOUR) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR);
 
@@ -47,17 +52,17 @@ WHERE TIMESTAMP_TRUNC(timestamp, HOUR) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INT
 -- 実行時は WITH 句を再利用するか、直接以下を貼る (placeholders を sed 置換):
 --
 -- SELECT
---   JSON_VALUE(jsonPayload, '$.event')     AS event,
---   JSON_VALUE(jsonPayload, '$.outcome')   AS outcome,
---   JSON_VALUE(jsonPayload, '$.component') AS component,
---   JSON_VALUE(jsonPayload, '$.action')    AS action,
---   COUNT(*)                               AS hit_count,
---   MAX(timestamp)                         AS latest_ts
+--   jsonPayload.event     AS event,
+--   jsonPayload.outcome   AS outcome,
+--   jsonPayload.component AS component,
+--   jsonPayload.action    AS action,
+--   COUNT(*)              AS hit_count,
+--   MAX(timestamp)        AS latest_ts
 -- FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
 -- WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
---   AND JSON_VALUE(jsonPayload, '$.event') IS NOT NULL
+--   AND jsonPayload.event IS NOT NULL
 -- GROUP BY event, outcome, component, action
 -- ORDER BY hit_count DESC;
 --
--- 特定 request_id の全境界ログ (= 1 trace 串刺し):
--- ... WHERE JSON_VALUE(jsonPayload, '$.request_id') = '<UUID>' ORDER BY timestamp ASC
+-- 特定 trace の全境界ログ (= 1 trace 串刺し、trace はトップレベルカラム):
+-- ... WHERE trace = 'projects/<PROJECT_ID>/traces/<TRACE_ID>' ORDER BY timestamp ASC

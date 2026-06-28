@@ -192,22 +192,27 @@ labels_test_fixture="$(printf '%s' "$TRACE_BODY" | jq -r '.spans[0].labels["bibl
 info '  → root span = biblio.acquire + 属性一致 OK'
 
 # =============================================================================
-# Section 5: BigQuery ポーリング (5 min timeout)
+# Section 5: BigQuery sink 疎通確認 (= 過去 1h に biblio.* event log が >= 1 件)
 # =============================================================================
-info '=== [5/7] BigQuery 到達ポーリング (sleep 10 × 30 回 = max 5 min) ==='
+# 案 C 設計 (PR #75 実機 verify で判明した plan 欠陥への対応):
+# - 元設計: emit-test-span の TRACE_ID と BQ row を個別マッチ
+# - 真因: emit-test-span は host (Crane WSL) で動き、host stdout は Cloud Logging に
+#   流れない (= WSL に logging agent なし)。sink filter は `k8s_container` 専用
+#   = host log は永久に届かない (= 元設計は test fixture が host 実行前提で plan 欠陥)
+# - 案 C: TRACE_ID 個別マッチを諦め、「sink 疎通 = 過去 1h に GKE 起源の biblio.* event
+#   log が >= 1 件 BQ 到達」だけ assert。M4-A Phase 3 deliverable (sink) の動作確認として
+#   value 十分、本番副作用なし、TRACE_ID 個別マッチは Section 4 (Cloud Trace) で完結済
+# - 完全 E2E (test fixture を GKE 内で動かす case A、Slack 経由 read-only action case B)
+#   は将来 phase で別途検討
+info '=== [5/7] BigQuery sink 疎通確認 (= 過去 1h に biblio.* event log が >= 1 件) ==='
 
 # Cloud Logging → BQ sink は `use_partitioned_tables = true` (= terraform/m4-a-observability/main.tf:39)
-# 設定により、テーブル名は **`stdout` / `stderr` の単独形** で生成され、`timestamp` 列で DAY partition
-# されている (= bq ls 実測: `Time Partitioning: DAY (field: timestamp)`)。`stdout_YYYYMMDD` 等の
-# sharded suffix 形式ではない (= `use_partitioned_tables = false` の挙動)。後続クエリは
-# `WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')` で partition pruning する。
-# jq の parse error は `bq ls` が JSON でない出力を返した bug ケースで永久に原因不明
-# になるため、stderr を専用ファイルに捕捉する (PR #75 review 提案 B-1)。
+# で `stdout` / `stderr` 単独形 + `timestamp` 列 DAY partition で生成される (= bq ls 実測:
+# `Time Partitioning: DAY (field: timestamp)`)。`stdout_YYYYMMDD` の sharded suffix ではない。
 ALL_TABLES="$(bq ls --format=json --max_results=500 "${GCP_PROJECT_ID}:${BQ_DATASET_ID}" 2>"$STDERR_DIR/bq-ls.stderr" \
   | jq -r '.[].tableReference.tableId' 2>"$STDERR_DIR/bq-ls-jq.stderr" \
   | grep -E '^(stdout|stderr)$' || true)"
 if [ -z "$ALL_TABLES" ]; then
-  # bq ls と jq の両 stderr を結合して fail メッセージ用に保存。
   cat "$STDERR_DIR/bq-ls.stderr" "$STDERR_DIR/bq-ls-jq.stderr" > "$STDERR_DIR/bq-ls-combined.stderr" 2>/dev/null || true
   LAST_HARNESS_STDERR="$STDERR_DIR/bq-ls-combined.stderr"
   fail "BQ dataset ${GCP_PROJECT_ID}:${BQ_DATASET_ID} に stdout / stderr テーブルが存在しない
@@ -218,38 +223,36 @@ fi
 TABLES="$ALL_TABLES"
 info "  対象テーブル: $(printf '%s' "$TABLES" | tr '\n' ' ')"
 
-FORMATTED_TRACE="projects/${GCP_PROJECT_ID}/traces/${TRACE_ID}"
-# Partition pruning 用 WHERE 句。verify は emit-test-span 即時実行 → BQ 到達まで通常 30s〜
-# のため過去 1h 範囲で十分。JST 0 時跨ぎは TIMESTAMP 比較ベースのため自然に吸収される
-# (= `DATE(timestamp, 'Asia/Tokyo')` 等の日付比較ではないため auto memory「DATE TZ bug」は無関係)。
-PARTITION_WHERE="AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)"
+# WHERE 句:
+# - `timestamp >= ... INTERVAL 1 HOUR`: partition pruning (cost + 性能担保)
+# - `jsonPayload.event LIKE 'biblio.%'`: biblio action 由来 (= biblio-claw の構造化ログ
+#   経路が動いている証跡)。jsonPayload は STRUCT (RECORD) のためドット記法でアクセス
+#   (= 旧 SQL の `JSON_VALUE(jsonPayload, '$.event')` は型エラーで全 query fail していた、
+#   bq show --schema --format=prettyjson stdout で実測判明)
+SINK_PROBE_WHERE="WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND jsonPayload.event LIKE 'biblio.%'"
 
+# 軽い retry (10s × 6 = 1 min)。biblio action が直近 1h で 1 件以上動いていれば即 hit。
 BQ_TOTAL=0
 bq_found=0
 auth_fail_streak=0
 AUTH_FAIL_MAX=3
+SINK_PROBE_MAX=6
 LAST_BQ_ATTEMPT=0
 
-for i in $(seq 1 30); do
+for i in $(seq 1 "$SINK_PROBE_MAX"); do
   LAST_BQ_ATTEMPT="$i"
   BQ_TOTAL=0
   outer_auth_fails=0
   outer_table_count=0
   for T in $TABLES; do
     outer_table_count=$((outer_table_count + 1))
-    # set -o pipefail 有効下では bq query 失敗で pipe 全体が exit !=0 になり
-    # `|| echo BQ_QUERY_FAIL` が発火する。これで auth 切れ / network 障害 / 404 を
-    # transient な "0 行" と区別可能になる (PR #75 review silent-failure 問題 2)。
+    # pipefail 有効下で bq query 失敗 → pipe exit !=0 → `|| echo BQ_QUERY_FAIL` 発火。
+    # auth 切れ / network 障害 / SQL 型エラーを transient "0 行" と区別可能にする。
     COUNT="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
-      "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` \
-       WHERE JSON_VALUE(jsonPayload, '\$[\"logging.googleapis.com/trace\"]') = '${FORMATTED_TRACE}' \
-       ${PARTITION_WHERE}" \
+      "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` ${SINK_PROBE_WHERE}" \
       2>"$STDERR_DIR/bq-poll-${i}-${T}.stderr" | tail -n1 || echo BQ_QUERY_FAIL)"
     if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
       BQ_TOTAL=$(( BQ_TOTAL + COUNT ))
-      # 1 件でも見つかったら内側ループを早期 break。
-      # 単一テーブル 2 件 (stdout / stderr) なので元の問題は限定的だが、
-      # 早期 break で 2 件目への無駄 query を回避する効果は残る。
       [ "$BQ_TOTAL" -ge 1 ] && break
     else
       outer_auth_fails=$((outer_auth_fails + 1))
@@ -258,49 +261,52 @@ for i in $(seq 1 30); do
 
   if [ "$BQ_TOTAL" -ge 1 ]; then
     bq_found=1
-    info "  [attempt ${i}/30] BQ row materialized (count=${BQ_TOTAL}) after ~$(( (i-1) * 10 ))s"
+    info "  [attempt ${i}/${SINK_PROBE_MAX}] sink 疎通 OK (biblio event row=${BQ_TOTAL}) after ~$(( (i-1) * 10 ))s"
     break
   fi
 
-  # outer 反復で全テーブルが query 失敗 (= persistent な auth/network 障害の可能性) なら
-  # streak をインクリメント、3 連続で early fail (= 5 分待たずに真原因を出す、
-  # PR #75 review silent-failure 問題 2)。1 でも success が混じれば streak リセット。
+  # 透明化 (PR #75 silent-failure 問題 2 再対応): 旧版は count=0 ハードコード表示で
+  # 失敗を 0 件と取り違えていた。今は outer 反復ごとに「成功 query 数 / 失敗数」を
+  # 出して内部状態を見える化する。
+  outer_success=$(( outer_table_count - outer_auth_fails ))
+  info "  [attempt ${i}/${SINK_PROBE_MAX}] biblio event not yet (success_query=${outer_success}/${outer_table_count}, failed_query=${outer_auth_fails}); sleep 10s"
+
+  # 全 query fail (= persistent auth/network/SQL 型) なら 3 連続で early abort。
   if [ "$outer_table_count" -gt 0 ] && [ "$outer_auth_fails" -eq "$outer_table_count" ]; then
     auth_fail_streak=$((auth_fail_streak + 1))
     if [ "$auth_fail_streak" -ge "$AUTH_FAIL_MAX" ]; then
-      warn "BQ query が ${AUTH_FAIL_MAX} 連続 outer 反復で全テーブル失敗 (= 認証切れ / 権限不足 / network 障害の可能性)"
+      warn "BQ query が ${AUTH_FAIL_MAX} 連続 outer 反復で全テーブル失敗"
       for T in $TABLES; do
         if [ -s "$STDERR_DIR/bq-poll-${i}-${T}.stderr" ]; then
           warn "  table=$T stderr 抜粋: $(tail -c 300 "$STDERR_DIR/bq-poll-${i}-${T}.stderr" | tr '\n' ' ')"
         fi
       done
       LAST_HARNESS_STDERR="$STDERR_DIR/bq-poll-${i}-$(printf '%s' "$TABLES" | head -n1).stderr"
-      fail "BQ poll early abort: ${AUTH_FAIL_MAX} 連続全失敗 (5 min 待たず早期終了)
+      fail "BQ poll early abort: ${AUTH_FAIL_MAX} 連続全失敗
     対処: (1) gcloud auth application-default print-access-token で token 取得確認 /
           (2) ADC 実行ユーザに roles/bigquery.dataViewer 付与済か /
-          (3) network 障害 (上の stderr 抜粋で原因確認)"
+          (3) SQL 型エラー (jsonPayload スキーマ仮定ミス等) — 上の stderr 抜粋で原因確認 /
+          (4) network 障害"
     fi
   else
     auth_fail_streak=0
   fi
 
-  info "  [attempt ${i}/30] not yet (count=0); sleep 10s"
   sleep 10
 done
 
 if [ "$bq_found" -ne 1 ]; then
-  # timeout 時、最後の outer 反復で全テーブルの stderr を warn で集約 (PR #75 review 提案 A-2、
-  # 旧実装は head -n1 で最初の 1 テーブルしか表示せず stderr 側の error が見えなかった)。
   for T in $TABLES; do
     if [ -s "$STDERR_DIR/bq-poll-${LAST_BQ_ATTEMPT}-${T}.stderr" ]; then
       warn "  timeout 直前 stderr (table=$T): $(tail -c 300 "$STDERR_DIR/bq-poll-${LAST_BQ_ATTEMPT}-${T}.stderr" | tr '\n' ' ')"
     fi
   done
   LAST_HARNESS_STDERR="$STDERR_DIR/bq-poll-${LAST_BQ_ATTEMPT}-$(printf '%s' "$TABLES" | head -n1).stderr"
-  fail "BQ に trace_id=$TRACE_ID が 5 min 以内に到達しなかった
-    対処: (1) sink writer_identity に roles/bigquery.dataEditor 付与済か /
-          (2) terraform/m4-a-observability/main.tf の filter が k8s_container かつ namespace=biblio-claw か /
-          (3) host が biblio-claw namespace の Pod として動いているか (= sink filter にマッチするか)"
+  fail "BQ sink 疎通確認 fail: 過去 1h に biblio.* event log が 1 件も到達していない
+    対処: (1) 直近 1h で biblio action (Slack で @bot 蔵書 等) を 1 件以上実行 /
+          (2) GKE orchestrator Pod が稼働中か (kubectl get pods -n biblio-claw) /
+          (3) sink writer_identity に roles/bigquery.dataEditor 付与済か /
+          (4) sink filter (k8s_container + namespace_name=biblio-claw) が biblio-claw Pod にマッチしているか"
 fi
 
 # =============================================================================
@@ -315,7 +321,7 @@ SUMMARY="$(sed -e "s/<PROJECT_ID>/${GCP_PROJECT_ID}/g" -e "s/<DATASET_ID>/${BQ_D
   "$SUMMARY_SQL_FILE" | \
   bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=json --quiet \
   2>"$STDERR_DIR/bq-summary.stderr")" \
-  || { LAST_HARNESS_STDERR="$STDERR_DIR/bq-summary.stderr"; fail "summary SQL 実行失敗"; }
+  || { LAST_HARNESS_STDERR="$STDERR_DIR/bq-summary.stderr"; fail "summary SQL 実行失敗 (上の stderr で原因確認、jsonPayload スキーマ仮定ミスなら summary.sql を修正)"; }
 
 HIT_COUNT="$(printf '%s' "$SUMMARY" | jq -r '.[0].hit_count // "0"')"
 MARKER="$(printf '%s' "$SUMMARY" | jq -r '.[0].marker // ""')"
@@ -329,40 +335,14 @@ fi
 info "  → hit_count=$HIT_COUNT biblio_event_count=$BIBLIO_EVENT_COUNT marker=$MARKER"
 
 # =============================================================================
-# Section 7: ネガティブ対照 (random trace_id で BQ 0 行 + sink filter 静的反証)
+# Section 7: 静的反証 (sink filter に k8s_container + namespace 縛りが残っていること)
 # =============================================================================
-info '=== [7/7] ネガティブ対照 ==='
+# 案 C 設計: 動的ネガティブ対照 (= random GHOST_TRACE_ID で 0 行) は TRACE_ID 個別マッチ
+# 前提のため案 C ではスコープ外。sink filter の k8s_container + namespace 縛りが
+# 静的に保持されていることだけ確認 (= sink が無関係 namespace のログを誤って取り込むことが
+# ないという設計の証跡)。
+info '=== [7/7] 静的反証 (sink filter スコープ確認) ==='
 
-GHOST_TRACE_ID="$(node -e "console.log(require('crypto').randomBytes(16).toString('hex'))")"
-GHOST_FORMATTED="projects/${GCP_PROJECT_ID}/traces/${GHOST_TRACE_ID}"
-GHOST_TOTAL=0
-for T in $TABLES; do
-  # CRITICAL: 旧実装は `2>/dev/null | tail -n1 || echo 0` で BQ query 失敗 (auth 切れ /
-  # network 障害 / 404) を `GC=0` に化けさせ、`GHOST_TOTAL=0` 判定をすり抜けて Section 7
-  # 「OK」を返していた = ネガティブ対照の意味消失 (PR #75 review silent-failure 問題 1)。
-  # `|| echo BQ_QUERY_FAIL` + 非数値判定で「BQ query が実際には実行できていない」を
-  # 検出して即 fail させる。stderr は専用ファイルに残し fail 時に展開可能にする。
-  GC_ERR="$STDERR_DIR/bq-neg-${T}.stderr"
-  GC="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
-    "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` \
-     WHERE JSON_VALUE(jsonPayload, '\$[\"logging.googleapis.com/trace\"]') = '${GHOST_FORMATTED}' \
-     ${PARTITION_WHERE}" \
-    2>"$GC_ERR" | tail -n1 || echo BQ_QUERY_FAIL)"
-  if [[ "$GC" =~ ^[0-9]+$ ]]; then
-    GHOST_TOTAL=$(( GHOST_TOTAL + GC ))
-  else
-    LAST_HARNESS_STDERR="$GC_ERR"
-    fail "ネガティブ対照: BQ query が table=$T で失敗 (= 0 行判定が信頼できない状態)。
-    対処: BQ query が実際に実行できる状態を確認 (auth + roles/bigquery.dataViewer + dataset 存在)。
-          上の LAST_HARNESS_STDERR 経由で bq の stderr 抜粋を確認してください。"
-  fi
-done
-[ "$GHOST_TOTAL" -eq 0 ] \
-  || fail "ネガティブ対照: 存在しない trace_id=$GHOST_TRACE_ID で BQ に $GHOST_TOTAL 行 hit (期待: 0、衝突確率 ~2^-128)"
-
-info "  → GHOST_TRACE_ID で BQ 0 行 OK (random trace_id=$GHOST_TRACE_ID)"
-
-# 静的反証: sink filter に k8s_container / namespace 縛りが残っていること。
 grep -q 'resource.type=.*k8s_container' terraform/m4-a-observability/main.tf \
   || fail "sink filter から k8s_container 縛りが消失 (terraform/m4-a-observability/main.tf)"
 grep -q 'namespace_name=' terraform/m4-a-observability/main.tf \
@@ -373,5 +353,5 @@ info '  → sink filter 静的反証 OK (k8s_container + namespace 縛り保持)
 # =============================================================================
 # PASS marker
 # =============================================================================
-info '  all assertions passed (preflight + keyless + trace + bq + summary + negative)'
+info '  all assertions passed (preflight + keyless + cloud-trace + bq-sink + summary + static-filter)'
 echo 'M4-A PASS'
