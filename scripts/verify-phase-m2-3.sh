@@ -179,7 +179,9 @@ case "$np_target" in
 esac
 
 # === 7. Slack adapter 起動 (回帰、A 案踏襲) ===
-# verify-phase-2-wiring.sh §9 と同じロジック (PR #69 / issue #55 で JSON 化済)。
+# verify-phase-2-wiring.sh §9 と同じロジック。orchestrator logger の JSON 化
+# (commit 9c113f0) に追従して本 script の regex を更新済 (PR #69 / issue #55 で
+# verify-phase-2-wiring.sh 側を先行修正、本箇所はその mirror = issue #68)。
 # GKE 経路の orchestrator は LOG_FORMAT=json (k8s/10-orchestrator-statefulset.yaml:200)
 # で動き emitJson が JSON 1 行を吐く (キーは "channel":"slack")。ANSI escape は JSON
 # 経路では出力されないため sed 剥離は不要。
