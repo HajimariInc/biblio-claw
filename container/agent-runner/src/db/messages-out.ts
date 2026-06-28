@@ -7,8 +7,13 @@
 import { getInboundDb, getOutboundDb } from './connection.js';
 import { log } from '../log.js';
 
-/** SQLITE_BUSY 等への小規模リトライ回数 (1 + 2 = 計 3 attempts)。
- *  busy_timeout=5000 を補強する上位リトライ層。host writeBackMessage と対称。 */
+/** SQLITE_BUSY 等への小規模リトライ回数 (1 initial + 2 retries = 計 3 attempts)。
+ *  busy_timeout=5000 を補強する上位リトライ層。
+ *
+ *  host `writeBackMessage` (src/biblio/action-helpers.ts) とパラメータは対称
+ *  (count=3 / base=100ms / 線形)、ただし **全失敗時の挙動は逆**:
+ *    - host:      最終失敗で return (= 絶対に throw しない)
+ *    - container: 最終失敗で throw (= dispatchTool が isError レスポンスに変換) */
 const WRITE_MAX_RETRIES = 2;
 /** 各リトライ前の sleep 基底 (ms)、attempt 倍率で線形バックオフ。 */
 const WRITE_RETRY_BASE_MS = 100;

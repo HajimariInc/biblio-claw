@@ -30,7 +30,7 @@ const toolMap = new Map<string, McpToolDefinition>();
 export async function dispatchTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
   const tool = toolMap.get(name);
   if (!tool) {
-    return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
+    return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
   }
   try {
     return await tool.handler(args);
@@ -44,7 +44,6 @@ export async function dispatchTool(name: string, args: Record<string, unknown>):
   }
 }
 
-/** Test-only: clear registered tools between cases. */
 export function _resetToolsForTest(): void {
   allTools.length = 0;
   toolMap.clear();

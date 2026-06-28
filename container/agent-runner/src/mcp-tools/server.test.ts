@@ -48,12 +48,31 @@ describe('dispatchTool — handler error containment', () => {
     expect(first.text).toBe('ok');
   });
 
-  it('returns unknown-tool text response without isError', async () => {
+  it('returns isError text response for unknown tool', async () => {
+    // MCP 仕様: 未知の tool 呼び出しは client error として isError: true を立てる
+    // (Claude 側がリカバリ判断できる)。
     const result = await dispatchTool('does_not_exist', {});
-    expect(result.isError).toBeUndefined();
+    expect(result.isError).toBe(true);
     const first = result.content[0] as { type: string; text: string };
     expect(first.text).toContain('Unknown tool');
     expect(first.text).toContain('does_not_exist');
+  });
+
+  it('passes args through to handler unchanged', async () => {
+    // dispatchTool が `tool.handler(args)` の args を喪失 (例: `{}` で上書き)
+    // するリグレッションを検知する。biblio MCP tool 9 種はすべて args 依存。
+    let receivedArgs: Record<string, unknown> | undefined;
+    const echoTool: McpToolDefinition = {
+      tool: { name: 'echo_tool', description: '', inputSchema: { type: 'object' } },
+      handler: async (args) => {
+        receivedArgs = args;
+        return { content: [{ type: 'text' as const, text: 'ok' }] };
+      },
+    };
+    registerTools([echoTool]);
+
+    await dispatchTool('echo_tool', { biblio_name: 'foo/bar', category: 'dev' });
+    expect(receivedArgs).toEqual({ biblio_name: 'foo/bar', category: 'dev' });
   });
 
   it('catches non-Error throws (e.g. raw string) without crashing', async () => {
