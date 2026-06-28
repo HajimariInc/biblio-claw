@@ -227,7 +227,9 @@ export type ShelveFailureReason =
   /** quarantine → shelf の `fs.rename` 失敗 (`EXDEV` / `EACCES` / `ENOSPC` 等)。 */
   | 'rename_error'
   /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
-  | 'invalid_category';
+  | 'invalid_category'
+  /** 必須 env (SHELF_REPO_OWNER 等) 欠落 = 設定不備。caller (action handler) のリトライ誘発を避ける目的で github_api_error から分離。 */
+  | 'config_error';
 
 /**
  * 陳列結果。discriminated union — `ok` で分岐する。
@@ -297,7 +299,9 @@ export type UnshelveFailureReason =
   /** Git Data API / Pulls API の non-2xx response (step + status + body を detail に含む)。 */
   | 'github_api_error'
   /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
-  | 'invalid_category';
+  | 'invalid_category'
+  /** 必須 env (SHELF_REPO_OWNER 等) 欠落 = 設定不備 (ShelveFailureReason と同義、対称性確保)。 */
+  | 'config_error';
 
 /**
  * 解除結果。discriminated union — `ok` で分岐する。

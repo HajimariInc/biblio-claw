@@ -497,14 +497,13 @@ export async function shelveMulti(
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
-    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
-    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
-    log.warn('shelveMulti: env not ready (config_error mapped to github_api_error)', {
+    log.warn('shelveMulti: env not ready', {
+      event: 'biblio.shelve',
+      outcome: 'config_error',
       count: reqs.length,
       detail,
     });
-    return failMulti('github_api_error', detail, reqs);
+    return failMulti('config_error', detail, reqs);
   }
 
   // 2. 重複検知 (marketplace.json 事前読み、per-req で 1 件でも引っかかれば全体 fail)
