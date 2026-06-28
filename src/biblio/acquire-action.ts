@@ -9,6 +9,8 @@
  * handler 内の例外は host を巻き込むため try/catch で握り、失敗も必ず inbound に
  * 書き戻す (silent failure 禁止 — patron に必ず可視化する)。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { acquire } from './acquire.js';
@@ -100,6 +102,13 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // 想定外例外も握って patron に通知する (host を落とさない)。
+      // 例外吸収による silent failure を避けるため span にも記録する (PR #78 review-agents I1):
+      // 旧実装は inner catch が rethrow しないため withBiblioActionSpan の outer catch
+      // (= recordException + ERROR status) が構造的 dead で、Cloud Trace 上のエラー検索
+      // (= status=ERROR) が機能していなかった。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('acquire_biblio threw', {
         event: 'biblio.acquire',
         outcome: 'failure',
@@ -109,7 +118,7 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorRecord.message;
       // resultText() の 'internal' 分岐と同じ文言形式に揃える (patron へのメッセージ統一)。
       await writeBackMessage(inDb, `システム構成エラー: 予期しない失敗 — ${detail}`, 'acquire-resp', 'acquire_biblio');
       span.setAttribute('biblio.outcome', 'failure');

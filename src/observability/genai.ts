@@ -28,6 +28,10 @@ export interface GenAIUsage {
 
 /** vertex response から semconv usage を抽出 (Gemini/Anthropic 両対応) */
 export function extractVertexUsage(json: unknown, provider: 'gemini' | 'anthropic'): GenAIUsage {
+  // 型署名 `unknown` が「何でも来うる」と約束しているのに型アサーションで直接 property access
+  // していたため、`null` や非オブジェクトで TypeError になっていた (PR #78 review-agents S2)。
+  // 呼び出し元は fetch 成功後の JSON だが、型の約束を満たして防御完結する。
+  if (typeof json !== 'object' || json === null) return {};
   if (provider === 'gemini') {
     const meta = (json as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number } })
       .usageMetadata;

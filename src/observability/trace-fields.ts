@@ -1,3 +1,8 @@
+// NOTE: host (src/observability/trace-fields.ts) と agent
+// (container/agent-runner/src/observability/trace-fields.ts) で同一実装を維持するファイル。
+// 片方を編集したら必ずもう一方にも同じ変更を適用すること (= Phase 1 auth.ts / env-propagation.ts と同流儀、
+// scripts/verify-m4-a.sh §7 で `diff -q` による drift 検知あり、byte-for-byte 一致が前提)。
+
 import { trace } from '@opentelemetry/api';
 
 /** Cloud Logging が top-level 昇格する reserved field を返す (active span 不在時は空)。

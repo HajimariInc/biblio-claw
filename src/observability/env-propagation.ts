@@ -1,3 +1,8 @@
+// NOTE: host (src/observability/env-propagation.ts) と agent
+// (container/agent-runner/src/observability/env-propagation.ts) で同一実装を維持するファイル。
+// 片方を編集したら必ずもう一方にも同じ変更を適用すること (= Phase 1 auth.ts / trace-fields.ts と同流儀、
+// scripts/verify-m4-a.sh §7 で `diff -q` による drift 検知あり、byte-for-byte 一致が前提)。
+//
 // W3C Env Carriers Specification: 環境変数経由での trace context 伝搬では
 // キーを UPPERCASE に正規化する (= K8s env 慣習)。OTel propagator は lowercase
 // (`traceparent` / `tracestate`) で carrier を inject/extract するため、本 Setter/
