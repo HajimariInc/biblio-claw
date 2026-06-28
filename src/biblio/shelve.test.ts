@@ -679,6 +679,46 @@ describe('shelveMulti — 入口 validation', () => {
       expect(result.items).toHaveLength(2);
     }
   });
+
+  it('必須 env 欠落 (SHELF_REPO_OWNER 不在) → config_error reason (issue #50)', async () => {
+    // env.ts mock を 1 回だけ「必須欠落」状態に上書きする (= readShelveEnv throw 経路)
+    vi.mocked(readEnvFile).mockReturnValueOnce({
+      // SHELF_REPO_OWNER を意図的に省略
+      SHELF_REPO_NAME: 'biblio-shelf',
+      SHELF_PR_AUTHOR_NAME: 'hj-biblio-github-app[bot]',
+      SHELF_PR_AUTHOR_EMAIL: '292998322+hj-biblio-github-app[bot]@users.noreply.github.com',
+      SHELF_PR_AUTHOR_FALLBACK: '',
+    });
+    const result = await shelveMulti([{ biblioName: 'owner--repo--x', category: 'biblio-dev', reason: 'r' }], {
+      quarantineRoot: path.join(TEST_DIR, 'quarantine'),
+      shelfRoot: path.join(TEST_DIR, 'shelf'),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('config_error');
+      expect(result.detail).toMatch(/SHELF_REPO_OWNER|required|missing/i);
+    }
+    // env catch は step 3 (rename) より前 = GitHub API は一切叩かない
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('単一 shelve() 経由でも env 欠落は config_error を patron に返す (wrapper passthrough)', async () => {
+    vi.mocked(readEnvFile).mockReturnValueOnce({
+      SHELF_REPO_NAME: 'biblio-shelf',
+      SHELF_PR_AUTHOR_NAME: 'hj-biblio-github-app[bot]',
+      SHELF_PR_AUTHOR_EMAIL: '292998322+hj-biblio-github-app[bot]@users.noreply.github.com',
+      SHELF_PR_AUTHOR_FALLBACK: '',
+    });
+    const result = await shelve(
+      { biblioName: 'owner--repo--single', category: 'biblio-dev', reason: 'r' },
+      { quarantineRoot: path.join(TEST_DIR, 'quarantine'), shelfRoot: path.join(TEST_DIR, 'shelf') },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe('config_error');
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('shelveMulti — 原子性 (1 件失敗で全体 fail、部分成功なし)', () => {
