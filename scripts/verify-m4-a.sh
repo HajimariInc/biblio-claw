@@ -48,8 +48,8 @@ else
   warn ".env が見つかりません — GKE / CI 経路 (env 直接投入) と想定して継続"
 fi
 
-: "${GCP_PROJECT_ID:?GCP_PROJECT_ID must be set (e.g. hajimari-ai-hackathon-2026)}"
-: "${BQ_DATASET_ID:?BQ_DATASET_ID must be set (e.g. llm_observability)}"
+: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. hajimari-ai-hackathon-2026)。.env.example の §M4-A observability 参照}"
+: "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)。.env.example の §M4-A observability 参照}"
 
 # 必要 CLI が PATH 上にいるか fail-fast。
 for cmd in gcloud bq jq node; do
