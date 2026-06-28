@@ -30,21 +30,34 @@
 -- - latency / token usage は span attribute としてのみ記録 (Cloud Trace 側)。
 --   BQ サマリは event 単位の boundary 集計に絞る (Phase 3 lesson 「log と span の責務分離」)。
 
+-- stdout / stderr テーブルの jsonPayload STRUCT は同型ではない (= stderr 側に
+-- `err RECORD` 等の error 専用 field がある、bq query で UNION ALL 時に
+-- "Column 2 in UNION ALL has incompatible types: STRUCT<...>, STRUCT<...>"
+-- エラー発生)。UNION ALL は同型必須のため、jsonPayload 全体ではなく **集計に
+-- 必要な primitive field だけ** を SELECT してから UNION ALL する。両 table とも
+-- jsonPayload.event / jsonPayload.component は STRING 型で存在確認済
+-- (= 2026-06-28 Phase 4 verify 実機検証)。
 WITH unioned AS (
-  SELECT timestamp, jsonPayload
+  SELECT
+    timestamp,
+    jsonPayload.event AS event,
+    jsonPayload.component AS component
   FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
   WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
   UNION ALL
-  SELECT timestamp, jsonPayload
+  SELECT
+    timestamp,
+    jsonPayload.event AS event,
+    jsonPayload.component AS component
   FROM `<PROJECT_ID>.<DATASET_ID>.stderr`
   WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
 )
 SELECT
-  COUNT(*)                                            AS hit_count,
-  MAX(timestamp)                                      AS latest_ts,
-  COUNTIF(jsonPayload.event LIKE 'biblio.%')          AS biblio_event_count,
-  ANY_VALUE(jsonPayload.component)                    AS sample_component,
-  'M4A_OK'                                            AS marker
+  COUNT(*)                            AS hit_count,
+  MAX(timestamp)                      AS latest_ts,
+  COUNTIF(event LIKE 'biblio.%')      AS biblio_event_count,
+  ANY_VALUE(component)                AS sample_component,
+  'M4A_OK'                            AS marker
 FROM unioned
 WHERE TIMESTAMP_TRUNC(timestamp, HOUR) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR);
 
