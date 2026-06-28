@@ -497,14 +497,21 @@ export async function shelveMulti(
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
-    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
-    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
-    log.warn('shelveMulti: env not ready (config_error mapped to github_api_error)', {
+    // 必須 env 欠落 = `'config_error'` reason で patron に通知 (issue #50)。
+    // 旧来は `'github_api_error'` に集約していたが、運用者が「GitHub API 障害」と
+    // 誤認するため reason を型分離した (= `MultiShelveFailureReason` は
+    // `ShelveFailureReason` 継承で `'config_error'` を自動取得)。
+    // 本 catch は step 1 で early return するため rename (step 3) は 1 件も実行
+    // されていない = 残骸 (shelf 配下に moved されたファイル) は存在しないため、
+    // `warnAndBuildResidualTrail` 呼び出しは不要 (= step 5 catch との非対称は意図的:
+    // step 5 は rename 完了後に GitHub API 失敗 = 残骸が実在するので可視化が必要)。
+    log.warn('shelveMulti: env not ready', {
+      event: 'biblio.shelve',
+      outcome: 'config_error',
       count: reqs.length,
       detail,
     });
-    return failMulti('github_api_error', detail, reqs);
+    return failMulti('config_error', detail, reqs);
   }
 
   // 2. 重複検知 (marketplace.json 事前読み、per-req で 1 件でも引っかかれば全体 fail)
@@ -893,8 +900,10 @@ export async function shelve(
   // multi 専用 reason (empty_items / duplicate_biblio_name) は単一経路では発生しない
   // ため safety net で github_api_error にマップする (= ShelveResult shape を維持)。
   // MultiShelveFailureReason = ShelveFailureReason | 'empty_items' | 'duplicate_biblio_name'
-  // のため、2 値を除いた residual は ShelveFailureReason と型が一致する。将来 multi 専用 reason
-  // を追加したときは、本マッピングも更新すること。
+  // のため、2 値を除いた residual は ShelveFailureReason と型が一致する。
+  // 新たな multi 専用 reason (= ShelveFailureReason に属さない値) を追加した場合、
+  // 下の if-check への追加が必要 — TypeScript が line 915 を型エラーで検出するため漏れない
+  // (= 型レベルで強制される、コメント遵守頼みではない)。
   if (result.reason === 'empty_items' || result.reason === 'duplicate_biblio_name') {
     // ありえない経路 (= shelveMulti([req]) は常に length 1 の単一要素配列を渡す) に到達した
     // 場合の defensive log。silent な github_api_error マッピングを残骸ログで可視化する。
