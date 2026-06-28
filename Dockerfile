@@ -89,4 +89,5 @@ ENV NODE_ENV=production
 ENV DATA_DIR=/app/data
 
 # host プロセスのエントリポイント (= NanoClaw main())
-CMD ["node", "dist/index.js"]
+# `--import ./dist/instrumentation.js` で OTel SDK を main() より前に load
+CMD ["node", "--import", "./dist/instrumentation.js", "dist/index.js"]

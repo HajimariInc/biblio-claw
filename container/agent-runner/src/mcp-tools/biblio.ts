@@ -64,7 +64,11 @@ export const acquireBiblio: McpToolDefinition = {
     });
 
     const target = skill ? `${repo}/${skill}` : repo;
-    log.info(`acquire_biblio: ${requestId} → ${target}`);
+    log.info('mcp.acquire_biblio', {
+      event: 'mcp.biblio.acquire',
+      request_id: requestId,
+      target,
+    });
     return ok(`仕入れリクエストを受け付けました: ${target}。取得が完了したら結果を通知します。`);
   },
 };
@@ -96,7 +100,11 @@ export const inspectBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'inspect_biblio', name }),
     });
 
-    log.info(`inspect_biblio: ${requestId} → ${name}`);
+    log.info('mcp.inspect_biblio', {
+      event: 'mcp.biblio.inspect',
+      request_id: requestId,
+      biblio_name: name,
+    });
     return ok(`検品リクエストを受け付けました: ${name}。判定が完了したら結果を通知します。`);
   },
 };
@@ -128,7 +136,11 @@ export const categorizeBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'categorize_biblio', name }),
     });
 
-    log.info(`categorize_biblio: ${requestId} → ${name}`);
+    log.info('mcp.categorize_biblio', {
+      event: 'mcp.biblio.categorize',
+      request_id: requestId,
+      biblio_name: name,
+    });
     return ok(`カテゴライズリクエストを受け付けました: ${name}。判定が完了したら結果を通知します。`);
   },
 };
@@ -172,7 +184,12 @@ export const shelveBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'shelve_biblio', name, category, reason }),
     });
 
-    log.info(`shelve_biblio: ${requestId} → ${name} / ${category}`);
+    log.info('mcp.shelve_biblio', {
+      event: 'mcp.biblio.shelve',
+      request_id: requestId,
+      biblio_name: name,
+      category,
+    });
     return ok(`陳列リクエストを受け付けました: ${name} → ${category}。PR 作成が完了したら結果を通知します。`);
   },
 };
@@ -243,7 +260,12 @@ export const shelveBiblioMulti: McpToolDefinition = {
     });
 
     const summary = items.map((it) => `${it.name}→${it.category}`).join(', ');
-    log.info(`shelve_biblio_multi: ${requestId} → ${items.length} items (${summary})`);
+    log.info('mcp.shelve_biblio_multi', {
+      event: 'mcp.biblio.shelve_multi',
+      request_id: requestId,
+      count: items.length,
+      summary,
+    });
     return ok(
       `複数陳列リクエストを受け付けました: ${items.length} 件 (${summary})。1 PR にまとめて作成が完了したら結果を通知します。`,
     );
@@ -284,7 +306,12 @@ export const enkinBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'enkin_biblio', name, category }),
     });
 
-    log.info(`enkin_biblio: ${requestId} → ${name} / ${category}`);
+    log.info('mcp.enkin_biblio', {
+      event: 'mcp.biblio.enkin',
+      request_id: requestId,
+      biblio_name: name,
+      category,
+    });
     return ok(`禁書リクエストを受け付けました: ${name} (${category})。admin 承認後に PR が立ったら通知します。`);
   },
 };
@@ -323,7 +350,12 @@ export const shokyakuBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'shokyaku_biblio', name, category }),
     });
 
-    log.info(`shokyaku_biblio: ${requestId} → ${name} / ${category}`);
+    log.info('mcp.shokyaku_biblio', {
+      event: 'mcp.biblio.shokyaku',
+      request_id: requestId,
+      biblio_name: name,
+      category,
+    });
     return ok(`焼却リクエストを受け付けました: ${name} (${category})。admin 承認後に PR が立ったら通知します。`);
   },
 };
@@ -363,7 +395,12 @@ export const updateConfig: McpToolDefinition = {
       content: JSON.stringify({ action: 'update_config', key, value }),
     });
 
-    log.info(`update_config: ${requestId} → ${key}=${value}`);
+    log.info('mcp.update_config', {
+      event: 'mcp.biblio.config',
+      request_id: requestId,
+      key,
+      value,
+    });
     return ok(`設定変更リクエストを受け付けました: ${key} = ${value}。結果が確定したら通知します。`);
   },
 };
@@ -395,7 +432,11 @@ export const listBiblio: McpToolDefinition = {
       content: JSON.stringify({ action: 'list_biblio', category }),
     });
 
-    log.info(`list_biblio: ${requestId} → category=${category || '(all)'}`);
+    log.info('mcp.list_biblio', {
+      event: 'mcp.biblio.list',
+      request_id: requestId,
+      category: category || '(all)',
+    });
     return ok(
       `蔵書リクエストを受け付けました${category ? ` (category=${category})` : ''}。一覧が揃ったら結果を通知します。`,
     );

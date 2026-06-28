@@ -18,7 +18,10 @@ import {
   type ConcurrencyStrategy,
   type Message as ChatMessage,
 } from 'chat';
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+
 import { log } from '../log.js';
+import { getTracer } from '../observability/index.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
@@ -220,19 +223,55 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Subscribed threads — every message in a thread we've previously
       // engaged. Carry the SDK's `message.isMention` through so mention-mode
       // wirings still fire on in-thread mentions.
+      const wrapSpan = async <T>(
+        eventType: string,
+        threadId: string,
+        channelId: string,
+        fn: () => Promise<T>,
+      ): Promise<T> => {
+        const tracer = getTracer();
+        return tracer.startActiveSpan(
+          `${adapter.name}.event`,
+          {
+            kind: SpanKind.SERVER,
+            attributes: {
+              'messaging.system': adapter.name,
+              [`${adapter.name}.event.type`]: eventType,
+              [`${adapter.name}.channel.id`]: channelId,
+              [`${adapter.name}.thread.ts`]: threadId,
+            },
+          },
+          async (span) => {
+            try {
+              return await fn();
+            } catch (err) {
+              span.recordException(err as Error);
+              span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+              throw err;
+            } finally {
+              span.end();
+            }
+          },
+        );
+      };
+
       chat.onSubscribedMessage(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(
-          channelId,
-          thread.id,
-          await messageToInbound(message, message.isMention === true, true),
-        );
+        await wrapSpan('subscribed_message', thread.id, channelId, async () => {
+          await setupConfig.onInbound(
+            channelId,
+            thread.id,
+            await messageToInbound(message, message.isMention === true, true),
+          );
+        });
       });
 
       // @mention in an unsubscribed thread — SDK-confirmed bot mention.
       chat.onNewMention(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
+        await wrapSpan('new_mention', thread.id, channelId, async () => {
+          await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
+        });
       });
 
       // DMs — by definition addressed to the bot. Thread id flows through
@@ -247,7 +286,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           sender: (message.author as any)?.fullName ?? (message.author as any)?.userId ?? 'unknown',
           threadId: thread.id,
         });
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, false));
+        await wrapSpan('direct_message', thread.id, channelId, async () => {
+          await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, false));
+        });
       });
 
       // Plain messages in unsubscribed threads.
@@ -262,7 +303,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // flood gate.
       chat.onNewMessage(/[\s\S]*/, async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
+        await wrapSpan('new_message', thread.id, channelId, async () => {
+          await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
+        });
       });
 
       // Handle button clicks (ask_user_question)

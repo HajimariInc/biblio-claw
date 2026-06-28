@@ -1,6 +1,6 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-06-23
+最終更新:2026-06-27
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
 
@@ -756,6 +756,322 @@ Phase 6 PASS (Slack E2E GKE) — PR URL=https://github.com/<owner>/<repo>/pull/<
 - 失敗時の原因切り分けは各 fail メッセージに `kubectl logs ... | grep biblio.<action>` を案内(= Phase 2 構造化ログ参照)
 
 > **Note**: Section F(= outbound + delivered の Slack 配信補助確認)は Section E で PR URL を取得した時点で E2E が実質成立しているため補助位置付け。配信側の問題がある場合は warn 継続で本体 PASS は維持される(= `--skip-slack-check` で skip 可)。
+
+---
+
+## M4-A Phase 1: OTel foundation 運用
+
+### 前提
+
+- GCP IAM:GSA `biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` に `roles/cloudtrace.agent`、DEN さん (`f.takematsu@hajimari.inc`) に `roles/cloudtrace.user`(2026-06-26 付与済)
+- Cloud Trace API は project default で有効。未有効なら `gcloud services enable cloudtrace.googleapis.com --project=hajimari-ai-hackathon-2026`
+- ローカル実行は `gcloud auth application-default login` 済前提(ADC)
+
+### 疎通確認(local)
+
+```bash
+GOOGLE_CLOUD_PROJECT=hajimari-ai-hackathon-2026 pnpm run otel-smoke-test
+# 出力: RESULT={"trace_id":"<32hex>"}
+
+TRACE_ID=<上記>
+sleep 30
+# `gcloud trace` CLI は廃止済 (= "Invalid choice: 'trace'")。Cloud Trace v1 REST API を直叩き。
+TOKEN=$(gcloud auth application-default print-access-token)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://cloudtrace.googleapis.com/v1/projects/hajimari-ai-hackathon-2026/traces/${TRACE_ID}" \
+  | jq '{traceId, spans: [.spans[] | {name, labels}]}'
+# 同 TRACE_ID と labels.gcp.project_id / service.name / biblio.phase が返れば PASS
+```
+
+UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-hackathon-2026>
+
+### shutdown 挙動
+
+- host は SIGTERM/SIGINT で `shutdownOtel()` 経由で BatchSpanProcessor を flush(`scheduledDelayMillis: 2000`、`exportTimeoutMillis: 10000`)
+- K8s grace period(30s)内に flush 完了する設計
+
+### Bun + OTLP HTTP 既知挙動
+
+- agent-runner(Bun)で `[otel] Request timed out` の warn が出ることがある([opentelemetry-js#5260](https://github.com/open-telemetry/opentelemetry-js/issues/5260))
+- **span 自体は届く**。warn は無視可能
+- 詳細診断が必要なら manifest env に `OTEL_DIAG=true` を一時投入
+
+### trace が届かない場合の切り分け順
+
+1. **smoke-test 起動時のログ**:`[otel] init failed` warn が出ているか → init 段階の失敗(projectId 不在 / ADC 不在 / network)
+2. **stdout の `RESULT={...}` 出力**:span 自体は生成されているか
+3. **`OTEL_DIAG=true` で再実行**:「Request timed out」が大量に出るか
+4. **30s 待って Cloud Trace v1 REST API を直叩き** (`gcloud trace` CLI は廃止):`curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" "https://cloudtrace.googleapis.com/v1/projects/<project>/traces/<traceId>"` で span が返れば成功
+5. **IAM 確認**:`gcloud projects get-iam-policy hajimari-ai-hackathon-2026 --flatten="bindings[].members" --filter="bindings.members:biblio-orchestrator"` で `roles/cloudtrace.agent` 存在
+6. **API enable 確認**:`gcloud services list --enabled --filter=cloudtrace --project=hajimari-ai-hackathon-2026`
+7. **agent 側のみ届かない場合**:`kubectl exec biblio-orchestrator-0 -c orchestrator -- printenv | grep -i otel` で env 確認、`NO_PROXY` に `telemetry.googleapis.com` が入っているか
+8. **HTTPS_PROXY 経由を疑う**:agent Pod 内で `bun -e "fetch('https://telemetry.googleapis.com/v1/traces')"` で直接接続テスト
+9. **Fallback 候補**:(a) `@google-cloud/opentelemetry-cloud-trace-exporter` (gRPC、Cloud Trace 専用 SDK) に host 側だけ切り替え(agent 側は Bun gRPC silent freeze のため不可)/(b) agent 側 export を諦め、span を `outbound.db` の新規テーブル経由で host に送って一元 export する architecture に変更
+
+### 関連
+
+- `src/instrumentation.ts` / `src/observability/{otel,auth,env-propagation,index}.ts`(host)
+- `container/agent-runner/src/observability/{otel-init,auth,env-propagation,index}.ts`(agent)
+- `scripts/otel-smoke-test.ts`(疎通スクリプト)
+- 起動コマンド:host = `node --import ./dist/instrumentation.js dist/index.js`(`Dockerfile` で配線済)
+
+---
+
+## M4-A Phase 2: GenAI semconv + boundary spans + log↔trace 連携
+
+### 観測体験
+
+Phase 2 で 1 patron リクエストの **全境界** に手動 span が立ち、Cloud Trace UI で親子関係つきで開ける。Cloud Logging UI からは「Trace を表示」リンクで 1-click 遷移できる。
+
+- **Slack inbound** (= `chat-sdk-bridge.ts` の各 callback) → `slack.event` span (`messaging.system='slack'` / `slack.event.type` / `slack.channel.id` / `slack.thread.ts`)
+- **9 action handler** (acquire / inspect / categorize / shelve / shelve_multi / list / enkin / shokyaku / config) → `biblio.${action}` span (`biblio.request_id` / `biblio.session_id` / `biblio.action` / `biblio.outcome`)
+- **LLM 呼び出し** (= `vertex-client.ts:callVertexGemini` / `callVertexAnthropic`) → `chat ${modelId}` span (GenAI semconv: `gen_ai.provider.name='gcp.vertex_ai'` / `gen_ai.request.model` / `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` / `gen_ai.usage.cache_read.input_tokens` / `server.address`)
+- **K8s Job spawn** (= `container-runner.ts:spawnContainer`) → `agent.spawn` span (`agent.session_id` / `agent.group_id` / `agent.group_name` / `agent.container_name` / `agent.runtime` / `k8s.job.name` / `k8s.namespace.name`)
+
+### log↔trace 連携 (Preferred Format)
+
+`src/log.ts` / `container/agent-runner/src/log.ts` の `emitJson` が active span から自動注入する:
+
+- `logging.googleapis.com/trace`: trace_id (32-hex そのまま、Preferred Format)
+- `logging.googleapis.com/spanId`: span_id (16-hex)
+- `logging.googleapis.com/trace_sampled`: boolean
+
+projectId 解決ロジックは持たない (= Cloud Logging UI が現在の project context で resolve する設計、`projects/<project>/traces/<id>` の Legacy full path 経路は採用していない。UI 遷移が立たない事象が出たら plan §Fallback Option G に切替判断)。
+
+### GenAI semconv の Development ステータス
+
+`gen_ai.*` 属性は OTel 仕様で **Development** ステータス。将来の変更を受容するため manifest env で明示している:
+
+```yaml
+- { name: OTEL_SEMCONV_STABILITY_OPT_IN, value: gen_ai_latest_experimental }
+```
+
+WARNING: `gen_ai.system` を見ているクライアント (旧仕様) は **`gen_ai.provider.name`** を見るよう更新が必要 (Vertex 経由 = `gcp.vertex_ai`、直接 Anthropic API = `anthropic`)。
+
+### Cloud Trace UI 検索フィルタ例
+
+```
+gen_ai.provider.name="gcp.vertex_ai"
+gen_ai.usage.input_tokens>1000
+biblio.action="acquire"
+biblio.outcome="failure"
+agent.runtime="k8s"
+```
+
+### debug 切り分け — Phase 2 追加分
+
+trace は届くが gen_ai 属性が空 / 期待外れの場合:
+
+1. `OTEL_SEMCONV_STABILITY_OPT_IN` env が manifest に投入されているか確認 (= `kubectl exec biblio-orchestrator-0 -c orchestrator -- env | grep OTEL_SEMCONV`)
+2. dummy `gen_ai` span を smoke-test で送出 → Cloud Trace REST API で取得し `labels.["gen_ai.provider.name"]` を目視
+   ```bash
+   gcloud auth application-default print-access-token | \
+     xargs -I{} curl -H "Authorization: Bearer {}" \
+       "https://cloudtrace.googleapis.com/v1/projects/<proj>/traces/<traceId>" | \
+     jq '.spans[].labels'
+   ```
+3. log↔trace UI 遷移が立たない場合: `gcloud logging read 'jsonPayload."logging.googleapis.com/trace"=*'` で jsonPayload に trace_id が乗っているか確認。空なら active span 不在経路 (= span ラップの外で log が出ている、bug)
+
+### Phase 2 で実装しなかったもの (= Out of Scope)
+
+- LLM prompt / completion 全文の span attribute / event 記録 (PII リスク、Phase 5+ で別途検討)
+- BigQuery sink (Phase 3 専任)
+- `scripts/verify-m4-a.sh` 統合 verify (Phase 4 専任)
+- `agent.lifecycle.{pending,ready,first_response}` の span (Phase 5+ で寄り道予定、plan §補足参照)
+
+### 関連
+
+- `src/observability/{genai,trace-fields}.ts` (host 側 Phase 2 追加 = GenAI semconv 定数 + Cloud Logging reserved field 生成)
+- `container/agent-runner/src/observability/trace-fields.ts` (agent 側 Phase 2 追加、host と実装同一を維持 = ファイル先頭の同期義務コメント参照)
+- `src/biblio/action-helpers.ts` (`withBiblioActionSpan` ヘルパ + `BiblioActionName` closed union)
+- `src/channels/chat-sdk-bridge.ts` (4 callback を `${adapter.name}.event` span 起点に)
+- `src/container-runner.ts` (`spawnContainer` を `agent.spawn` span でラップ)
+- `src/adapters/container/k8s.ts` (`k8s.job.name` / `k8s.namespace.name` 属性追加)
+- `src/biblio/vertex-client.ts` (`callVertexGemini` / `callVertexAnthropic` を `chat ${modelId}` span でラップ + `gen_ai.*` 属性)
+- `container/agent-runner/src/mcp-tools/biblio.ts` (9 tool の log を structured form = `mcp.biblio.*` event に)
+
+---
+
+## M4-A Phase 3: Cloud Logging → BigQuery sink
+
+### 概要
+
+biblio-claw の構造化ログ (GKE Fluent Bit 経由で Cloud Logging に到達済) を BigQuery dataset `llm_observability` に sink し、`request_id` 1 つで SQL 集計可能にする。Terraform で sink + dataset + IAM を宣言的に管理 (`terraform/m4-a-observability/`)。clustering は sink 経由作成テーブルへの後追い `bq update` で適用 — `CREATE OR REPLACE TABLE ... CLUSTER BY` は全ログ消滅の罠なので使わない。
+
+### 前提
+
+- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済 (memory `gcp_iam_secret_manager_pattern` 参照)
+- GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中 (= Phase 1+2 完了)
+- keyless: `gcloud auth application-default login` 済 (ADC)、SA key を使わない
+
+### Apply
+
+```bash
+cd terraform/m4-a-observability
+terraform init
+terraform plan -out=tfplan
+terraform apply tfplan
+```
+
+作成リソース (5 個):
+
+- `google_bigquery_dataset.logs` (`llm_observability`、location `asia-northeast1`、90 日 expiration)
+- `google_logging_project_sink.biblio` (`biblio-claw-to-bq`、filter = `k8s_container` + namespace `biblio-claw`)
+- `google_bigquery_dataset_iam_member.sink_writer` (sink writer identity → `roles/bigquery.dataEditor`)
+- `google_project_service.{bigquery,logging}` (API 有効化、`disable_on_destroy=false` で API は destroy 時も残置)
+
+### Verify(手動 1 回確認)
+
+1. biblio-claw で任意の biblio action を 1 回実行 (Slack で `@bot 蔵書` 等)
+2. ~5 分待ち、`bq ls hajimari-ai-hackathon-2026:llm_observability` でテーブル materialize 確認
+3. 実テーブル名は GKE container の logName 直接由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 Phase 3 apply 時に実測確認)
+4. 以下を実行 (`sql/summary.sql` は M4-A Phase 4 で placeholder 化済 = `sed` 置換が必要):
+   ```bash
+   sed -e "s/<PROJECT_ID>/hajimari-ai-hackathon-2026/g" \
+       -e "s/<DATASET_ID>/llm_observability/g" \
+       terraform/m4-a-observability/sql/summary.sql | \
+     bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false
+   ```
+   1 行返却で `hit_count >= 1` かつ `marker = M4A_OK` が出れば OK。event/outcome 別集計が欲しい場合は SQL ファイル末尾のコメントブロックを参照
+5. `request_id` 1 つを取り出し、`SELECT * WHERE jsonPayload.request_id='<UUID>'` で全境界ログが取得できることを確認
+
+> **TZ bug 回避**: `WHERE DATE(timestamp) = CURRENT_DATE('Asia/Tokyo')` は UTC 評価 vs JST date 比較で時差ズレ (= 朝の時間帯に 0 件症状)。`DATE(timestamp, 'Asia/Tokyo')` を使う。`summary.sql` は対応済
+
+### Clustering 後追い(初回 emit 後に 1 回)
+
+sink 経由作成テーブルは Terraform 管理外 (sink writer SA に `tables.delete` 権限なし、`CREATE OR REPLACE` 罠回避)。`bq update` で後追い適用:
+
+```bash
+bq update \
+  --clustering_fields=severity \
+  hajimari-ai-hackathon-2026:llm_observability.stdout
+
+bq show --format=json \
+  hajimari-ai-hackathon-2026:llm_observability.stdout \
+  | jq .clustering
+# → {"fields": ["severity"]}
+```
+
+- **BQ 仕様: clustering は top-level column のみ**。`jsonPayload.event` 等の nested field は `Fields specified for clustering can only be top-level fields` で reject される。`severity` 単独で WHERE 句頻出ケースをカバー
+- 新規行のみ clustering 対象 (既存行は再クラスタなし)。biblio-claw の運用量 (~100 req/day) では DML UPDATE 再クラスタは不要
+- 罠: `CREATE OR REPLACE TABLE ... CLUSTER BY` は全ログ消滅。絶対に使わない
+
+### Teardown
+
+`delete_contents_on_destroy = false` のため、`terraform destroy` 単独では dataset 削除に失敗する。順序固定:
+
+```bash
+cd terraform/m4-a-observability
+terraform plan -destroy                                       # dry-run
+bq rm -r -f -d hajimari-ai-hackathon-2026:llm_observability   # dataset + 全テーブル削除
+terraform destroy -auto-approve                                # sink + IAM 削除
+```
+
+`google_project_service` は `disable_on_destroy=false` で API 残置 (他リソース影響回避)。
+
+### 既知の罠 / gotcha
+
+- **BQ location ≠ GKE region で無音 drop**: `variables.tf` default で `asia-northeast1` 固定。GKE cluster region と一致必須
+- **`_iam_binding` 罠**: 他 principal を退出させる authoritative。`_iam_member` (additive) を使う
+- **`unique_writer_identity = true` 必須**: `bigquery_options` 使用時。v5+ デフォルト true だが明示
+- **テーブル名 (GKE)**: `stdout` / `stderr` (logName 直接由来)。Cloud Run などの別環境では `run_googleapis_com_stdout` 系になる
+- **`DATE(timestamp)` の TZ bug**: デフォルト UTC 評価。JST date と比較する SQL は `DATE(timestamp, 'Asia/Tokyo')` を使う。PoC-10 写経起点で同 bug 継承していたため Phase 3 で修正済
+- **clustering は top-level column のみ**: `jsonPayload.event` 等 nested は reject。`severity` 単独運用
+- **log には latency/tokens が載らない**: span attribute としてのみ記録 (Cloud Trace 側で見る設計)。BQ サマリは event/outcome/component/action の境界集計に絞る
+- **`default_table_expiration_ms` 単位はミリ秒**: 7776000000 = 90 日
+
+### Phase 3 で実装しなかったもの (= Out of Scope)
+
+- `scripts/verify-m4-a.sh` 自動化 (Phase 4 任意で扱う、Phase 3 は手動 1 回確認)
+- BQ Dashboard / Looker Studio 連携 (M4-C 責務)
+- log filter の細分化 (`namespace_name="biblio-claw"` で十分、BQ 側で `component` 列 WHERE 絞り込み)
+- multi-environment (dev/prod 分離) 対応 (現状 ハッカソン GCP 1 project のみ)
+
+### 関連
+
+- `terraform/m4-a-observability/{versions,providers,variables,main,outputs}.tf` (sink + dataset + IAM 宣言)
+- `terraform/m4-a-observability/sql/summary.sql` (request_id 集計 SQL 雛形)
+- `terraform/m4-a-observability/README.md` (Terraform dir ローカルの apply / clustering / teardown 詳細)
+- PoC-10 `/home/proj/wforest/repos/PoC/biblio-poc-10-logging-bigquery/` (写経元)
+
+---
+
+## M4-A Phase 4: verify-m4-a.sh 統合検証
+
+### 概要
+
+1 リクエストの観測経路全体 (test fixture span → Cloud Trace → BQ sink → summary SQL) を 1 コマンドで E2E 確認する。M4-A PRD の最終判定 + M4-B ADK 移行時の回帰検出基盤。
+
+### Run
+
+```bash
+bash scripts/verify-m4-a.sh
+```
+
+所要時間 ~2-6 min (BQ 到達待ち = 通常 ~30s、最悪 5 min)。終了時に `M4-A PASS` が出れば exit 0。
+
+### 必須 env
+
+| 変数 | 例 | 用途 |
+| :--- | :--- | :--- |
+| `GCP_PROJECT_ID` | `hajimari-ai-hackathon-2026` | Cloud Trace + BQ query 対象 |
+| `BQ_DATASET_ID` | `llm_observability` | sink 先 dataset (terraform default) |
+
+`.env` 不在は warn 継続 (= GKE / CI 経路想定)。
+
+### 設計判断 — 案 C 採用 (= TRACE_ID 個別マッチ諦め)
+
+Phase 4 当初は「emit-test-span の TRACE_ID と BQ row を個別マッチ」設計だったが、PR #75 実機 verify で **host stdout は Cloud Logging に流れない = BQ sink に永久に届かない** plan 欠陥が判明 (= host = WSL 上に logging agent なし、sink filter は `k8s_container` 専用)。案 A (kubectl exec で orchestrator Pod 内で fixture 実行) / 案 B (Slack 経由 read-only action) は将来 phase で別途検討、Phase 4 では:
+
+- **Section 4 (Cloud Trace)**: emit-test-span は host → 直接 OTLP HTTP export → Cloud Trace に到達するため **TRACE_ID 個別マッチを assert** (元設計通り)
+- **Section 5-6 (BQ sink)**: TRACE_ID 個別マッチを諦め、**「過去 1h に GKE 起源の biblio.* event log が >= 1 件 BQ 到達」だけ assert** (= sink 疎通の証跡、M4-A Phase 3 deliverable の動作確認として value 十分、本番副作用なし)
+- **Section 7 (静的反証)**: 動的ネガティブ対照は TRACE_ID 個別マッチ前提のため案 C ではスコープ外、sink filter の `k8s_container` + `namespace` 縛り保持の静的 grep のみ
+
+### 内部フロー (7 セクション)
+
+1. **preflight** — `.env` 読み + 必須 env (`GCP_PROJECT_ID` / `BQ_DATASET_ID`) + CLI 存在 (gcloud / bq / jq / node)
+2. **keyless 4 面** — `GOOGLE_APPLICATION_CREDENTIALS` 未設定 / ADC type が authorized_user|external_account|impersonated_service_account / repo 内に SA key json 不在 / TF に `google_service_account_key` resource 不在
+3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag)
+4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert (= TRACE_ID 個別マッチ)
+5. **BQ sink 疎通確認** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND jsonPayload.event LIKE 'biblio.%'` で sleep 10 × 6 (1 min) ポーリング、count >= 1 で break (= 過去 1h に biblio action 由来 log が sink 到達している証跡)
+6. **summary SQL** — `sed` で `<PROJECT_ID>` / `<DATASET_ID>` を置換した `terraform/m4-a-observability/sql/summary.sql` を実行、`hit_count >= 1` + `marker = 'M4A_OK'` を assert
+7. **静的反証** — `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを grep で確認 (= sink の責任範囲縛りが消失していないことの証跡)
+
+### 既知の罠 / 解釈
+
+- **Cloud Trace 90s timeout で偽 fail** — 多くは下記 2 つの原因。fail メッセージ内の "対処" 案内も同じ順で参照する:
+  1. **`roles/cloudtrace.user` 不足** — 30 回 retry でほぼ全て 403 を返す。Section 4 の poll ループは attempt 3 で warn を 1 度出す設計
+  2. **OTLP export 失敗** — `BatchSpanProcessor` が export エラーを内部 catch して `shutdownOtel()` が resolve する OTel SDK 仕様の限界。verify は `OTEL_DIAG=true` を emit-test-span に渡して export エラーを stderr に流し、`LAST_HARNESS_STDERR` 経由で fail 時に展開する
+  3. それ以外: ネットワーク不調 / `BatchSpanProcessor` flush 遅延 — 再実行で多くは解決
+- **Section 5 で「過去 1h に biblio.* event 0 件」fail** — 多くは下記 2 つ:
+  1. **GKE で直近 1h に biblio action が動いていない** — Slack で `@bot 蔵書` 等 read-only action を 1 件発射すれば即解決
+  2. **GKE orchestrator Pod が停止中** — `kubectl get pods -n biblio-claw` で確認
+- **BQ poll の auth-fail early abort** — outer 反復 3 連続で全テーブル query 失敗時 (= persistent な auth 切れ / 権限不足 / SQL 型エラー / network 障害) は 1 min 待たず 30s で fail する設計。fail メッセージで `gcloud auth application-default print-access-token` と `roles/bigquery.dataViewer` 付与 + SQL 型エラーの可能性を案内
+- **BQ poll の partition pruning** — verify は `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` で過去 1h に絞った partition のみ scan する設計 (sink の `use_partitioned_tables=true` で生成される DAY partition を効かせ、cost + 性能を担保)
+- **`stdout` / `stderr` テーブル不在** — Phase 3 sink がまだ初動していない可能性。biblio action を 1 回実行して 5 分待ってから再実行 (= テーブルは sink が最初の log 流入時に自動生成、`terraform apply` 単独では作られない)
+- **BQ スキーマ仕様** (PR #75 実機 verify で判明) — Cloud Logging → BQ export は以下のスキーマ:
+  - **`trace` / `spanId` / `traceSampled`** はトップレベル STRING / STRING / BOOL カラム (= `WHERE trace = 'projects/PROJECT/traces/TRACE_ID'` で個別 trace 検索)
+  - **`jsonPayload`** は RECORD (STRUCT) 型 → **ドット記法 `jsonPayload.event`** でアクセス、`JSON_VALUE(jsonPayload, ...)` は型エラーで失敗
+- **冪等性** — 連続実行可。各実行で新規 trace_id を Cloud Trace に発射 (= 過去 30 日で別 trace として保持)、BQ sink 側は過去 1h 集計のため 1 件以上 hit 状態が続く限り PASS 継続
+
+### test fixture (`scripts/emit-test-span.ts`)
+
+`withBiblioActionSpan('acquire', requestId, sessionId, fn)` を直接呼ぶ test fixture。本番 `acquire()` ロジック (GitHub clone 等) は起こさない = 外部依存を Cloud Trace export 経路のみに絞り、verify を deterministic に保つ。span 属性は `biblio.request_id` / `biblio.session_id` / `biblio.action='acquire'` + `biblio.test_fixture=true` + event `verify-m4-a.fixture.emitted`。
+
+**注**: 案 C 設計では fixture span は **Section 4 (Cloud Trace) でのみ assert** される。host stdout は Cloud Logging に流れないため Section 5 (BQ) には届かない (= sink filter は `k8s_container` 専用、host = WSL は対象外)。BQ 経路の E2E は GKE 上で稼働する本番 biblio action 由来の log で代替確認する。
+
+### Teardown
+
+verify は副作用なし (= shelf / DB / 既存リソース変更なし)。残存リソースは Cloud Trace span と BQ row のみで、Cloud Trace は 30 日 / BQ は dataset の `default_table_expiration_ms` (= 90 日) で自動失効。明示削除不要。
+
+### 関連
+
+- `scripts/verify-m4-a.sh` (本体)
+- `scripts/emit-test-span.ts` (test fixture)
+- `scripts/verify-m3-helpers.sh` (info/warn/fail 等 source 元)
+- `terraform/m4-a-observability/sql/summary.sql` (summary SQL、`<PROJECT_ID>` / `<DATASET_ID>` placeholder)
+- PoC-8 `/home/proj/wforest/repos/PoC/biblio-poc-8-observability/verify.sh` (写経元)
+- PoC-10 `/home/proj/wforest/repos/PoC/biblio-poc-10-logging-bigquery/scripts/verify.sh` (写経元)
 
 ---
 

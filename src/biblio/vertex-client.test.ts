@@ -275,3 +275,84 @@ describe('setupVertexProxy — noProxy 構成', () => {
     expect(setGlobalDispatcherMock).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * gen_ai.* span 計装の単体検証 (Phase 2 Task 8)。
+ * InMemorySpanExporter で span name + 属性を assert する。
+ */
+describe('callVertexAnthropic / callVertexGemini — gen_ai.* span', () => {
+  // 動的 import で OTel 関連の setup を test 内に閉じ込める
+  it('Anthropic 経路: provider=gcp.vertex_ai / model / usage 属性を立てる', async () => {
+    const otelApi = await import('@opentelemetry/api');
+    const sdk = await import('@opentelemetry/sdk-trace-base');
+    const alsHooks = await import('@opentelemetry/context-async-hooks');
+    const memoryExporter = new sdk.InMemorySpanExporter();
+    otelApi.context.setGlobalContextManager(new alsHooks.AsyncLocalStorageContextManager().enable());
+    const provider = new sdk.BasicTracerProvider({
+      sampler: new sdk.ParentBasedSampler({ root: new sdk.AlwaysOnSampler() }),
+      spanProcessors: [new sdk.SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+
+    fetchMock.mockResolvedValue(
+      res(200, {
+        content: [{ type: 'text', text: 'CATEGORY: biblio-dev\nREASON: x' }],
+        usage: { input_tokens: 123, output_tokens: 45, cache_read_input_tokens: 7 },
+      }),
+    );
+    await callVertexAnthropic({ prompt: 'x', maxTokens: 32, temperature: 0 }, { requestId: 'req-1' });
+
+    const spans = memoryExporter.getFinishedSpans();
+    expect(spans.length).toBe(1);
+    const span = spans[0];
+    expect(span.name).toBe('chat claude-sonnet-4-6');
+    expect(span.attributes['gen_ai.operation.name']).toBe('chat');
+    expect(span.attributes['gen_ai.provider.name']).toBe('gcp.vertex_ai');
+    expect(span.attributes['gen_ai.request.model']).toBe('claude-sonnet-4-6');
+    expect(span.attributes['gen_ai.usage.input_tokens']).toBe(123);
+    expect(span.attributes['gen_ai.usage.output_tokens']).toBe(45);
+    expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(7);
+    expect(span.attributes['server.address']).toBe('aiplatform.googleapis.com');
+    expect(span.attributes['biblio.request_id']).toBe('req-1');
+
+    memoryExporter.reset();
+    await provider.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
+  });
+
+  it('Gemini 経路: usage 属性 (cache_read 無し) を立てる', async () => {
+    const otelApi = await import('@opentelemetry/api');
+    const sdk = await import('@opentelemetry/sdk-trace-base');
+    const alsHooks = await import('@opentelemetry/context-async-hooks');
+    const memoryExporter = new sdk.InMemorySpanExporter();
+    otelApi.context.setGlobalContextManager(new alsHooks.AsyncLocalStorageContextManager().enable());
+    const provider = new sdk.BasicTracerProvider({
+      sampler: new sdk.ParentBasedSampler({ root: new sdk.AlwaysOnSampler() }),
+      spanProcessors: [new sdk.SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+
+    fetchMock.mockResolvedValue(
+      res(200, {
+        candidates: [{ content: { parts: [{ text: 'VERDICT: CLEAN' }] } }],
+        usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 8 },
+      }),
+    );
+    await callVertexGemini({ prompt: 'x', maxOutputTokens: 32, temperature: 0 });
+
+    const spans = memoryExporter.getFinishedSpans();
+    expect(spans.length).toBe(1);
+    const span = spans[0];
+    expect(span.name).toBe('chat gemini-2.5-flash');
+    expect(span.attributes['gen_ai.provider.name']).toBe('gcp.vertex_ai');
+    expect(span.attributes['gen_ai.usage.input_tokens']).toBe(50);
+    expect(span.attributes['gen_ai.usage.output_tokens']).toBe(8);
+    expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
+
+    memoryExporter.reset();
+    await provider.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
+  });
+});

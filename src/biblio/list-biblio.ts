@@ -47,6 +47,8 @@ function projectItem(plugin: Record<string, unknown>): ListBiblioItem {
     category = rawCategory as BiblioCategory;
   } else {
     log.warn('list-biblio: plugin source has unrecognized category — bucketing to unknown', {
+      event: 'biblio.list',
+      outcome: 'warn',
       name,
       source,
     });
@@ -85,6 +87,8 @@ export async function listBiblio(params: ListBiblioParams, opts: { ctx?: GhFetch
     // 名前が空 (= 不正データ) のエントリは skip + warn。
     if (!item.name) {
       log.warn('list-biblio: skipping plugin with empty name', {
+        event: 'biblio.list',
+        outcome: 'warn',
         source: typeof p.source === 'string' ? p.source : null,
       });
       continue;

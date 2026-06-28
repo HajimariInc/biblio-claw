@@ -1,3 +1,5 @@
+import { getTraceLogFields } from './observability/trace-fields.js';
+
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -79,6 +81,7 @@ function emitJson(level: Level, msg: string, data?: Record<string, unknown>): vo
     message: msg,
     time: new Date().toISOString(),
     component: COMPONENT,
+    ...getTraceLogFields(),
   };
   if (data) {
     for (const [k, v] of Object.entries(data)) {
