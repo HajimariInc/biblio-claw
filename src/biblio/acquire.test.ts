@@ -276,12 +276,33 @@ describe('acquire', () => {
       quarantinePath: path.join(QUARANTINE, 'octocat--hello'),
     });
     expect(fs.existsSync(path.join(QUARANTINE, 'octocat--hello', '.claude-plugin', 'marketplace.json'))).toBe(true);
-    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、{ ctx: undefined })。
+    // ghFetch が GET /repos/octocat/hello で 1 回呼ばれている (= ctx は呼出元から渡さない経路、{ ctx: undefined, noAuth: true })。
+    // noAuth: true は外部 repo 対応 (issue #46 fix)。countSkillsInRepo (marketplace.json / git/trees) と対称。
     expect(mockGhFetch).toHaveBeenCalledWith(
       'acquire.check-repo',
       expect.stringMatching(/\/repos\/octocat\/hello$/),
       {},
-      { ctx: undefined },
+      { ctx: undefined, noAuth: true },
+    );
+  });
+
+  it('外部 public repo (scope 外) でも check-repo が noAuth: true で通る (issue #46)', async () => {
+    // 外部 repo (= GH App installation scope 外) でも check-repo が 200 を返せる
+    // ことを assert。実装の noAuth: true により Authorization header が省略され、
+    // OneCLI MITM の installation token inject 経路を bypass する (= 401 にならない)。
+    mockSpawn.mockImplementation((_cmd, args) => {
+      const dest = (args as string[])[4];
+      fs.mkdirSync(path.join(dest, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(path.join(dest, '.claude-plugin', 'marketplace.json'), '{}');
+      return spawnResult(0);
+    });
+    const result = await acquire({ repo: 'example-org/test-biblio-minimal' });
+    expect(result.ok).toBe(true);
+    expect(mockGhFetch).toHaveBeenCalledWith(
+      'acquire.check-repo',
+      expect.stringMatching(/\/repos\/example-org\/test-biblio-minimal$/),
+      {},
+      expect.objectContaining({ noAuth: true }),
     );
   });
 
