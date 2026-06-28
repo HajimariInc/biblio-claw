@@ -196,37 +196,34 @@ info '  → root span = biblio.acquire + 属性一致 OK'
 # =============================================================================
 info '=== [5/7] BigQuery 到達ポーリング (sleep 10 × 30 回 = max 5 min) ==='
 
-# stdout_* / stderr_* テーブルを動的に列挙 (= sharded suffix を吸収)。
+# Cloud Logging → BQ sink は `use_partitioned_tables = true` (= terraform/m4-a-observability/main.tf:39)
+# 設定により、テーブル名は **`stdout` / `stderr` の単独形** で生成され、`timestamp` 列で DAY partition
+# されている (= bq ls 実測: `Time Partitioning: DAY (field: timestamp)`)。`stdout_YYYYMMDD` 等の
+# sharded suffix 形式ではない (= `use_partitioned_tables = false` の挙動)。後続クエリは
+# `WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')` で partition pruning する。
 # jq の parse error は `bq ls` が JSON でない出力を返した bug ケースで永久に原因不明
 # になるため、stderr を専用ファイルに捕捉する (PR #75 review 提案 B-1)。
 ALL_TABLES="$(bq ls --format=json --max_results=500 "${GCP_PROJECT_ID}:${BQ_DATASET_ID}" 2>"$STDERR_DIR/bq-ls.stderr" \
   | jq -r '.[].tableReference.tableId' 2>"$STDERR_DIR/bq-ls-jq.stderr" \
-  | grep -E '^stdout_|^stderr_' || true)"
+  | grep -E '^(stdout|stderr)$' || true)"
 if [ -z "$ALL_TABLES" ]; then
   # bq ls と jq の両 stderr を結合して fail メッセージ用に保存。
   cat "$STDERR_DIR/bq-ls.stderr" "$STDERR_DIR/bq-ls-jq.stderr" > "$STDERR_DIR/bq-ls-combined.stderr" 2>/dev/null || true
   LAST_HARNESS_STDERR="$STDERR_DIR/bq-ls-combined.stderr"
-  fail "BQ dataset ${GCP_PROJECT_ID}:${BQ_DATASET_ID} に stdout_*/stderr_* テーブルが存在しない
+  fail "BQ dataset ${GCP_PROJECT_ID}:${BQ_DATASET_ID} に stdout / stderr テーブルが存在しない
     対処: (1) M4-A Phase 3 sink が動いていない可能性 — terraform/m4-a-observability/ apply 済か /
           (2) sink 初動から最初の log 流入まで数分かかる場合あり /
           (3) bq CLI / jq の異常出力の可能性は上記 stderr を参照"
 fi
-
-# 当日 JST シャードに絞り込む (PR #75 review code-reviewer 問題 1)。
-# シャード数が日次蓄積で増えても 1 outer 反復のクエリ数を最大 2 (stdout_<today> + stderr_<today>)
-# に固定し、verify 所要時間がシャード数に比例して線形増大することを防ぐ。当日シャード未生成時
-# (= JST 0 時直後 + 初動直後) は全シャードフォールバックで吸収。
-TODAY_JST="$(TZ='Asia/Tokyo' date +%Y%m%d)"
-TODAY_TABLES="$(printf '%s\n' "$ALL_TABLES" | grep -E "^(stdout|stderr)_${TODAY_JST}$" || true)"
-if [ -n "$TODAY_TABLES" ]; then
-  TABLES="$TODAY_TABLES"
-  info "  当日 JST シャードに絞り込み: $(printf '%s' "$TABLES" | tr '\n' ' ')"
-else
-  TABLES="$ALL_TABLES"
-  warn "当日 JST シャード (stdout|stderr_${TODAY_JST}) 不在 — 全シャードフォールバック"
-fi
+TABLES="$ALL_TABLES"
+info "  対象テーブル: $(printf '%s' "$TABLES" | tr '\n' ' ')"
 
 FORMATTED_TRACE="projects/${GCP_PROJECT_ID}/traces/${TRACE_ID}"
+# Partition pruning 用 WHERE 句。verify は emit-test-span 即時実行 → BQ 到達まで通常 30s〜
+# のため過去 1h 範囲で十分。JST 0 時跨ぎは TIMESTAMP 比較ベースのため自然に吸収される
+# (= `DATE(timestamp, 'Asia/Tokyo')` 等の日付比較ではないため auto memory「DATE TZ bug」は無関係)。
+PARTITION_WHERE="AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)"
+
 BQ_TOTAL=0
 bq_found=0
 auth_fail_streak=0
@@ -245,13 +242,14 @@ for i in $(seq 1 30); do
     # transient な "0 行" と区別可能になる (PR #75 review silent-failure 問題 2)。
     COUNT="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
       "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` \
-       WHERE JSON_VALUE(jsonPayload, '\$[\"logging.googleapis.com/trace\"]') = '${FORMATTED_TRACE}'" \
+       WHERE JSON_VALUE(jsonPayload, '\$[\"logging.googleapis.com/trace\"]') = '${FORMATTED_TRACE}' \
+       ${PARTITION_WHERE}" \
       2>"$STDERR_DIR/bq-poll-${i}-${T}.stderr" | tail -n1 || echo BQ_QUERY_FAIL)"
     if [[ "$COUNT" =~ ^[0-9]+$ ]]; then
       BQ_TOTAL=$(( BQ_TOTAL + COUNT ))
-      # 1 件でも見つかったら内側ループを早期 break。全シャードを毎反復で走査せず、
-      # 平均 verify 時間を outer 1 反復あたり最大 (table 数 × bq RTT) → (1 query) に圧縮
-      # (PR #75 review code-reviewer 問題 1)。
+      # 1 件でも見つかったら内側ループを早期 break。
+      # 単一テーブル 2 件 (stdout / stderr) なので元の問題は限定的だが、
+      # 早期 break で 2 件目への無駄 query を回避する効果は残る。
       [ "$BQ_TOTAL" -ge 1 ] && break
     else
       outer_auth_fails=$((outer_auth_fails + 1))
@@ -347,7 +345,8 @@ for T in $TABLES; do
   GC_ERR="$STDERR_DIR/bq-neg-${T}.stderr"
   GC="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
     "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` \
-     WHERE JSON_VALUE(jsonPayload, '\$[\"logging.googleapis.com/trace\"]') = '${GHOST_FORMATTED}'" \
+     WHERE JSON_VALUE(jsonPayload, '\$[\"logging.googleapis.com/trace\"]') = '${GHOST_FORMATTED}' \
+     ${PARTITION_WHERE}" \
     2>"$GC_ERR" | tail -n1 || echo BQ_QUERY_FAIL)"
   if [[ "$GC" =~ ^[0-9]+$ ]]; then
     GHOST_TOTAL=$(( GHOST_TOTAL + GC ))

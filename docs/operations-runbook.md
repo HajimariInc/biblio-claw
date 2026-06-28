@@ -1025,7 +1025,7 @@ bash scripts/verify-m4-a.sh
 2. **keyless 4 面** — `GOOGLE_APPLICATION_CREDENTIALS` 未設定 / ADC type が authorized_user|external_account|impersonated_service_account / repo 内に SA key json 不在 / TF に `google_service_account_key` resource 不在
 3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag、PR #75 提案 D)
 4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert
-5. **BQ poll** — `stdout_*` / `stderr_*` テーブルを `bq ls` で動的列挙、各テーブルに `WHERE JSON_VALUE(jsonPayload, '$["logging.googleapis.com/trace"]') = 'projects/<PROJECT>/traces/<TRACE_ID>'` で sleep 10 × 30 (5 min) ポーリング、count >= 1 で break
+5. **BQ poll** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE JSON_VALUE(jsonPayload, '$["logging.googleapis.com/trace"]') = 'projects/<PROJECT>/traces/<TRACE_ID>' AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` (= partition pruning) で sleep 10 × 30 (5 min) ポーリング、count >= 1 で break
 6. **summary SQL** — `sed` で `<PROJECT_ID>` / `<DATASET_ID>` を置換した `terraform/m4-a-observability/sql/summary.sql` を実行、`hit_count >= 1` + `marker = 'M4A_OK'` を assert
 7. **ネガティブ対照** — random GHOST_TRACE_ID (128-bit) で BQ 0 行を assert + `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを静的反証
 
@@ -1037,8 +1037,8 @@ bash scripts/verify-m4-a.sh
   3. それ以外: ネットワーク不調 / `BatchSpanProcessor` flush 遅延 — 再実行で多くは解決
 - **BQ 5 min timeout で偽 fail** — sink lag 通常 30s 程度だが、初動直後や高負荷時は数分かかる。fail メッセージで sink writer_identity の `roles/bigquery.dataEditor` 付与 + filter の k8s_container/namespace 整合を案内
 - **BQ poll の auth-fail early abort** — outer 反復 3 連続で全テーブル query 失敗時 (= persistent な auth 切れ / 権限不足 / network 障害) は 5 分待たず 30s で fail する設計 (PR #75 提案 silent-failure 問題 2)。fail メッセージで `gcloud auth application-default print-access-token` と `roles/bigquery.dataViewer` 付与の確認を案内
-- **BQ poll の当日 JST シャード絞り込み** — verify は `stdout_YYYYMMDD` / `stderr_YYYYMMDD` の当日 JST シャードのみ query する設計 (PR #75 code-reviewer 問題 1)。当日シャード未生成 (= JST 0 時直後 + 初動直後) は warn 出して全シャードフォールバックに自動切替
-- **`stdout_*` / `stderr_*` テーブル不在** — Phase 3 sink がまだ初動していない可能性。biblio action を 1 回実行して 5 分待ってから再実行
+- **BQ poll の partition pruning** — verify は `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` で過去 1h に絞った partition のみ scan する設計 (sink の `use_partitioned_tables=true` で生成される DAY partition を効かせ、cost + 性能を担保)。emit-test-span → BQ 到達まで通常 30s 程度のため 1h で十分
+- **`stdout` / `stderr` テーブル不在** — Phase 3 sink がまだ初動していない可能性。biblio action を 1 回実行して 5 分待ってから再実行 (= テーブルは sink が最初の log 流入時に自動生成、`terraform apply` 単独では作られない)
 - **`JSON_VALUE` の JSON path 構文** — フィールド名にドット (`logging.googleapis.com/trace`) を含むため bracketed 形式 `'$["logging.googleapis.com/trace"]'` が必須。`jsonPayload.foo.bar` のドット記法では拾えない
 - **ネガティブ対照の意義** — random trace_id で BQ に 0 行 = sink filter が「無関係な trace を黙って通していない」証跡。1 行でも hit したら sink filter または BQ schema を疑う (衝突確率 ~2^-128 = 事実上ゼロ)
 - **冪等性** — 2 連続実行で両方 PASS する設計。各実行で新規 trace_id を発射、summary `hit_count` は過去 1h 集計に積算される (= 2 回目で増えるのは正常)

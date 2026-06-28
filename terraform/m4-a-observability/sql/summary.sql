@@ -16,20 +16,23 @@
 --   marker             固定 'M4A_OK' (= SQL 自体の到達性 assert 用)
 --
 -- 設計上の注:
--- - テーブルは stdout_* / stderr_* のワイルドカード参照で日次 sharded を吸収。
---   _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE('Asia/Tokyo')) で JST 基準
---   (auto memory m4-a-phase-3-bq-sink-lessons.md「DATE(timestamp) TZ bug」回避)。
+-- - テーブルは Cloud Logging sink の `use_partitioned_tables = true` 設定により
+--   `stdout` / `stderr` の単独形 (= terraform/m4-a-observability/main.tf:39)。日次 sharded
+--   ではない。`timestamp` 列で DAY partition、partition pruning には WHERE timestamp >= ...
+--   または DATE(timestamp, 'Asia/Tokyo') = ... を使う。
+-- - `DATE(timestamp, 'Asia/Tokyo')` で JST 基準 (auto memory m4-a-phase-3-bq-sink-lessons.md
+--   「DATE(timestamp) TZ bug」回避、デフォルト UTC 評価で朝の時間帯に 0 件症状を防ぐ)。
 -- - latency / token usage は span attribute としてのみ記録 (Cloud Trace 側)。
 --   BQ サマリは event 単位の boundary 集計に絞る (Phase 3 lesson 「log と span の責務分離」)。
 
 WITH unioned AS (
   SELECT timestamp, jsonPayload
-  FROM `<PROJECT_ID>.<DATASET_ID>.stdout_*`
-  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE('Asia/Tokyo'))
+  FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
+  WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
   UNION ALL
   SELECT timestamp, jsonPayload
-  FROM `<PROJECT_ID>.<DATASET_ID>.stderr_*`
-  WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE('Asia/Tokyo'))
+  FROM `<PROJECT_ID>.<DATASET_ID>.stderr`
+  WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
 )
 SELECT
   COUNT(*)                                                       AS hit_count,
@@ -50,8 +53,8 @@ WHERE TIMESTAMP_TRUNC(timestamp, HOUR) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INT
 --   JSON_VALUE(jsonPayload, '$.action')    AS action,
 --   COUNT(*)                               AS hit_count,
 --   MAX(timestamp)                         AS latest_ts
--- FROM `<PROJECT_ID>.<DATASET_ID>.stdout_*`
--- WHERE _TABLE_SUFFIX = FORMAT_DATE('%Y%m%d', CURRENT_DATE('Asia/Tokyo'))
+-- FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
+-- WHERE DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
 --   AND JSON_VALUE(jsonPayload, '$.event') IS NOT NULL
 -- GROUP BY event, outcome, component, action
 -- ORDER BY hit_count DESC;
