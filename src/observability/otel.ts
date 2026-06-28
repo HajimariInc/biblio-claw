@@ -72,9 +72,13 @@ export async function startOtel(): Promise<NodeSDK> {
 // OTLPTraceExporter は dynamic header 更新の公式 API を持たない
 // (= opentelemetry-js#4017)。SDK バージョンアップで `_headers` が rename/
 // 削除された場合は silent fail (= Authorization が初回 token で固定 → 1h で 401
-// retry-loop) になるため、検知用に warn ログを 1 回だけ出す + SDK upgrade 後は
-// smoke-test (scripts/otel-smoke-test.ts) を回して疎通確認すること。
-let headerRefreshWarned = false;
+// retry-loop で全 span が無音 drop) になるため、検知用に warn ログを **継続発火** する
+// (~60 min ごと、PR #78 review-agents C2 = 旧実装は warn 1 回だけ出して以降の tick を
+// 完全 no-op にしていたため長期稼働で気付けなかった)。SDK upgrade 後は emit-test-span
+// (scripts/emit-test-span.ts、`pnpm exec tsx --import ./src/instrumentation.ts ...`) を
+// 1 回回して疎通確認すること。
+let headerRefreshSkipCount = 0;
+const HEADER_REFRESH_WARN_EVERY_TICKS = 60; // 60 ticks × 60s = ~60 min
 
 function startHeaderRefresh(): void {
   if (headerRefreshTimer) return;
@@ -84,13 +88,23 @@ function startHeaderRefresh(): void {
     const exp = exporterRef as unknown as { _headers?: Record<string, string> };
     if (exp._headers) {
       exp._headers.Authorization = `Bearer ${token}`;
-    } else if (!headerRefreshWarned) {
-      log.warn('OTel header refresh skipped: _headers not accessible on exporter', {
-        event: 'otel.header_refresh.skipped',
-        outcome: 'degraded',
-      });
-      headerRefreshWarned = true;
+      return;
     }
+    // `_headers` 不可視時は本 tick で何も更新できない。元実装は最初の 1 回だけ warn を出して
+    // 以降 silent だったため、ADC token 失効 (~1h) 後の全 span 無音 drop が気付かれなかった。
+    // 約 60 min 間隔で warn を継続発火させ、長期稼働で degraded 状態を見落とさないようにする。
+    if (headerRefreshSkipCount % HEADER_REFRESH_WARN_EVERY_TICKS === 0) {
+      log.warn(
+        'OTel header refresh skipped: _headers not accessible on exporter ' +
+          '(token will expire ~1h after init, all spans will drop silently until SDK is patched)',
+        {
+          event: 'otel.header_refresh.skipped',
+          outcome: 'degraded',
+          skipped_ticks: headerRefreshSkipCount + 1,
+        },
+      );
+    }
+    headerRefreshSkipCount += 1;
   }, 60 * 1000);
   if (headerRefreshTimer.unref) headerRefreshTimer.unref();
 }
@@ -100,7 +114,7 @@ export async function shutdownOtel(): Promise<void> {
     clearInterval(headerRefreshTimer);
     headerRefreshTimer = null;
   }
-  headerRefreshWarned = false;
+  headerRefreshSkipCount = 0;
   stopTokenRefresh();
   if (!sdkInstance) return;
   await sdkInstance.shutdown();

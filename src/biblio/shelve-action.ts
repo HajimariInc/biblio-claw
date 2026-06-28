@@ -9,6 +9,8 @@
  * inspect-action.ts / categorize-action.ts と同形 (writeBack 3 retry / fail-closed catch /
  * BIBLIO_NAME_RE)。差分は (a) `category` パラメータの validate、(b) 応答テキストの整形のみ。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { shelve } from './shelve.js';
@@ -64,6 +66,10 @@ registerDeliveryAction('shelve_biblio', async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // shelve() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('shelve_biblio threw', {
         event: 'biblio.shelve',
         outcome: 'failure',
@@ -73,8 +79,12 @@ registerDeliveryAction('shelve_biblio', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
-      await writeBackMessage(inDb, `陳列エラー (internal): 予期しない失敗 — ${detail}`, 'shelve-resp', 'shelve_biblio');
+      await writeBackMessage(
+        inDb,
+        `陳列エラー (internal): 予期しない失敗 — ${errorRecord.message}`,
+        'shelve-resp',
+        'shelve_biblio',
+      );
       span.setAttribute('biblio.outcome', 'failure');
     }
   });

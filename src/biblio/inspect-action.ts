@@ -9,6 +9,8 @@
  * handler 内例外は host を巻き込むため try/catch で握り、失敗も必ず inbound に
  * 書き戻す (silent failure 禁止 — patron に必ず可視化する。`acquire-action.ts` と同形)。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { inspect } from './inspect.js';
@@ -86,6 +88,10 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', outcome);
     } catch (err) {
       // inspect() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('inspect_biblio threw', {
         event: 'biblio.inspect',
         outcome: 'failure',
@@ -94,10 +100,9 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
       await writeBackMessage(
         inDb,
-        `検品エラー (internal): 予期しない失敗 — ${detail}`,
+        `検品エラー (internal): 予期しない失敗 — ${errorRecord.message}`,
         'inspect-resp',
         'inspect_biblio',
       );

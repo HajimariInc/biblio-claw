@@ -64,6 +64,10 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     }
     try {
       const result = await enkin({ biblioName, category }, { ctx: { requestId } });
+      // PR #78 review-agents I2: success / 業務失敗の両 path で biblio.outcome を必ず立てる
+      // (= 旧実装は catch のみで設定していたため、HITL 承認 = 本番多数派オペレーションが
+      // BQ の `WHERE attributes['biblio.outcome']='success'` から消えていた)。
+      span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
       if (result.ok) {
         safeNotify(
           notify,
@@ -95,6 +99,10 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
       }
     } catch (err) {
       // enkin() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('enkin_confirm threw', {
         event: 'biblio.enkin',
         outcome: 'failure',
@@ -103,8 +111,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
-      safeNotify(notify, `禁書エラー (internal): 予期しない失敗 — ${detail}`, {
+      safeNotify(notify, `禁書エラー (internal): 予期しない失敗 — ${errorRecord.message}`, {
         action: APPROVAL_ACTION,
         biblioName,
       });
@@ -145,6 +152,10 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
       );
       span.setAttribute('biblio.outcome', 'success');
     } catch (err) {
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('enkin_biblio requestApproval threw', {
         event: 'biblio.enkin_request',
         outcome: 'failure',
@@ -154,8 +165,12 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
-      await writeBackMessage(inDb, `禁書エラー (internal): 承認申請に失敗 — ${detail}`, 'enkin-resp', 'enkin_biblio');
+      await writeBackMessage(
+        inDb,
+        `禁書エラー (internal): 承認申請に失敗 — ${errorRecord.message}`,
+        'enkin-resp',
+        'enkin_biblio',
+      );
       span.setAttribute('biblio.outcome', 'failure');
     }
   });

@@ -11,6 +11,8 @@
  * per-item validation (= BIBLIO_NAME_RE + BIBLIO_CATEGORIES) を delivery action 入口で
  * 行う点のみ (validateBiblioInput は単一 name+category 想定のため再利用しない)。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { BIBLIO_NAME_RE, withBiblioActionSpan, writeBackMessage } from './action-helpers.js';
@@ -165,14 +167,22 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // shelveMulti() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('shelve_biblio_multi threw', {
         count: items.length,
         session_id: session.id,
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
-      await writeBackMessage(inDb, `陳列エラー (internal): 予期しない失敗 — ${detail}`, RESP_PREFIX, ACTION_NAME);
+      await writeBackMessage(
+        inDb,
+        `陳列エラー (internal): 予期しない失敗 — ${errorRecord.message}`,
+        RESP_PREFIX,
+        ACTION_NAME,
+      );
       span.setAttribute('biblio.outcome', 'failure');
     }
   });

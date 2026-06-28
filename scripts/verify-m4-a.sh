@@ -350,8 +350,20 @@ grep -q 'namespace_name=' terraform/m4-a-observability/main.tf \
 
 info '  → sink filter 静的反証 OK (k8s_container + namespace 縛り保持)'
 
+# host / agent-runner の dual-copy drift 検知 (PR #78 review-agents S3)。
+# env-propagation.ts / trace-fields.ts は byte-for-byte 同一維持が前提だが、コメントの規約
+# のみで強制されていない。drift が起きた場合、distributed trace が沈黙して繋がらなくなる
+# silent failure になる。auth.ts は intentional に差分がある (unref 処理) ため対象外。
+for f in env-propagation.ts trace-fields.ts; do
+  if ! diff -q "src/observability/$f" "container/agent-runner/src/observability/$f" >/dev/null 2>&1; then
+    fail "host / agent-runner の dual-copy が drift: $f (= distributed trace が silent に壊れる)
+    対処: 片方の編集を他方にコピーして byte-for-byte 一致させる (Bun 非互換のため共有 npm 化はしない方針、CLAUDE.md §observability 参照)"
+  fi
+done
+info '  → host/agent dual-copy 一致 OK (env-propagation.ts / trace-fields.ts)'
+
 # =============================================================================
 # PASS marker
 # =============================================================================
-info '  all assertions passed (preflight + keyless + cloud-trace + bq-sink + summary + static-filter)'
+info '  all assertions passed (preflight + keyless + cloud-trace + bq-sink + summary + static-filter + dual-copy-drift)'
 echo 'M4-A PASS'

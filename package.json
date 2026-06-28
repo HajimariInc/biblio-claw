@@ -12,7 +12,6 @@
     "build": "tsc",
     "start": "node --import ./dist/instrumentation.js dist/index.js",
     "dev": "tsx --import ./src/instrumentation.ts src/index.ts",
-    "otel-smoke-test": "tsx --import ./src/instrumentation.ts scripts/otel-smoke-test.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:fix": "prettier --write \"src/**/*.ts\"",

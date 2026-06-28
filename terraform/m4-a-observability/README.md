@@ -29,7 +29,14 @@ terraform apply tfplan
 1. biblio-claw で任意の biblio action を 1 回実行 (= Slack で `@bot 蔵書` 等)
 2. ~5 分待ち、`bq ls hajimari-ai-hackathon-2026:llm_observability` でテーブル materialize 確認
 3. 実テーブル名は GKE container の logName 由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 実測)
-4. `bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false < sql/summary.sql` で集計結果が >= 1 行返ることを確認
+4. `sql/summary.sql` は `<PROJECT_ID>` / `<DATASET_ID>` placeholder 形式 (= Phase 4 verify-m4-a.sh と共有) のため `sed` 置換で実行:
+   ```bash
+   sed -e "s/<PROJECT_ID>/hajimari-ai-hackathon-2026/g" \
+       -e "s/<DATASET_ID>/llm_observability/g" \
+       sql/summary.sql | \
+     bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false --format=json
+   ```
+   `hit_count >= 1` かつ `marker = 'M4A_OK'` が返れば OK
 5. `request_id` 1 つを取り出し、`SELECT * WHERE jsonPayload.request_id='<UUID>'` で全境界ログが取得できることを確認
 
 > **注 (TZ bug 回避)**: `WHERE DATE(timestamp) = CURRENT_DATE('Asia/Tokyo')` は UTC date と JST date を比較するため時差で 0 件になる。必ず `DATE(timestamp, 'Asia/Tokyo')` を使う (`summary.sql` は対応済)。
@@ -63,7 +70,3 @@ bq update \
   ```
 - `google_project_service` は `disable_on_destroy=false` で API 残置 (他リソース影響回避)
 
-## Patterns to Mirror
-
-- PoC-10 `/home/proj/wforest/repos/PoC/biblio-poc-10-logging-bigquery/terraform/main.tf` (sink + dataset + IAM)
-- PoC-10 `sql/summary.sql` (DATE partition pruning)

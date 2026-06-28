@@ -12,6 +12,8 @@
  * (c) 応答テキストの整形 (= 件数 + カテゴリ別内訳 + 一覧) / (d) `BIBLIO_NAME_RE` 不要
  * (= 入力パラメータが name を取らないため、name validate ロジックは存在しない)。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 
@@ -114,6 +116,10 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
     } catch (err) {
       // listBiblio() は fetchMarketplace / readShelveEnv の throw 等で抜けることがある。
       // 想定外例外も握って patron に通知 (host を落とさない、`shelve-action.ts` 流儀)。
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('list_biblio threw', {
         event: 'biblio.list',
         outcome: 'failure',
@@ -121,8 +127,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
-      await writeBackMessage(inDb, `蔵書一覧取得エラー (internal): ${detail}`, 'list-resp', 'list_biblio');
+      await writeBackMessage(inDb, `蔵書一覧取得エラー (internal): ${errorRecord.message}`, 'list-resp', 'list_biblio');
       span.setAttribute('biblio.outcome', 'failure');
     }
   });

@@ -31,6 +31,8 @@
  * 将来 (別 PRD) で session → 最新 inbound message → sender userId の逆引き経路を整備したら、
  * この関数を per-user 厳密 check に書き換える。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { getDb, hasTable } from '../db/connection.js';
 import { setBiblioSetting } from '../db/biblio-settings.js';
@@ -186,6 +188,10 @@ registerDeliveryAction('update_config', async (content, session, inDb) => {
       });
       span.setAttribute('biblio.outcome', 'success');
     } catch (err) {
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('update_config threw', {
         event: 'biblio.config',
         outcome: 'failure',
@@ -195,8 +201,12 @@ registerDeliveryAction('update_config', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
-      await writeBackMessage(inDb, `設定エラー (internal): 予期しない失敗 — ${detail}`, 'config-resp', 'update_config');
+      await writeBackMessage(
+        inDb,
+        `設定エラー (internal): 予期しない失敗 — ${errorRecord.message}`,
+        'config-resp',
+        'update_config',
+      );
       span.setAttribute('biblio.outcome', 'failure');
     }
   });

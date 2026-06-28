@@ -9,6 +9,8 @@
  * inspect-action.ts と同形 (writeBack 3 retry / fail-closed catch / BIBLIO_NAME_RE)。
  * 差分は (a) 名前 validate を `owner--name` 形式に厳格化、(b) 応答テキストの整形のみ。
  */
+import { SpanStatusCode } from '@opentelemetry/api';
+
 import { registerDeliveryAction } from '../delivery.js';
 import { log } from '../log.js';
 import { categorize } from './categorize.js';
@@ -86,6 +88,10 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // categorize() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
+      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      const errorRecord = err instanceof Error ? err : new Error(String(err));
+      span.recordException(errorRecord);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
       log.error('categorize_biblio threw', {
         event: 'biblio.categorize',
         outcome: 'failure',
@@ -94,10 +100,9 @@ registerDeliveryAction('categorize_biblio', async (content, session, inDb) => {
         request_id: requestId,
         err,
       });
-      const detail = err instanceof Error ? err.message : String(err);
       await writeBackMessage(
         inDb,
-        `カテゴライズエラー (internal): 予期しない失敗 — ${detail}`,
+        `カテゴライズエラー (internal): 予期しない失敗 — ${errorRecord.message}`,
         'categorize-resp',
         'categorize_biblio',
       );

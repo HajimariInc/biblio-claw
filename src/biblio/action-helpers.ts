@@ -229,10 +229,20 @@ export function parseApprovalPayload(payload: Record<string, unknown>): {
   category: BiblioCategory;
 } {
   const biblioName = typeof payload.biblioName === 'string' ? payload.biblioName : '';
-  const category: BiblioCategory =
-    typeof payload.category === 'string' && BIBLIO_CATEGORIES.includes(payload.category as BiblioCategory)
-      ? (payload.category as BiblioCategory)
-      : 'biblio-dev';
+  const rawCategory = typeof payload.category === 'string' ? payload.category : null;
+  const isKnownCategory = rawCategory !== null && BIBLIO_CATEGORIES.includes(rawCategory as BiblioCategory);
+  const category: BiblioCategory = isKnownCategory ? (rawCategory as BiblioCategory) : 'biblio-dev';
+  // 旧実装は不正 category を無警告で `biblio-dev` に置換していたため、shokyaku_confirm 等の
+  // 破壊操作で category 化けが起きると意図と違う shelf を対象にした上にデバッグ時に「なぜ
+  // biblio-dev?」が謎になっていた (PR #78 review-agents I6)。fallback 発動時は warn を残す。
+  if (rawCategory !== null && !isKnownCategory) {
+    log.warn('parseApprovalPayload: unknown category, defaulting to biblio-dev', {
+      event: 'biblio.validate',
+      outcome: 'fallback',
+      original_category: rawCategory,
+      biblio_name: biblioName,
+    });
+  }
   return { biblioName, category };
 }
 
