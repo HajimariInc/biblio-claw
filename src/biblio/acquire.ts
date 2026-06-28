@@ -651,17 +651,20 @@ export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = 
   const baseSpawn = { env, stdio: 'pipe' as const, encoding: 'utf-8' as const };
 
   // 1. 存在確認 (= GET /repos/{owner}/{name})。`ghFetch` は undici fetch + global
-  //    ProxyAgent (= `initHostProxy` で設定) 経由で OneCLI proxy に乗り、proxy 側で
-  //    Authorization: Bearer <installation-token> を wire 置換する (= shelve /
-  //    unshelve / list-biblio で本番動作実証済の経路)。orchestrator container 内に
-  //    gh CLI の local credential (`gh auth login` / `GH_TOKEN`) を持つ必要が無い。
+  //    ProxyAgent (= `initHostProxy` で設定) 経由で OneCLI proxy に乗る。本 step は
+  //    `noAuth: true` で Authorization ヘッダを省略する (= 後段 `countSkillsInRepo`
+  //    の marketplace.json / git/trees 経路と同流儀)。理由は外部 repo (= GH App
+  //    installation scope 外、例: `example-org/*`) の場合、placeholder を素通しすると
+  //    OneCLI MITM が installation token に置換 → GitHub が scope 外として 401 を
+  //    返すため (= public API は無認証で 200、rate limit は IP 単位 60 req/h で本 step
+  //    は 1 acquire = 1 回呼出のため余裕)。HajimariInc 系 public repo も無認証 200。
   //
   //    分岐: 404 → not_found / 他 status → internal / network エラー (timeout 含む)
   //    → internal。GitHub は private/不在いずれも 404 を返す仕様 (= 旧 gh api 経路と
   //    同じ)。401/403/5xx は OneCLI 認証経路 or GitHub 障害を示唆するため、patron
   //    に誤解させず `internal` で明示する (silent failure 防止)。
   try {
-    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`, {}, { ctx: opts.ctx });
+    await ghFetch('acquire.check-repo', `${GITHUB_API}/repos/${owner}/${name}`, {}, { ctx: opts.ctx, noAuth: true });
   } catch (err) {
     if (err instanceof GhHttpError) {
       if (err.status === 404) {
