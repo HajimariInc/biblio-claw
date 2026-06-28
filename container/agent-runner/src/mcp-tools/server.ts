@@ -11,12 +11,44 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import type { McpToolDefinition } from './types.js';
 import { log } from '../log.js';
 
 const allTools: McpToolDefinition[] = [];
 const toolMap = new Map<string, McpToolDefinition>();
+
+/**
+ * Dispatch a single tool call with uniform error containment.
+ *
+ * Exported as a narrow API so unit tests can exercise the catch path
+ * without setting up the full stdio MCP server. handler が throw した場合は
+ * `isError: true` の MCP レスポンスへ変換し、agent (Claude) へ診断情報を返す
+ * (= patron 経路は agent reply 側で間接通知される、SDK 側へは例外を伝播しない)。
+ */
+export async function dispatchTool(name: string, args: Record<string, unknown>): Promise<CallToolResult> {
+  const tool = toolMap.get(name);
+  if (!tool) {
+    return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
+  }
+  try {
+    return await tool.handler(args);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.error('mcp tool handler threw', { tool: name, detail });
+    return {
+      content: [{ type: 'text', text: `内部エラー: ${detail}` }],
+      isError: true,
+    };
+  }
+}
+
+/** Test-only: clear registered tools between cases. */
+export function _resetToolsForTest(): void {
+  allTools.length = 0;
+  toolMap.clear();
+}
 
 export function registerTools(tools: McpToolDefinition[]): void {
   for (const t of tools) {
@@ -38,11 +70,7 @@ export async function startMcpServer(): Promise<void> {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const tool = toolMap.get(name);
-    if (!tool) {
-      return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
-    }
-    return tool.handler(args ?? {});
+    return dispatchTool(name, args ?? {});
   });
 
   const transport = new StdioServerTransport();

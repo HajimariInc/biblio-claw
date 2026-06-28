@@ -5,6 +5,18 @@
  * The host polls this DB (read-only) for undelivered messages.
  */
 import { getInboundDb, getOutboundDb } from './connection.js';
+import { log } from '../log.js';
+
+/** SQLITE_BUSY 等への小規模リトライ回数 (1 + 2 = 計 3 attempts)。
+ *  busy_timeout=5000 を補強する上位リトライ層。host writeBackMessage と対称。 */
+const WRITE_MAX_RETRIES = 2;
+/** 各リトライ前の sleep 基底 (ms)、attempt 倍率で線形バックオフ。 */
+const WRITE_RETRY_BASE_MS = 100;
+
+function sleepSync(ms: number): void {
+  // bun:sqlite は同期 API なので retry も同期で揃える。Bun ランタイム前提。
+  Bun.sleepSync(ms);
+}
 
 export interface MessageOutRow {
   id: string;
@@ -43,6 +55,36 @@ export interface WriteMessageOut {
  * the agent's "edit message #5" could resolve to the wrong row.
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
+  for (let attempt = 0; attempt <= WRITE_MAX_RETRIES; attempt++) {
+    try {
+      return writeMessageOutOnce(msg);
+    } catch (err) {
+      const isLast = attempt === WRITE_MAX_RETRIES;
+      const detail = err instanceof Error ? err.message : String(err);
+      log.warn('writeMessageOut: attempt failed', {
+        attempt: attempt + 1,
+        isLast,
+        kind: msg.kind,
+        id: msg.id,
+        detail,
+      });
+      if (isLast) {
+        log.error('writeMessageOut: patron notification lost after all retries', {
+          retries: WRITE_MAX_RETRIES + 1,
+          kind: msg.kind,
+          id: msg.id,
+          detail,
+        });
+        throw err; // server.ts 側で catch して MCP isError レスポンス化させる
+      }
+      sleepSync((attempt + 1) * WRITE_RETRY_BASE_MS);
+    }
+  }
+  // unreachable — loop either returns or throws.
+  throw new Error('writeMessageOut: exhausted retries unexpectedly');
+}
+
+function writeMessageOutOnce(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();
   const inbound = getInboundDb();
 
