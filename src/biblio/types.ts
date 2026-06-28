@@ -227,7 +227,9 @@ export type ShelveFailureReason =
   /** quarantine → shelf の `fs.rename` 失敗 (`EXDEV` / `EACCES` / `ENOSPC` 等)。 */
   | 'rename_error'
   /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
-  | 'invalid_category';
+  | 'invalid_category'
+  /** 必須 env 欠落 (`SHELF_REPO_OWNER` / `SHELF_REPO_NAME` / commit author 4 件) = 設定不備。`github_api_error` と区別し、patron に "設定不備" として認知させる (= GitHub API 障害との誤解を防ぐ、issue #50)。 */
+  | 'config_error';
 
 /**
  * 陳列結果。discriminated union — `ok` で分岐する。

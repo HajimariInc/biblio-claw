@@ -497,14 +497,15 @@ export async function shelveMulti(
     env = readShelveEnv();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    // 設定不備 (= 必須 env 欠落) を `'github_api_error'` reason に集約しているが、
-    // 根本原因は config_error。caller (action handler) がリトライを誘発しないよう、
-    // 将来 reason を型分離する選択肢ありで、現状はログで追跡可能化のみ。
-    log.warn('shelveMulti: env not ready (config_error mapped to github_api_error)', {
-      count: reqs.length,
-      detail,
-    });
-    return failMulti('github_api_error', detail, reqs);
+    // 必須 env 欠落 = `'config_error'` reason で patron に通知 (issue #50)。
+    // 旧来は `'github_api_error'` に集約していたが、運用者が「GitHub API 障害」と
+    // 誤認するため reason を型分離した (= `MultiShelveFailureReason` は
+    // `ShelveFailureReason` 継承で `'config_error'` を自動取得)。
+    // 本 catch は step 3 (rename) より前 = `movedShelfPaths` は常に空のため、
+    // step 5 catch のような `warnAndBuildResidualTrail` 呼び出しは行わない
+    // (= 残骸が存在しないので可視化不要。step 5 と構造が違うのは意図的)。
+    log.warn('shelveMulti: env not ready', { count: reqs.length, detail });
+    return failMulti('config_error', detail, reqs);
   }
 
   // 2. 重複検知 (marketplace.json 事前読み、per-req で 1 件でも引っかかれば全体 fail)
