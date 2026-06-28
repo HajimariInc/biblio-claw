@@ -2,9 +2,11 @@
 -- + Phase 3 操作用 GROUP BY 集計 (= 末尾コメントブロックに補助保持)
 --
 -- Usage (verify-m4-a.sh 経由):
---   sed -e "s/<PROJECT_ID>/$GCP_PROJECT_ID/g" -e "s/<DATASET_ID>/$BQ_DATASET_ID/g" \
+--   sed -e "s/<PROJECT_ID>/${GCP_PROJECT_ID}/g" -e "s/<DATASET_ID>/${BQ_DATASET_ID}/g" \
 --     terraform/m4-a-observability/sql/summary.sql | \
---     bq query --use_legacy_sql=false --format=json --quiet
+--     bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=json --quiet
+--
+-- 注: `--project_id` を必ず指定する (= gcloud config の default に意図せず向くのを防ぐ)。
 --
 -- 出力 (1 行):
 --   hit_count          直近 1h で sink に流入した biblio-claw container ログ件数

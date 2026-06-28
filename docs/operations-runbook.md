@@ -925,12 +925,14 @@ terraform apply tfplan
 1. biblio-claw で任意の biblio action を 1 回実行 (Slack で `@bot 蔵書` 等)
 2. ~5 分待ち、`bq ls hajimari-ai-hackathon-2026:llm_observability` でテーブル materialize 確認
 3. 実テーブル名は GKE container の logName 直接由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 Phase 3 apply 時に実測確認)
-4. 以下を実行 (`sql/summary.sql` は実テーブル名 `stdout` で書かれている):
+4. 以下を実行 (`sql/summary.sql` は M4-A Phase 4 で placeholder 化済 = `sed` 置換が必要):
    ```bash
-   bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false \
-     < terraform/m4-a-observability/sql/summary.sql
+   sed -e "s/<PROJECT_ID>/hajimari-ai-hackathon-2026/g" \
+       -e "s/<DATASET_ID>/llm_observability/g" \
+       terraform/m4-a-observability/sql/summary.sql | \
+     bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false
    ```
-   `hit_count >= 1` の行が複数 event / outcome で返れば OK
+   1 行返却で `hit_count >= 1` かつ `marker = M4A_OK` が出れば OK。event/outcome 別集計が欲しい場合は SQL ファイル末尾のコメントブロックを参照
 5. `request_id` 1 つを取り出し、`SELECT * WHERE jsonPayload.request_id='<UUID>'` で全境界ログが取得できることを確認
 
 > **TZ bug 回避**: `WHERE DATE(timestamp) = CURRENT_DATE('Asia/Tokyo')` は UTC 評価 vs JST date 比較で時差ズレ (= 朝の時間帯に 0 件症状)。`DATE(timestamp, 'Asia/Tokyo')` を使う。`summary.sql` は対応済
@@ -1021,7 +1023,7 @@ bash scripts/verify-m4-a.sh
 
 1. **preflight** — `.env` 読み + 必須 env + CLI 存在 (gcloud / bq / jq / node)
 2. **keyless 4 面** — `GOOGLE_APPLICATION_CREDENTIALS` 未設定 / ADC type が authorized_user|external_account|impersonated_service_account / repo 内に SA key json 不在 / TF に `google_service_account_key` resource 不在
-3. **emit-test-span** — `pnpm exec tsx scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出
+3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag、PR #75 提案 D)
 4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert
 5. **BQ poll** — `stdout_*` / `stderr_*` テーブルを `bq ls` で動的列挙、各テーブルに `WHERE JSON_VALUE(jsonPayload, '$["logging.googleapis.com/trace"]') = 'projects/<PROJECT>/traces/<TRACE_ID>'` で sleep 10 × 30 (5 min) ポーリング、count >= 1 で break
 6. **summary SQL** — `sed` で `<PROJECT_ID>` / `<DATASET_ID>` を置換した `terraform/m4-a-observability/sql/summary.sql` を実行、`hit_count >= 1` + `marker = 'M4A_OK'` を assert
@@ -1029,8 +1031,13 @@ bash scripts/verify-m4-a.sh
 
 ### 既知の罠 / 解釈
 
-- **Cloud Trace 90s timeout で偽 fail** — `BatchSpanProcessor` flush 遅延が原因。`scripts/emit-test-span.ts` 末尾の `await shutdownOtel()` で強制 flush しているが、ネットワーク不調時は 90s で届かない場合あり。再実行で多くは解決
+- **Cloud Trace 90s timeout で偽 fail** — 多くは下記 2 つの原因。fail メッセージ内の "対処" 案内も同じ順で参照する:
+  1. **`roles/cloudtrace.user` 不足** — 30 回 retry でほぼ全て 403 を返す。Section 4 の poll ループは attempt 3 で warn を 1 度出す設計 (PR #75 提案 A-1)
+  2. **OTLP export 失敗** — `BatchSpanProcessor` が export エラーを内部 catch して `shutdownOtel()` が resolve する OTel SDK 仕様の限界 (PR #75 Important 問題 3)。verify は `OTEL_DIAG=true` を emit-test-span に渡して export エラーを stderr に流し、`LAST_HARNESS_STDERR` 経由で fail 時に展開する (PR #75 提案 D 対症)
+  3. それ以外: ネットワーク不調 / `BatchSpanProcessor` flush 遅延 — 再実行で多くは解決
 - **BQ 5 min timeout で偽 fail** — sink lag 通常 30s 程度だが、初動直後や高負荷時は数分かかる。fail メッセージで sink writer_identity の `roles/bigquery.dataEditor` 付与 + filter の k8s_container/namespace 整合を案内
+- **BQ poll の auth-fail early abort** — outer 反復 3 連続で全テーブル query 失敗時 (= persistent な auth 切れ / 権限不足 / network 障害) は 5 分待たず 30s で fail する設計 (PR #75 提案 silent-failure 問題 2)。fail メッセージで `gcloud auth application-default print-access-token` と `roles/bigquery.dataViewer` 付与の確認を案内
+- **BQ poll の当日 JST シャード絞り込み** — verify は `stdout_YYYYMMDD` / `stderr_YYYYMMDD` の当日 JST シャードのみ query する設計 (PR #75 code-reviewer 問題 1)。当日シャード未生成 (= JST 0 時直後 + 初動直後) は warn 出して全シャードフォールバックに自動切替
 - **`stdout_*` / `stderr_*` テーブル不在** — Phase 3 sink がまだ初動していない可能性。biblio action を 1 回実行して 5 分待ってから再実行
 - **`JSON_VALUE` の JSON path 構文** — フィールド名にドット (`logging.googleapis.com/trace`) を含むため bracketed 形式 `'$["logging.googleapis.com/trace"]'` が必須。`jsonPayload.foo.bar` のドット記法では拾えない
 - **ネガティブ対照の意義** — random trace_id で BQ に 0 行 = sink filter が「無関係な trace を黙って通していない」証跡。1 行でも hit したら sink filter または BQ schema を疑う (衝突確率 ~2^-128 = 事実上ゼロ)
