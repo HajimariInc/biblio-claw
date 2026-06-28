@@ -911,9 +911,9 @@ describe('acquire — Phase 2 threshold-promote', () => {
   });
 
   it('countSkillsInRepo は外部 repo に noAuth: true で fetch する (= Authorization ヘッダなし)', async () => {
-    // OneCLI secret の pathPattern (`/repos/HajimariInc/*`) miss で `Bearer placeholder` を素通しすると
-    // GitHub が invalid token として 401 を返す問題への対策。外部 repo (anthropics/skills 等) を呼ぶ
-    // countSkillsInRepo は ghFetch を `{ noAuth: true }` opts 付きで呼び出す。
+    // 外部 repo (= GH App installation scope 外、anthropics/skills 等) は OneCLI MITM が token 注入
+    // しても GitHub が 401 Bad credentials を返すため、countSkillsInRepo は ghFetch を
+    // `{ noAuth: true }` opts 付きで呼び出して無認証 public API 200 を取る経路に倒す。
     // 本テストは mockGhFetch の引数を直接見て opts.noAuth が true であることを assert する。
     setupCloneSuccess();
     setupExistenceCheckSuccess();
