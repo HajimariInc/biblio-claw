@@ -2,9 +2,8 @@
  * inspect-tool のユニットテスト (M4-B Phase 1)。
  *
  * acquire-tool.test.ts と同流儀: `runAsync({args, toolContext})` 経由で Zod 検証 +
- * execute 委譲を 1 path で検証。
+ * execute 委譲を 1 path で検証。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。
  */
-import type { Context } from '@google/adk';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const { inspectMock } = vi.hoisted(() => ({
@@ -21,23 +20,12 @@ vi.mock('../../log.js', () => ({
 
 import { inspectBiblioTool } from './inspect-tool.js';
 import { log } from '../../log.js';
+import { mockToolContext, resetLogMocks } from './test-helpers.js';
 
 beforeEach(() => {
   inspectMock.mockReset();
-  vi.mocked(log.debug).mockReset();
-  vi.mocked(log.info).mockReset();
-  vi.mocked(log.warn).mockReset();
-  vi.mocked(log.error).mockReset();
+  resetLogMocks(log);
 });
-
-function mockToolContext(opts?: { invocationId?: string; sessionId?: string }): Context {
-  return {
-    invocationContext: {
-      invocationId: opts?.invocationId ?? 'inv-test-1',
-      session: { id: opts?.sessionId ?? 'sess-test-1' },
-    },
-  } as unknown as Context;
-}
 
 describe('inspectBiblioTool — name / description', () => {
   it('tool 名と description が LLM 公開向けに設定されている', () => {
@@ -62,7 +50,7 @@ describe('inspectBiblioTool — 正常系 (execute → inspect 委譲)', () => {
     expect(result).toEqual({ verdict: 'ACCEPT', biblioName: 'wf--test' });
   });
 
-  it('inspect() が HOLD / REJECT を返したらそのまま中継する (= silent failure 防止)', async () => {
+  it('inspect() が REJECT を返したらそのまま中継する (= silent failure 防止)', async () => {
     inspectMock.mockResolvedValue({
       verdict: 'REJECT',
       biblioName: 'wf--bad',
@@ -74,6 +62,20 @@ describe('inspectBiblioTool — 正常系 (execute → inspect 委譲)', () => {
       toolContext: mockToolContext(),
     });
     expect(result).toMatchObject({ verdict: 'REJECT', reason: 'dangerous_code' });
+  });
+
+  it('inspect() が HOLD を返したらそのまま中継する (= verdict 3 通り網羅、pr-test-analyzer S6)', async () => {
+    inspectMock.mockResolvedValue({
+      verdict: 'HOLD',
+      biblioName: 'wf--license-unknown',
+      reason: 'license_unknown',
+      detail: 'plugin.json に license フィールド不在 + allow リスト外',
+    });
+    const result = await inspectBiblioTool.runAsync({
+      args: { biblioName: 'wf--license-unknown' },
+      toolContext: mockToolContext(),
+    });
+    expect(result).toMatchObject({ verdict: 'HOLD', reason: 'license_unknown' });
   });
 
   it('構造化ログ event=adk.tool.inspect.invoke が 1 件出る', async () => {

@@ -7,9 +7,9 @@
  * invokes the user-defined execute function」と一致)。
  *
  * mock パターンは Phase 0 `AnthropicVertexLlm.test.ts` 流儀: `vi.hoisted` で fn を上げる +
- * `vi.mock` で SDK / 既存関数 / log を mock + 静的 import。
+ * `vi.mock` で SDK / 既存関数 / log を mock + 静的 import。`mockToolContext` / `resetLogMocks` は
+ * `test-helpers.ts` に集約 (= 3 tool test で複製していた pattern の単一更新点化)。
  */
-import type { Context } from '@google/adk';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const { acquireMock } = vi.hoisted(() => ({
@@ -26,24 +26,12 @@ vi.mock('../../log.js', () => ({
 
 import { acquireBiblioTool } from './acquire-tool.js';
 import { log } from '../../log.js';
+import { mockToolContext, resetLogMocks } from './test-helpers.js';
 
 beforeEach(() => {
   acquireMock.mockReset();
-  vi.mocked(log.debug).mockReset();
-  vi.mocked(log.info).mockReset();
-  vi.mocked(log.warn).mockReset();
-  vi.mocked(log.error).mockReset();
+  resetLogMocks(log);
 });
-
-/** Context の最小 structural mock。`invocationContext.{invocationId, session.id}` のみ持つ。 */
-function mockToolContext(opts?: { invocationId?: string; sessionId?: string }): Context {
-  return {
-    invocationContext: {
-      invocationId: opts?.invocationId ?? 'inv-test-1',
-      session: { id: opts?.sessionId ?? 'sess-test-1' },
-    },
-  } as unknown as Context;
-}
 
 describe('acquireBiblioTool — name / description', () => {
   it('tool 名と description が LLM 公開向けに設定されている', () => {

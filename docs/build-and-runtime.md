@@ -11,7 +11,7 @@ host とコンテナはそれぞれ独自のパッケージツリーを持つ:
 
 ```
 /                             pnpm + Node 24
-  pnpm-lock.yaml              host の依存 (channels, Chat SDK, Baileys, better-sqlite3 等)
+  pnpm-lock.yaml              host の依存 (channels, Chat SDK, Baileys, better-sqlite3, zod 等)
   pnpm-workspace.yaml         minimumReleaseAge + onlyBuiltDependencies ポリシー
 
 /container/agent-runner/      Bun 1.3+

@@ -10,8 +10,11 @@
  * **GOTCHA (plan Task 6)**:
  *   - `appName` は `(appName, userId, sessionId)` triple の session key 構成要素。Phase 1 では
  *     1 Runner のみのため `'biblio_m4b'` 固定で OK。複数 Runner 同居時はユニークにする
- *   - `Runner.runAsync` の `finally` で全 `BaseToolset.close()` が呼ばれる。`FunctionTool` は
- *     `BaseTool` (= toolset ではない) なので close 影響なし
+ *   - `Runner.runAsync` の `finally` で全 `BaseToolset.close()` が呼ばれる (= adk-js
+ *     `runner.js:244-248`)。Phase 1 verify script と root-agent.test.ts は `runEphemeral` を使い、
+ *     `runEphemeral` は内部で `runAsync` に委譲する (= `runner.js:62-96`) ため、close 経路は
+ *     `runEphemeral → runAsync → finally → close()` で発火する (= comment-analyzer S4)。
+ *     `FunctionTool` は `BaseTool` (= toolset ではない) なので本 PR で配線する 3 tool は close 影響なし
  */
 import { InMemoryRunner } from '@google/adk';
 import type { BaseAgent } from '@google/adk';

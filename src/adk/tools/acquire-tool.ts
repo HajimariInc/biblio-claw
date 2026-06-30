@@ -25,6 +25,8 @@ import { acquire } from '../../biblio/acquire.js';
 import type { AcquireResult } from '../../biblio/types.js';
 import { log } from '../../log.js';
 
+import { resolveToolCtx } from './tool-ctx.js';
+
 /**
  * Zod schema for `acquire_biblio` 入力。`repo` 1 つに集約 (= `owner/repo` / `owner/repo/skill` /
  * GitHub URL を `normalizeRepo()` が分岐する)。describe で LLM への explanation を付ける。
@@ -39,8 +41,14 @@ const AcquireBiblioInput = z.object({
 
 /**
  * ADK Runner 配下に登録する `acquire_biblio` tool。
- * `name` 明示 (= adk-js が arrow function の `name` を空文字 default にすると runtime error、
- * plan Task 2 GOTCHA 1)。
+ *
+ * **`name` 明示が必須** (= Plan Task 2 GOTCHA 1、comment-analyzer S1 で挙動再確認):
+ *   `name` を省略すると adk-js が fallback として `execute.name` を使う (`function_tool.js:32-35`)。
+ *   object literal property shorthand で渡した async arrow function は ECMAScript の name inference
+ *   により `.name === 'execute'` になるため、ADK は truthy な `'execute'` を受けて exception を
+ *   投げずに **tool 名 `'execute'` のままサイレント登録**する。LLM 公開時に `acquire_biblio` でない
+ *   `'execute'` という奇妙な名前が見え、tool 自律選択経路が壊れる (= runtime error は出ない、
+ *   静かに誤名で動き続ける罠)。本ファイルでは `name: 'acquire_biblio'` で明示してこれを回避。
  */
 export const acquireBiblioTool = new FunctionTool({
   name: 'acquire_biblio',
@@ -48,16 +56,33 @@ export const acquireBiblioTool = new FunctionTool({
     'Acquire a skill (biblio) from a GitHub repository into the biblio system. The skill is fetched into quarantine for subsequent inspection. Returns AcquireResult { ok: true, biblioName, quarantinePath } on success, or { ok: false, reason, detail } on failure (reasons: invalid_input, not_found, manifest_missing, clone_failed, threshold_exceeded, internal, marketplace_source_root, marketplace_source_external).',
   parameters: AcquireBiblioInput,
   execute: async ({ repo }, tool_context): Promise<AcquireResult> => {
-    // tool_context は `runEphemeral` 経路で自動 session 作成されるため通常 undefined にならないが、
-    // 直接 execute 呼出 (= unit test) で undefined 経路もあるため防御的 fallback (plan Task 2 GOTCHA 3)。
-    const requestId = tool_context?.invocationContext.invocationId ?? crypto.randomUUID();
-    const sessionId = tool_context?.invocationContext.session.id ?? '';
+    // ctx 抽出は共通ヘルパ `resolveToolCtx` (= ReadonlyContext getter 経由 + fallback 戦略を集約) に委譲。
+    // `tool_context` が undefined になる経路は **ADK 内部の edge case** (= ADK が toolContext を省略する
+    // 稀な経路への防御線、現在の adk-js@1.3.0 では `runEphemeral` 経路で自動 session 作成されるため
+    // 通常は発生しない。Plan Task 2 GOTCHA 3 の「unit test 経路」は実コード上 `mockToolContext` を必ず
+    // 渡すため該当しない = comment-analyzer S2 で根拠を再確認した結果)。
+    const { requestId, sessionId } = resolveToolCtx(tool_context);
     log.info('ADK tool: acquire_biblio invoked', {
       event: 'adk.tool.acquire.invoke',
       request_id: requestId,
       session_id: sessionId,
       repo,
     });
-    return await acquire({ repo }, { ctx: { requestId, sessionId } });
+    try {
+      return await acquire({ repo }, { ctx: { requestId, sessionId } });
+    } catch (err) {
+      // `acquire()` は throw しない契約 (= Result.ok discriminated union)。万が一 unexpected throw が
+      // 起きた場合、ADK は内部で `Error in tool acquire_biblio: <msg>` で re-throw して original stack
+      // trace を消失させる (= silent-failure-hunter I1)。server-side ログがゼロになる罠を防ぐため
+      // ここで log.error を 1 度残してから rethrow する (= biblio-claw §silent failure 撲滅方針)。
+      log.error('ADK tool: acquire_biblio unexpected throw', {
+        event: 'adk.tool.acquire.unexpected_error',
+        request_id: requestId,
+        session_id: sessionId,
+        repo,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
   },
 });

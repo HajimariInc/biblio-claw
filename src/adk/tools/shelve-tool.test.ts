@@ -2,9 +2,8 @@
  * shelve-tool のユニットテスト (M4-B Phase 1)。
  *
  * acquire-tool.test.ts と同流儀。`category` の Zod enum 検証 (= `BIBLIO_CATEGORIES` 4 値以外
- * reject) も含む。
+ * reject) も含む。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。
  */
-import type { Context } from '@google/adk';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { BIBLIO_CATEGORIES } from '../../biblio/types.js';
@@ -23,23 +22,12 @@ vi.mock('../../log.js', () => ({
 
 import { shelveBiblioTool } from './shelve-tool.js';
 import { log } from '../../log.js';
+import { mockToolContext, resetLogMocks } from './test-helpers.js';
 
 beforeEach(() => {
   shelveMock.mockReset();
-  vi.mocked(log.debug).mockReset();
-  vi.mocked(log.info).mockReset();
-  vi.mocked(log.warn).mockReset();
-  vi.mocked(log.error).mockReset();
+  resetLogMocks(log);
 });
-
-function mockToolContext(opts?: { invocationId?: string; sessionId?: string }): Context {
-  return {
-    invocationContext: {
-      invocationId: opts?.invocationId ?? 'inv-test-1',
-      session: { id: opts?.sessionId ?? 'sess-test-1' },
-    },
-  } as unknown as Context;
-}
 
 describe('shelveBiblioTool — name / description', () => {
   it('tool 名と description が LLM 公開向けに設定されている', () => {

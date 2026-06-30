@@ -1,31 +1,56 @@
 /**
- * M4-B Phase 1 verify — local 実機検証 script。
+ * M4-B Phase 1 verify — local scaffolding 構造 smoke + OTel 流出確認 script。
  *
- * 実 Anthropic Vertex (= ADC + `claude-sonnet-4-6`) + 実 `acquire()` (= GitHub clone) を
- * 起こして、ADK Runner 経路で **1 patron 自然文命令 → tool 自律呼出 → 既存関数実行 → 結果応答**
- * が成立することを実機検証する。Phase 1 plan Task 10 の完了判定 fixture。
+ * **重要 — 何を verify するか / 何を verify しないか** (= code-reviewer C1 + comment-analyzer S3 で
+ * 当初記述を訂正):
+ *
+ *   ADK Runner hierarchy (= `LlmAgent` + `FunctionTool` + `InMemoryRunner`) の **scaffolding 構造**
+ *   が壊れていないことと、OTel span が active span として観測できることを実機 (= ADC + Vertex API)
+ *   で smoke 確認する。
+ *
+ *   **しないこと**: 「LLM 自律 tool 呼出 → 既存関数実行 → 結果応答」の E2E は **本 Phase では成立
+ *   しない**。理由: Phase 0 `AnthropicVertexLlm` に以下 2 つの未対応事項があるため:
+ *     (1) `generateContentAsync` が `llmRequest.config.tools` を読まないため、Anthropic API に
+ *         tool 定義 (`FunctionDeclaration[]`) が届かず、Claude は acquire_biblio / inspect_biblio /
+ *         shelve_biblio の存在を知らない (= `AnthropicVertexLlm.ts:199-201`)
+ *     (2) `toLlmResponse` が `content[].find(c => c.type === 'text')` で text block のみ抽出する
+ *         ため、仮に Claude が `tool_use` を返しても ADK `functionCall` event に変換されない
+ *         (= 同 `:349-367`)
+ *   → 両者を **Phase 2 で `AnthropicVertexLlm` 拡張後** に tool 自律呼出経路が成立する。本 Phase 1
+ *   では `TOOL_CALLED=false` + LLM が text 応答のみ返す経路で scaffolding が壊れていないこと
+ *   (= Runner 起動 + event 列消費 + span 流出) を smoke 確認する。
  *
  * 使い方:
  *   pnpm exec tsx --import ./src/instrumentation.ts scripts/verify-phase-1-adk-local.ts
  *
- * env (任意):
- *   VERIFY_PHASE_1_BIBLIO  — 取得対象 biblio (default: example-org/test-biblio-minimal)
+ * env:
+ *   ANTHROPIC_VERTEX_PROJECT_ID  — Vertex AI project ID (必須)
+ *   CLOUD_ML_REGION              — Vertex region (設定推奨、未設定で 'global' フォールバック =
+ *                                   `AnthropicVertexLlm.ts:128` の DEFAULT_REGION 経路)
+ *   VERIFY_PHASE_1_BIBLIO        — 任意、本 Phase 1 では LLM が tool 呼出しないため未使用に等しい
+ *                                   が、Phase 2 拡張後の verify で使う想定で env 接続は残す
  *
  * 出力 (stdout、後続の grep/awk が抽出する形式):
  *   TRACE_ID=<32 hex>
  *   EVENT_COUNT=<int>
+ *   TOOL_CALLED=<bool>             — Phase 1 では常に false (= Phase 0 制約)、Phase 2 拡張後に true 期待
  *   FINAL_TEXT=<text>
  *
- * **GOTCHA (Phase 1 plan Task 10)**:
- *   - `ANTHROPIC_VERTEX_PROJECT_ID` / `CLOUD_ML_REGION=global` env 必須 + `gcloud auth ADC` 済が前提
+ * 出力 (stderr、エラー or 想定外経路の warn):
+ *   ERROR: ADK error event: <code> — <msg>    (= I2 fix: LLM API 失敗を text-only 経路と区別)
+ *
+ * **GOTCHA**:
+ *   - `gcloud auth ADC` 済が前提
  *   - `HTTPS_PROXY` (= OneCLI) が `aiplatform.googleapis.com` に乗ると keyless ADC が壊れる
  *     経路あり (Phase 0 GOTCHA と同じ) — 失敗時は `unset HTTPS_PROXY` or `NO_PROXY` で再試行
- *   - 実 GitHub clone (= `acquire()`) が走るため `VERIFY_PHASE_1_BIBLIO` で安全な test biblio を
- *     指定 (default: `example-org/test-biblio-minimal`)
  *   - `shutdownOtel()` を最後に呼ばないと BatchSpanProcessor が flush されず Cloud Trace に
  *     span が届かない (M4-A Phase 4 で発見済の罠)
- *   - LLM が tool を呼ばずに text のみ返却した場合でも exit 0 (= 実用性のため fail-fast しない)、
- *     ただし stderr に warn を流す。失敗 (= SDK error / acquire 失敗) のみ exit 1
+ *   - **`TOOL_CALLED=false` が正常**: 本 Phase 1 では Phase 0 `AnthropicVertexLlm` 制約により
+ *     `true` には到達しない。Phase 2 完了後の同 script 実行で `true` への遷移を期待する
+ *   - **ADK error event 検知 (I2 fix)**: LLM API 失敗 (= ADC 未設定 / quota / 503 等) が ADK runner
+ *     で `errorCode` 付き event として yield された場合、本 script は exit 1 に倒して fail-fast
+ *     する。これにより「LLM API 失敗」と「LLM が tool 呼ばずに text 応答 (= Phase 1 正常)」を
+ *     区別できる
  */
 import { trace } from '@opentelemetry/api';
 import { isFinalResponse } from '@google/adk';
@@ -56,6 +81,8 @@ async function main(): Promise<void> {
   let traceId: string | undefined;
   let eventCount = 0;
   let toolWasCalled = false;
+  let adkErrorCode: string | undefined;
+  let adkErrorMessage: string | undefined;
 
   for await (const event of runner.runEphemeral({
     userId: 'verify-phase-1',
@@ -70,13 +97,27 @@ async function main(): Promise<void> {
         traceId = sc.traceId;
       }
     }
-    // event 内の functionCall / functionResponse part を観察 (= LLM が tool を呼んだか)。
+    // ADK error event 検知 (= silent-failure-hunter I2 fix): LLM API 失敗時に ADK runner は
+    // throw せず `errorCode` 付き event を yield する。これを text 応答経路から区別して fail-fast。
+    if (typeof event === 'object' && event !== null && 'errorCode' in event) {
+      const ev = event as { errorCode?: string; errorMessage?: string };
+      if (ev.errorCode) {
+        adkErrorCode = ev.errorCode;
+        adkErrorMessage = ev.errorMessage;
+        log.error('Phase 1 verify: ADK error event received', {
+          event: 'verify.phase_1.adk_error',
+          error_code: ev.errorCode,
+          error_message: ev.errorMessage,
+        });
+        break;
+      }
+    }
+    // event 内の functionCall / functionResponse part を観察 (= LLM が tool を呼んだか、
+    // = code-simplifier S11b で guard-clause 抽出した重複除去版)。
     const parts = event.content?.parts ?? [];
     for (const p of parts) {
-      if (
-        (typeof p === 'object' && p !== null && 'functionCall' in p && p.functionCall) ||
-        (typeof p === 'object' && p !== null && 'functionResponse' in p && p.functionResponse)
-      ) {
+      if (typeof p !== 'object' || p === null) continue;
+      if (('functionCall' in p && p.functionCall) || ('functionResponse' in p && p.functionResponse)) {
         toolWasCalled = true;
       }
     }
@@ -87,7 +128,7 @@ async function main(): Promise<void> {
 
   log.info('Phase 1 verify: completed', {
     event: 'verify.phase_1.complete',
-    outcome: toolWasCalled ? 'tool_called' : 'text_only',
+    outcome: adkErrorCode ? 'adk_error' : toolWasCalled ? 'tool_called' : 'text_only',
     event_count: eventCount,
     trace_id: traceId ?? 'undefined',
     final_text_length: finalText.length,
@@ -99,10 +140,15 @@ async function main(): Promise<void> {
   process.stdout.write(`TOOL_CALLED=${toolWasCalled}\n`);
   process.stdout.write(`FINAL_TEXT=${finalText.replace(/\n/g, ' ')}\n`);
 
-  if (!toolWasCalled) {
-    // LLM が tool を呼ばなかったケース — exit 0 で進めるが warn 出力 (= instruction の調整余地を提示)。
+  if (adkErrorCode) {
+    // I2 fix: LLM API 失敗 = exit 1 で text 応答経路 (= Phase 1 正常) と区別する
+    process.stderr.write(`ERROR: ADK error event: ${adkErrorCode} — ${adkErrorMessage ?? '(no message)'}\n`);
+    process.exitCode = 1;
+  } else if (!toolWasCalled) {
+    // **Phase 1 では正常経路** (= Phase 0 `AnthropicVertexLlm` 制約により tool 呼出は成立しない)。
+    // Phase 2 拡張後は本経路は異常になる = LLM が tool を呼ばなかった事実を warn として残す。
     process.stderr.write(
-      'WARN: LLM did not invoke any tool (only text response). Review root agent instruction or test biblio choice.\n',
+      'INFO: LLM did not invoke any tool (text response only). Phase 1 では Phase 0 `AnthropicVertexLlm` 制約により正常。Phase 2 拡張後は LLM tool 呼出経路が成立予定。\n',
     );
   }
   if (!traceId) {
