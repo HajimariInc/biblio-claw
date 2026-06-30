@@ -2,7 +2,14 @@
  * llm-registry-setup のユニットテスト (M4-B Phase 0)。
  *
  * `LLMRegistry` は ADK の static `Map` を持つ singleton なので、test 間で内部状態が残る。
- * `vi.resetModules()` + 動的 import + `_testResetRegistration()` で test ごとに局所化する。
+ * `_testResetRegistration()` を `beforeEach` で呼び module-scope `registered` flag だけ
+ * リセットすることで、同一 module instance を保ったまま「register 直後の状態」を
+ * 各 test で再現する。`LLMRegistry` の `register` は同じ class なら上書き idempotent なので
+ * `Map.set` の累積でも問題ない。
+ *
+ * `vi.resetModules()` だと dynamic import 経路で `registerAnthropicVertexLlm` 内部の
+ * `AnthropicVertexLlm` と test の取り直した `AnthropicVertexLlm` が別 module instance になり、
+ * `LLMRegistry.resolve()` の戻り値と Object.is で不一致になる罠がある。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -10,41 +17,36 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-beforeEach(async () => {
-  // `vi.resetModules()` だと dynamic import 経路で `registerAnthropicVertexLlm` 内部の
-  // `AnthropicVertexLlm` と test の取り直した `AnthropicVertexLlm` が別 module instance に
-  // なり、`LLMRegistry.resolve()` の戻り値と Object.is で不一致になる経路がある。
-  // 同一 module instance を保ったまま `registered` flag だけリセットすれば、`LLMRegistry`
-  // の static `Map` への登録は idempotent (= 同じ class の上書き) なので副作用なく
-  // describe 跨ぎで完結する。失敗 test (= `LLMRegistry.register` 差し替え) のみ
-  // `vi.resetModules()` + `vi.doMock` を test 内で行う。
-  const { _testResetRegistration } = await import('./llm-registry-setup.js');
+// `vi.mock` は Vitest がホイストするため、静的 import はモック適用後に解決される。
+// 動的 import は不要 (= P9 fix: vi.resetModules() を使わない方針が確立しているなら静的 import が筋)。
+import { registerAnthropicVertexLlm, _testResetRegistration } from './llm-registry-setup.js';
+import { AnthropicVertexLlm } from './AnthropicVertexLlm.js';
+import { LLMRegistry } from '@google/adk';
+import { log } from '../log.js';
+
+beforeEach(() => {
+  // 各 test 前に `registered` flag をリセット。LLMRegistry の static `Map` は累積するが、
+  // AnthropicVertexLlm の登録は idempotent (= 同じ class の上書き) なので問題ない。
   _testResetRegistration();
+  vi.mocked(log.debug).mockReset();
+  vi.mocked(log.info).mockReset();
+  vi.mocked(log.warn).mockReset();
+  vi.mocked(log.error).mockReset();
 });
 
 describe('registerAnthropicVertexLlm — LLMRegistry 解決', () => {
-  it('register 後 LLMRegistry.resolve("claude-sonnet-4-6") が AnthropicVertexLlm を返す', async () => {
-    const { registerAnthropicVertexLlm } = await import('./llm-registry-setup.js');
-    const { AnthropicVertexLlm } = await import('./AnthropicVertexLlm.js');
-    const { LLMRegistry } = await import('@google/adk');
+  it('register 後 LLMRegistry.resolve("claude-sonnet-4-6") が AnthropicVertexLlm を返す', () => {
     registerAnthropicVertexLlm();
-    const cls = LLMRegistry.resolve('claude-sonnet-4-6');
-    expect(cls).toBe(AnthropicVertexLlm);
+    expect(LLMRegistry.resolve('claude-sonnet-4-6')).toBe(AnthropicVertexLlm);
   });
 
-  it('claude-opus-4-8 等の他の Claude モデル ID も同 class を返す (= ^claude-.*$ 仕様)', async () => {
-    const { registerAnthropicVertexLlm } = await import('./llm-registry-setup.js');
-    const { AnthropicVertexLlm } = await import('./AnthropicVertexLlm.js');
-    const { LLMRegistry } = await import('@google/adk');
+  it('claude-opus-4-8 等の他の Claude モデル ID も同 class を返す (= ^claude-.*$ 仕様)', () => {
     registerAnthropicVertexLlm();
     expect(LLMRegistry.resolve('claude-opus-4-8')).toBe(AnthropicVertexLlm);
     expect(LLMRegistry.resolve('claude-haiku-4-5')).toBe(AnthropicVertexLlm);
   });
 
-  it('gemini-1.5-pro 等の non-claude モデル ID は AnthropicVertexLlm を返さない', async () => {
-    const { registerAnthropicVertexLlm } = await import('./llm-registry-setup.js');
-    const { AnthropicVertexLlm } = await import('./AnthropicVertexLlm.js');
-    const { LLMRegistry } = await import('@google/adk');
+  it('gemini-1.5-pro 等の non-claude モデル ID は AnthropicVertexLlm を返さない', () => {
     registerAnthropicVertexLlm();
     // LLMRegistry.resolve は登録された pattern にマッチしなければ throw する。
     // AnthropicVertexLlm のみ登録した状態で gemini ID を引くと、no match で throw する。
@@ -59,9 +61,7 @@ describe('registerAnthropicVertexLlm — LLMRegistry 解決', () => {
 });
 
 describe('registerAnthropicVertexLlm — idempotent 性', () => {
-  it('二重呼出しても例外を投げず、2 回目は noop_already_registered で抜ける', async () => {
-    const { registerAnthropicVertexLlm } = await import('./llm-registry-setup.js');
-    const { log } = await import('../log.js');
+  it('二重呼出しても例外を投げず、2 回目は noop_already_registered で抜ける', () => {
     expect(() => {
       registerAnthropicVertexLlm();
       registerAnthropicVertexLlm();

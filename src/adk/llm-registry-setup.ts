@@ -4,13 +4,13 @@
  * `LlmAgent({model: 'claude-sonnet-4-6'})` の文字列モデル ID 解決を成立させるため、`main()`
  * 冒頭 (= OTel init は `--import` 経路で既に完了済の前提) で本関数を 1 回呼ぶ。`LLMRegistry`
  * の `register` は static `Map` の `set` (= 上書き許容) だが、二重登録の log noise を避けるため
- * module-scope flag で第 2 回以降を no-op 化する (= `src/instrumentation.ts` の起動時 1 回
- * 副作用パターン流儀)。
+ * module-scope flag で第 2 回以降を no-op 化する (= 起動時 1 回呼び出し規約: `main()` 冒頭の
+ * 副作用 hook を idempotent にする biblio-claw 標準)。
  *
  * 失敗時は throw で `main()` を抜けさせる: silent に握り潰すと `LlmAgent` 解決時に
  * `LLMRegistry.resolve('claude-sonnet-4-6')` が「Model not found」で死に、起動成功 → 命令実行で
- * 突然死というデバッグ困難経路を生む。biblio-claw の silent failure 撲滅方針 ([[silent_failure_hunter]])
- * と整合。
+ * 突然死というデバッグ困難経路を生む。biblio-claw の silent failure 撲滅方針 (= 失敗は必ず
+ * throw/log、握り潰さない) と整合。
  */
 import { LLMRegistry } from '@google/adk';
 
@@ -47,9 +47,16 @@ export function registerAnthropicVertexLlm(): void {
 }
 
 /**
- * テスト用 — module-scope `registered` flag をリセット。`LLMRegistry` の static `Map` が
- * test 間で残るため、`vi.resetModules()` 後に `import` し直して `registerAnthropicVertexLlm()` を
- * 呼び直す経路で初期化する。本番 code path から呼ばない (= `_test` prefix で意図を表明)。
+ * @internal テスト専用。本番コードから呼ばないこと。
+ *
+ * module-scope `registered` flag をリセットする。`LLMRegistry` の static `Map` への登録は
+ * idempotent (= `register` は `Map.set` で同じ class なら上書き) のため、test 間で flag だけ
+ * リセットすれば describe 跨ぎでも `LLMRegistry.resolve` が同じ class instance を返す。
+ *
+ * 代替経路 (= `vi.resetModules()`) は dynamic import 経路で `registerAnthropicVertexLlm` 内部の
+ * `AnthropicVertexLlm` と test の取り直した `AnthropicVertexLlm` が別 module instance になり、
+ * `LLMRegistry.resolve()` の戻り値と Object.is で不一致になる罠がある。詳細は
+ * `llm-registry-setup.test.ts` の `beforeEach` コメント参照。
  */
 export function _testResetRegistration(): void {
   registered = false;

@@ -2,15 +2,22 @@
  * AnthropicVertexLlm — ADK `BaseLlm` 継承による Vertex AI × Anthropic Claude wrap (M4-B Phase 0)。
  *
  * `@google/adk@^1.3.0` は Gemini / Apigee 系の `BaseLlm` 実装のみ同梱しており、Anthropic
- * Claude on Vertex AI 経路は自前 wrap が必要 ([[notes-adk-samples]] §wrap 必要性 確証完了)。
- * 本クラスは `LLMRegistry.register()` 経由で `LlmAgent({model: 'claude-sonnet-4-6'})` の
- * 文字列モデル ID 解決を成立させる ADK 配下 hierarchy への最初の足場 (Phase 1 sub-agent 化の前提)。
+ * Claude on Vertex AI 経路は自前 wrap が必要 (adk-js v1.3.0 時点の調査で確認: Gemini 系
+ * LLM は同梱、Anthropic 経路は自前 wrap 必須)。本クラスは `LLMRegistry.register()` 経由で
+ * `LlmAgent({model: 'claude-sonnet-4-6'})` の文字列モデル ID 解決を成立させる ADK 配下
+ * hierarchy への最初の足場 (Phase 1 sub-agent 化の前提)。
  *
  * **scope (Phase 0)**:
  *   - `generateContentAsync` の最小実装 (text part のみ抽出、非 streaming): MVP 1 命令完遂の前提
  *   - `connect()` (streaming) は throw NotImplemented (= PRD §作らないもの と整合)
- *   - 自前 span 計装 (= `src/biblio/vertex-client.ts:417-525` の写経): M4-A 観測経路 (1 trace 串刺し +
- *     `gen_ai.*` semconv) を ADK 経由でも継続させる
+ *   - 自前 span 計装 (= `src/biblio/vertex-client.ts:417-527` の属性設計を踏襲):
+ *     - span 名 `chat <model>`、`gen_ai.*` semconv 属性、`extractVertexUsage` 共有は同一
+ *     - context propagation: `tracer.startSpan` + `context.with(trace.setSpan(...), ...)` で
+ *       SDK 内部の HTTP 自動計装 span が本 span の子として trace 構造に組み込まれる
+ *       (= M4-A の「1 trace 串刺し + log↔trace リンク」を ADK 経由でも継続させる)。
+ *       writer 元 `callVertexAnthropic` は `tracer.startActiveSpan` を使うが、async generator
+ *       内では `startActiveSpan` のコールバック内で `yield` できないため、`startSpan` +
+ *       `context.with` の手動経路を採る (= 同等の context propagation を実現)
  *   - keyless ADC 経路: constructor に `accessToken` / `googleAuth` / `authClient` を明示渡さず、
  *     `@anthropic-ai/vertex-sdk` 内部の `google-auth-library@9.x` ADC 解決に委譲
  *     (= PRD 成功指標 §keyless 4 面アサート PASS の前提)
@@ -29,7 +36,7 @@
  *   top-level に re-export したら型 alias を差し替える方針 (= drop-in 互換)。
  */
 import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
-import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { SpanKind, SpanStatusCode, context, trace } from '@opentelemetry/api';
 import { BaseLlm } from '@google/adk';
 import type { BaseLlmConnection } from '@google/adk';
 
@@ -55,26 +62,27 @@ import { getTracer } from '../observability/index.js';
 type LlmRequest = Parameters<BaseLlm['generateContentAsync']>[0];
 type LlmResponse = ReturnType<BaseLlm['generateContentAsync']> extends AsyncGenerator<infer R, void> ? R : never;
 
-/** region 既定値 — `vertex-client.ts:50` と同値 (CLOUD_ML_REGION 未設定なら global)。 */
-const DEFAULT_REGION = 'global';
+/**
+ * `LlmRequest.config` の最小 narrow — Phase 0 では `maxOutputTokens` / `systemInstruction` のみ参照
+ * (= `ContentLike` と同じ「Phase 0 で必要なフィールドだけ structural 抽出」流儀)。
+ */
+type LlmRequestConfig = { maxOutputTokens?: number; systemInstruction?: unknown };
 
 /**
- * Anthropic SDK `messages.create` の戻り値 — Phase 0 で参照する最小フィールドのみ narrow して保持。
+ * Anthropic SDK `messages.create` の戻り値型を抽出 — `@anthropic-ai/sdk` の `Message` 型は
+ * subpath export 制限で直接 import 不可 (= `@anthropic-ai/vertex-sdk` 直接依存はあるが
+ * `@anthropic-ai/sdk` は transitive)。`Awaited<ReturnType<...>>` 経由で SDK の method
+ * signature から型を逆算する (= `LlmRequest` / `LlmResponse` を adk-js の `BaseLlm` 公開面
+ * から逆算するのと同じ流儀、`as unknown as` を排除して TypeScript の構造チェックを通す)。
  *
- * `content[].type === 'text'` の最初の要素から `.text` を取り出して `LlmResponse.content.parts[0].text`
- * に詰める (= 既存 `callVertexAnthropic:489` 流儀)。`usage.{input,output,cache_read_input}_tokens` は
- * `extractVertexUsage(_, 'anthropic')` で gen_ai semconv usage 属性に変換する。SDK の型を直接 import
- * すると `MessagesResource` の型変動を吸い込むため、最小 narrow で版差絶縁する。
+ * SDK overload は streaming/non-streaming で union を返す (= `Stream<RawMessageStreamEvent>
+ * | Message`)。Phase 0 は non-streaming 経路のみで `Message` 側を期待するため、`content`
+ * フィールドを持つ side だけ `Extract<...>` で narrow する (= Stream には `content` field なし)。
  */
-interface AnthropicVertexMessage {
-  content?: Array<{ type?: string; text?: string }>;
-  stop_reason?: string;
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cache_read_input_tokens?: number;
-  };
-}
+type SdkMessageResponse = Extract<Awaited<ReturnType<AnthropicVertex['messages']['create']>>, { content: unknown }>;
+
+/** region 既定値 — `vertex-client.ts:50` と同値 (CLOUD_ML_REGION 未設定なら global)。 */
+const DEFAULT_REGION = 'global';
 
 /**
  * `LlmRequest.contents` の最小 narrow — text part のみ抽出する Phase 0 用 (multi-modal は Phase 1+ で拡張)。
@@ -85,6 +93,16 @@ interface ContentLike {
   role?: string;
   parts?: Array<{ text?: string }>;
 }
+
+/**
+ * Phase 1+ で発生する可能性のあるロールマッピング表 — ADK の `Content.role` は将来 `'tool'` /
+ * `'function'` / `'system'` 等の拡張が入りうるが、Anthropic Messages API は `'user'` / `'assistant'`
+ * の 2 ロールのみを受け付け、かつ連続同一ロールを 400 で拒否する (= "roles must alternate")。
+ * 未知ロールは `'user'` に fallback するが、その瞬間 log.warn で可視化し、Phase 1+ で
+ * role mapping table の拡張が必要なことを即座に検知できるようにする。
+ */
+const ASSISTANT_ROLES = new Set(['model', 'assistant']);
+const USER_ROLES = new Set(['user']);
 
 /**
  * `BaseLlm` 継承による Anthropic Claude on Vertex AI ADK wrap。
@@ -128,10 +146,13 @@ export class AnthropicVertexLlm extends BaseLlm {
    * 非 streaming 単発生成。`@google/genai` 型の `LlmRequest.contents` を Anthropic `messages` 形式
    * (`[{role, content}]`) に最小変換し、SDK `messages.create` を叩き、`LlmResponse` に詰めて 1 yield する。
    *
-   * span 計装は既存 `callVertexAnthropic:417-525` と同じ structure (= `chat <model>` 名、
+   * span 計装は既存 `callVertexAnthropic:417-527` と同じ属性設計 (= `chat <model>` 名、
    * `gen_ai.operation.name` / `provider.name` / `request.model` / `server.address` 属性、
-   * usage 取得は `extractVertexUsage(_, 'anthropic')` 共有)。失敗時は span.recordException +
-   * setStatus(ERROR) + rethrow で M4-A の Cloud Trace × Logging リンクを継続させる。
+   * usage 取得は `extractVertexUsage(_, 'anthropic')` 共有)。SDK 呼出を `context.with` で本 span
+   * を active context にした状態でラップすることで、SDK 内部の HTTP 自動計装 span が子としてリンクされる。
+   * 失敗時は span.recordException + setStatus(ERROR) + `log.error` + rethrow で M4-A の Cloud Trace ×
+   * Logging リンクを継続させ、OTel が degraded fallback でも構造化ログに残るようにする
+   * (= biblio-claw §silent failure 撲滅方針: 失敗は必ず throw/log、握り潰さない)。
    */
   override async *generateContentAsync(
     llmRequest: LlmRequest,
@@ -148,27 +169,54 @@ export class AnthropicVertexLlm extends BaseLlm {
         [SERVER_ADDRESS]: this.serverAddress(),
       },
     });
+    // span を active context に設定 (= SDK 内部の OTel 計装 span が子としてリンクされる前提)。
+    const spanCtx = trace.setSpan(context.active(), span);
     try {
       const messages = this.convertContentsToAnthropicMessages(llmRequest);
+
+      // 空 messages ガード (= Phase 1+ で全 parts が image/audio/function-call のみのとき発火)。
+      // Anthropic API は空 messages を 400 で拒否するため、SDK を呼ぶ前に EMPTY_MESSAGES で
+      // fail-fast し span にも ERROR を立てる (= silent failure 撲滅)。
+      if (messages.length === 0) {
+        log.warn('AnthropicVertexLlm: no usable text content in request', {
+          event: 'adk.anthropic_vertex_llm.empty_messages',
+          outcome: 'empty_messages',
+          model: this.model,
+        });
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: 'No text content found in request contents',
+        });
+        yield {
+          errorCode: 'EMPTY_MESSAGES',
+          errorMessage: 'No text content found in request contents',
+        } as LlmResponse;
+        return;
+      }
+
       // `LlmRequest.config` (= `@google/genai` の `GenerateContentConfig`) は version 差で
-      // shape が変わるため、structural narrow で取り出す。`maxOutputTokens` は ADK が一般的に
-      // expose する field、`systemInstruction` も同様。共に optional。
-      const config = (llmRequest as { config?: { maxOutputTokens?: number; systemInstruction?: unknown } }).config;
+      // shape が変わるため、structural narrow (`LlmRequestConfig`) で取り出す。
+      const config = (llmRequest as { config?: LlmRequestConfig }).config;
       const maxTokens = config?.maxOutputTokens ?? 1024;
-      const system = config?.systemInstruction;
+      const flatSystem = config?.systemInstruction ? this.flattenSystemInstruction(config.systemInstruction) : '';
 
       // SDK は abortSignal を `fetchOptions` 経由で受ける設計 (`@anthropic-ai/sdk` 流儀)、
       // `messages.create` の第 2 引数で渡す。`maxRetries` は SDK default (2) に任せる
       // (= 既存 `callVertexAnthropic` は retry なし、Phase 0 は SDK default 流儀に倒す)。
-      const response = (await this.client.messages.create(
-        {
-          model: this.model,
-          max_tokens: maxTokens,
-          messages,
-          ...(system ? { system: this.flattenSystemInstruction(system) } : {}),
-        },
-        { signal: abortSignal },
-      )) as unknown as AnthropicVertexMessage;
+      //
+      // `system: ''` は OneCLI proxy 経路で 400 を引き起こすため flatten 後ガードで除外
+      // (= `vertex-client.ts:445` と同じ防御パターン)。
+      const response: SdkMessageResponse = await context.with(spanCtx, () =>
+        this.client.messages.create(
+          {
+            model: this.model,
+            max_tokens: maxTokens,
+            messages,
+            ...(flatSystem ? { system: flatSystem } : {}),
+          },
+          { signal: abortSignal },
+        ),
+      );
 
       const usage = extractVertexUsage(response, 'anthropic');
       if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
@@ -177,11 +225,28 @@ export class AnthropicVertexLlm extends BaseLlm {
         span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage.cache_read_input_tokens);
       }
 
-      yield this.toLlmResponse(response);
+      const llmResponse = this.toLlmResponse(response);
+      // EMPTY_TEXT 経路で SDK は成功 HTTP 応答を返すが意味的には失敗 = span ERROR を立てて
+      // Cloud Trace UI で「正常 SUCCESS」として記録される silent failure を防ぐ。
+      const errorCode = (llmResponse as { errorCode?: string }).errorCode;
+      if (errorCode) {
+        const errorMessage = (llmResponse as { errorMessage?: string }).errorMessage;
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage });
+      }
+      yield llmResponse;
     } catch (err) {
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+      // OTel が degraded fallback (= `instrumentation.ts` の init failure 経路) のとき
+      // `span.recordException` / `setStatus` は全部 no-op になるため、構造化ログにも残す
+      // (= biblio-claw §silent failure 撲滅方針: 失敗は必ず log、握り潰さない)。
+      log.error('AnthropicVertex SDK call failed', {
+        event: 'adk.anthropic_vertex_llm.generate',
+        outcome: 'failure',
+        model: this.model,
+        err: errorRecord.message,
+      });
       throw err;
     } finally {
       span.end();
@@ -207,7 +272,9 @@ export class AnthropicVertexLlm extends BaseLlm {
    *
    * Phase 0 scope:
    *   - text part のみ抽出 (= multi-modal / function_call は Phase 1+ で sub-agent 化に伴い拡張)
-   *   - `role: 'model'` (= Gemini 流儀) は `'assistant'` にマップ (= Anthropic Messages API 流儀)
+   *   - `role: 'model'` (= Gemini 流儀) は `'assistant'` にマップ、`'user'` はそのまま
+   *   - 未知ロール (`'tool'` / `'function'` / `'system'` / undefined) は `'user'` に fallback
+   *     しつつ `log.warn` で可視化 (Phase 1+ で role mapping table の拡張が必要)
    *   - parts が複数あれば改行で join (= 1 turn 1 文字列が Anthropic 流儀)
    *   - text が空文字 / 不在の turn は skip (= 空 messages で SDK が 400 を返す経路を避ける)
    */
@@ -217,12 +284,25 @@ export class AnthropicVertexLlm extends BaseLlm {
     const contents = (llmRequest as { contents?: ContentLike[] }).contents ?? [];
     const result: Array<{ role: 'user' | 'assistant'; content: string }> = [];
     for (const c of contents) {
-      const role: 'user' | 'assistant' = c.role === 'model' ? 'assistant' : 'user';
+      const originalRole = c.role ?? '(undefined)';
+      let mappedRole: 'user' | 'assistant';
+      if (ASSISTANT_ROLES.has(c.role ?? '')) {
+        mappedRole = 'assistant';
+      } else if (USER_ROLES.has(c.role ?? '')) {
+        mappedRole = 'user';
+      } else {
+        log.warn('AnthropicVertexLlm: unsupported role mapped to user', {
+          event: 'adk.anthropic_vertex_llm.role_mapping',
+          outcome: 'unknown_role_mapped_to_user',
+          original_role: originalRole,
+        });
+        mappedRole = 'user';
+      }
       const text = (c.parts ?? [])
         .map((p) => (typeof p.text === 'string' ? p.text : ''))
         .filter((t) => t.length > 0)
         .join('\n');
-      if (text) result.push({ role, content: text });
+      if (text) result.push({ role: mappedRole, content: text });
     }
     return result;
   }
@@ -238,7 +318,12 @@ export class AnthropicVertexLlm extends BaseLlm {
   private flattenSystemInstruction(systemInstruction: unknown): string {
     if (typeof systemInstruction === 'string') return systemInstruction;
     if (Array.isArray(systemInstruction)) {
-      return systemInstruction.map((c) => this.flattenSystemInstruction(c)).join('\n');
+      // 空 string を filter してから join (= 全要素が空のとき `'\n'` 等の偽 truthy 文字列を
+      // 返すと caller の C1 ガードを通過して `system: '\n'` が SDK に渡る経路を防ぐ)。
+      return systemInstruction
+        .map((c) => this.flattenSystemInstruction(c))
+        .filter((s) => s.length > 0)
+        .join('\n');
     }
     if (typeof systemInstruction === 'object' && systemInstruction !== null) {
       const parts = (systemInstruction as ContentLike).parts;
@@ -253,15 +338,24 @@ export class AnthropicVertexLlm extends BaseLlm {
   }
 
   /**
-   * SDK 戻り値の `content[type=text].text` を取り出して `LlmResponse` (= `@google/genai` の `Content`
-   * 型相当) に詰める。`type === 'text'` の最初のブロックを採用 (= 既存 `callVertexAnthropic:489`
-   * 流儀、`tool_use` 等が混ざる経路への防御)。text 不在は `errorCode/errorMessage` で表現
-   * (= ADK の `LlmResponse` 流儀に整合)。
+   * SDK 戻り値 (`@anthropic-ai/sdk` の `Message` 型、`content[].type === 'text'` の最初のブロックを
+   * 採用) を ADK の `LlmResponse` (= `@google/genai` の `Content` 型相当) に詰める。
+   * `type === 'text'` の最初のブロックを採用 (= 既存 `callVertexAnthropic:489` 流儀、`tool_use` 等が
+   * 混ざる経路への防御)。text 不在は `errorCode/errorMessage` で表現し、caller 側で span ERROR を
+   * 立てる経路 (= `generateContentAsync` 内で errorCode 検知時に `span.setStatus(ERROR)` 呼出) を取る。
+   * テキスト不在自体の `log.warn` もここで吐く (= biblio-claw §silent failure 撲滅: 成功 HTTP 応答だが
+   * 意味的失敗のケースを構造化ログで可視化、OTel degraded 状態でも追跡可能)。
    */
-  private toLlmResponse(response: AnthropicVertexMessage): LlmResponse {
+  private toLlmResponse(response: SdkMessageResponse): LlmResponse {
     const textBlock = response.content?.find((c) => c?.type === 'text');
-    const text = textBlock?.text ?? '';
+    const text = textBlock && 'text' in textBlock ? textBlock.text : '';
     if (!text) {
+      log.warn('AnthropicVertex returned no text content', {
+        event: 'adk.anthropic_vertex_llm.empty_text',
+        outcome: 'empty_text',
+        model: this.model,
+        stop_reason: response.stop_reason ?? 'unknown',
+      });
       return {
         errorCode: 'EMPTY_TEXT',
         errorMessage: `AnthropicVertex returned no text content (stop_reason=${response.stop_reason ?? 'unknown'})`,
