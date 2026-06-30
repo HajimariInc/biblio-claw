@@ -11,7 +11,7 @@
 ## クイックスタート (biblio-claw, local)
 
 **前提**:
-- Node.js 22+ / pnpm / bun
+- Node.js 24.13+ / pnpm / bun
 - Docker Desktop または Docker Engine
 - gcloud CLI + ADC ログイン済 (`gcloud auth application-default login --project hajimari-ai-hackathon-2026`)
 - `.env` 投入 — `.env.example` を雛形に `ANTHROPIC_VERTEX_PROJECT_ID` / `GH_APP_ID` / `GH_INSTALLATION_ID` / `GH_APP_PEM_PATH` / `SLACK_BOT_TOKEN` / `SHELF_REPO_OWNER` 等を手動で埋める
