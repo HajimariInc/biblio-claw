@@ -27,7 +27,8 @@
 #     biblio-claw:m1-p1
 #
 # 構成:
-#   - base: node:22-slim (engines.node >= 20、Phase 1 と同 runtime)
+#   - base: node:24-slim (engines.node >= 24.13.0、M4-B Phase 0 で Node 24 LTS 化、
+#           `@google/adk@^1.3.0` + `better-sqlite3@12.x` (Node 24 prebuilt binary 対応) 前提)
 #   - tools: git (group-init で参照される可能性) / ca-certificates (HTTPS)
 #   - pnpm: corepack で `packageManager: pnpm@10.33.0` を有効化
 #   - dependencies: pnpm install --frozen-lockfile
@@ -37,7 +38,7 @@
 #   - runtime: scripts/ (host から呼ばれる onecli-*.sh / sign_jwt.cjs 等) +
 #     空 groups/ (host が listing するだけ、install 固有 state は image に焼かない)
 
-FROM node:22-slim
+FROM node:24-slim
 
 WORKDIR /app
 

@@ -5,6 +5,7 @@
  * start delivery polls, start sweep, handle shutdown.
  */
 import { getDsnProvider, getSecretProvider } from './adapters/index.js';
+import { registerAnthropicVertexLlm } from './adk/llm-registry-setup.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { incrementBootCounter } from './boot-counter.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
@@ -85,6 +86,11 @@ import { shutdownOtel } from './observability/index.js';
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
+
+  // M4-B Phase 0: ADK `LLMRegistry` に `AnthropicVertexLlm` を登録。`LlmAgent({model:
+  // 'claude-sonnet-4-6'})` の文字列モデル ID 解決経路を成立させる (Phase 1 sub-agent 化の前提)。
+  // OTel init は `--import` 経路で main() より前に完了済 = ここでは register のみ。
+  registerAnthropicVertexLlm();
 
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
