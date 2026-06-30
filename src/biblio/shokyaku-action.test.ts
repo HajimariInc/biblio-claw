@@ -185,6 +185,40 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     expect(notifiedText).toContain('step=POST git/blobs');
   });
 
+  it('shokyaku() ok=false (config_error) → notify に「焼却失敗 (config_error)」 + detail (env 欠落時)', async () => {
+    shokyakuMock.mockResolvedValue({
+      ok: false,
+      biblioName: 'owner--repo',
+      reason: 'config_error',
+      detail: 'shelve: required env missing: SHELF_REPO_OWNER',
+    });
+    const notifyMock = vi.fn();
+    await approvalHandler({
+      session: { id: 'sess-x' } as never,
+      payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
+      userId: 'slack:U-DEN',
+      notify: notifyMock,
+    });
+    const notifiedText = notifyMock.mock.calls[0][0] as string;
+    expect(notifiedText).toContain('焼却失敗 (config_error)');
+    expect(notifiedText).toContain('owner--repo');
+    expect(notifiedText).toContain('required env missing: SHELF_REPO_OWNER');
+  });
+
+  it('payload 不正 (biblioName 空) → notify で payload 破損を通知 (shokyaku 未呼び)', async () => {
+    const notifyMock = vi.fn();
+    await approvalHandler({
+      session: { id: 'sess-x' } as never,
+      payload: { biblioName: '', category: 'biblio-ai' },
+      userId: 'slack:U-DEN',
+      notify: notifyMock,
+    });
+    expect(shokyakuMock).not.toHaveBeenCalled();
+    const notifiedText = notifyMock.mock.calls[0][0] as string;
+    expect(notifiedText).toContain('焼却エラー');
+    expect(notifiedText).toContain('payload が壊れています');
+  });
+
   it('shokyaku() throw を握って notify (internal)', async () => {
     shokyakuMock.mockRejectedValue(new Error('unexpected'));
     const notifyMock = vi.fn();

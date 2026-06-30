@@ -30,6 +30,7 @@ vi.mock('undici', () => ({
   fetch: (url: string, init?: { method?: string; body?: string }) => fetchMock(url, init),
 }));
 
+import { log } from '../log.js';
 import { readEnvFile } from '../env.js';
 import { unshelve } from './unshelve.js';
 
@@ -199,6 +200,39 @@ describe('unshelve — 正常系 (削除 PR 作成)', () => {
       path: '.claude-plugin/marketplace.json',
       sha: 'new-mp-blob-sha',
     });
+  });
+});
+
+describe('unshelve — config_error (env 欠落)', () => {
+  it('SHELF_REPO_OWNER 等の必須 env が欠落していると config_error reason で fail を返す', async () => {
+    // readEnvFile が空オブジェクトを返すと shelf-gh.ts:readShelveEnv が
+    // `shelve: required env missing: SHELF_REPO_OWNER, ...` を throw する。
+    vi.mocked(readEnvFile).mockReturnValueOnce({});
+    vi.mocked(log.warn).mockClear();
+
+    const result = await unshelve({
+      biblioName: 'owner--repo',
+      category: 'biblio-dev',
+      opLabel: '禁書',
+      branchPrefix: 'enkin',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return; // 型ガード
+    expect(result.reason).toBe('config_error');
+    expect(result.detail).toMatch(/required env missing: SHELF_REPO_OWNER/);
+    expect(result.biblioName).toBe('owner--repo');
+    // env catch は marketplace 取得前に早期 return するため、ネットワーク呼び出しは発生しない
+    expect(fetchMock).not.toHaveBeenCalled();
+    // 構造化ログキー (= BQ sink の event/outcome 集計に乗ること) の永続 guard
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'unshelve: env not ready',
+      expect.objectContaining({
+        event: 'biblio.unshelve',
+        outcome: 'config_error',
+        biblioName: 'owner--repo',
+      }),
+    );
   });
 });
 

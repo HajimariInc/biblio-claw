@@ -208,6 +208,25 @@ describe('shelve_biblio_multi handler — 成功/失敗パス', () => {
     expect(text).toContain('既存 entry');
   });
 
+  it('shelveMulti 失敗 (config_error) — env 欠落時の最終 patron 通知文字列を組み立てる', async () => {
+    shelveMultiMock.mockResolvedValue({
+      ok: false,
+      reason: 'config_error',
+      detail: 'shelve: required env missing: SHELF_REPO_OWNER',
+      items: [{ biblioName: 'owner--repo--skill-a', category: 'biblio-dev' }],
+    });
+    await handler(
+      {
+        items: [{ name: 'owner--repo--skill-a', category: 'biblio-dev', reason: 'r1' }],
+      },
+      dummySession,
+      dummyDb,
+    );
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('陳列失敗 (config_error)');
+    expect(text).toContain('required env missing: SHELF_REPO_OWNER');
+  });
+
   it('shelveMulti 失敗 (duplicate_biblio_name) で失敗テキストを返す', async () => {
     shelveMultiMock.mockResolvedValue({
       ok: false,

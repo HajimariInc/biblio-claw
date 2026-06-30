@@ -127,6 +127,21 @@ describe('shelve_biblio handler — 成功/失敗パス', () => {
     expect(text).toContain('step=POST git/blobs');
   });
 
+  it('config_error 失敗テキストを返す (env 欠落時、biblioName 中間挿入形式)', async () => {
+    shelveMock.mockResolvedValue({
+      ok: false,
+      biblioName: 'owner--repo',
+      reason: 'config_error',
+      detail: 'shelve: required env missing: SHELF_REPO_OWNER',
+    });
+    await handler({ name: 'owner--repo', category: 'biblio-dev' }, dummySession, dummyDb);
+    const text = getWrittenText() ?? '';
+    expect(text).toContain('陳列失敗 (config_error)');
+    // single 経路は biblioName を中間に挿入する (multi 経路と form が異なる)
+    expect(text).toContain('owner--repo');
+    expect(text).toContain('required env missing: SHELF_REPO_OWNER');
+  });
+
   it('shelve 自体が throw しても writeBack に倒す (host を巻き込まない)', async () => {
     shelveMock.mockRejectedValue(new Error('unexpected'));
     await expect(

@@ -299,7 +299,9 @@ export type UnshelveFailureReason =
   /** Git Data API / Pulls API の non-2xx response (step + status + body を detail に含む)。 */
   | 'github_api_error'
   /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
-  | 'invalid_category';
+  | 'invalid_category'
+  /** 必須 env 欠落 = 設定不備 (shelve 経路の同 reason と同義、`readShelveEnv()` throw = GitHub 呼出前のため `github_api_error` と mutually-exclusive)。env 4 件の具体名は `ShelveFailureReason.config_error` 参照 (issue #50)。 */
+  | 'config_error';
 
 /**
  * 解除結果。discriminated union — `ok` で分岐する。

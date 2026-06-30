@@ -164,6 +164,26 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     expect(notifiedText).toContain('既に解除済');
   });
 
+  it('enkin() ok=false (config_error) → notify に「禁書失敗 (config_error)」 + detail (env 欠落時)', async () => {
+    enkinMock.mockResolvedValue({
+      ok: false,
+      biblioName: 'owner--repo',
+      reason: 'config_error',
+      detail: 'shelve: required env missing: SHELF_REPO_OWNER',
+    });
+    const notifyMock = vi.fn();
+    await approvalHandler({
+      session: { id: 'sess-x' } as never,
+      payload: { biblioName: 'owner--repo', category: 'biblio-dev' },
+      userId: 'slack:U-DEN',
+      notify: notifyMock,
+    });
+    const notifiedText = notifyMock.mock.calls[0][0] as string;
+    expect(notifiedText).toContain('禁書失敗 (config_error)');
+    expect(notifiedText).toContain('owner--repo');
+    expect(notifiedText).toContain('required env missing: SHELF_REPO_OWNER');
+  });
+
   it('enkin() throw を握って notify (internal) — host を巻き込まない', async () => {
     enkinMock.mockRejectedValue(new Error('unexpected'));
     const notifyMock = vi.fn();
