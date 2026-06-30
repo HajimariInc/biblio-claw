@@ -186,3 +186,78 @@ describe('LLMRegistry 状態漏れ防止', () => {
     expect(LLMRegistry.resolve('claude-opus-4-8')).toBe(AnthropicVertexLlm);
   });
 });
+
+describe('runEphemeral — LLM 自律 tool 呼出 (Phase 2 で埋め戻し)', () => {
+  /**
+   * Phase 0 `AnthropicVertexLlm` の 2 つの構造的制約 (config.tools 非読出 / tool_use 非変換) を
+   * Phase 2 で消化したことで、本 integration test が成立可能になった (= Phase 1 plan §逸脱で
+   * 「Phase 2 で埋め戻す」と確定した分の埋め戻し)。
+   *
+   * mock 経路:
+   *   1. messagesCreateMock 1 回目: Claude が `tool_use` 単一 block を返す (= acquire_biblio 自律呼出)
+   *   2. AnthropicVertexLlm.toLlmResponse が functionCall part に変換 → ADK runner が dispatch
+   *   3. acquire-tool の execute から acquireMock が呼ばれる (= 成功 result を返す)
+   *   4. messagesCreateMock 2 回目: Claude が text で完了応答 (= tool_result を踏まえた応答)
+   *   5. ADK runner が text part を最終 event として yield
+   */
+  it('LLM が tool_use を返したとき acquireMock が呼ばれ、最終 event は text 応答', async () => {
+    messagesCreateMock
+      .mockResolvedValueOnce({
+        content: [
+          {
+            type: 'tool_use',
+            id: 'toolu_01',
+            name: 'acquire_biblio',
+            input: { repo: 'wf/test' },
+          },
+        ],
+        usage: { input_tokens: 30, output_tokens: 10 },
+        stop_reason: 'tool_use',
+      })
+      .mockResolvedValueOnce({
+        content: [{ type: 'text', text: '仕入れ完了しました: wf--test' }],
+        usage: { input_tokens: 45, output_tokens: 8 },
+        stop_reason: 'end_turn',
+      });
+
+    acquireMock.mockResolvedValue({
+      ok: true,
+      biblioName: 'wf--test',
+      quarantinePath: '/tmp/quarantine/wf--test',
+    });
+
+    const runner = buildRunner(buildRootAgent());
+    const events: Array<{ content?: { parts?: Array<{ text?: string }> } }> = [];
+    for await (const event of runner.runEphemeral({
+      userId: 'test-user',
+      newMessage: { role: 'user', parts: [{ text: 'acquire wf/test' }] },
+    })) {
+      events.push(event as { content?: { parts?: Array<{ text?: string }> } });
+    }
+
+    // acquireMock が tool 経由で呼ばれた (= LLM 自律 tool 呼出経路成立)
+    expect(acquireMock).toHaveBeenCalledTimes(1);
+    expect(acquireMock).toHaveBeenCalledWith(
+      { repo: 'wf/test' },
+      expect.objectContaining({
+        ctx: expect.objectContaining({
+          requestId: expect.any(String),
+          sessionId: expect.any(String),
+        }),
+      }),
+    );
+    // 他 tool は呼ばれていない
+    expect(inspectMock).not.toHaveBeenCalled();
+    expect(shelveMock).not.toHaveBeenCalled();
+
+    // messages.create は 2 回呼ばれている (= tool_use → tool_result → text の round-trip)
+    expect(messagesCreateMock).toHaveBeenCalledTimes(2);
+
+    // 最終 event の text に「仕入れ完了」が含まれる
+    const lastTextEvent = events
+      .map((e) => e.content?.parts?.[0]?.text)
+      .filter((t): t is string => typeof t === 'string' && t.length > 0)
+      .pop();
+    expect(lastTextEvent).toContain('仕入れ完了');
+  });
+});

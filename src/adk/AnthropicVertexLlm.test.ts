@@ -391,3 +391,292 @@ describe('AnthropicVertexLlm — supportedModels', () => {
     expect(re.test('gemini-2.5-flash')).toBe(false);
   });
 });
+
+describe('AnthropicVertexLlm — tool routing (Phase 2)', () => {
+  /**
+   * Phase 2 で導入した 3 つの拡張経路を unit test で固定する:
+   *   (a) `config.tools` → `toAnthropicTools` → `messages.create({tools})` で Anthropic API に
+   *       tool 定義が届く
+   *   (b) `tool_use` 単一 block → `functionCall` part に変換 (= `id` 保持)
+   *   (c) `tool_use` 複数 block → 複数 `functionCall` part に変換 (= multi-block 対応)
+   *
+   * これにより Phase 0 で Phase 2 申し送りとして残した TODO 3 つ (LlmRequestConfig.tools /
+   * messages.create({tools}) / toLlmResponse の tool_use 変換) が消化された状態の回帰を防ぐ。
+   */
+  function llmRequestWithTools(text: string, tools: Array<{ functionDeclarations?: unknown[] }>) {
+    return {
+      contents: [{ role: 'user', parts: [{ text }] }],
+      config: { tools },
+    } as unknown as Parameters<AnthropicVertexLlm['generateContentAsync']>[0];
+  }
+
+  it('config.tools 経路: toAnthropicTools 変換後の tools が messages.create に渡る', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const req = llmRequestWithTools('test', [
+      {
+        functionDeclarations: [
+          {
+            name: 'acquire_biblio',
+            description: 'Acquire a skill',
+            parameters: { type: 'OBJECT', properties: { repo: { type: 'STRING' } } },
+          },
+        ],
+      },
+    ]);
+    for await (const _ of llm.generateContentAsync(req)) {
+      void _;
+    }
+    expect(messagesCreateMock).toHaveBeenCalledTimes(1);
+    const callArgs = messagesCreateMock.mock.calls[0][0] as {
+      tools?: Array<{ name: string; description?: string; input_schema: Record<string, unknown> }>;
+    };
+    expect(callArgs.tools).toEqual([
+      {
+        name: 'acquire_biblio',
+        description: 'Acquire a skill',
+        input_schema: {
+          type: 'object',
+          properties: { repo: { type: 'string' } },
+        },
+      },
+    ]);
+  });
+
+  it('config.tools が undefined / 空配列のとき tools 引数は SDK に渡らない (= 既存経路保持)', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    // config.tools 指定なし (= llmRequest 既存パターン)
+    await llm.generateContentAsync(llmRequest('hello')).next();
+    const callArgs = messagesCreateMock.mock.calls[0][0] as { tools?: unknown };
+    expect(callArgs.tools).toBeUndefined();
+
+    // 空 entry でも tools は渡らない (= toAnthropicTools が空配列を返す経路)
+    messagesCreateMock.mockReset();
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+    });
+    await llm.generateContentAsync(llmRequestWithTools('hello', [{ functionDeclarations: [] }])).next();
+    const callArgs2 = messagesCreateMock.mock.calls[0][0] as { tools?: unknown };
+    expect(callArgs2.tools).toBeUndefined();
+  });
+
+  it('tool_use 単一 block を functionCall part に変換 + id 保持', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          id: 'toolu_01abc',
+          name: 'acquire_biblio',
+          input: { repo: 'wf/test' },
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: 'tool_use',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const results: unknown[] = [];
+    for await (const r of llm.generateContentAsync(llmRequest('acquire wf/test'))) {
+      results.push(r);
+    }
+    expect(results).toHaveLength(1);
+    const parts = (results[0] as { content: { parts: unknown[] } }).content.parts;
+    expect(parts).toEqual([
+      {
+        functionCall: { id: 'toolu_01abc', name: 'acquire_biblio', args: { repo: 'wf/test' } },
+      },
+    ]);
+  });
+
+  it('multi-block: tool_use 複数 block を複数 functionCall part に変換', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [
+        { type: 'tool_use', id: 'toolu_01a', name: 'acquire_biblio', input: { repo: 'wf/a' } },
+        { type: 'tool_use', id: 'toolu_01b', name: 'inspect_biblio', input: { biblioName: 'wf--a' } },
+      ],
+      usage: { input_tokens: 10, output_tokens: 5 },
+      stop_reason: 'tool_use',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const results: unknown[] = [];
+    for await (const r of llm.generateContentAsync(llmRequest('do both'))) {
+      results.push(r);
+    }
+    const parts = (results[0] as { content: { parts: unknown[] } }).content.parts;
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({
+      functionCall: { id: 'toolu_01a', name: 'acquire_biblio', args: { repo: 'wf/a' } },
+    });
+    expect(parts[1]).toEqual({
+      functionCall: { id: 'toolu_01b', name: 'inspect_biblio', args: { biblioName: 'wf--a' } },
+    });
+  });
+
+  it('tool_use と text 混在: tool_use 優先で text 無視 (= 単純化された変換契約)', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [
+        { type: 'text', text: 'これから tool を呼びます' },
+        { type: 'tool_use', id: 'toolu_01', name: 'acquire_biblio', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const results: unknown[] = [];
+    for await (const r of llm.generateContentAsync(llmRequest('q'))) {
+      results.push(r);
+    }
+    const parts = (results[0] as { content: { parts: unknown[] } }).content.parts;
+    // tool_use のみ抽出され、text は dropped
+    expect(parts).toHaveLength(1);
+    expect((parts[0] as { functionCall: unknown }).functionCall).toBeDefined();
+  });
+
+  it('functionResponse part (= 前回 tool 結果) を Anthropic tool_result block に変換 (Phase 2)', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'received' }],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const req = {
+      contents: [
+        { role: 'user', parts: [{ text: 'acquire wf/test' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'toolu_01', name: 'acquire_biblio', args: { repo: 'wf/test' } } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'toolu_01',
+                name: 'acquire_biblio',
+                response: { ok: true, biblioName: 'wf--test' },
+              },
+            },
+          ],
+        },
+      ],
+      config: {},
+    } as unknown as Parameters<AnthropicVertexLlm['generateContentAsync']>[0];
+    await llm.generateContentAsync(req).next();
+    const callArgs = messagesCreateMock.mock.calls[0][0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    expect(callArgs.messages).toHaveLength(3);
+    expect(callArgs.messages[0]).toEqual({ role: 'user', content: 'acquire wf/test' });
+    expect(callArgs.messages[1]).toEqual({
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'toolu_01', name: 'acquire_biblio', input: { repo: 'wf/test' } }],
+    });
+    expect(callArgs.messages[2]).toEqual({
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_01',
+          content: JSON.stringify({ ok: true, biblioName: 'wf--test' }),
+        },
+      ],
+    });
+  });
+
+  it('functionResponse の response が string ならそのまま tool_result.content にする', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const req = {
+      contents: [{ role: 'user', parts: [{ functionResponse: { id: 'toolu_X', response: 'string result' } }] }],
+      config: {},
+    } as unknown as Parameters<AnthropicVertexLlm['generateContentAsync']>[0];
+    await llm.generateContentAsync(req).next();
+    const callArgs = messagesCreateMock.mock.calls[0][0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const blocks = callArgs.messages[0].content as Array<{ type: string; content?: string }>;
+    expect(blocks[0]).toEqual({
+      type: 'tool_result',
+      tool_use_id: 'toolu_X',
+      content: 'string result',
+    });
+  });
+
+  it('multi-block message (= text + functionCall 混在) を 1 message に配列 content で詰める', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const req = {
+      contents: [
+        {
+          role: 'model',
+          parts: [
+            { text: 'I will call acquire' },
+            { functionCall: { id: 'toolu_99', name: 'acquire_biblio', args: { repo: 'a/b' } } },
+          ],
+        },
+      ],
+      config: {},
+    } as unknown as Parameters<AnthropicVertexLlm['generateContentAsync']>[0];
+    await llm.generateContentAsync(req).next();
+    const callArgs = messagesCreateMock.mock.calls[0][0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    expect(callArgs.messages[0].role).toBe('assistant');
+    expect(callArgs.messages[0].content).toEqual([
+      { type: 'text', text: 'I will call acquire' },
+      { type: 'tool_use', id: 'toolu_99', name: 'acquire_biblio', input: { repo: 'a/b' } },
+    ]);
+  });
+
+  it('functionCall に id が無いと skip (= silent failure 撲滅)', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const req = {
+      contents: [
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'no_id', args: {} } }, { text: 'fallback' }],
+        },
+      ],
+      config: {},
+    } as unknown as Parameters<AnthropicVertexLlm['generateContentAsync']>[0];
+    await llm.generateContentAsync(req).next();
+    const callArgs = messagesCreateMock.mock.calls[0][0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    expect(callArgs.messages[0]).toEqual({ role: 'assistant', content: 'fallback' });
+  });
+
+  it('tool_use block の id が string でないとき skip + 残る block 0 件で text 経路へ', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [
+        // id が undefined: predicate で skip
+        { type: 'tool_use', name: 'acquire_biblio', input: {} },
+        { type: 'text', text: 'text fallback' },
+      ],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const results: unknown[] = [];
+    for await (const r of llm.generateContentAsync(llmRequest('q'))) {
+      results.push(r);
+    }
+    const parts = (results[0] as { content: { parts: Array<{ text?: string }> } }).content.parts;
+    expect(parts[0].text).toBe('text fallback');
+  });
+});

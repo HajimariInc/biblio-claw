@@ -58,10 +58,21 @@ import { isFinalResponse } from '@google/adk';
 import { registerAnthropicVertexLlm } from '../src/adk/llm-registry-setup.js';
 import { buildRootAgent } from '../src/adk/root-agent.js';
 import { buildRunner } from '../src/adk/runner.js';
+import { initHostProxy } from '../src/biblio/host-proxy.js';
+import { setupVertexProxy } from '../src/biblio/vertex-client.js';
 import { shutdownOtel } from '../src/observability/index.js';
 import { log } from '../src/log.js';
 
 async function main(): Promise<void> {
+  // Phase 2 追加: host proxy 初期化 — `acquire()` 内 `github.fetch` を OneCLI proxy 経由に
+  // 乗せて GH App installation token を注入する経路を有効化する。本番 main() (`src/index.ts`)
+  // で実施されている初期化と同等 (= verify script 内では touch しない方針の `src/index.ts` を
+  // 経由しないため、main() 同等の bootstrap を verify 内で複製する)。Phase 1 では LLM が
+  // tool を呼ばないため `acquire()` が走らず本問題は発覚しなかった = Phase 2 で tool routing
+  // 成立後に表面化した inflight bug の補正。
+  await initHostProxy();
+  setupVertexProxy();
+
   // LLM registry hook — instrumentation.ts は `--import` 経路で main() より前に起動済み前提。
   registerAnthropicVertexLlm();
 
