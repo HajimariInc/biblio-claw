@@ -190,7 +190,7 @@ esac
 # Pod 起動以降の全期間 (--since-time=$pod_start_time) で grep する。"Channel
 # credentials missing" は最新状態の鮮度確保のため --since=120s を維持する
 # (= "missing → credentials 投入 → 手動 Pod restart" の複合履歴で旧 missing に
-# 誤マッチする偽陽性回避、設計意図コメント @verify-phase-2-wiring.sh:170-172
+# 誤マッチする偽陽性回避、設計意図コメント @verify-phase-2-wiring.sh:170-175
 # 参照)。判定順は missing 先 → started 後 (missing が最新で見えていれば即 fail)。
 pod_start_time="$(kubectl get pod "$ORCH_POD" -n "$NS" -o jsonpath='{.status.startTime}' 2>/dev/null || echo '')"
 if [ -n "$pod_start_time" ]; then
