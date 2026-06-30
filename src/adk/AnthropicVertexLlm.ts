@@ -65,6 +65,13 @@ type LlmResponse = ReturnType<BaseLlm['generateContentAsync']> extends AsyncGene
 /**
  * `LlmRequest.config` の最小 narrow — Phase 0 では `maxOutputTokens` / `systemInstruction` のみ参照
  * (= `ContentLike` と同じ「Phase 0 で必要なフィールドだけ structural 抽出」流儀)。
+ *
+ * TODO(M4-B Phase 2): `tools?: unknown[]` を追加し、`generateContentAsync` 内で `config.tools` を読んで
+ * `messages.create()` に転送する経路を実装する。Phase 1 完了時点で本フィールド未対応により ADK runner
+ * から渡される `FunctionDeclaration[]` が Anthropic API に届かず、Claude は `acquire_biblio` /
+ * `inspect_biblio` / `shelve_biblio` の存在を知らないまま応答する状態 (= LLM 自律 tool 呼出経路が
+ * 構造的に成立しない)。詳細は M4-B PRD §「Phase 1 完了時の発見 (= Phase 2 必須前提)」§未対応 1 参照、
+ * code-reviewer C1 (PR #91) を出典。
  */
 type LlmRequestConfig = { maxOutputTokens?: number; systemInstruction?: unknown };
 
@@ -199,6 +206,10 @@ export class AnthropicVertexLlm extends BaseLlm {
       const config = (llmRequest as { config?: LlmRequestConfig }).config;
       const maxTokens = config?.maxOutputTokens ?? 1024;
       const flatSystem = config?.systemInstruction ? this.flattenSystemInstruction(config.systemInstruction) : '';
+      // TODO(M4-B Phase 2): config.tools (= ADK runner が appendTools で格納する FunctionDeclaration[]) を
+      // 読み取り、Anthropic `messages.create({tools: [...]})` 形式に変換して下の SDK 呼出に渡す。
+      // 現状は本変換が無いため Claude は tool 定義を受け取らず LLM 自律 tool 呼出が成立しない。
+      // 詳細は M4-B PRD §「Phase 1 完了時の発見」§未対応 1。
 
       // SDK は abortSignal を `fetchOptions` 経由で受ける設計 (`@anthropic-ai/sdk` 流儀)、
       // `messages.create` の第 2 引数で渡す。`maxRetries` は SDK default (2) に任せる
@@ -347,6 +358,15 @@ export class AnthropicVertexLlm extends BaseLlm {
    * 意味的失敗のケースを構造化ログで可視化、OTel degraded 状態でも追跡可能)。
    */
   private toLlmResponse(response: SdkMessageResponse): LlmResponse {
+    // TODO(M4-B Phase 2): tool_use block の ADK functionCall 変換を本メソッドの先頭に追加すること。
+    // 現状 text block のみ抽出するため、Claude が tool_use を返しても EMPTY_TEXT 経路に倒れ、
+    // ADK の functionCall event 経路が起動しない (= LLM 自律 tool 呼出経路の構造的未成立)。
+    // 期待する追加コード:
+    //   const toolUseBlock = response.content?.find((c) => c?.type === 'tool_use');
+    //   if (toolUseBlock && 'id' in toolUseBlock) {
+    //     return { content: { role: 'model', parts: [{ functionCall: { name: toolUseBlock.name, args: toolUseBlock.input } }] } } as LlmResponse;
+    //   }
+    // 詳細は M4-B PRD §「Phase 1 完了時の発見」§未対応 2、code-reviewer C1 (PR #91) を出典。
     const textBlock = response.content?.find((c) => c?.type === 'text');
     const text = textBlock && 'text' in textBlock ? textBlock.text : '';
     if (!text) {
