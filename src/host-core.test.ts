@@ -1120,7 +1120,7 @@ describe('router: ADK provider branch (M4-B Phase 3)', () => {
     expect(wakeContainer).not.toHaveBeenCalled();
   });
 
-  it("dispatchToAdk が throw しても routeInbound は resolve する (I6 = router 防御的 catch + fallback)", async () => {
+  it('dispatchToAdk が throw しても routeInbound は resolve する (I6 = router 防御的 catch + fallback)', async () => {
     const { routeInbound } = await import('./router.js');
     const { dispatchToAdk } = await import('./adk/dispatcher.js');
 
