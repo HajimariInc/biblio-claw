@@ -4,25 +4,20 @@
  * `acquire_biblio` で quarantine に置かれた biblio を 3 軸 (schema → license → dangerous) で検査し、
  * ACCEPT / HOLD / REJECT を返す。設計理念は `acquire-tool.ts` 冒頭ドキュメント参照。
  *
- * **GOTCHA — `BIBLIO_NAME_RE` 防御線の所在** (= comment-analyzer C5 で事実訂正):
- *   `BIBLIO_NAME_RE` (path traversal 防御線) は `src/biblio/inspect.ts` 内部には **存在しない**。
- *   実際の所在は `src/biblio/inspect-action.ts:50` (= MCP delivery handler 経路) と
- *   `src/biblio/equip.ts:71` のみ。MCP/delivery 経路では action handler 入口で validation 済の
- *   `biblioName` が `inspect()` に渡される前提。一方、本 ADK tool 経路は **acquire_biblio の戻り値
- *   `biblioName` をそのまま inspect_biblio に渡す前提** (= LLM が再構築せずパススルー) のため、
- *   `inspect()` 自身は `path.join(quarantineRoot, biblioName)` (= 正規化のみ、traversal 拒否なし)
- *   で受ける。
- *
- *   **影響と申し送り** (= Phase 3 Slack 本番化前):
- *     - 現状 Phase 1 では local verify-script のみで起動するため攻撃面なし
- *     - Phase 3 で Slack patron 経路 → ADK Runner → LLM 自律呼出 → 不正 `biblioName` 直接渡し
- *       が成立した場合、`schema_invalid` REJECT に倒れるがファイルシステム探索は実行される
- *     - tool 層での `BIBLIO_NAME_RE` 同等 validation 追加を Phase 3 で検討すべき (= 別 issue
- *       として記録するか、本 PR フォローアップで対応)
+ * **`BIBLIO_NAME_RE` 防御線** (= M4-B Phase 3 で tool 層に追加):
+ *   `BIBLIO_NAME_RE` (path traversal 防御線) は `src/biblio/inspect.ts` 内部には存在せず、
+ *   従来は `src/biblio/inspect-action.ts:50` (= MCP delivery handler 経路) と
+ *   `src/biblio/equip.ts:71` のみが持っていた。ADK tool 経路 (= LLM 自律呼出) は
+ *   acquire_biblio の戻り値 `biblioName` をそのまま inspect_biblio に渡す前提だが、
+ *   Phase 3 で CLI/Slack 経路が本番化した以降、LLM が不正 `biblioName` を直接構成して
+ *   投入する経路が現実的な攻撃面になる。ここで `execute` 冒頭に BIBLIO_NAME_RE guard を
+ *   追加して fail-closed に REJECT + schema_invalid を返す (= inspect-action.ts の
+ *   validation と同等)。
  */
 import { FunctionTool } from '@google/adk';
 import { z } from 'zod';
 
+import { BIBLIO_NAME_RE } from '../../biblio/action-helpers.js';
 import { inspect } from '../../biblio/inspect.js';
 import type { InspectResult } from '../../biblio/types.js';
 import { log } from '../../log.js';
@@ -48,6 +43,23 @@ export const inspectBiblioTool = new FunctionTool({
   parameters: InspectBiblioInput,
   execute: async ({ biblioName }, tool_context): Promise<InspectResult> => {
     const { requestId, sessionId } = resolveToolCtx(tool_context);
+    // Path-traversal 防御 (M4-B Phase 3): CLI/Slack 経路 + LLM 自律呼出が本番化した Phase 3
+    // 以降、`biblioName` は LLM 生成の未検証文字列として扱う必要がある。`inspect-action.ts:50`
+    // と同じ regex で fail-closed に REJECT + schema_invalid を返す。
+    if (!BIBLIO_NAME_RE.test(biblioName)) {
+      log.warn('ADK tool: inspect_biblio invalid name (path-traversal guard)', {
+        event: 'adk.tool.inspect.schema_invalid',
+        request_id: requestId,
+        session_id: sessionId,
+        biblio_name: biblioName,
+      });
+      return {
+        verdict: 'REJECT',
+        biblioName,
+        reason: 'schema_invalid',
+        detail: `biblioName does not match BIBLIO_NAME_RE: ${biblioName}`,
+      };
+    }
     log.info('ADK tool: inspect_biblio invoked', {
       event: 'adk.tool.inspect.invoke',
       request_id: requestId,

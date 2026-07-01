@@ -1160,6 +1160,196 @@ invocation (ADK root)
 
 ---
 
+## M4-B Phase 3: slack-e2e + verify-m4-b (CLI 経由 verify + Slack 経路温存)
+
+### 概要
+
+`router.ts:deliverToAgent` に `container_configs.provider === 'adk'` 分岐を追加し、orchestrator 内 in-process ADK Runner (`src/adk/dispatcher.ts`) に patron 命令 (CLI or Slack) を直接流す。**agent-runner container 経路 (= K8s Job spawn) を経由しない**。channel adapter agnostic な dispatcher が `channelType` を parameter で受け、`getChannelAdapter(...).deliver(...)` で patron に応答返却する。
+
+`inspect-tool.ts` に `BIBLIO_NAME_RE` guard を追加 (path-traversal 防御、Phase 3 で CLI/Slack 経由 LLM 自律呼出が本番化した以降の攻撃面閉塞)。
+
+verify は **CLI channel (`pnpm run chat`) 経由で完結** させ、Slack workspace 設定 (channel 作成 / bot 招待 / user token scope) を Phase 3 完成判定から除外。Slack 経路は `init-adk-agent.ts` の optional flag (env `SLACK_WIRE_CHANNEL_ID`) で wire 可能状態まで整備し、実 Slack channel wire は Phase 3 完了後の DEN さん任意操作 (= プレゼン素材録画用の手動デモ経路) として温存。
+
+### Deploy 手順 (= orchestrator only、sidecar 無改変)
+
+```bash
+# 1. dry-run で空打ち確認
+bash scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --dry-run
+
+# 2. 本番実行 (= 4 image build + AR push + manifest tag bump + kubectl apply + rollout)
+bash scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --confirm
+
+# 3. Pod 実 image tag 確認
+kubectl get pod biblio-orchestrator-0 -c orchestrator -n biblio-claw \
+  -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}'
+# 期待: ...biblio-claw:m4b-p3
+```
+
+`k8s/10-orchestrator-statefulset.yaml` の image tag は **4 箇所全て** (orchestrator container `image` (line 135) + agent container の `CONTAINER_IMAGE` env (line 153) + `gh-token-rotator` sidecar `image` (line 231) + `vertex-token-rotator` sidecar `image` (line 277)) を `m4b-p3` に更新される。`init-project-gcp-image-sync.sh` が 4 image を単一 `--tag` で一括 build/push + manifest 同期する仕様のため、sidecar 2 image (biblio-sidecar-gh / biblio-sidecar-vertex) の実装内容自体に Phase 3 の変更はないが、tag はまとめて bump される (= sidecar image が `m4b-p2` タグのまま残ることはない、`m4b-p3` タグが Artifact Registry に build/push 済)。
+
+### ADK agent group + CLI channel wire (deploy 後 1 回)
+
+```bash
+# Pod 内で init-adk-agent.ts を実行 (= ADK agent group を central DB に upsert + CLI 自動 wire)
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  pnpm exec tsx scripts/init-adk-agent.ts
+
+# 期待: container_configs.provider='adk' が central DB に登録される
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  pnpm exec tsx scripts/q.ts data/v2.db \
+  "SELECT ag.id, cc.provider, mg.channel_type, mg.platform_id FROM agent_groups ag \
+   JOIN container_configs cc ON ag.id = cc.agent_group_id \
+   JOIN messaging_group_agents mga ON ag.id = mga.agent_group_id \
+   JOIN messaging_groups mg ON mga.messaging_group_id = mg.id \
+   WHERE cc.provider='adk'"
+# 期待: 1 行 (ag-... / adk / cli / local)
+```
+
+冪等 — 既存 ADK agent group がある場合は再作成せず reuse する。
+
+### Verify 手順 (= Phase 3 完成判定、CLI 経由)
+
+```bash
+# (a) Phase 3 完成判定 (= M4-B PASS marker、7 section + 冪等)
+bash scripts/verify-m4-b.sh
+# 期待: 末尾に "M4-B PASS"、exit 0
+
+# (b) 2 連続実行冪等 (副作用は draft PR のみ = 毎回別 branch で無害)
+bash scripts/verify-m4-b.sh && bash scripts/verify-m4-b.sh
+# 期待: 両方 M4-B PASS + exit 0
+
+# (c) 既存 regression chain
+bash scripts/verify-phase-2-adk-gke.sh   # M4-B Phase 2 継続 PASS
+bash scripts/verify-m4-a.sh              # M4-A 観測経路 継続 PASS
+bash scripts/verify-m3.sh                # M3 装備機構 継続 PASS
+
+# (d) opt-in で verify-slack-e2e-gke.sh を verify-m4-b.sh Section 7 に組み込む
+VERIFY_M4B_INCLUDE_REGRESSION=1 bash scripts/verify-m4-b.sh
+```
+
+所要時間: `verify-m4-b.sh` 単体 ~5-10 分 (LLM 応答 8-15s + Cloud Trace 到達 30-90s)。
+
+### CLI 経由 patron 命令のテスト手順 (DEN さん手動確認用)
+
+```bash
+# 前提: init-adk-agent.ts 済 + m4b-p3 image deploy 済
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "cd /app && pnpm run chat '@bot 仕入れて example-org/test-biblio-minimal'"
+# 期待: LLM が acquire_biblio を呼び、日本語で「仕入れ完了です!📦」等の応答を返す
+#       (SILENCE_MS=2000ms で自然終了、120s HARD_TIMEOUT)
+```
+
+`pnpm run chat` は `data/cli.sock` (Unix socket) 経由で router.ts に inbound event を投げる。router が provider='adk' を検知 → dispatcher が in-process ADK Runner を呼ぶ経路。
+
+### ADK 用 Slack channel wire 手順 (プレゼン用手動デモ、Phase 3 完了後の任意作業)
+
+Phase 3 完成判定 (verify-m4-b.sh PASS) には含めない DEN さん任意操作:
+
+```bash
+# 1. Slack App 側で channel 作成 + Bot 招待 (Workspace UI 操作)
+#    - channel 名: 任意 (例: #biblio-adk-demo)
+#    - Bot user に channel:write scope 付与済であること (既存の Slack app 設定を継承)
+
+# 2. Pod 内で init-adk-agent.ts を env 指定で再実行 (= Slack channel wire 追加)
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "SLACK_WIRE_CHANNEL_ID='C0XXXXXX' pnpm exec tsx scripts/init-adk-agent.ts"
+
+# 3. Slack で `@bot 仕入れて example-org/test-biblio-minimal` 打鍵 → 応答確認
+```
+
+wire 済 Slack channel での応答は `dispatchToAdk` が `getChannelAdapter('slack').deliver(...)` を呼ぶ経路で自動的に配信される (= CLI 経路と code path 同一)。
+
+### Cloud Trace 観察ガイド
+
+`verify-m4-b.sh` Section 5-6 で自動確認しているが、UI 目視でも観察できる。実 GKE verify (M4-B PASS 取得時、~20 spans/trace) で観測された top-level span 群:
+
+```
+call_llm                          (= ADK 1.3.0 自動 span、gen_ai.operation.name=invoke_agent 付き)
+chat claude-sonnet-4-6            (= AnthropicVertexLlm 自前 span、gen_ai.* 完全 set + usage 付き)
+execute_tool acquire_biblio       (= ADK 1.3.0 自動 span)
+GET / POST / tcp.connect × 多数   (= undici HTTP client の自動計装、acquire の GH API 呼出)
+```
+
+**invoke_agent (named span) は ADK 1.3.0 InMemoryRunner では立たない** — plan 起草時の adk-js docs 想定と異なり、`call_llm` が top-level に位置する。`gen_ai.operation.name=invoke_agent` は `call_llm` span の label として付与される (span 名ではない)。verify-m4-b.sh Section 5 の assertion は `execute_tool acquire_biblio` + `chat claude-*` の 2 種存在で判定する形にしてある。
+
+**`gen_ai.*` 完全 set (provider.name / request.model / usage.input_tokens / usage.output_tokens 等) を持つのは AnthropicVertexLlm 自前 span (`chat claude-*`) のみ** — ADK 内部 span (`invoke_agent` / `call_llm` / `execute_tool`) にも `gen_ai.operation.name` は付くが、provider/model/usage は付かない。Section 6 の assertion は `.name | startswith("chat ")` で明示的に狙う。
+
+Cloud Trace UI で trace_id 検索:
+
+```
+https://console.cloud.google.com/traces/list?tid=<TRACE_ID>&project=hajimari-ai-hackathon-2026
+```
+
+trace_id は Pod ログの JSON structured log の `logging.googleapis.com/trace` field (bare 32hex、`projects/.../traces/` prefix なし) から拾える。**単純に `tail -n1` で拾うと rotator sidecar の trace_id を掴む race がある**ため、`event=adk.tool.acquire.invoke` / `event=adk.anthropic_vertex_llm.init` 等の ADK 経路 event に絞って抽出する (`verify-m4-b.sh` Section 5 参照):
+
+```bash
+kubectl logs biblio-orchestrator-0 -c orchestrator --since=3m \
+  | grep '"event":"adk.tool.acquire.invoke"' \
+  | grep -oE '"logging\.googleapis\.com/trace":"[a-f0-9]{32}"' \
+  | tail -n1
+```
+
+### 既知の罠 / gotcha (5 件)
+
+- **`HTTPS_PROXY` が `aiplatform.googleapis.com` に乗ると keyless ADC が壊れる** — Phase 2 と共通。local verify では `NO_PROXY=aiplatform.googleapis.com` を入れる。GKE 経路では manifest env で NO_PROXY を明示済のため通常発火しないが、agent Pod 再構築時等に env drift すると発症する
+- **`InMemoryRunner` module-level singleton は Pod 再起動でロスト = OK** — `runEphemeral` が都度 ephemeral session を作る仕様なので session 永続化なし。長寿命 Pod で memory leak しないかは Phase 3 稼働後に観察 (`kubectl top pod biblio-orchestrator-0`)。実測で leak が判明したら Phase 4 で `Runner` + 明示 session lifecycle 管理に差替
+- **`pnpm run chat` の TOTAL_TIMEOUT_MS=120s を超える LLM 応答は verify-m4-b.sh Section 4 fail** — Phase 2 実測で 8-15s、120s 内に余裕あり。超過時は Vertex 負荷 or ADK Runner ハング疑い → Pod ログ (`kubectl logs biblio-orchestrator-0 -c orchestrator --since=5m`) で `adk.dispatcher.invoke` event 以降の trace を確認
+- **verify-slack-e2e-gke.sh と verify-m4-b.sh は別 channel を対象** — 誤って同じ agent_group を両経路で使うと race。運用上は claude CLI 経路 agent group と ADK 経路 agent group を **別 folder** (= 別 agent_group_id) で分離する (init-cli-agent.ts vs init-adk-agent.ts の folder 引数が別値になっている前提)
+- **inspect-tool.ts guard の REJECT + schema_invalid は LLM 応答経路で正しく伝わる** — silent failure ではない。LLM は tool 応答の `verdict=REJECT + reason=schema_invalid + detail=...` を受けて patron に理由 (例: "検品で REJECT: biblioName の形式が不正です") を伝達する。structured log `adk.tool.inspect.schema_invalid` が warn として出力される (Cloud Logging で filterable)
+
+### GKE 実機 verify で判明した罠 (8 件)
+
+M4-B PASS 取得 (2026-07-01、PR #101) 時、`verify-m4-b.sh` 初回実装から実 GKE でしか判明しない不具合が 8 件発見された。同 verify script + Cloud Trace API の後続利用時のリファレンスとして残す (fix commit `44a66ba`)。
+
+- **`kubectl get pod -c orchestrator` の `-c` は `get` で効かない** — `-c` は `exec` / `logs` 専用の container 指定。`get` に渡すと silent に無視されて `.spec.containers[*].image` 相当が空になる。正しくは jsonpath 側で container 名を絞る (`{.spec.containers[?(@.name=="orchestrator")].image}`)。同様に `kubectl exec` / `kubectl logs` の `-c` は valid なので混同しない
+- **`scripts/q.ts data/v2.db` (相対パス) は GKE 経路で ENOENT** — orchestrator container の Dockerfile WORKDIR は `/app`、相対 `data/v2.db` は `/app/data/v2.db` に解決される。しかし GKE では PVC mount で `/data/v2.db` (`DATA_DIR=/data` env) が実体。**q.ts / init-adk-agent.ts 等の Pod 内 DB 直叩き script は必ず絶対パス `/data/v2.db` で叩く**
+- **trace_id は `logging.googleapis.com/trace` field に bare 32hex で出る** — `projects/<PROJECT>/traces/<32hex>` 形式ではない。biblio-claw の `trace-fields.ts` が bare 32hex で出力し、Cloud Logging 側で GCP 標準形式に自動昇格される (Preferred Format)。正規表現で拾うときは `"logging\.googleapis\.com/trace":"[a-f0-9]{32}"` を狙う
+- **Pod ログの単純 `tail -n1` は rotator sidecar の trace_id を掴む race** — gh-token-rotator / vertex-token-rotator が周期的に独自の trace を発火するため、Section 4 の chat 実行に対応する trace を狙いたい場合は `event=adk.tool.acquire.invoke` (実 acquire 経由) や `event=adk.anthropic_vertex_llm.init` (LLM 呼出、active span 配下確定) 等の ADK 経路 event に必ず絞る
+- **ADK 1.3.0 に `invoke_agent` named span は存在しない** — `call_llm` が top-level に立つ。plan 起草時の adk-js docs 想定と乖離。`invoke_agent` は `call_llm` span の `gen_ai.operation.name` label としてのみ観測される。Cloud Trace assertion は `execute_tool acquire_biblio` + `chat claude-*` の 2 種で判定するのが実装挙動と一致
+- **`gen_ai.*` 完全 set (provider / model / usage) は AnthropicVertexLlm 自前 span のみ** — ADK 内部 span (`invoke_agent` / `call_llm` / `execute_tool`) にも `gen_ai.operation.name` は付くが `provider.name` / `request.model` / `usage.*` は不在。「`gen_ai.*` を持つ最初の span」で filter すると ADK 内部 span が先に当たって assertion が壊れる。`.name | startswith("chat ")` で明示的に AnthropicVertexLlm 自前 span を狙う
+- **`jq ... | head -n1` は `set -o pipefail` の下で exit 141 = SIGPIPE** — head が先に close して jq が SIGPIPE 受けると全体が非ゼロ終了、script が silent に途中終了する。jq 側で slice する (`[.spans[] | select(...)] | .[0] // empty`) 経路に統一。同様の pattern は他 verify script (verify-m4-a.sh 等) でも要注意
+- **BatchSpanProcessor 非同期 export で「spans >= 1」の retry break は早すぎる** — Cloud Trace への span export は非同期で、初回到達時点では HTTP client (undici) の span のみで ADK / AnthropicVertexLlm span がまだ到達していないことがある。verify-m4-b.sh は break 条件を「`execute_tool acquire_biblio` + `chat claude-*` の 2 種が両方存在するまで retry (最大 90s)」に変更した
+
+### 症状: Pod 長時間稼働後 OTLP export が Premature close で失敗 (対症手順、根本調査は #104)
+
+Pod 稼働 ~1.5 時間以上経過後、Cloud Trace への OTLP export が connection premature close で継続的に失敗し始める現象。実運用 + verify-m4-b.sh 実行時の両方で影響する。
+
+**症状**:
+- `verify-m4-b.sh` Section 5 が 30 retry × 3s = 90s 経過後 fail (`Cloud Trace に trace_id=... が 90s 以内に到達しなかった`)
+- Section 4 (patron 応答) は正常返却 = **LLM 実行経路は無傷**、OTLP export 経路のみ壊れる
+- Pod ログには span 生成の証跡あり (全 event に `logging.googleapis.com/trace` + `trace_sampled: true` 付与済 = Cloud Logging + BQ sink 経路は無影響)
+- Pod ログに `K8s informer error, restarting` + `Premature close` (context-async-hooks 経由の HTTP stream 切断) が出現
+
+**対症手順** (~2-3 分で復活):
+
+```bash
+# 1. 症状確認
+kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw --since=5m 2>&1 \
+  | grep -iE 'premature close|informer.*restart' | head -5
+
+# 2. Pod 再起動 (StatefulSet + PVC 永続化のため状態消失なし)
+kubectl delete pod biblio-orchestrator-0 -n biblio-claw
+kubectl wait --for=condition=Ready pod/biblio-orchestrator-0 -n biblio-claw --timeout=300s
+
+# 3. 検証: verify-m4-b.sh 再実行で M4-B PASS 取得可能
+bash scripts/verify-m4-b.sh
+```
+
+**注意**:
+- 現在は対症手順のみ確立。根本原因調査 (undici connection pool の keep-alive 挙動 vs OTLP endpoint idle timeout / OpenTelemetry Collector sidecar 化検討 等) は **[#104](https://github.com/HajimariInc/biblio-claw/issues/104)** で管理
+- Pod 再起動は現在稼働中の in-process ADK Runner セッション (`getSharedRunner()` の singleton) をリセットするため、patron が実行中の chat 応答があれば中断される。運用時は「patron が active でない時間帯」を狙って実施
+
+### 関連
+
+- `src/adk/dispatcher.ts` (= channel adapter agnostic dispatcher、event stream → deliver)
+- `src/adk/dispatcher.test.ts` (= 10 case、mock runner + adapter で網羅)
+- `src/router.ts:deliverToAgent` (= provider 分岐、~397 行)
+- `src/adk/tools/inspect-tool.ts` (= BIBLIO_NAME_RE guard、Phase 3 で追加)
+- `scripts/init-adk-agent.ts` (= ADK 用 agent group + CLI 自動 wire + Slack optional wire)
+- `scripts/verify-m4-b.sh` (= 7 section、CLI 経由 E2E、M4-B PASS marker)
+
+---
+
 ## Vertex 401 ACCESS_TOKEN_EXPIRED retry loop の対症手順
 
 ### 症状

@@ -127,3 +127,60 @@ describe('inspectBiblioTool — 異常系 (inspect throw 経路)', () => {
     ).rejects.toThrow(/quarantine FS failure/);
   });
 });
+
+describe('inspectBiblioTool — BIBLIO_NAME_RE guard (M4-B Phase 3)', () => {
+  // Zod は string type check のみ = 内容は制約しない。BIBLIO_NAME_RE guard 側で
+  // fail-closed に REJECT + schema_invalid を返し、inspect() が呼ばれないことを確認する。
+  const invalidNames: Array<[string, string]> = [
+    ['path traversal (../etc/passwd)', '../etc/passwd'],
+    ['path traversal (owner/repo/../etc)', 'owner/repo/../etc'],
+    ['空文字列', ''],
+    ['null byte 混入', 'owner--repo\x00malicious'],
+    ['URL scheme', 'http://malicious/repo'],
+    ['絶対パス', '/etc/passwd'],
+    ['単一 dash 区切り (separator 不正)', 'owner-repo'],
+    ['先頭が dash', '--owner--repo'],
+  ];
+
+  for (const [label, name] of invalidNames) {
+    it(`${label}: '${name}' → REJECT + schema_invalid + inspect() 未呼出`, async () => {
+      const result = await inspectBiblioTool.runAsync({
+        args: { biblioName: name },
+        toolContext: mockToolContext({ invocationId: 'inv-guard', sessionId: 'sess-guard' }),
+      });
+      expect(result).toMatchObject({
+        verdict: 'REJECT',
+        reason: 'schema_invalid',
+        biblioName: name,
+      });
+      expect(inspectMock).not.toHaveBeenCalled();
+      // structured log で silent failure 防止 (adk.tool.inspect.schema_invalid) を確認
+      expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+        expect.stringContaining('invalid name (path-traversal guard)'),
+        expect.objectContaining({
+          event: 'adk.tool.inspect.schema_invalid',
+          biblio_name: name,
+        }),
+      );
+    });
+  }
+
+  const validNames: string[] = [
+    'owner--repo',
+    'wf--test',
+    'anthropics--claude-plugins-official--my-skill', // 3 要素 (Phase 4 個別 skill 仕入れ)
+    'wf--biblio_min', // underscore 許容
+    'wf--biblio.min', // dot 許容
+  ];
+  for (const name of validNames) {
+    it(`valid biblioName regression: '${name}' → guard 通過 + inspect() 呼出`, async () => {
+      inspectMock.mockResolvedValue({ verdict: 'ACCEPT', biblioName: name });
+      const result = await inspectBiblioTool.runAsync({
+        args: { biblioName: name },
+        toolContext: mockToolContext(),
+      });
+      expect(inspectMock).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ verdict: 'ACCEPT', biblioName: name });
+    });
+  }
+});

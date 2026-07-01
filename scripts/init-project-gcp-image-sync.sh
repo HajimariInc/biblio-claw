@@ -11,7 +11,7 @@
 #   Block 6: 状況確認 (Pod 内 image tag / env 反映 / M3 ファイル存在 / Phase 2 JSON ログ観測)
 #
 # 引数:
-#   --tag <tag>          必須。AR push する image tag (例: m2-p4)。既存 tag 上書き事故防止のため required
+#   --tag <tag>          必須。AR push する image tag (例: m4b-p3)。既存 tag 上書き事故防止のため required
 #   --dry-run            既定。全 Block を echo して exit 0 (Block 1 の実 probe は実行する)
 #   --confirm            実行 (= --dry-run の opposite)
 #   --no-build           Block 2 (build) を skip
@@ -69,7 +69,7 @@ GKE 上の 4 image (biblio-claw orchestrator + nanoclaw-agent + biblio-sidecar-g
 → kubectl apply → rollout 待ち → 状況確認 まで 1 発で完遂する。
 
 Required:
-  --tag <tag>           AR push する image tag (例: m2-p4)。既存 tag 上書き事故防止のため required
+  --tag <tag>           AR push する image tag (例: m4b-p3)。既存 tag 上書き事故防止のため required
 
 Optional:
   --dry-run             既定。全 Block を echo して exit 0 (Block 1 の実 probe は実行する)
@@ -82,16 +82,16 @@ Optional:
 
 Examples:
   # 既定 (= dry-run、影響なし)
-  bash scripts/init-project-gcp-image-sync.sh --tag m2-p4
+  bash scripts/init-project-gcp-image-sync.sh --tag m4b-p3
 
   # 本番実行
-  bash scripts/init-project-gcp-image-sync.sh --tag m2-p4 --confirm
+  bash scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --confirm
 
   # build のみ走らせて push/apply は止める (= 動作確認用)
-  bash scripts/init-project-gcp-image-sync.sh --tag m2-p4 --confirm --no-push --no-apply
+  bash scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --confirm --no-push --no-apply
 
   # 同 tag 上書き push 後の明示再起動
-  bash scripts/init-project-gcp-image-sync.sh --tag m2-p4 --confirm --rollout-restart
+  bash scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --confirm --rollout-restart
 EOF
 }
 
@@ -100,7 +100,7 @@ while [ $# -gt 0 ]; do
     --tag)
       # `--tag` 末尾 (= 値なし) で `shift 2` が silent exit する罠を防ぐ事前チェック。
       # `${2:-}` の空文字確認で「`--tag` の後に何もない」と「`--tag ''`」の両方を弾く。
-      if [ -z "${2:-}" ]; then usage >&2; fail "--tag の値が指定されていません (例: --tag m2-p4)"; fi
+      if [ -z "${2:-}" ]; then usage >&2; fail "--tag の値が指定されていません (例: --tag m4b-p3)"; fi
       TAG="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=true; shift ;;
     --confirm)         DRY_RUN=false; shift ;;
@@ -113,7 +113,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$TAG" ] || { usage >&2; fail "--tag <tag> は必須引数 (例: --tag m2-p4)"; }
+[ -n "$TAG" ] || { usage >&2; fail "--tag <tag> は必須引数 (例: --tag m4b-p3)"; }
 
 # run() 関数: dry-run なら echo、--confirm なら実行 (= teardown-phase-2.sh:64-73 と同パターン)
 # 失敗時は fail() で停止 (= teardown-phase-2.sh は WARN 継続だが、本 Phase は build/push 失敗

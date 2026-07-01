@@ -12,6 +12,20 @@ const SCALAR_COLUMNS = new Set([
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
+/**
+ * Provider values recognized by biblio-claw. The column type is `string`
+ * (schemaless — historically extended by adding provider modules under
+ * `src/providers/`), so this list is documentation + a type union used by
+ * router/container-runner to branch on the ADK path.
+ *
+ *   - `'claude'`  — NanoClaw 上流の claude CLI provider (agent-runner container 経路、既存)
+ *   - `'opencode'` — NanoClaw 上流の opencode CLI provider (`providers` ブランチ経由、`channels` ブランチは channel adapter 専用)
+ *   - `'adk'`     — biblio-claw M4-B Phase 3 で追加。orchestrator 内 in-process ADK Runner
+ *                    経路 (agent-runner container を起動しない = router.ts で分岐)。
+ */
+export const KNOWN_PROVIDERS = ['claude', 'opencode', 'adk'] as const;
+export type ProviderName = (typeof KNOWN_PROVIDERS)[number];
+
 export function getContainerConfig(agentGroupId: string): ContainerConfigRow | undefined {
   return getDb().prepare('SELECT * FROM container_configs WHERE agent_group_id = ?').get(agentGroupId) as
     ContainerConfigRow | undefined;
