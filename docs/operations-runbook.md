@@ -1261,15 +1261,18 @@ wire 済 Slack channel での応答は `dispatchToAdk` が `getChannelAdapter('s
 
 ### Cloud Trace 観察ガイド
 
-`verify-m4-b.sh` Section 5-6 で自動確認しているが、UI 目視でも観察できる:
+`verify-m4-b.sh` Section 5-6 で自動確認しているが、UI 目視でも観察できる。実 GKE verify (M4-B PASS 取得時、~20 spans/trace) で観測された top-level span 群:
 
 ```
-invocation (ADK root)
- └─ invoke_agent biblio_root_agent
-     ├─ call_llm
-     │   └─ chat claude-sonnet-4-6  (= M4-A GenAI semconv、gen_ai.provider.name='gcp.vertex_ai')
-     └─ execute_tool acquire_biblio  (= ADK 自動 span)
+call_llm                          (= ADK 1.3.0 自動 span、gen_ai.operation.name=invoke_agent 付き)
+chat claude-sonnet-4-6            (= AnthropicVertexLlm 自前 span、gen_ai.* 完全 set + usage 付き)
+execute_tool acquire_biblio       (= ADK 1.3.0 自動 span)
+GET / POST / tcp.connect × 多数   (= undici HTTP client の自動計装、acquire の GH API 呼出)
 ```
+
+**invoke_agent (named span) は ADK 1.3.0 InMemoryRunner では立たない** — plan 起草時の adk-js docs 想定と異なり、`call_llm` が top-level に位置する。`gen_ai.operation.name=invoke_agent` は `call_llm` span の label として付与される (span 名ではない)。verify-m4-b.sh Section 5 の assertion は `execute_tool acquire_biblio` + `chat claude-*` の 2 種存在で判定する形にしてある。
+
+**`gen_ai.*` 完全 set (provider.name / request.model / usage.input_tokens / usage.output_tokens 等) を持つのは AnthropicVertexLlm 自前 span (`chat claude-*`) のみ** — ADK 内部 span (`invoke_agent` / `call_llm` / `execute_tool`) にも `gen_ai.operation.name` は付くが、provider/model/usage は付かない。Section 6 の assertion は `.name | startswith("chat ")` で明示的に狙う。
 
 Cloud Trace UI で trace_id 検索:
 
@@ -1277,7 +1280,14 @@ Cloud Trace UI で trace_id 検索:
 https://console.cloud.google.com/traces/list?tid=<TRACE_ID>&project=hajimari-ai-hackathon-2026
 ```
 
-trace_id は Pod ログの JSON structured log の `logging.googleapis.com/trace` field or biblio 独自 `trace_id` field から拾える (`kubectl logs biblio-orchestrator-0 -c orchestrator --since=5m`)。
+trace_id は Pod ログの JSON structured log の `logging.googleapis.com/trace` field (bare 32hex、`projects/.../traces/` prefix なし) から拾える。**単純に `tail -n1` で拾うと rotator sidecar の trace_id を掴む race がある**ため、`event=adk.tool.acquire.invoke` / `event=adk.anthropic_vertex_llm.init` 等の ADK 経路 event に絞って抽出する (`verify-m4-b.sh` Section 5 参照):
+
+```bash
+kubectl logs biblio-orchestrator-0 -c orchestrator --since=3m \
+  | grep '"event":"adk.tool.acquire.invoke"' \
+  | grep -oE '"logging\.googleapis\.com/trace":"[a-f0-9]{32}"' \
+  | tail -n1
+```
 
 ### 既知の罠 / gotcha (5 件)
 
@@ -1286,6 +1296,19 @@ trace_id は Pod ログの JSON structured log の `logging.googleapis.com/trace
 - **`pnpm run chat` の TOTAL_TIMEOUT_MS=120s を超える LLM 応答は verify-m4-b.sh Section 4 fail** — Phase 2 実測で 8-15s、120s 内に余裕あり。超過時は Vertex 負荷 or ADK Runner ハング疑い → Pod ログ (`kubectl logs biblio-orchestrator-0 -c orchestrator --since=5m`) で `adk.dispatcher.invoke` event 以降の trace を確認
 - **verify-slack-e2e-gke.sh と verify-m4-b.sh は別 channel を対象** — 誤って同じ agent_group を両経路で使うと race。運用上は claude CLI 経路 agent group と ADK 経路 agent group を **別 folder** (= 別 agent_group_id) で分離する (init-cli-agent.ts vs init-adk-agent.ts の folder 引数が別値になっている前提)
 - **inspect-tool.ts guard の REJECT + schema_invalid は LLM 応答経路で正しく伝わる** — silent failure ではない。LLM は tool 応答の `verdict=REJECT + reason=schema_invalid + detail=...` を受けて patron に理由 (例: "検品で REJECT: biblioName の形式が不正です") を伝達する。structured log `adk.tool.inspect.schema_invalid` が warn として出力される (Cloud Logging で filterable)
+
+### GKE 実機 verify で判明した罠 (7 件)
+
+M4-B PASS 取得 (2026-07-01、PR #97) 時、`verify-m4-b.sh` 初回実装から実 GKE でしか判明しない不具合が 7 件発見された。同 verify script + Cloud Trace API の後続利用時のリファレンスとして残す (fix commit `44a66ba`)。
+
+- **`kubectl get pod -c orchestrator` の `-c` は `get` で効かない** — `-c` は `exec` / `logs` 専用の container 指定。`get` に渡すと silent に無視されて `.spec.containers[*].image` 相当が空になる。正しくは jsonpath 側で container 名を絞る (`{.spec.containers[?(@.name=="orchestrator")].image}`)。同様に `kubectl exec` / `kubectl logs` の `-c` は valid なので混同しない
+- **`scripts/q.ts data/v2.db` (相対パス) は GKE 経路で ENOENT** — orchestrator container の Dockerfile WORKDIR は `/app`、相対 `data/v2.db` は `/app/data/v2.db` に解決される。しかし GKE では PVC mount で `/data/v2.db` (`DATA_DIR=/data` env) が実体。**q.ts / init-adk-agent.ts 等の Pod 内 DB 直叩き script は必ず絶対パス `/data/v2.db` で叩く**
+- **trace_id は `logging.googleapis.com/trace` field に bare 32hex で出る** — `projects/<PROJECT>/traces/<32hex>` 形式ではない。biblio-claw の `trace-fields.ts` が bare 32hex で出力し、Cloud Logging 側で GCP 標準形式に自動昇格される (Preferred Format)。正規表現で拾うときは `"logging\.googleapis\.com/trace":"[a-f0-9]{32}"` を狙う
+- **Pod ログの単純 `tail -n1` は rotator sidecar の trace_id を掴む race** — gh-token-rotator / vertex-token-rotator が周期的に独自の trace を発火するため、Section 4 の chat 実行に対応する trace を狙いたい場合は `event=adk.tool.acquire.invoke` (実 acquire 経由) や `event=adk.anthropic_vertex_llm.init` (LLM 呼出、active span 配下確定) 等の ADK 経路 event に必ず絞る
+- **ADK 1.3.0 に `invoke_agent` named span は存在しない** — `call_llm` が top-level に立つ。plan 起草時の adk-js docs 想定と乖離。`invoke_agent` は `call_llm` span の `gen_ai.operation.name` label としてのみ観測される。Cloud Trace assertion は `execute_tool acquire_biblio` + `chat claude-*` の 2 種で判定するのが実装挙動と一致
+- **`gen_ai.*` 完全 set (provider / model / usage) は AnthropicVertexLlm 自前 span のみ** — ADK 内部 span (`invoke_agent` / `call_llm` / `execute_tool`) にも `gen_ai.operation.name` は付くが `provider.name` / `request.model` / `usage.*` は不在。「`gen_ai.*` を持つ最初の span」で filter すると ADK 内部 span が先に当たって assertion が壊れる。`.name | startswith("chat ")` で明示的に AnthropicVertexLlm 自前 span を狙う
+- **`jq ... | head -n1` は `set -o pipefail` の下で exit 141 = SIGPIPE** — head が先に close して jq が SIGPIPE 受けると全体が非ゼロ終了、script が silent に途中終了する。jq 側で slice する (`[.spans[] | select(...)] | .[0] // empty`) 経路に統一。同様の pattern は他 verify script (verify-m4-a.sh 等) でも要注意
+- **BatchSpanProcessor 非同期 export で「spans >= 1」の retry break は早すぎる** — Cloud Trace への span export は非同期で、初回到達時点では HTTP client (undici) の span のみで ADK / AnthropicVertexLlm span がまだ到達していないことがある。verify-m4-b.sh は break 条件を「`execute_tool acquire_biblio` + `chat claude-*` の 2 種が両方存在するまで retry (最大 90s)」に変更した
 
 ### 関連
 
