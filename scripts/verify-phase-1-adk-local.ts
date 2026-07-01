@@ -156,10 +156,12 @@ async function main(): Promise<void> {
     process.stderr.write(`ERROR: ADK error event: ${adkErrorCode} — ${adkErrorMessage ?? '(no message)'}\n`);
     process.exitCode = 1;
   } else if (!toolWasCalled) {
-    // **Phase 1 では正常経路** (= Phase 0 `AnthropicVertexLlm` 制約により tool 呼出は成立しない)。
-    // Phase 2 拡張後は本経路は異常になる = LLM が tool を呼ばなかった事実を warn として残す。
+    // 厳格 assertion は `scripts/verify-phase-2-adk-gke.sh` 側が担う (= GKE Pod 内で
+    // TOOL_CALLED=true を強制、fail() で exit 1)。本 script は local smoke として INFO を
+    // 残すだけで exit 0 を維持し、GKE 経路 verify を最終判定に委ねる設計。
     process.stderr.write(
-      'INFO: LLM did not invoke any tool (text response only). Phase 1 では Phase 0 `AnthropicVertexLlm` 制約により正常。Phase 2 拡張後は LLM tool 呼出経路が成立予定。\n',
+      'INFO: LLM did not invoke any tool (text response only). ' +
+        '厳格な TOOL_CALLED=true 判定は verify-phase-2-adk-gke.sh が担う。\n',
     );
   }
   if (!traceId) {

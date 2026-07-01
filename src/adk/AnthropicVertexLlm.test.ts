@@ -640,7 +640,7 @@ describe('AnthropicVertexLlm — tool routing (Phase 2)', () => {
     ]);
   });
 
-  it('functionCall に id が無いと skip (= silent failure 撲滅)', async () => {
+  it('functionCall に id が無いと skip + log.warn (= silent failure 撲滅)', async () => {
     messagesCreateMock.mockResolvedValue({
       content: [{ type: 'text', text: 'ok' }],
       stop_reason: 'end_turn',
@@ -660,6 +660,62 @@ describe('AnthropicVertexLlm — tool routing (Phase 2)', () => {
       messages: Array<{ role: string; content: unknown }>;
     };
     expect(callArgs.messages[0]).toEqual({ role: 'assistant', content: 'fallback' });
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        event: 'adk.anthropic_vertex_llm.skip_invalid_function_call',
+        outcome: 'skipped',
+      }),
+    );
+  });
+
+  it('functionResponse に id が無いと skip + log.warn (= functionCall と対称、pr-test-analyzer 改善 2)', async () => {
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const req = {
+      contents: [
+        {
+          role: 'user',
+          // id 不在の functionResponse は skip されるべき (= tool_use_id 対応関係を壊すため)
+          parts: [{ functionResponse: { name: 'acquire_biblio', response: { ok: true } } }],
+        },
+      ],
+      config: {},
+    } as unknown as Parameters<AnthropicVertexLlm['generateContentAsync']>[0];
+    // id 不在 → block skip → contents[0] が空 → EMPTY_MESSAGES 経路
+    const result = (await llm.generateContentAsync(req).next()).value as { errorCode?: string };
+    expect(result.errorCode).toBe('EMPTY_MESSAGES');
+    expect(messagesCreateMock).not.toHaveBeenCalled();
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        event: 'adk.anthropic_vertex_llm.skip_invalid_function_response',
+        outcome: 'skipped',
+      }),
+    );
+  });
+
+  it('tool_use block が来たが全 id/name 不正で filter 全滅 → warn (= silent-failure-hunter #3)', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [
+        { type: 'tool_use', name: 'acquire_biblio', input: {} }, // id undefined
+        { type: 'text', text: 'text fallback' },
+      ],
+      stop_reason: 'end_turn',
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    const results: unknown[] = [];
+    for await (const r of llm.generateContentAsync(llmRequest('q'))) {
+      results.push(r);
+    }
+    // text 経路に fall-through するが、tool_use が silent drop された事実を warn で残す
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        event: 'adk.anthropic_vertex_llm.tool_use_dropped',
+        outcome: 'all_dropped',
+        raw_count: 1,
+      }),
+    );
   });
 
   it('tool_use block の id が string でないとき skip + 残る block 0 件で text 経路へ', async () => {

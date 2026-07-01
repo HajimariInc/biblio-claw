@@ -50,9 +50,9 @@ LAST_HARNESS_STDERR="$TMP_ERR"
 RUN_CMD='cd /app && pnpm exec tsx --import ./src/instrumentation.ts scripts/verify-phase-1-adk-local.ts'
 
 if ! kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- sh -c "$RUN_CMD" > "$TMP_OUT" 2> "$TMP_ERR"; then
-  warn "[3/4] verify script が Pod 内で exit != 0、stdout/stderr を確認:"
+  warn "[3/4] verify script が Pod 内で exit != 0、stdout を確認:"
   sed 's/^/    [stdout] /' "$TMP_OUT" >&2 || true
-  sed 's/^/    [stderr] /' "$TMP_ERR" >&2 || true
+  # stderr は LAST_HARNESS_STDERR 経由で fail() が自動展開する (= verify-m3.sh 等と一貫)
   fail "verify script の Pod 内実行が失敗した"
 fi
 

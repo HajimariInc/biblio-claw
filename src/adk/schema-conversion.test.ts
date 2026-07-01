@@ -268,7 +268,7 @@ describe('toAnthropicTools — ADK config.tools → Anthropic Tool[] 変換', ()
     expect(result[0].input_schema).toEqual({ type: 'object' });
   });
 
-  it('parameters が不正な型 (= string) でも {type: "object"} で fallback', () => {
+  it('parameters が不正な型 (= string) でも {type: "object"} で fallback + log.warn (silent-failure-hunter #4)', () => {
     const input = [
       {
         functionDeclarations: [{ name: 'bad_params', parameters: 'not a schema' }],
@@ -276,6 +276,15 @@ describe('toAnthropicTools — ADK config.tools → Anthropic Tool[] 変換', ()
     ];
     const result = toAnthropicTools(input);
     expect(result[0].input_schema).toEqual({ type: 'object' });
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        event: 'adk.tool_conversion.invalid_parameters',
+        outcome: 'fallback_empty_schema',
+        tool_name: 'bad_params',
+        parameters_type: 'string',
+      }),
+    );
   });
 
   it('description が string でないとき omit される (= Anthropic 仕様で optional)', () => {

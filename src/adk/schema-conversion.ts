@@ -22,7 +22,8 @@
  * **写経元**:
  *   - `pailat/adk-llm-bridge` `src/converters/schema.ts` (= `normalizeSharedSchema`)
  *   - `pailat/adk-llm-bridge` `src/providers/anthropic/converters/request.ts` (= `convertTools`)
- *   - Anthropic SDK `Tool` 型: `node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts:1184`
+ *   - Anthropic SDK `Tool` 型: `@anthropic-ai/sdk/resources/messages/messages.d.ts` の `Tool` interface
+ *     (= 行番号は SDK バージョン up で腐敗するため省略)
  */
 import { log } from '../log.js';
 
@@ -156,7 +157,9 @@ export function toAnthropicTools(adkTools: unknown): AnthropicTool[] {
   if (!Array.isArray(adkTools)) return [];
   const result: AnthropicTool[] = [];
   for (const entry of adkTools as AdkToolEntry[]) {
-    const fns = entry?.functionDeclarations ?? [];
+    // `?? []` は削除 (= 直後の !Array.isArray guard と二重防御になっていた、code-simplifier #2)。
+    // functionDeclarations が undefined / 非配列なら等しく continue で skip する。
+    const fns = entry?.functionDeclarations;
     if (!Array.isArray(fns)) continue;
     for (const fn of fns) {
       if (!fn?.name || typeof fn.name !== 'string') {
@@ -166,10 +169,22 @@ export function toAnthropicTools(adkTools: unknown): AnthropicTool[] {
         });
         continue;
       }
+      // TODO(ADK 1.4.0+): fn.parametersJsonSchema が追加されたら parameters より優先採用する
+      // (= type-design-analyzer #3、grep しやすいコメントで残す)。
       const normalized = normalizeSchema(fn.parameters);
       // Anthropic は `input_schema.type: 'object'` 必須 (= SDK の `InputSchema` 型リテラル制約)。
       // `normalizeSchema` の結果が他 type / 不在のときは強制的に `'object'` に倒す
-      // (= `parameters` 不在 / 不正経路の最小スケルトン fallback、silent failure 撲滅)。
+      // (= `parameters` 不在 / 不正経路の最小スケルトン fallback)。
+      // silent-failure-hunter #4 対応: fn.parameters が非 null で不正型 (= string 等) だと
+      // normalizeSchema が {} を返して schema を silent discard するため、warn で可視化する。
+      if (fn.parameters != null && typeof fn.parameters !== 'object' && Object.keys(normalized).length === 0) {
+        log.warn('toAnthropicTools: parameters is not an object, falling back to empty schema', {
+          event: 'adk.tool_conversion.invalid_parameters',
+          outcome: 'fallback_empty_schema',
+          tool_name: fn.name,
+          parameters_type: typeof fn.parameters,
+        });
+      }
       const inputSchema: AnthropicTool['input_schema'] = {
         ...normalized,
         type: 'object',

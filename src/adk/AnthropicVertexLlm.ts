@@ -64,18 +64,20 @@ type LlmRequest = Parameters<BaseLlm['generateContentAsync']>[0];
 type LlmResponse = ReturnType<BaseLlm['generateContentAsync']> extends AsyncGenerator<infer R, void> ? R : never;
 
 /**
- * `LlmRequest.config` の最小 narrow — Phase 0 では `maxOutputTokens` / `systemInstruction` のみ参照
- * (= `ContentLike` と同じ「Phase 0 で必要なフィールドだけ structural 抽出」流儀)。
+ * `LlmRequest.config` の最小 narrow — `maxOutputTokens` / `systemInstruction` / `tools` の 3 フィールドを
+ * structural に抽出する (= `@google/genai` の `GenerateContentConfig` を直接 import すると transitive
+ * dep を package.json 直接依存に昇格する必要があるため、`ContentLike` 同様の structural narrow で代替)。
  *
- * **Phase 2 で `tools?` 追加** (= 旧 TODO 消化、code-reviewer C1 PR #91 出典):
- *   ADK runner が `appendTools()` で格納する `Array<{ functionDeclarations: FunctionDeclaration[] }>`
- *   の最小 narrow。`generateContentAsync` 内で `toAnthropicTools(config.tools)` を呼んで
- *   Anthropic `Tool[]` に変換し、`messages.create({tools})` へ転送する。これにより LLM が
- *   `acquire_biblio` / `inspect_biblio` / `shelve_biblio` を自律呼出できる経路が成立する。
+ * 履歴:
+ *   - Phase 0: `maxOutputTokens` / `systemInstruction` のみ
+ *   - Phase 2: `tools?` 追加 (= code-reviewer C1 PR #91 出典)。ADK runner が `appendTools()` で
+ *     格納する `Array<{ functionDeclarations: FunctionDeclaration[] }>` を narrow し、
+ *     `generateContentAsync` 内で `toAnthropicTools(config.tools)` → `messages.create({tools})`
+ *     経路で LLM に tool 定義を届ける
  *
- *   ADK 1.4.0+ で `parametersJsonSchema` が追加される可能性に備え、`functionDeclarations` 内の
- *   個別 entry は `unknown[]` で narrow を緩く保つ (= structural narrow が壊れないように)、
- *   実際の型 narrow は `schema-conversion.ts` の `AdkFunctionDeclaration` で吸収する。
+ * `functionDeclarations` 内の個別 entry は `unknown[]` で narrow を緩く保つ (= ADK 1.4.0+ で
+ * `parametersJsonSchema` が追加される前方互換性、structural narrow が壊れないように)、実際の型
+ * narrow は `schema-conversion.ts` の `AdkFunctionDeclaration` で吸収する。
  */
 type LlmRequestConfig = {
   maxOutputTokens?: number;
@@ -180,8 +182,14 @@ export class AnthropicVertexLlm extends BaseLlm {
   }
 
   /**
-   * 非 streaming 単発生成。`@google/genai` 型の `LlmRequest.contents` を Anthropic `messages` 形式
-   * (`[{role, content}]`) に最小変換し、SDK `messages.create` を叩き、`LlmResponse` に詰めて 1 yield する。
+   * 非 streaming 単発生成。`@google/genai` 型の `LlmRequest` を Anthropic `messages.create` 形式に
+   * 変換し、`LlmResponse` に詰めて 1 yield する。変換対象は以下の 4 経路:
+   *   - contents の text part → `{role, content: string}`
+   *   - contents の functionCall part → `{role: 'assistant', content: [{type: 'tool_use', ...}]}`
+   *     (= multi-turn round-trip で前回 LLM 応答を持ち回る経路)
+   *   - contents の functionResponse part → `{role: 'user', content: [{type: 'tool_result', ...}]}`
+   *     (= 前回 tool 実行結果を LLM に渡す経路)
+   *   - config.tools の FunctionDeclaration → Anthropic Tool (`toAnthropicTools`)
    *
    * span 計装は既存 `callVertexAnthropic:417-527` と同じ属性設計 (= `chat <model>` 名、
    * `gen_ai.operation.name` / `provider.name` / `request.model` / `server.address` 属性、
@@ -211,9 +219,12 @@ export class AnthropicVertexLlm extends BaseLlm {
     try {
       const messages = this.convertContentsToAnthropicMessages(llmRequest);
 
-      // 空 messages ガード (= Phase 1+ で全 parts が image/audio/function-call のみのとき発火)。
-      // Anthropic API は空 messages を 400 で拒否するため、SDK を呼ぶ前に EMPTY_MESSAGES で
-      // fail-fast し span にも ERROR を立てる (= silent failure 撲滅)。
+      // 空 messages ガード (= 全 turns の blocks が 0 件のとき発火)。
+      // Phase 2 で有効な `functionCall` / `functionResponse` は blocks に積まれるため、本経路が
+      // 実際に踏まれるのは (a) image/audio のみの turn、(b) 無効な functionCall/Response (= id/name
+      // 欠け) のみの turn で全 turns 構成されるケース。Anthropic API は空 messages を 400 で
+      // 拒否するため、SDK を呼ぶ前に EMPTY_MESSAGES で fail-fast し span にも ERROR を立てる
+      // (= silent failure 撲滅)。
       if (messages.length === 0) {
         log.warn('AnthropicVertexLlm: no usable text content in request', {
           event: 'adk.anthropic_vertex_llm.empty_messages',
@@ -238,7 +249,7 @@ export class AnthropicVertexLlm extends BaseLlm {
       const flatSystem = config?.systemInstruction ? this.flattenSystemInstruction(config.systemInstruction) : '';
       // Phase 2: ADK runner が `appendTools()` で `config.tools` に格納した FunctionDeclaration[] を
       // Anthropic Tool[] (= `{name, description, input_schema}`) に変換する。Schema 変換は
-      // `schema-conversion.ts:toAnthropicTools` に集約 (= 純粋関数、unit test で 18 ケース検証済)。
+      // `schema-conversion.ts:toAnthropicTools` に集約 (= 純粋関数、unit test で境界ケース群検証済)。
       // 空配列 (= LLM call 時に tools を渡さないモード) のときは下の messages.create 呼出で
       // spread から省略する (= 既存経路を破壊しない)。
       const anthropicTools = toAnthropicTools(config?.tools);
@@ -363,20 +374,24 @@ export class AnthropicVertexLlm extends BaseLlm {
         mappedRole = 'user';
       }
       const blocks: AnthropicContentBlock[] = [];
-      let textOnly = '';
-      let hasNonText = false;
       for (const p of c.parts ?? []) {
         if (!p || typeof p !== 'object') continue;
         if (typeof p.text === 'string' && p.text.length > 0) {
           blocks.push({ type: 'text', text: p.text });
-          if (!hasNonText) {
-            textOnly = textOnly ? `${textOnly}\n${p.text}` : p.text;
-          }
         } else if (p.functionCall) {
           const fc = p.functionCall;
           if (typeof fc.id === 'string' && typeof fc.name === 'string') {
             blocks.push({ type: 'tool_use', id: fc.id, name: fc.name, input: fc.args ?? {} });
-            hasNonText = true;
+          } else {
+            // multi-turn round-trip の生命線を守るため、id/name 不在の functionCall は warn で可視化。
+            // 静かに drop すると LLM は前回 tool 呼出履歴を失い、同じ tool を無限リトライする
+            // (= silent-failure-hunter H1 / code-reviewer #2)。
+            log.warn('AnthropicVertexLlm: functionCall part has no valid id/name, skipped', {
+              event: 'adk.anthropic_vertex_llm.skip_invalid_function_call',
+              outcome: 'skipped',
+              id_type: typeof fc.id,
+              name_type: typeof fc.name,
+            });
           }
         } else if (p.functionResponse) {
           const fr = p.functionResponse;
@@ -386,14 +401,28 @@ export class AnthropicVertexLlm extends BaseLlm {
             // (= silent failure 撲滅、構造を壊さず LLM に渡す)。
             const content = typeof fr.response === 'string' ? fr.response : JSON.stringify(fr.response ?? null);
             blocks.push({ type: 'tool_result', tool_use_id: fr.id, content });
-            hasNonText = true;
+          } else {
+            // functionResponse の id 不在は tool_use_id 対応関係を壊す最悪経路。ADK は通常
+            // toLlmResponse の `functionCall.id` を引き継いで生成するため、通常経路では踏まない
+            // が、warn で可視化して LLM 無限ループ retry の原因追跡を可能にする
+            // (= silent-failure-hunter H1)。
+            log.warn('AnthropicVertexLlm: functionResponse part has no valid id, skipped', {
+              event: 'adk.anthropic_vertex_llm.skip_invalid_function_response',
+              outcome: 'skipped',
+              id_type: typeof fr.id,
+              name: typeof fr.name === 'string' ? fr.name : '(unknown)',
+            });
           }
         }
       }
       if (blocks.length === 0) continue;
-      // text-only message は string content に簡素化 (= 既存 Phase 0 / Phase 1 test の compat 維持)
-      if (!hasNonText && textOnly.length > 0) {
-        result.push({ role: mappedRole, content: textOnly });
+      // text-only message は string content に簡素化 (= 既存 Phase 0 / Phase 1 test の compat 維持)。
+      // 判定はループ外に切り出し、blocks 状態を単一情報源にする (= code-simplifier #1、textOnly /
+      // hasNonText の二重状態管理を除去)。
+      const isTextOnly = blocks.every((b) => b.type === 'text');
+      if (isTextOnly) {
+        const text = (blocks as Array<{ type: 'text'; text: string }>).map((b) => b.text).join('\n');
+        result.push({ role: mappedRole, content: text });
       } else {
         result.push({ role: mappedRole, content: blocks });
       }
@@ -432,12 +461,19 @@ export class AnthropicVertexLlm extends BaseLlm {
   }
 
   /**
-   * SDK 戻り値 (`@anthropic-ai/sdk` の `Message` 型、`content[].type === 'text'` の最初のブロックを
-   * 採用) を ADK の `LlmResponse` (= `@google/genai` の `Content` 型相当) に詰める。
-   * `type === 'text'` の最初のブロックを採用 (= 既存 `callVertexAnthropic:489` 流儀、`tool_use` 等が
-   * 混ざる経路への防御)。text 不在は `errorCode/errorMessage` で表現し、caller 側で span ERROR を
-   * 立てる経路 (= `generateContentAsync` 内で errorCode 検知時に `span.setStatus(ERROR)` 呼出) を取る。
-   * テキスト不在自体の `log.warn` もここで吐く (= biblio-claw §silent failure 撲滅: 成功 HTTP 応答だが
+   * SDK 戻り値 (`@anthropic-ai/sdk` の `Message` 型) を ADK の `LlmResponse`
+   * (= `@google/genai` の `Content` 型相当) に詰める。
+   *
+   * **Phase 2 から tool_use 優先** (= LLM 自律 tool 呼出経路の生命線):
+   *   - `tool_use` block が 1 件以上あれば → `functionCall` parts として return
+   *     (= ADK runner の `functionCall` event dispatch を成立させる)
+   *   - `tool_use` が 0 件のとき → `text` block を採用 (= Phase 0/1 継承の fallback 経路)
+   *   - text も不在 → `errorCode: 'EMPTY_TEXT'` で return、caller が span ERROR を立てる
+   *
+   * `id/name` が string でない `tool_use` block は filter で skip、全て filter drop された場合は
+   * `event: 'adk.anthropic_vertex_llm.tool_use_dropped'` の warn で可視化する (= silent failure
+   * 撲滅、tool_use と text 応答を外部から区別可能にする)。
+   * テキスト不在自体の `log.warn` も本メソッド末尾で吐く (= biblio-claw §silent failure 撲滅: 成功 HTTP 応答だが
    * 意味的失敗のケースを構造化ログで可視化、OTel degraded 状態でも追跡可能)。
    */
   private toLlmResponse(response: SdkMessageResponse): LlmResponse {
@@ -457,11 +493,29 @@ export class AnthropicVertexLlm extends BaseLlm {
     // 切り離した structural narrow + 末尾 `as` cast で `id` / `name` / `input` の最小フィールド
     // のみ抽出する (= silent failure 撲滅のため `id` / `name` が string でないものは filter で skip)。
     type ExtractedToolUse = { type: 'tool_use'; id: string; name: string; input: unknown };
-    const toolUseBlocks = ((response.content ?? []) as unknown[]).filter((c): c is ExtractedToolUse => {
+    const rawContent = (response.content ?? []) as unknown[];
+    // 生の tool_use ブロック数を filter 前に記録。これで「tool_use が来たが全 filter drop された」経路
+    // と「そもそも tool_use が来ていなかった (text 応答のみ)」を後段で区別できる (= code-simplifier #3
+    // で block → 命名改善済、silent-failure-hunter #3 対応)。
+    const rawToolUseCount = rawContent.filter(
+      (c) => typeof c === 'object' && c !== null && (c as { type?: unknown }).type === 'tool_use',
+    ).length;
+    const toolUseBlocks = rawContent.filter((c): c is ExtractedToolUse => {
       if (typeof c !== 'object' || c === null) return false;
-      const o = c as { type?: unknown; id?: unknown; name?: unknown };
-      return o.type === 'tool_use' && typeof o.id === 'string' && typeof o.name === 'string';
+      const block = c as { type?: unknown; id?: unknown; name?: unknown };
+      return block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string';
     });
+    if (rawToolUseCount > 0 && toolUseBlocks.length === 0) {
+      // Anthropic API が tool_use ブロックを返したが id/name が全て string でなかった経路。
+      // text 経路に fall-through すると tool 呼出の意図が silent に消え、tool_use と text 応答を
+      // 外部から区別できなくなる。warn で可視化して SDK バージョン差 / API 不整合を検知可能にする。
+      log.warn('AnthropicVertexLlm: tool_use blocks present but all dropped (invalid id/name)', {
+        event: 'adk.anthropic_vertex_llm.tool_use_dropped',
+        outcome: 'all_dropped',
+        raw_count: rawToolUseCount,
+        stop_reason: response.stop_reason ?? 'unknown',
+      });
+    }
     if (toolUseBlocks.length > 0) {
       log.debug('AnthropicVertexLlm: tool_use blocks detected', {
         event: 'adk.anthropic_vertex_llm.tool_use',
