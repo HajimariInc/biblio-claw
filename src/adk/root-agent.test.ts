@@ -35,11 +35,28 @@
 import { isFinalResponse, LLMRegistry, LlmAgent, InMemoryRunner } from '@google/adk';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-const { messagesCreateMock, acquireMock, inspectMock, shelveMock } = vi.hoisted(() => ({
+const {
+  messagesCreateMock,
+  acquireMock,
+  inspectMock,
+  shelveMock,
+  categorizeMock,
+  listBiblioMock,
+  shelveMultiMock,
+  enkinMock,
+  shokyakuMock,
+  setBiblioSettingMock,
+} = vi.hoisted(() => ({
   messagesCreateMock: vi.fn(),
   acquireMock: vi.fn(),
   inspectMock: vi.fn(),
   shelveMock: vi.fn(),
+  categorizeMock: vi.fn(),
+  listBiblioMock: vi.fn(),
+  shelveMultiMock: vi.fn(),
+  enkinMock: vi.fn(),
+  shokyakuMock: vi.fn(),
+  setBiblioSettingMock: vi.fn(),
 }));
 
 vi.mock('@anthropic-ai/vertex-sdk', () => ({
@@ -61,6 +78,27 @@ vi.mock('../biblio/inspect.js', () => ({
 
 vi.mock('../biblio/shelve.js', () => ({
   shelve: (...args: unknown[]) => shelveMock(...args),
+  shelveMulti: (...args: unknown[]) => shelveMultiMock(...args),
+}));
+
+vi.mock('../biblio/categorize.js', () => ({
+  categorize: (...args: unknown[]) => categorizeMock(...args),
+}));
+
+vi.mock('../biblio/list-biblio.js', () => ({
+  listBiblio: (...args: unknown[]) => listBiblioMock(...args),
+}));
+
+vi.mock('../biblio/enkin.js', () => ({
+  enkin: (...args: unknown[]) => enkinMock(...args),
+}));
+
+vi.mock('../biblio/shokyaku.js', () => ({
+  shokyaku: (...args: unknown[]) => shokyakuMock(...args),
+}));
+
+vi.mock('../db/biblio-settings.js', () => ({
+  setBiblioSetting: (...args: unknown[]) => setBiblioSettingMock(...args),
 }));
 
 vi.mock('../log.js', () => ({
@@ -81,6 +119,12 @@ beforeEach(() => {
   acquireMock.mockReset();
   inspectMock.mockReset();
   shelveMock.mockReset();
+  categorizeMock.mockReset();
+  listBiblioMock.mockReset();
+  shelveMultiMock.mockReset();
+  enkinMock.mockReset();
+  shokyakuMock.mockReset();
+  setBiblioSettingMock.mockReset();
   resetLogMocks(log);
 });
 
@@ -92,10 +136,35 @@ describe('buildRootAgent — 構造検証', () => {
     expect(agent.description).toContain('biblio-claw');
   });
 
-  it('tools には 3 種 (acquire_biblio / inspect_biblio / shelve_biblio) が並ぶ', () => {
+  it('tools には 9 種 (Phase 4: acquire/inspect/categorize/shelve/shelve_multi/list/update_config/enkin/shokyaku) が並ぶ', () => {
     const agent = buildRootAgent();
     const toolNames = (agent.tools ?? []).map((t) => ('name' in t ? t.name : 'unknown'));
-    expect(toolNames).toEqual(['acquire_biblio', 'inspect_biblio', 'shelve_biblio']);
+    expect(toolNames).toEqual([
+      'acquire_biblio',
+      'inspect_biblio',
+      'categorize_biblio',
+      'shelve_biblio',
+      'shelve_biblio_multi',
+      'list_biblio',
+      'update_config',
+      'enkin_biblio',
+      'shokyaku_biblio',
+    ]);
+  });
+
+  it('description が「9 tools + HITL approval」を含む (= Phase 4 拡張の指標)', () => {
+    const agent = buildRootAgent();
+    expect(agent.description).toContain('9 tools');
+    expect(agent.description).toContain('HITL');
+  });
+
+  it('instruction に破壊操作 (enkin/shokyaku) の admin 承認要求 + 判断規範が明示されている', () => {
+    const agent = buildRootAgent();
+    expect(agent.instruction).toContain('enkin_biblio');
+    expect(agent.instruction).toContain('shokyaku_biblio');
+    expect(agent.instruction).toContain('admin 承認');
+    // 破壊操作の判断規範 (曖昧指示なら list_biblio → 明示指示 → 発火の 2 段)
+    expect(agent.instruction).toContain('list_biblio で候補');
   });
 
   it('model 文字列 ID が "claude-sonnet-4-6" で、LLMRegistry.resolve が AnthropicVertexLlm を返す', () => {
@@ -106,18 +175,26 @@ describe('buildRootAgent — 構造検証', () => {
   });
 });
 
-describe('buildRunner — 構造検証', () => {
-  it('InMemoryRunner instance を返す + appName が biblio_m4b', () => {
+describe('buildRunner — 構造検証 (Phase 4: SharedRunnerContext shape)', () => {
+  it('{ runner, sessionService } を返し runner は InMemoryRunner instance + appName が biblio_m4b', () => {
     const agent = buildRootAgent();
-    const runner = buildRunner(agent);
-    expect(runner).toBeInstanceOf(InMemoryRunner);
-    expect(runner.appName).toBe(BIBLIO_M4B_APP_NAME);
+    const ctx = buildRunner(agent);
+    expect(ctx).toHaveProperty('runner');
+    expect(ctx).toHaveProperty('sessionService');
+    expect(ctx.runner).toBeInstanceOf(InMemoryRunner);
+    expect(ctx.runner.appName).toBe(BIBLIO_M4B_APP_NAME);
   });
 
   it('runner.agent が buildRootAgent の戻り値と Object.is で一致する', () => {
     const agent = buildRootAgent();
-    const runner = buildRunner(agent);
-    expect(runner.agent).toBe(agent);
+    const ctx = buildRunner(agent);
+    expect(ctx.runner.agent).toBe(agent);
+  });
+
+  it('sessionService は runner.sessionService と同じ参照 (= InMemoryRunner 内部生成の共有経路)', () => {
+    const agent = buildRootAgent();
+    const ctx = buildRunner(agent);
+    expect(ctx.sessionService).toBe(ctx.runner.sessionService);
   });
 });
 
@@ -128,7 +205,7 @@ describe('runEphemeral — text-only スモーク (LLM が tool を呼ばずに 
       stop_reason: 'end_turn',
       usage: { input_tokens: 30, output_tokens: 10 },
     });
-    const runner = buildRunner(buildRootAgent());
+    const { runner } = buildRunner(buildRootAgent());
 
     const events: unknown[] = [];
     let finalText = '';
@@ -155,7 +232,7 @@ describe('runEphemeral — text-only スモーク (LLM が tool を呼ばずに 
       content: [{ type: 'tool_use', name: 'fake', input: {}, id: 'tu-1' }],
       stop_reason: 'tool_use',
     });
-    const runner = buildRunner(buildRootAgent());
+    const { runner } = buildRunner(buildRootAgent());
 
     // EMPTY_TEXT path: AnthropicVertexLlm が errorCode を含む LlmResponse を yield、
     // ADK runner はそれを受けて error event を流す。tool は 1 つも呼ばれない。
@@ -226,7 +303,7 @@ describe('runEphemeral — LLM 自律 tool 呼出 (Phase 2 で埋め戻し)', ()
       quarantinePath: '/tmp/quarantine/wf--test',
     });
 
-    const runner = buildRunner(buildRootAgent());
+    const { runner } = buildRunner(buildRootAgent());
     const events: Array<{ content?: { parts?: Array<{ text?: string }> } }> = [];
     for await (const event of runner.runEphemeral({
       userId: 'test-user',

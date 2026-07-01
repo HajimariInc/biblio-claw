@@ -228,7 +228,21 @@ export type ShelveFailureReason =
   | 'rename_error'
   /** `category` パラメータが `BiblioCategory` の 4 値に含まれない (= action handler 入口防御線)。 */
   | 'invalid_category'
-  /** 必須 env 欠落 (`SHELF_REPO_OWNER` / `SHELF_REPO_NAME` / `SHELF_PR_AUTHOR_NAME` / `SHELF_PR_AUTHOR_EMAIL` の計 4 件、`shelf-gh.ts:SHELVE_ENV_KEYS_REQUIRED`) = 設定不備。`github_api_error` と区別し、patron に "設定不備" として認知させる (= GitHub API 障害との誤解を防ぐ、issue #50)。 */
+  /**
+   * 必須 env 欠落 (`SHELF_REPO_OWNER` / `SHELF_REPO_NAME` / `SHELF_PR_AUTHOR_NAME` / `SHELF_PR_AUTHOR_EMAIL` の計 4 件、`shelf-gh.ts:SHELVE_ENV_KEYS_REQUIRED`) = 設定不備。`github_api_error` と区別し、patron に "設定不備" として認知させる (= GitHub API 障害との誤解を防ぐ、issue #50)。
+   *
+   * **M4-B Phase 4 追加 (Phase 4 review CM4 対応)**: ADK 経路の 4 用途にも転用されている。
+   * `UnshelveFailureReason` に対応 tag がない失敗を config_error に集約している:
+   *   - `enkin-tool.ts` / `shokyaku-tool.ts` の path-traversal guard 失敗 (`BIBLIO_NAME_RE` 不通過)
+   *   - `enkin-tool.ts` / `shokyaku-tool.ts` の admin 拒否 (`toolConfirmation.confirmed=false`)
+   *   - `enkin-tool.ts` / `shokyaku-tool.ts` の `tool_context` 不在 (defensive)
+   *   - `enkin-tool.ts` / `shokyaku-tool.ts` の `requestConfirmation` throw (Phase 4 review I2)
+   *   - `shelve-multi-tool.ts` の path-traversal guard 失敗 (per-item BIBLIO_NAME_RE 不通過)
+   * 各 tool ファイルのコメントで個別に「なぜ config_error を借用するか」を明記済。将来
+   * Phase 90 で `UnshelveFailureReason` / `MultiShelveFailureReason` に `'schema_invalid'` /
+   * `'user_rejected'` 追加を検討 (= 型分離の判断は本 union が unshelve 経路とも共有される
+   * closed union のため慎重に扱う)。
+   */
   | 'config_error';
 
 /**

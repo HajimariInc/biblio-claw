@@ -1,5 +1,5 @@
 /**
- * ADK Runner → channel adapter dispatcher (M4-B Phase 3).
+ * ADK Runner → channel adapter dispatcher (M4-B Phase 3 + Phase 4 HITL 統合).
  *
  * 本 module は `src/router.ts:deliverToAgent()` の `provider === 'adk'` 分岐から呼ばれ、
  * patron 命令 (CLI / Slack / 他 channel いずれか) を root `LlmAgent` に流し込み、
@@ -8,55 +8,83 @@
  * **channel adapter agnostic**: `channelType` を parameter で受け、`getChannelAdapter()` で
  * 動的に adapter を解決するだけ。CLI (`cli.ts`) でも Slack (`slack.ts`) でも同一 code path。
  *
- * **`runEphemeral` 採用理由** (Phase 3 MVP = 1 patron 命令 = 1 session):
- *   - `InMemoryRunner.runEphemeral({userId, newMessage})` は内部で `runAsync` に委譲し、
- *     都度 ephemeral session を作る (= session key 衝突懸念なし + code 単純)
- *   - Phase 3 verify-m4-b.sh には multi-turn 要件がない (= 1 命令完遂で足りる)
- *   - Phase 4 以降で multi-turn / 永続 SessionService に差替時は dispatcher 内で
- *     `runEphemeral` → `runAsync` の変更のみで済む (interface は factory で吸収)
+ * # Phase 3 → Phase 4 の切替: `runEphemeral` → `runAsync` + 明示 session 管理
  *
- * **module-level singleton runner の理由** (comment-analyzer S2 精度訂正):
- *   - `new LlmAgent(...)` 自体は認証を触らない (= 文字列 model ID を保持するのみ)。実際の
- *     Vertex 認証解決は `canonicalModel` getter → `AnthropicVertexLlm` コンストラクタ経由で
- *     `runEphemeral` 実行時に **遅延発火** する (adk-js 1.3.0 `llm_agent.js` 実装)
- *   - それでも singleton 化する理由は SDK オブジェクト (`LlmAgent` / `InMemoryRunner` /
- *     内部 in-memory service) 構築コストの毎回発火を避けるため
- *   - Pod 再起動で消えるが `runEphemeral` は session を都度使い捨てるため実害なし
- *   - test では `_resetSharedRunnerForTest()` を beforeEach で呼び、`vi.mock('./root-agent.js')`
- *     で mock runner に差替可能 (= test-helpers.ts pattern と一貫)
+ * Phase 3 は `InMemoryRunner.runEphemeral({userId, newMessage})` を使い ephemeral session を
+ * 都度使い捨てだった。Phase 4 で HITL 承認機構 (enkin/shokyaku) を統合するため、明示的な
+ * `sessionService.createSession → runner.runAsync → 保持 or deleteSession` に切り替えた。
+ *
+ * # HITL pending 経路 (event.content.parts 内の adk_request_confirmation を検知)
+ *
+ * LLM が `enkin_biblio` / `shokyaku_biblio` の tool を呼び、内部で `requestConfirmation()` を
+ * 発火すると、adk-js は `generateRequestConfirmationEvent` (`agents/functions.js:129-170`) 経由で:
+ *   - `event.content.parts` に `{functionCall: {name: 'adk_request_confirmation',
+ *     args: {originalFunctionCall, toolConfirmation}, id: <wrapper_id>}}` を追加
+ *   - `event.longRunningToolIds: [<wrapper_id>]` を populate (**wrapper 側の新規 UUID**)
+ *
+ * **重要 (Phase 4 review C1、adk-js 実装トレースで判明)**: `event.longRunningToolIds` の ID
+ * は `generateClientFunctionCallId()` で新規採番された wrapper (`adk_request_confirmation`
+ * 名) の function call id であり、`event.actions.requestedToolConfirmations` のキー
+ * (= 元 tool call `enkin_biblio` の function call id) とは**別 namespace で一致しない**。
+ * したがって `requestedToolConfirmations[longRunningId]` は必ず undefined になる罠がある。
+ * 本 dispatcher では `event.content.parts` を直接走査して `adk_request_confirmation` function
+ * call を見つけ、`args.toolConfirmation` から payload を、`part.functionCall.id` から
+ * wrapper id (= resume 時の `functionResponse.id`) を取り出す設計に統一する。
+ *
+ * dispatcher の pending 検知後の流れ:
+ *   1. payload から `{biblioName, category, action: 'enkin' | 'shokyaku'}` を取り出し
+ *   2. `requestAdkApproval({...})` で admin に Slack DM ask_question card を配信
+ *      (**戻り値 `boolean` で pending row 作成成否を判定** = Phase 4 review C3)
+ *   3. patron に「承認申請しました」中間応答を deliver
+ *   4. `break` で event stream 消費を打ち切り、`deleteSession` を **skip** して session 保持
+ *
+ * 承認完了 (admin 押下) 時は response-handler.ts が `resolveAdkApproval` を呼び、同 sessionId で
+ * runAsync 再呼出 → functionResponse 送り込み → tool.execute 再実行 → 最終応答 deliver。
+ *
+ * # silent failure 撲滅方針 (Phase 3 契約を維持 + Phase 4 review C2 で強化)
+ *
+ * `throw` しない (= router.ts の catch に頼らない)。runner 初期化失敗 / event stream 例外 /
+ * adapter.deliver 失敗までを全て内部で catch し、patron 向けに何らかの日本語 fallback text で
+ * `adapter.deliver` を試みる。空 `patronText` は patron に「認識できませんでした」応答。
+ * **catch 経路では `pending = false` にリセット**して通常経路 (deleteSession + finalText
+ * deliver) に落とし、silent drop + session leak を防ぐ (Phase 4 review C2 対応)。
  */
 import { isFinalResponse } from '@google/adk';
-import type { InMemoryRunner } from '@google/adk';
 
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import { log } from '../log.js';
+import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
 
 import { buildRootAgent } from './root-agent.js';
-import { buildRunner, BIBLIO_M4B_APP_NAME } from './runner.js';
+import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
+import type { HitlConfirmationPayload } from './tools/hitl-types.js';
 
 /** module-scope singleton。SDK オブジェクト構築コストを起動時 1 回に抑える。 */
-let sharedRunner: InMemoryRunner | undefined;
+let sharedContext: SharedRunnerContext | undefined;
 
 /**
  * ADK Runner の共有インスタンスを返す (初回呼出時に lazy 初期化)。
  *
+ * Phase 4 で戻り値を `SharedRunnerContext = { runner, sessionService }` に拡張した
+ * (= HITL 承認機構が sessionService を経由して明示的に session の create / delete を行う)。
+ *
  * lazy 初期化する理由: `buildRootAgent()` は SDK 内部 validation (`FunctionTool` name regex、
  * `LlmAgent` config 検証) を同期実行する。ADK 側の想定外変更で例外が投げられうる (= 現状は
- * 稀だが 0 ではない)。**呼出元は必ず try で囲む** (= dispatchToAdk が試みる契約、下記参照)。
- * また実際の Vertex 認証は `runEphemeral` 実行時に遅延発火するため、`initHostProxy()` /
+ * 稀だが 0 ではない)。**呼出元は必ず try で囲む** (= dispatchToAdk / resolveAdkApproval が
+ * 試みる契約)。実際の Vertex 認証は `runAsync` 実行時に遅延発火するため、`initHostProxy()` /
  * `setupVertexProxy()` / `registerAnthropicVertexLlm()` が完了した後 (= routeInbound 経由
  * 呼出時点) で走る順序を `src/index.ts` main() が保証している。
  */
-export function getSharedRunner(): InMemoryRunner {
-  if (!sharedRunner) {
+export function getSharedRunner(): SharedRunnerContext {
+  if (!sharedContext) {
     const rootAgent = buildRootAgent();
-    sharedRunner = buildRunner(rootAgent);
-    log.info('ADK dispatcher: shared runner created', {
+    sharedContext = buildRunner(rootAgent);
+    log.info('ADK dispatcher: shared runner + sessionService created', {
       event: 'adk.dispatcher.runner_created',
       app_name: BIBLIO_M4B_APP_NAME,
     });
   }
-  return sharedRunner;
+  return sharedContext;
 }
 
 /**
@@ -66,7 +94,7 @@ export function getSharedRunner(): InMemoryRunner {
  * `_resetSharedRunnerForTest()` を呼ばないと前 case の runner が引き継がれる。
  */
 export function _resetSharedRunnerForTest(): void {
-  sharedRunner = undefined;
+  sharedContext = undefined;
 }
 
 /** dispatcher の入力パラメータ。router.ts:deliverToAgent が組み立てて渡す。 */
@@ -88,17 +116,11 @@ export interface DispatchToAdkParams {
  * ADK Runner event stream を消費し、最終応答を channel adapter 経由で patron に返す。
  *
  * **contract** (silent failure 撲滅方針の徹底):
- *   - `throw` しない (= router.ts の catch に頼らない)。`getSharedRunner()` の初期化失敗
- *     から `runEphemeral` の event stream 例外、`adapter.deliver` 失敗までを全て内部で
- *     catch し、patron 向けに何らかの日本語 fallback text で `adapter.deliver` を試みる
- *   - `adapter` 不在時のみ warn log で終了 (= 応答経路がないなら他に選択肢がない)
- *   - `adapter.deliver` が `undefined` を返した場合、CLI 経路等の「client 未接続 = 実 delivery
- *     なし」の可能性があるため `delivered` ログではなく `not_delivered` を残す (= 偽成功
- *     ログを防ぐ、silent-failure-hunter C1 対処)
- *   - 空 `patronText` は patron に「認識できませんでした」応答 (= 唯一の validation、上流
- *     チェックはない前提)
- *
- * event stream 消費 pattern は `scripts/verify-phase-1-adk-local.ts:98-138` から写経。
+ *   - `throw` しない
+ *   - runner 初期化失敗 / event stream 例外 / adapter.deliver 失敗を全て内部で catch し patron 通知
+ *   - HITL pending 経路 (`event.longRunningToolIds`) 検知時は `requestAdkApproval` 呼出 +
+ *     patron に中間応答 + session 保持 (deleteSession skip) で return
+ *   - 通常経路の finally は session cleanup、pending 経路は resume 側 (approval-dispatcher.ts) が cleanup
  */
 export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> {
   const { channelType, platformId, threadId, patronText, requestId } = params;
@@ -120,11 +142,10 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     return;
   }
 
-  // Runner 初期化を try に含める (I1 = code-reviewer + comment-analyzer 指摘)。
-  // 初期化失敗時は system error として patron に fallback を送る。
-  let runner: InMemoryRunner;
+  // Runner 初期化を try に含める (Phase 3 契約継承)。初期化失敗時は system error として fallback。
+  let ctx: SharedRunnerContext;
   try {
-    runner = getSharedRunner();
+    ctx = getSharedRunner();
   } catch (err) {
     log.error('ADK dispatcher: runner init failed', {
       event: 'adk.dispatcher.runner_init_failed',
@@ -140,8 +161,53 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     );
     return;
   }
+  const { runner, sessionService } = ctx;
 
   const userId = params.userId ?? params.platformId;
+
+  // Session 明示作成 (runEphemeral 内部処理を manual で行う、HITL pause 対応のため)。
+  // sessionId は adk-js が UUID を自動生成する。
+  let sessionId: string;
+  try {
+    const session = await sessionService.createSession({
+      appName: BIBLIO_M4B_APP_NAME,
+      userId,
+    });
+    sessionId = session.id;
+  } catch (err) {
+    log.error('ADK dispatcher: createSession failed', {
+      event: 'adk.dispatcher.create_session_failed',
+      request_id: requestId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    await deliverFallback(
+      channelType,
+      platformId,
+      threadId,
+      'エラー: 会話セッションの作成に失敗しました。しばらくして再度お試しください。',
+      requestId,
+    );
+    return;
+  }
+
+  // 重複 deleteSession 防止 (= 将来 catch/finally/pending 経路が増えた時の防御)。
+  // 現状 (Phase 4 時点) は finally の 1 箇所からしか呼ばれないため実質的に発火しないが、
+  // Phase 90 の routing-cleanup で経路が増える見込みのため予防的に維持 (Phase 4 review CM3)。
+  let sessionDeleted = false;
+  const deleteSessionSafe = async (): Promise<void> => {
+    if (sessionDeleted) return;
+    sessionDeleted = true;
+    try {
+      await sessionService.deleteSession({ appName: BIBLIO_M4B_APP_NAME, userId, sessionId });
+    } catch (err) {
+      log.warn('ADK dispatcher: deleteSession failed (leaking session)', {
+        event: 'adk.dispatcher.delete_session_failed',
+        request_id: requestId,
+        session_id: sessionId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   log.info('ADK dispatcher: invoke', {
     event: 'adk.dispatcher.invoke',
@@ -150,20 +216,22 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     agent_group_id: params.agentGroupId,
     messaging_group_id: params.messagingGroupId,
     user_id: userId,
+    adk_session_id: sessionId,
     patron_text_length: patronText.length,
   });
 
   let finalText = '';
   let adkErrorCode: string | undefined;
   let adkErrorMessage: string | undefined;
+  let pending = false;
 
   try {
-    for await (const event of runner.runEphemeral({
+    for await (const event of runner.runAsync({
       userId,
+      sessionId,
       newMessage: { role: 'user', parts: [{ text: patronText }] },
     })) {
-      // ADK error event 検知 (= verify-phase-1-adk-local.ts:72-84 パターン):
-      // LLM API 失敗時に ADK runner は throw せず `errorCode` 付き event を yield する。
+      // ADK error event 検知 (= Phase 3 pattern と同じ)
       if (typeof event === 'object' && event !== null && 'errorCode' in event) {
         const ev = event as { errorCode?: string; errorMessage?: string };
         if (ev.errorCode) {
@@ -178,6 +246,115 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
           break;
         }
       }
+
+      // Phase 4: HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)
+      //
+      // **adk-js@1.3.0 実装契約** (Phase 4 review C1 対応):
+      // `longRunningToolIds` に入るのは `generateRequestConfirmationEvent` (`agents/functions.js:129`)
+      // が新規採番した wrapper (`adk_request_confirmation` 名) の function call id。一方
+      // `event.actions.requestedToolConfirmations` のキーは元 tool call (`enkin_biblio` 等) の
+      // function call id。両者は別 namespace で一致しないため、`requestedToolConfirmations[id]`
+      // 引き経路は使えない。`event.content.parts` を直接走査して `adk_request_confirmation`
+      // function call を見つける方式に統一する。
+      const longRunningIds = event.longRunningToolIds;
+      if (longRunningIds && longRunningIds.length > 0) {
+        pending = true;
+        const parts = event.content?.parts ?? [];
+        let dispatched = 0;
+        // longRunningToolIds に対応する wrapper function call を parts から抽出。
+        // 通常 1 event に 1 wrapper だが、複数破壊操作の同時 pause (issue #110) に備えて
+        // for-loop で全件処理する。
+        for (const part of parts) {
+          const fc = part.functionCall;
+          if (!fc || fc.name !== 'adk_request_confirmation' || !fc.id) continue;
+          // longRunningToolIds に含まれる wrapper のみ処理 (= 型上の double check、
+          // adk-js が populate する longRunningToolIds と一致するはず)
+          if (!longRunningIds.includes(fc.id)) continue;
+
+          // args から toolConfirmation を取り出す。args の shape は adk-js の
+          // generateRequestConfirmationEvent が構築する `{originalFunctionCall, toolConfirmation}`。
+          const args = fc.args as { toolConfirmation?: { hint?: unknown; payload?: unknown } } | undefined;
+          const toolConfirmation = args?.toolConfirmation;
+          if (!toolConfirmation) {
+            log.warn('ADK dispatcher: adk_request_confirmation function call without toolConfirmation, skipping', {
+              event: 'adk.dispatcher.pending_no_confirmation',
+              request_id: requestId,
+              function_call_id: fc.id,
+            });
+            continue;
+          }
+
+          const toolPayload = toolConfirmation.payload as HitlConfirmationPayload | undefined;
+          if (!toolPayload) {
+            log.warn('ADK dispatcher: confirmation without payload, skipping', {
+              event: 'adk.dispatcher.pending_no_payload',
+              request_id: requestId,
+              function_call_id: fc.id,
+            });
+            continue;
+          }
+          const action = toolPayload.action;
+          if (action !== 'enkin' && action !== 'shokyaku') {
+            log.warn('ADK dispatcher: unknown confirmation action, skipping', {
+              event: 'adk.dispatcher.pending_unknown_action',
+              request_id: requestId,
+              function_call_id: fc.id,
+              action: (action as unknown) ?? null,
+            });
+            continue;
+          }
+
+          const hint = typeof toolConfirmation.hint === 'string' ? toolConfirmation.hint : undefined;
+
+          // requestAdkApproval は Phase 4 review C3 対応で Promise<boolean> を返す。
+          // 内部 fallback 通知 (approver 不在 / DM 不在 / deliver throw) 時は false を返し、
+          // dispatcher は「成功」と誤認しない = 中間応答「承認申請しました」を送らない。
+          let created = false;
+          try {
+            created = await requestAdkApproval({
+              agentGroupId: params.agentGroupId,
+              channelType,
+              platformId,
+              threadId,
+              userId,
+              adkSessionId: sessionId,
+              functionCallId: fc.id,
+              hint: hint ?? '承認が必要な操作です。',
+              action,
+              payload: toolPayload,
+            });
+          } catch (err) {
+            // requestAdkApproval は throw しない契約だが、防御的に catch (Phase 4 review C2、
+            // silent-failure-hunter I1 pattern 継承)。ここで throw が抜けると outer catch に
+            // 到達して pending リセット + patron に system error が届く。
+            log.error('ADK dispatcher: requestAdkApproval unexpectedly threw', {
+              event: 'adk.dispatcher.request_approval_error',
+              request_id: requestId,
+              function_call_id: fc.id,
+              action,
+              err: err instanceof Error ? err.message : String(err),
+            });
+            created = false;
+          }
+          if (created) dispatched++;
+        }
+        // 中間応答: patron に「承認申請しました」通知
+        // (dispatched === 0 なら結局承認カードが 1 件も出ていない = 通常経路に落として最終応答を試みる)
+        if (dispatched > 0) {
+          await deliverFallback(
+            channelType,
+            platformId,
+            threadId,
+            '承認を admin にお願いしました。承認後に処理を続行します。',
+            requestId,
+          );
+          break; // session を残したまま return (deleteSession しない)
+        } else {
+          // 全 confirmation を skip した = pending 経路の実体なし、通常経路として続行
+          pending = false;
+        }
+      }
+
       if (isFinalResponse(event)) {
         finalText = event.content?.parts?.[0]?.text ?? '';
       }
@@ -189,6 +366,20 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       err: err instanceof Error ? err.message : String(err),
     });
     finalText = 'エラー: LLM 呼び出しに失敗しました。しばらくして再度お試しください。';
+    // Phase 4 review C2 対応: catch 経路では必ず pending をリセットして通常経路 (finally で
+    // deleteSession + finalText で adapter.deliver) に落とす。pending=true のまま抜けると
+    // finalText が deliver されず + session がリークする silent failure になる。
+    pending = false;
+  } finally {
+    // 通常経路のみ deleteSession、pending は resume 側 (approval-dispatcher.ts) が cleanup。
+    if (!pending) {
+      await deleteSessionSafe();
+    }
+  }
+
+  if (pending) {
+    // pending 経路: 中間応答は既に送信済、最終応答は resume 時に approval-dispatcher が送る。
+    return;
   }
 
   if (adkErrorCode) {
@@ -232,10 +423,6 @@ async function deliverFallback(
       content: { text },
     });
     if (deliveryId === undefined) {
-      // CLI adapter は client 未接続時に undefined を返す (`cli.ts:126-135` で warn 出力済)。
-      // ADK 経路は outbound.db を経由しないため、この応答は永久にロストする = 偽成功
-      // ログを残さないよう `not_delivered` を明示。運用は Cloud Logging で
-      // `event="adk.dispatcher.not_delivered"` を監視することで silent failure を検知できる。
       log.warn('ADK dispatcher: adapter returned undefined (delivery may not have reached patron)', {
         event: 'adk.dispatcher.not_delivered',
         request_id: requestId,
