@@ -8,7 +8,8 @@
 #
 #   1. preflight (.env / kubectl context / 必須 env)
 #   2. keyless 4 面アサート (GAC empty / ADC type / SA key 不在 / TF に key resource なし)
-#   3. deploy 成立 (StatefulSet readyReplicas=1 + image tag = m4b-*)
+#   3. deploy 成立 (StatefulSet readyReplicas=1 + ADK agent group 登録済 = 機能で判定、
+#      image tag は info log のみで assert しない)
 #   4. 1 命令完遂 (kubectl exec で Pod 内 `pnpm run chat` 発火 → stdout に期待キーワード)
 #   4.5. 拡張 tool smoke (Phase 4: list_biblio + update_config → chat 経由で発火して stdout 検証)
 #   5. 1 trace 串刺し (Cloud Trace REST で trace + span 一覧取得 →
@@ -38,7 +39,9 @@
 #   - kubectl context = biblio-prod (or ~gke_*_biblio-prod)
 #   - gcloud auth application-default login 済
 #   - ADK agent group + CLI wire は事前完了 (scripts/init-adk-agent.ts 実行済)
-#   - image tag m4b-p3 が deploy 済 (scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --confirm)
+#   - orchestrator image が Phase 4 実装を含む状態で deploy 済
+#     (scripts/init-project-gcp-image-sync.sh --tag <任意> --confirm、tag 名は verify 側で問わない
+#     = Section 4.5 / 6.5 の機能 assertion で Phase 4 実装の生死を判定する設計)
 #
 # 所要時間: ~5-10 min (LLM 応答 8-15s + Cloud Trace 到達 30-90s + regression 数 min)
 
@@ -130,7 +133,7 @@ fi
 info '  → keyless 4 面すべて OK'
 
 # =============================================================================
-# Section 3: deploy 成立 (StatefulSet ready + image tag = m4b-p3*)
+# Section 3: deploy 成立 (StatefulSet ready + ADK agent group 登録済)
 # =============================================================================
 info '=== [3/9] deploy 成立 ==='
 
@@ -143,19 +146,30 @@ if [[ "$POD_READY" != "1" ]]; then
   fail "orchestrator StatefulSet readyReplicas != 1: $POD_READY"
 fi
 
-# 実 Pod 上の image tag を確認 (manifest 上ではなく実 runtime を見る)
+# 実 Pod 上の image tag は **assert しない** (info log のみ)。
+#
+# 設計判断 (DEN さん判断、2026-07-01): verify は「何が動いて / 何が動かないか」を
+# 機能で測る役割で、「どの image が乗っているか」の identify は deploy 側の責務。
+# 過去の `[[ "$IMAGE_TAG" =~ ^m4b-p3 ]]` prefix assert は Phase 番号を hard-code しており、
+# Phase bump 毎に script 同期更新が必要になる brittleness を持っていた
+# (Phase 4 実装で実際に script と plan Level 6 の tag 指定が乖離した実績あり)。
+# 「Phase 4 実装が乗った Pod で verify している」の identify は後続 section の機能
+# assertion で自然に検知される:
+#   - Section 4.5 (list_biblio / update_config smoke) — Phase 4 の 6 新 tool が動く image でなければ fail
+#   - Section 6.5 (HITL flow smoke) — Phase 4 の dispatcher HITL 分岐が動く image でなければ fail
+# したがって image tag の事前 identifier check は冗長かつ brittle として除外した。
+# tag 値は fail 時のデバッグ手掛かりとして info log に残す (assertion からは除外)。
+#
 # `kubectl get pod` は `-c` flag を受け付けない (exec/logs 専用) — jsonpath の
 # container name filter で狙う。
 POD_IMAGE="$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}' 2>"$STDERR_DIR/pod-get.stderr" || echo '')"
 if [ -z "$POD_IMAGE" ]; then
   LAST_HARNESS_STDERR="$STDERR_DIR/pod-get.stderr"
+  warn "  Pod image 情報取得失敗 (継続、後続の機能 assertion で判定)"
 fi
 IMAGE_TAG="$(printf '%s' "$POD_IMAGE" | awk -F: '{print $NF}')"
-[[ "$IMAGE_TAG" =~ ^m4b-p3 ]] \
-  || fail "orchestrator Pod image tag が m4b-p3* ではない: '$IMAGE_TAG' (image=$POD_IMAGE)
-    対処: scripts/init-project-gcp-image-sync.sh --tag m4b-p3 --confirm を実行済か確認"
 
-info "  StatefulSet READY=1, image tag=$IMAGE_TAG (OK)"
+info "  StatefulSet READY=1, image tag=$IMAGE_TAG (info only, not asserted)"
 
 # ADK agent group が存在するかを DB 経由で確認 (init-adk-agent.ts 実行済であること)
 # GKE 経路では PVC mount で `/data/v2.db` が実体 (`DATA_DIR=/data` env)。
