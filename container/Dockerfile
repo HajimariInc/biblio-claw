@@ -99,6 +99,15 @@ RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/
 # volume mount ロジック)。
 ENV SSL_CERT_FILE=/etc/ssl/certs/onecli/onecli-combined-ca.pem
 
+# ---- OneCLI MITM 経由の gh CLI auth pre-check 回避 -------------------------
+# gh CLI は wire request を送る前に client-side で auth state を確認するため、
+# GH_TOKEN env も hosts.yml も空だと `gh auth login` を促して reject する。
+# OneCLI proxy は wire 上の Authorization ヘッダを実 installation token に
+# 完全上書き (= scripts/onecli-gh-secret.sh の valueFormat: "Bearer {value}")
+# するため、ここでは pre-check を pass させる placeholder で十分。host 側
+# `Bearer placeholder` 流儀 (src/biblio/shelf-gh.ts:118 等) と同根。
+ENV GH_TOKEN=placeholder
+
 # ---- agent-runner deps -------------------------------------------------------
 # Deps are cached independently of CLI versions.
 WORKDIR /app
