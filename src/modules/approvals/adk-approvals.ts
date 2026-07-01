@@ -214,10 +214,20 @@ async function notifyPatronFallback(opts: RequestAdkApprovalOptions, text: strin
     return;
   }
   try {
-    await adapter.deliver(opts.platformId, opts.threadId, {
+    // Phase 4 review I1 対応: `deliveryId === undefined` 検知 (CLI 未接続時の silent 化防止、
+    // dispatcher.ts:deliverFallback の C1 教訓 carry over)。
+    const deliveryId = await adapter.deliver(opts.platformId, opts.threadId, {
       kind: 'chat',
       content: { text },
     });
+    if (deliveryId === undefined) {
+      log.warn('ADK approval fallback: adapter returned undefined (patron may not have received)', {
+        event: 'adk.approval.fallback_not_delivered',
+        channel_type: opts.channelType,
+        action: opts.action,
+        text_length: text.length,
+      });
+    }
   } catch (err) {
     log.error('ADK approval fallback deliver threw', {
       event: 'adk.approval.fallback_failed',

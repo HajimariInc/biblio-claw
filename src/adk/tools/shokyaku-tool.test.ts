@@ -176,3 +176,25 @@ describe('shokyakuBiblioTool — Resume 後の異常系', () => {
     ).rejects.toThrow(/unshelve failed/);
   });
 });
+
+describe('shokyakuBiblioTool — Phase 4 review I2: requestConfirmation throw の防御', () => {
+  it('初回呼出で requestConfirmation() が throw → fail-closed で config_error 返却 + shokyaku() 未呼出', async () => {
+    requestConfirmationMock.mockImplementation(() => {
+      throw new Error('ADK internal: confirmation channel closed');
+    });
+    const result = await shokyakuBiblioTool.runAsync({
+      args: { biblioName: 'wf--test', category: 'biblio-dev' },
+      toolContext: mockHitlContext(),
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      reason: 'config_error',
+      detail: expect.stringContaining('requestConfirmation'),
+    });
+    expect(shokyakuMock).not.toHaveBeenCalled();
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      expect.stringContaining('requestConfirmation threw'),
+      expect.objectContaining({ event: 'adk.tool.shokyaku.request_confirmation_error' }),
+    );
+  });
+});

@@ -211,10 +211,31 @@ async function deliverToPatron(payload: AdkApprovalPayload, text: string, reques
     return;
   }
   try {
-    await adapter.deliver(payload.platformId, payload.threadId, {
+    // Phase 4 review I1 対応: `deliverFallback` (dispatcher.ts:333-379) と同流儀の
+    // `deliveryId === undefined` 検知を追加。CLI adapter が client 未接続時に undefined を
+    // 返すため、`delivered` ではなく `not_delivered` warn を残して silent 化を防ぐ
+    // (silent-failure-hunter C1 教訓の carry over)。
+    const deliveryId = await adapter.deliver(payload.platformId, payload.threadId, {
       kind: 'chat',
       content: { text },
     });
+    if (deliveryId === undefined) {
+      log.warn('ADK approval resolve: adapter returned undefined (delivery may not have reached patron)', {
+        event: 'adk.approval.not_delivered',
+        request_id: requestId,
+        channel_type: payload.channelType,
+        inner_action: payload.innerAction,
+        final_text_length: text.length,
+      });
+    } else {
+      log.info('ADK approval resolve: delivered', {
+        event: 'adk.approval.delivered',
+        request_id: requestId,
+        channel_type: payload.channelType,
+        delivery_id: deliveryId,
+        final_text_length: text.length,
+      });
+    }
   } catch (err) {
     log.error('ADK approval deliver failed', {
       event: 'adk.approval.deliver_failed',

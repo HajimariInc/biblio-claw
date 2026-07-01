@@ -137,12 +137,34 @@ export const enkinBiblioTool = new FunctionTool({
       category,
     });
     const confirmationPayload: HitlConfirmationPayload = { biblioName, category, action: 'enkin' };
-    tool_context.requestConfirmation({
-      hint: `禁書: ${biblioName} (${category}) を棚から除去します。装備源は残置 (= 再装備可)。承認しますか?`,
-      payload: confirmationPayload,
-    });
-    // 型上 EnkinResult を返す必要があるが、runner は pause で先取りするためこの return は
-    // 実行されない (= dead code、型合わせ)。GOTCHA 1 参照。
+    // Phase 4 review I2 対応: `requestConfirmation()` は adk-js@1.3.0 `@experimental` API のため
+    // throw リスクは非ゼロ。resume 側 (実 `enkin()` 呼出) には既に try/catch がある一方で
+    // 初回呼出には無く対称性を欠いていたため、ここに追加。throw 時は fail-closed で
+    // config_error に倒す (silent skip 禁止)。
+    try {
+      tool_context.requestConfirmation({
+        hint: `禁書: ${biblioName} (${category}) を棚から除去します。装備源は残置 (= 再装備可)。承認しますか?`,
+        payload: confirmationPayload,
+      });
+    } catch (err) {
+      log.error('ADK tool: enkin_biblio requestConfirmation threw', {
+        event: 'adk.tool.enkin.request_confirmation_error',
+        request_id: requestId,
+        session_id: sessionId,
+        biblio_name: biblioName,
+        category,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return {
+        ok: false,
+        biblioName,
+        reason: 'config_error',
+        detail: 'ADK requestConfirmation の呼出に失敗しました (internal error)。',
+      };
+    }
+    // 型上 EnkinResult を返す必要があるが、runner が pause で先取りするため、この return 文
+    // 自体は runner に消費されるだけで **呼び出し元 (LLM / patron) には届かない** (dead code
+    // ではなく、単に「捨てられる」return 値。Phase 4 review CM2 対応で表現訂正)。GOTCHA 1 参照。
     return {
       ok: false,
       biblioName,

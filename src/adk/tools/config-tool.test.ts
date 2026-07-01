@@ -123,6 +123,26 @@ describe('updateConfigTool — validateValueForKey (意味的検証)', () => {
     expect(result).toMatchObject({ ok: false, reason: 'invalid_value' });
     expect(setBiblioSettingMock).not.toHaveBeenCalled();
   });
+
+  it('Phase 4 review I3: ACQUIRE_SKILL_THRESHOLD に小数 ("10.5") → ok:false (parseInt 切り捨てで literal 保存を防ぐ)', async () => {
+    const result = await updateConfigTool.runAsync({
+      args: { key: 'ACQUIRE_SKILL_THRESHOLD', value: '10.5' },
+      toolContext: mockToolContext(),
+    });
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_value' });
+    expect(setBiblioSettingMock).not.toHaveBeenCalled();
+  });
+
+  it('Phase 4 review I3: ACQUIRE_SKILL_THRESHOLD に "1.0" → ok:true (整数値であれば形式は問わない)', async () => {
+    setBiblioSettingMock.mockImplementation(() => undefined);
+    const result = await updateConfigTool.runAsync({
+      args: { key: 'ACQUIRE_SKILL_THRESHOLD', value: '1.0' },
+      toolContext: mockToolContext(),
+    });
+    // Number("1.0") === 1、Number.isInteger(1) === true なので accept
+    expect(result).toMatchObject({ ok: true, key: 'ACQUIRE_SKILL_THRESHOLD', value: '1.0' });
+    expect(setBiblioSettingMock).toHaveBeenCalled();
+  });
 });
 
 describe('updateConfigTool — 異常系 (setBiblioSetting throw 経路)', () => {

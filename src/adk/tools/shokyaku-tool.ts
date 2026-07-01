@@ -127,10 +127,31 @@ export const shokyakuBiblioTool = new FunctionTool({
       category,
     });
     const confirmationPayload: HitlConfirmationPayload = { biblioName, category, action: 'shokyaku' };
-    tool_context.requestConfirmation({
-      hint: `焼却: ${biblioName} (${category}) を棚から除去し、装備源も物理削除します (= 再装備不可、破壊操作)。承認しますか?`,
-      payload: confirmationPayload,
-    });
+    // Phase 4 review I2 対応: enkin-tool.ts と同流儀の requestConfirmation throw 防御。
+    try {
+      tool_context.requestConfirmation({
+        hint: `焼却: ${biblioName} (${category}) を棚から除去し、装備源も物理削除します (= 再装備不可、破壊操作)。承認しますか?`,
+        payload: confirmationPayload,
+      });
+    } catch (err) {
+      log.error('ADK tool: shokyaku_biblio requestConfirmation threw', {
+        event: 'adk.tool.shokyaku.request_confirmation_error',
+        request_id: requestId,
+        session_id: sessionId,
+        biblio_name: biblioName,
+        category,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return {
+        ok: false,
+        biblioName,
+        reason: 'config_error',
+        detail: 'ADK requestConfirmation の呼出に失敗しました (internal error)。',
+      };
+    }
+    // 型上 ShokyakuResult を返す必要があるが、runner が pause で先取りするため、この return 文
+    // は runner に消費されるだけで **呼び出し元 (LLM / patron) には届かない** (Phase 4 review
+    // CM2 対応で表現訂正、enkin-tool.ts と同流儀)。
     return {
       ok: false,
       biblioName,
