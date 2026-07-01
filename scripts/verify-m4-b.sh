@@ -134,7 +134,9 @@ POD_READY="$(kubectl get statefulset/biblio-orchestrator -n "$NAMESPACE" -o json
 [[ "$POD_READY" == "1" ]] || fail "orchestrator StatefulSet readyReplicas != 1: $POD_READY"
 
 # 実 Pod 上の image tag を確認 (manifest 上ではなく実 runtime を見る)
-POD_IMAGE="$(kubectl get pod "$POD" -c orchestrator -n "$NAMESPACE" -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}' 2>/dev/null || echo '')"
+# `kubectl get pod` は `-c` flag を受け付けない (exec/logs 専用) — jsonpath の
+# container name filter で狙う。
+POD_IMAGE="$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}' 2>/dev/null || echo '')"
 IMAGE_TAG="$(printf '%s' "$POD_IMAGE" | awk -F: '{print $NF}')"
 [[ "$IMAGE_TAG" =~ ^m4b-p3 ]] \
   || fail "orchestrator Pod image tag が m4b-p3* ではない: '$IMAGE_TAG' (image=$POD_IMAGE)
@@ -143,8 +145,11 @@ IMAGE_TAG="$(printf '%s' "$POD_IMAGE" | awk -F: '{print $NF}')"
 info "  StatefulSet READY=1, image tag=$IMAGE_TAG (OK)"
 
 # ADK agent group が存在するかを DB 経由で確認 (init-adk-agent.ts 実行済であること)
+# GKE 経路では PVC mount で `/data/v2.db` が実体 (`DATA_DIR=/data` env)。
+# 相対パス `data/v2.db` は WORKDIR=/app 相対で解決されて `/app/data/` を見に行き
+# ENOENT で fail するため、絶対パス指定。
 ADK_AG_COUNT="$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
-  pnpm exec tsx scripts/q.ts data/v2.db \
+  pnpm exec tsx scripts/q.ts /data/v2.db \
   "SELECT COUNT(*) FROM container_configs WHERE provider='adk'" 2>"$STDERR_DIR/adk-ag-check.stderr" \
   | tail -n1 || echo '')"
 if ! [[ "$ADK_AG_COUNT" =~ ^[0-9]+$ ]] || [ "$ADK_AG_COUNT" -lt 1 ]; then
@@ -201,19 +206,26 @@ if [ -z "$POD_LOGS" ]; then
   fail "Pod ログ取得失敗"
 fi
 
-# trace_id は Cloud Logging reserved field or biblio log で trace_id/traceId として出るはず。
-# 直近の router.dispatch.adk event か adk.dispatcher.invoke event の trace_id を狙う。
+# trace_id は Cloud Logging reserved field として `logging.googleapis.com/trace` に出る。
+# biblio-claw の trace-fields.ts は bare 32hex (`"logging.googleapis.com/trace":"<32hex>"`)
+# で出力する = Cloud Logging 側で GCP 標準の `projects/<PROJECT>/traces/<32hex>` 形式に
+# 自動昇格される (= biblio-claw 側は project 情報を追加しない設計)。
+#
+# Section 4 の chat 経由 acquire を狙うため、`adk.tool.acquire.invoke` event に絞る。
+# 単なる `tail -n1` では rotator sidecar 経路の trace_id を拾う race condition があった。
 TRACE_ID="$(printf '%s\n' "$POD_LOGS" \
-  | grep -oE '"logging\.googleapis\.com/trace":"projects/[^/]+/traces/[a-f0-9]{32}"' \
+  | grep '"event":"adk.tool.acquire.invoke"' \
+  | grep -oE '"logging\.googleapis\.com/trace":"[a-f0-9]{32}"' \
   | tail -n1 \
-  | sed -E 's|.*/traces/([a-f0-9]{32})"|\1|' || true)"
+  | sed -E 's/"logging\.googleapis\.com\/trace":"([a-f0-9]{32})"/\1/' || true)"
 
-# fallback: biblio 独自 trace_id field も探す
+# fallback: `AnthropicVertexLlm initialized` event (LLM 呼出時、必ず active span 配下)。
 if [ -z "$TRACE_ID" ]; then
   TRACE_ID="$(printf '%s\n' "$POD_LOGS" \
-    | grep -oE '"trace_id":"[a-f0-9]{32}"' \
+    | grep '"event":"adk.anthropic_vertex_llm.init"' \
+    | grep -oE '"logging\.googleapis\.com/trace":"[a-f0-9]{32}"' \
     | tail -n1 \
-    | sed -E 's/"trace_id":"([a-f0-9]{32})"/\1/' || true)"
+    | sed -E 's/"logging\.googleapis\.com\/trace":"([a-f0-9]{32})"/\1/' || true)"
 fi
 
 if ! [[ "$TRACE_ID" =~ ^[a-f0-9]{32}$ ]]; then
@@ -231,19 +243,25 @@ TOKEN="$(gcloud auth application-default print-access-token 2>"$STDERR_DIR/adc-t
 
 TRACE_BODY=''
 trace_span_count=0
+# break 条件: `execute_tool acquire_biblio` + `chat claude-*` の 2 種 span が両方存在すること。
+# Cloud Trace の span export は BatchSpanProcessor 経由で非同期に到達するため、
+# 単に「spans >= 1」で break すると初回到達時点の HTTP client span しか含まれず、
+# ADK 自動 span + AnthropicVertexLlm 自前 span がまだ出揃っていない状態を掴む。
 for i in $(seq 1 30); do
   body="$(curl -fsS -H "Authorization: Bearer $TOKEN" \
     "https://cloudtrace.googleapis.com/v1/projects/${GCP_PROJECT_ID}/traces/${TRACE_ID}" \
     2>"$STDERR_DIR/trace-curl-$i.stderr" || true)"
   if [ -n "$body" ]; then
     trace_span_count="$(printf '%s' "$body" | jq -r '.spans | length // 0' 2>/dev/null || echo 0)"
-    if [ "$trace_span_count" -ge 1 ] 2>/dev/null; then
+    span_names_partial="$(printf '%s' "$body" | jq -r '.spans[].name' 2>/dev/null || true)"
+    if printf '%s' "$span_names_partial" | grep -qE 'execute_tool.*acquire_biblio' \
+       && printf '%s' "$span_names_partial" | grep -qE 'chat claude-'; then
       TRACE_BODY="$body"
-      info "  [attempt ${i}/30] trace 到達 (spans=${trace_span_count}) after ~$(( (i-1) * 3 ))s"
+      info "  [attempt ${i}/30] trace 到達 (spans=${trace_span_count}、execute_tool + chat 揃い) after ~$(( (i-1) * 3 ))s"
       break
     fi
   fi
-  info "  [attempt ${i}/30] not yet; sleep 3s"
+  info "  [attempt ${i}/30] partial (spans=${trace_span_count}); sleep 3s"
   sleep 3
 done
 
@@ -259,28 +277,42 @@ SPAN_NAMES="$(printf '%s' "$TRACE_BODY" | jq -r '.spans[].name')"
 info "  span 一覧 (${trace_span_count} 件):"
 printf '%s\n' "$SPAN_NAMES" | head -20 | while IFS= read -r n; do info "    - $n"; done
 
-# 期待 span:
-#   - invoke_agent* (ADK 自動 span、root agent 呼出)
-#   - execute_tool* (ADK 自動 span、tool 実行 = acquire_biblio 呼出)
-#   - AnthropicVertexLlm の generateContentAsync 自前 span (= chat <model> or 相当)
-if ! printf '%s' "$SPAN_NAMES" | grep -qE 'invoke_agent'; then
-  warn "  invoke_agent* span が見つからない (span 一覧上記参照)"
-  fail "ADK root agent の invoke_agent span 不在 (spans=$trace_span_count)"
-fi
+# 期待 span (Phase 3 完成判定):
+#   - `execute_tool acquire_biblio` (ADK 自動 span、tool 実行)
+#   - `chat claude-sonnet-4-6` (AnthropicVertexLlm 自前 span、M4-A GenAI semconv 準拠)
+#
+# `invoke_agent biblio_root_agent` は runbook §Cloud Trace 観察ガイド に記載していたが、
+# ADK 1.3.0 の `InMemoryRunner` 実装では top-level に `call_llm` として立ち、
+# `invoke_agent` の named span は生成されない (= plan 想定と実装のずれ、実 GKE verify で
+# 判明)。LLM 自律 tool 呼出 + trace 串刺し観察という Phase 3 の意義は
+# `execute_tool` + `chat <model>` の存在で十分達成できるため、assertion からは除外。
 if ! printf '%s' "$SPAN_NAMES" | grep -qE 'execute_tool.*acquire_biblio|acquire_biblio'; then
   warn "  execute_tool acquire_biblio span が見つからない"
-  fail "acquire_biblio の execute_tool span 不在"
+  fail "acquire_biblio の execute_tool span 不在 (spans=$trace_span_count)"
+fi
+if ! printf '%s' "$SPAN_NAMES" | grep -qE 'chat claude-'; then
+  warn "  chat claude-* span が見つからない (= AnthropicVertexLlm 自前 span、M4-A GenAI semconv 準拠)"
+  fail "chat claude-* span 不在 (LLM 呼出経路が壊れている可能性)"
 fi
 
-info "  → invoke_agent + execute_tool acquire_biblio span 存在 OK"
+info "  → execute_tool acquire_biblio + chat claude-* span 存在 OK"
 
 # =============================================================================
 # Section 6: gen_ai.* semconv 維持 (Cloud Trace span labels)
 # =============================================================================
 info '=== [6/7] gen_ai.* semconv 維持 ==='
 
-# span 群を走査して gen_ai.operation.name / provider.name / request.model を持つ span を探す
-GEN_AI_LABELS="$(printf '%s' "$TRACE_BODY" | jq -c '.spans[] | select(.labels // {} | to_entries | map(.key) | any(startswith("gen_ai.")))' | head -n1)"
+# AnthropicVertexLlm 自前 span (= `chat claude-*`) を狙う。
+#
+# ADK 1.3.0 は `invoke_agent` / `call_llm` / `execute_tool` の各 span にも
+# `gen_ai.operation.name` を付ける (semconv 準拠) が、`provider.name` / `request.model` /
+# `usage.*` の完全 set は AnthropicVertexLlm 自前 span (= M4-A Phase 2 で自前計装) にしか
+# 付いていない。単純に「gen_ai.* を持つ最初の span」を取ると invoke_agent が先に当たるため、
+# 明示的に span 名で絞る (= `chat ` prefix + model 名)。
+#
+# `| head -n1` は jq を SIGPIPE で先落ちさせて `set -o pipefail` + `set -e` の下では exit 141
+# で script 全体が中断してしまう。jq 側で slice する ([...] | .[0]) 経路に統一。
+GEN_AI_LABELS="$(printf '%s' "$TRACE_BODY" | jq -c '[.spans[] | select(.name | startswith("chat "))] | .[0] // empty')"
 
 if [ -z "$GEN_AI_LABELS" ]; then
   fail "gen_ai.* label を持つ span が 1 つも存在しない (M4-A GenAI semconv がここで壊れている可能性)"
