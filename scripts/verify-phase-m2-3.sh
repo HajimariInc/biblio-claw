@@ -185,14 +185,29 @@ esac
 # GKE 経路の orchestrator は LOG_FORMAT=json (k8s/10-orchestrator-statefulset.yaml:200)
 # で動き emitJson が JSON 1 行を吐く (キーは "channel":"slack")。ANSI escape は JSON
 # 経路では出力されないため sed 剥離は不要。
-orch_logs="$(kubectl logs "$ORCH_POD" -c orchestrator -n "$NS" --since=120s 2>/dev/null || true)"
-if echo "$orch_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
-  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致)"
-elif echo "$orch_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
-  fail "[slack] Slack credentials が見えていない — biblio-slack-tokens Secret を確認"
+#
+# 窓分離 (issue #83): "Channel adapter started" は Pod 起動時 1 回限りのため
+# Pod 起動以降の全期間 (--since-time=$pod_start_time) で grep する。"Channel
+# credentials missing" は最新状態の鮮度確保のため --since=120s を維持する
+# (= "missing → credentials 投入 → 手動 Pod restart" の複合履歴で旧 missing に
+# 誤マッチする偽陽性回避、設計意図コメント @verify-phase-2-wiring.sh:170-175
+# 参照)。判定順は missing 先 → started 後 (missing が最新で見えていれば即 fail)。
+pod_start_time="$(kubectl get pod "$ORCH_POD" -n "$NS" -o jsonpath='{.status.startTime}' 2>/dev/null || echo '')"
+if [ -n "$pod_start_time" ]; then
+  startup_logs="$(kubectl logs "$ORCH_POD" -c orchestrator -n "$NS" --since-time="$pod_start_time" 2>/dev/null || true)"
+else
+  # startTime 取得失敗 (= Pod 異常 / metadata 未生成) は全期間 fallback
+  startup_logs="$(kubectl logs "$ORCH_POD" -c orchestrator -n "$NS" 2>/dev/null || true)"
+fi
+recent_logs="$(kubectl logs "$ORCH_POD" -c orchestrator -n "$NS" --since=120s 2>/dev/null || true)"
+
+if echo "$recent_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
+  fail "[slack] Slack credentials が見えていない (直近 120s 内に missing 検出) — biblio-slack-tokens Secret を確認"
+elif echo "$startup_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
+  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致, Pod 起動時刻起点で確認)"
 else
   pod_phase="$(kubectl get pod "$ORCH_POD" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo 'unknown')"
-  fail "[slack] Slack adapter 痕跡なし (Pod phase=$pod_phase) — kubectl logs $ORCH_POD -c orchestrator -n $NS で確認"
+  fail "[slack] Slack adapter 痕跡なし (Pod phase=$pod_phase, startTime=$pod_start_time) — kubectl logs $ORCH_POD -c orchestrator -n $NS で確認"
 fi
 
 # === 8. 回帰: verify-phase-m2-2.sh で Phase 2.5 までの assert を再確認 ===
