@@ -355,6 +355,13 @@ async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
+        // Accumulate gate — mirrors the outer loop's gate above: trigger=0-only
+        // batches are context, not wake events. Without this, an active query
+        // keeps consuming every accumulate follow-up and engage_mode=mention
+        // devolves into mention-sticky. Rows stay `pending` and ride along the
+        // next trigger=1 batch (via this same poller or the outer loop).
+        if (!newMessages.some((m) => m.trigger === 1)) return;
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
