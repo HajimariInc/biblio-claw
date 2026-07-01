@@ -20,6 +20,7 @@ import { shokyaku } from '../../biblio/shokyaku.js';
 import { BIBLIO_CATEGORIES, type ShokyakuResult } from '../../biblio/types.js';
 import { log } from '../../log.js';
 
+import type { HitlConfirmationPayload } from './hitl-types.js';
 import { resolveToolCtx } from './tool-ctx.js';
 
 const ShokyakuBiblioInput = z.object({
@@ -125,9 +126,10 @@ export const shokyakuBiblioTool = new FunctionTool({
       biblio_name: biblioName,
       category,
     });
+    const confirmationPayload: HitlConfirmationPayload = { biblioName, category, action: 'shokyaku' };
     tool_context.requestConfirmation({
       hint: `焼却: ${biblioName} (${category}) を棚から除去し、装備源も物理削除します (= 再装備不可、破壊操作)。承認しますか?`,
-      payload: { biblioName, category, action: 'shokyaku' as const },
+      payload: confirmationPayload,
     });
     return {
       ok: false,

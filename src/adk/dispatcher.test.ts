@@ -198,30 +198,58 @@ describe('dispatchToAdk — 通常経路 (isFinalResponse + createSession + dele
   });
 });
 
-describe('dispatchToAdk — Phase 4 HITL pending 経路', () => {
-  it('longRunningToolIds + enkin payload → requestAdkApproval 呼出 + 中間応答 deliver + deleteSession 呼ばれない', async () => {
-    // event: longRunningToolIds = ['fc-1'] + actions.requestedToolConfirmations = {fc-1: {hint, payload}}
-    const pendingEvent = {
-      longRunningToolIds: ['fc-1'],
-      actions: {
-        requestedToolConfirmations: {
-          'fc-1': {
-            hint: '禁書: wf--test (biblio-dev) を棚から除去します。承認しますか?',
-            confirmed: false,
-            payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'enkin' },
+describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () => {
+  // adk-js@1.3.0 実装 (`agents/functions.js:129-170` `generateRequestConfirmationEvent`) に基づく
+  // 実際の event 形状: `event.content.parts` に `{functionCall: {name: 'adk_request_confirmation',
+  // args: {originalFunctionCall, toolConfirmation}, id: <wrapper_id>}}` が入り、
+  // `event.longRunningToolIds: [<wrapper_id>]` が populate される。
+  // wrapper_id は元 tool call id とは別 namespace の新規 UUID (= Phase 4 review C1)。
+  function makeRequestConfirmationEvent(opts: {
+    wrapperId: string;
+    hint: string;
+    payload: { biblioName: string; category: string; action: string };
+  }): unknown {
+    return {
+      content: {
+        parts: [
+          {
+            functionCall: {
+              name: 'adk_request_confirmation',
+              id: opts.wrapperId,
+              args: {
+                originalFunctionCall: {
+                  name: opts.payload.action === 'enkin' ? 'enkin_biblio' : 'shokyaku_biblio',
+                  id: 'original-fc-id-not-used-by-dispatcher',
+                  args: {},
+                },
+                toolConfirmation: {
+                  hint: opts.hint,
+                  confirmed: false,
+                  payload: opts.payload,
+                },
+              },
+            },
           },
-        },
+        ],
       },
+      longRunningToolIds: [opts.wrapperId],
     };
+  }
+
+  it('enkin 経路: wrapper function call から payload 取得 + requestAdkApproval + 中間応答 + session 保持', async () => {
+    const pendingEvent = makeRequestConfirmationEvent({
+      wrapperId: 'wrapper-enkin-1',
+      hint: '禁書: wf--test (biblio-dev) を棚から除去します。承認しますか?',
+      payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'enkin' },
+    });
     runAsyncMock.mockReturnValue(asyncGen([pendingEvent]));
     isFinalResponseMock.mockReturnValue(false);
     deliverMock.mockResolvedValue('delivery-pending-notice');
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
-    requestAdkApprovalMock.mockResolvedValue(undefined);
+    requestAdkApprovalMock.mockResolvedValue(true); // Phase 4 C3: boolean 契約
 
     await dispatchToAdk({ ...BASE_PARAMS });
 
-    // pending 経路: requestAdkApproval が呼ばれる
     expect(requestAdkApprovalMock).toHaveBeenCalledTimes(1);
     expect(requestAdkApprovalMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -231,67 +259,86 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路', () => {
         threadId: null,
         userId: 'local',
         adkSessionId: 'sess-mock-1',
-        functionCallId: 'fc-1',
+        // Phase 4 C1: functionCallId は wrapper id (元 tool call id ではない)
+        functionCallId: 'wrapper-enkin-1',
         hint: expect.stringContaining('禁書'),
         action: 'enkin',
-        payload: expect.objectContaining({ biblioName: 'wf--test', category: 'biblio-dev' }),
+        payload: expect.objectContaining({ biblioName: 'wf--test', category: 'biblio-dev', action: 'enkin' }),
       }),
     );
-    // 中間応答: 「承認申請しました」
+    // 中間応答
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
       content: { text: expect.stringContaining('承認を admin にお願いしました') },
     });
-    // pending 経路: session は保持 (deleteSession は呼ばれない)
+    // session 保持 (deleteSession skip)
     expect(deleteSessionMock).not.toHaveBeenCalled();
   });
 
   it('shokyaku 経路も同流儀 (action=shokyaku)', async () => {
-    const pendingEvent = {
-      longRunningToolIds: ['fc-shokyaku'],
-      actions: {
-        requestedToolConfirmations: {
-          'fc-shokyaku': {
-            hint: '焼却: wf--test (biblio-dev) を棚から除去し、装備源も物理削除します',
-            confirmed: false,
-            payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'shokyaku' },
-          },
-        },
-      },
-    };
+    const pendingEvent = makeRequestConfirmationEvent({
+      wrapperId: 'wrapper-shokyaku-1',
+      hint: '焼却: wf--test (biblio-dev) を棚から除去し、装備源も物理削除します',
+      payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'shokyaku' },
+    });
     runAsyncMock.mockReturnValue(asyncGen([pendingEvent]));
     isFinalResponseMock.mockReturnValue(false);
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
-    requestAdkApprovalMock.mockResolvedValue(undefined);
+    requestAdkApprovalMock.mockResolvedValue(true);
 
     await dispatchToAdk({ ...BASE_PARAMS });
 
-    expect(requestAdkApprovalMock).toHaveBeenCalledWith(expect.objectContaining({ action: 'shokyaku' }));
+    expect(requestAdkApprovalMock).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'shokyaku', functionCallId: 'wrapper-shokyaku-1' }),
+    );
     expect(deleteSessionMock).not.toHaveBeenCalled();
+  });
+
+  it('Phase 4 C3: requestAdkApproval が false 返却 → 中間応答送らず deleteSession + finalText fallback', async () => {
+    // 内部 fallback (approver 不在 等) で false を返した場合、dispatcher は「承認申請しました」
+    // 中間応答を送らず、通常経路に落として最終応答 (空応答時は "(応答が空でした。)") を deliver、
+    // session も deleteSession する。
+    const pendingEvent = makeRequestConfirmationEvent({
+      wrapperId: 'wrapper-enkin-fail',
+      hint: 'x',
+      payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'enkin' },
+    });
+    runAsyncMock.mockReturnValue(asyncGen([pendingEvent]));
+    isFinalResponseMock.mockReturnValue(false);
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
+    requestAdkApprovalMock.mockResolvedValue(false); // 内部 fallback で false
+
+    await dispatchToAdk({ ...BASE_PARAMS });
+
+    expect(requestAdkApprovalMock).toHaveBeenCalledTimes(1);
+    // 中間応答は送らない (dispatched === 0 で通常経路 fallback)
+    expect(deliverMock).not.toHaveBeenCalledWith(
+      'local',
+      null,
+      expect.objectContaining({ content: { text: expect.stringContaining('承認を admin にお願いしました') } }),
+    );
+    // 通常経路: session 削除 + 空応答 fallback
+    expect(deleteSessionMock).toHaveBeenCalled();
+    expect(deliverMock).toHaveBeenCalledWith('local', null, {
+      kind: 'chat',
+      content: { text: '(応答が空でした。)' },
+    });
   });
 
   it('unknown action の payload → skip + log.warn + requestAdkApproval 未呼出 + 通常経路継続', async () => {
     // pending event が入るが、payload.action が不明 (= enkin/shokyaku 以外) の場合、
     // pending 経路として cancel されて通常経路に fall-through する契約。
-    const events: unknown[] = [
-      {
-        longRunningToolIds: ['fc-unknown'],
-        actions: {
-          requestedToolConfirmations: {
-            'fc-unknown': {
-              hint: 'x',
-              confirmed: false,
-              payload: { action: 'delete_user_data' }, // unknown action
-            },
-          },
-        },
-      },
-      { content: { parts: [{ text: 'fallback final' }] } },
-    ];
+    const unknownEvent = makeRequestConfirmationEvent({
+      wrapperId: 'wrapper-unknown',
+      hint: 'x',
+      payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'delete_user_data' },
+    });
+    const events: unknown[] = [unknownEvent, { content: { parts: [{ text: 'fallback final' }] } }];
     runAsyncMock.mockReturnValue(asyncGen(events));
     isFinalResponseMock.mockImplementation((e: unknown) => {
-      const ev = e as { content?: unknown };
-      return ev.content !== undefined;
+      const ev = e as { content?: { parts?: { text?: string }[] } };
+      // fallback event は parts[0].text 有 (text-only part)、pending event は parts[0].functionCall 有
+      return ev.content?.parts?.[0]?.text === 'fallback final';
     });
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
 
@@ -310,12 +357,14 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路', () => {
     });
   });
 
-  it('longRunningToolId に対応する confirmation payload 不在 → skip + log.warn', async () => {
+  it('longRunningToolIds 存在するが content.parts に adk_request_confirmation 不在 → skip', async () => {
+    // 万一 longRunningToolIds が populate されているが対応する adk_request_confirmation function
+    // call が parts に不在の場合 (adk-js のバージョン差異等)、skip して通常経路に fall-through。
     const pendingEvent = {
-      longRunningToolIds: ['fc-orphan'],
-      actions: {
-        requestedToolConfirmations: {}, // orphan longRunning id
+      content: {
+        parts: [{ functionCall: { name: 'some_other_call', id: 'other-1', args: {} } }],
       },
+      longRunningToolIds: ['orphan-wrapper-id'],
     };
     runAsyncMock.mockReturnValue(asyncGen([pendingEvent]));
     isFinalResponseMock.mockReturnValue(false);
@@ -324,10 +373,31 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路', () => {
     await dispatchToAdk({ ...BASE_PARAMS });
 
     expect(requestAdkApprovalMock).not.toHaveBeenCalled();
-    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
-      expect.stringContaining('without confirmation payload'),
-      expect.objectContaining({ event: 'adk.dispatcher.pending_no_confirmation' }),
+    // dispatched === 0 → pending=false → 通常経路 → deleteSession
+    expect(deleteSessionMock).toHaveBeenCalled();
+  });
+
+  it('requestAdkApproval が unexpected throw → catch + log.error + created=false 扱いで通常経路', async () => {
+    // requestAdkApproval は throw しない契約だが、防御的 catch (Phase 4 review C2 継承)
+    const pendingEvent = makeRequestConfirmationEvent({
+      wrapperId: 'wrapper-enkin-throw',
+      hint: 'x',
+      payload: { biblioName: 'wf--test', category: 'biblio-dev', action: 'enkin' },
+    });
+    runAsyncMock.mockReturnValue(asyncGen([pendingEvent]));
+    isFinalResponseMock.mockReturnValue(false);
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
+    requestAdkApprovalMock.mockRejectedValue(new Error('DB error'));
+
+    await dispatchToAdk({ ...BASE_PARAMS });
+
+    // catch されて log.error + created=false → 通常経路 fall-through
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      expect.stringContaining('requestAdkApproval unexpectedly threw'),
+      expect.objectContaining({ event: 'adk.dispatcher.request_approval_error' }),
     );
+    // session は削除 (通常経路)
+    expect(deleteSessionMock).toHaveBeenCalled();
   });
 });
 

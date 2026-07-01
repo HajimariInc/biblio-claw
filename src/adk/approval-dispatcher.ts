@@ -36,13 +36,22 @@ import { log } from '../log.js';
 
 import { getSharedRunner } from './dispatcher.js';
 import { BIBLIO_M4B_APP_NAME } from './runner.js';
+import type { HitlConfirmationPayload, HitlToolAction } from './tools/hitl-types.js';
 
 /**
  * response-handler.ts の adk_confirm 分岐が受け取る payload の shape (= adk-approvals.ts の
  * `createPendingApproval` payload と対応)。JSON.parse 後にこの型で扱う。
+ *
+ * **Phase 4 review W3-3 / issue #108 対応**: `innerAction` / `toolPayload` の型を
+ * `hitl-types.ts` の named type に統一 (3 箇所の重複定義解消)。
  */
 export interface AdkApprovalPayload {
   adkSessionId: string;
+  /**
+   * ADK runner が pause 時に付与した wrapper (`adk_request_confirmation`) の function call id。
+   * resume 時の `functionResponse.id` に指定する (Phase 4 review C1: 元 tool call id と別
+   * namespace、`event.longRunningToolIds[]` = `event.content.parts[].functionCall.id` の側)。
+   */
   functionCallId: string;
   userId: string;
   agentGroupId: string;
@@ -50,8 +59,8 @@ export interface AdkApprovalPayload {
   platformId: string;
   threadId: string | null;
   hint: string;
-  innerAction: 'enkin' | 'shokyaku';
-  toolPayload: Record<string, unknown>;
+  innerAction: HitlToolAction;
+  toolPayload: HitlConfirmationPayload;
 }
 
 /**

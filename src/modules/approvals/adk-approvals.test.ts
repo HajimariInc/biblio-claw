@@ -259,7 +259,7 @@ describe('requestAdkApproval — fallback 通知経路の adapter 不在', () =>
     pickApproverMock.mockReturnValue([]);
     getChannelAdapterMock.mockReturnValue(undefined);
 
-    await expect(requestAdkApproval(BASE_OPTS)).resolves.toBeUndefined();
+    await expect(requestAdkApproval(BASE_OPTS)).resolves.toBe(false);
 
     expect(fallbackDeliverMock).not.toHaveBeenCalled();
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(

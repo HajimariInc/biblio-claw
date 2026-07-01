@@ -22,6 +22,7 @@ import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { createPendingApproval } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
+import type { HitlConfirmationPayload, HitlToolAction } from '../../adk/tools/hitl-types.js';
 
 import { pickApprovalDelivery, pickApprover } from './primitive.js';
 
@@ -50,14 +51,18 @@ export interface RequestAdkApprovalOptions {
   userId: string;
   /** dispatcher が create した ADK session id (= runner.sessionService.createSession 結果)。 */
   adkSessionId: string;
-  /** ADK runner が pause 時に付与した function call id (= resume 時の functionResponse.id に使う)。 */
+  /**
+   * ADK runner が pause 時に付与した wrapper (`adk_request_confirmation`) の function call id。
+   * resume 時の `functionResponse.id` に使う (Phase 4 review C1: 元 tool call id と別 namespace、
+   * `event.longRunningToolIds[]` = `event.content.parts[].functionCall.id` に一致する側)。
+   */
   functionCallId: string;
   /** admin に表示する承認カード本文 (tool 側 `requestConfirmation({hint, ...})` の hint と同値)。 */
   hint: string;
-  /** 内部 action 名 (= tool 側 payload.action、`'enkin' | 'shokyaku'`)。承認カード title 分岐に使う。 */
-  action: 'enkin' | 'shokyaku';
-  /** tool 側 requestConfirmation の payload (= { biblioName, category, action } の 3 要素)。 */
-  payload: Record<string, unknown>;
+  /** 内部 action 名 (= tool 側 payload.action)。承認カード title 分岐に使う。 */
+  action: HitlToolAction;
+  /** tool 側 requestConfirmation の payload (= issue #108 対応、named type で 3 箇所統一)。 */
+  payload: HitlConfirmationPayload;
 }
 
 /**
@@ -70,14 +75,24 @@ function shortAdkApprovalId(): string {
 }
 
 /**
- * ADK 経路の承認要求を発行 (fire-and-forget、throw しない)。
+ * ADK 経路の承認要求を発行 (throw しない、pending row 作成成否を boolean で返す)。
  *
- * approver 不在 / DM 経路不在 / adapter.deliver throw の各 fail 経路で:
- *   - `getChannelAdapter(channelType).deliver(...)` (= raw channel adapter、ChannelAdapter の
- *     3 引数 shape) で patron に fallback 通知
- *   - `pending_approvals` row は作らない (= 到達不可能な approval を DB に残さない、silent 蓄積防止)
+ * **Phase 4 review C3 対応**: 戻り値を `Promise<boolean>` に変更した。以下の各 fail 経路では
+ * patron に既に「失敗」通知を deliver した状態で `false` を返す。**呼び出し元 (dispatcher.ts)
+ * は false を「pending row 未作成 = 承認要求は成立していない」と解釈**し、`dispatched` を
+ * インクリメントせず、中間応答「承認を admin にお願いしました」を送らない (= 内部失敗と
+ * 「成功しました」の矛盾する 2 通のメッセージ配信を防ぐ、silent-failure-hunter C2)。
+ *
+ * 各 fail 経路:
+ *   - approver 不在 → patron に「承認可能な admin / owner が未設定です」通知 → false
+ *   - DM 経路不在 → patron に「承認可能な approver への DM 経路がありません」通知 → false
+ *   - 承認カード配信 throw → patron に「承認カード配信に失敗しました」通知 → false
+ *   - delivery adapter 未 wire (boot 直後 / shutdown 中) → patron に「配信系統が未初期化です」通知 → false
+ *   - 上記いずれも `pending_approvals` row は作らない (= 到達不可能な approval の silent 蓄積防止)
+ *
+ * 正常経路: `pending_approvals` row を作成後 true を返す。
  */
-export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promise<void> {
+export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promise<boolean> {
   const approvers = pickApprover(opts.agentGroupId);
   if (approvers.length === 0) {
     log.warn('ADK approval: no eligible approver, notifying patron', {
@@ -86,7 +101,7 @@ export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promi
       action: opts.action,
     });
     await notifyPatronFallback(opts, `${opts.action} 失敗: 承認可能な admin / owner が未設定です。`);
-    return;
+    return false;
   }
 
   const target = await pickApprovalDelivery(approvers, opts.channelType);
@@ -98,7 +113,7 @@ export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promi
       approvers,
     });
     await notifyPatronFallback(opts, `${opts.action} 失敗: 承認可能な approver への DM 経路がありません。`);
-    return;
+    return false;
   }
 
   const approvalId = shortAdkApprovalId();
@@ -130,7 +145,7 @@ export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promi
       });
       // card 配信失敗時は patron に fallback 通知 (= silent failure 防止)、pending row 作らない
       await notifyPatronFallback(opts, `${opts.action} 失敗: 承認カード配信に失敗しました。`);
-      return;
+      return false;
     }
   } else {
     // delivery adapter 未 wire (= boot 直後 or shutdown 中) 想定外経路。row 作らずに patron 通知。
@@ -140,7 +155,7 @@ export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promi
       action: opts.action,
     });
     await notifyPatronFallback(opts, `${opts.action} 失敗: 配信系統が未初期化です。しばらくして再度お試しください。`);
-    return;
+    return false;
   }
 
   createPendingApproval({
@@ -179,6 +194,7 @@ export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promi
     adk_session_id: opts.adkSessionId,
     function_call_id: opts.functionCallId,
   });
+  return true;
 }
 
 /**

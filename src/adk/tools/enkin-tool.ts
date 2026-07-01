@@ -38,6 +38,7 @@ import { enkin } from '../../biblio/enkin.js';
 import { BIBLIO_CATEGORIES, type EnkinResult } from '../../biblio/types.js';
 import { log } from '../../log.js';
 
+import type { HitlConfirmationPayload } from './hitl-types.js';
 import { resolveToolCtx } from './tool-ctx.js';
 
 const EnkinBiblioInput = z.object({
@@ -135,9 +136,10 @@ export const enkinBiblioTool = new FunctionTool({
       biblio_name: biblioName,
       category,
     });
+    const confirmationPayload: HitlConfirmationPayload = { biblioName, category, action: 'enkin' };
     tool_context.requestConfirmation({
       hint: `禁書: ${biblioName} (${category}) を棚から除去します。装備源は残置 (= 再装備可)。承認しますか?`,
-      payload: { biblioName, category, action: 'enkin' as const },
+      payload: confirmationPayload,
     });
     // 型上 EnkinResult を返す必要があるが、runner は pause で先取りするためこの return は
     // 実行されない (= dead code、型合わせ)。GOTCHA 1 参照。
