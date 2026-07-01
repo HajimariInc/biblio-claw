@@ -1209,12 +1209,14 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 
 ### Verify 手順 (= Phase 3 完成判定、CLI 経由)
 
+**(Phase 4 で 9 section に拡張済、詳細は §M4-B Phase 4 参照)**
+
 ```bash
-# (a) Phase 3 完成判定 (= M4-B PASS marker、7 section + 冪等)
+# (a) Phase 3 完成判定 (= M4-B PASS marker、Phase 3 時点は 7 section、Phase 4 で 9 section 化 + 冪等)
 bash scripts/verify-m4-b.sh
 # 期待: 末尾に "M4-B PASS"、exit 0
 
-# (b) 2 連続実行冪等 (副作用は draft PR のみ = 毎回別 branch で無害)
+# (b) 2 連続実行冪等 (副作用は draft PR + dummy pending row のみ = 毎回別 branch + cleanup で無害)
 bash scripts/verify-m4-b.sh && bash scripts/verify-m4-b.sh
 # 期待: 両方 M4-B PASS + exit 0
 
@@ -1292,7 +1294,7 @@ kubectl logs biblio-orchestrator-0 -c orchestrator --since=3m \
 ### 既知の罠 / gotcha (5 件)
 
 - **`HTTPS_PROXY` が `aiplatform.googleapis.com` に乗ると keyless ADC が壊れる** — Phase 2 と共通。local verify では `NO_PROXY=aiplatform.googleapis.com` を入れる。GKE 経路では manifest env で NO_PROXY を明示済のため通常発火しないが、agent Pod 再構築時等に env drift すると発症する
-- **`InMemoryRunner` module-level singleton は Pod 再起動でロスト = OK** — `runEphemeral` が都度 ephemeral session を作る仕様なので session 永続化なし。長寿命 Pod で memory leak しないかは Phase 3 稼働後に観察 (`kubectl top pod biblio-orchestrator-0`)。実測で leak が判明したら Phase 4 で `Runner` + 明示 session lifecycle 管理に差替
+- **`InMemoryRunner` module-level singleton は Pod 再起動でロスト** — Phase 3 時点は `runEphemeral` が都度 ephemeral session を作る仕様で session 永続化なし = 無害。**(Phase 4 で状況変化)** HITL 承認 (enkin/shokyaku) の pause/resume に session 保持が必要になったため、Phase 4 で `sessionService.createSession + runner.runAsync + 明示 deleteSession` に切替済。Pod 再起動時は pause 中の全 ADK session が消失し、`resolveAdkApproval` が失効通知を patron に deliver する経路が実装されている (詳細は §M4-B Phase 4 §Pod 再起動時の対処 参照)
 - **`pnpm run chat` の TOTAL_TIMEOUT_MS=120s を超える LLM 応答は verify-m4-b.sh Section 4 fail** — Phase 2 実測で 8-15s、120s 内に余裕あり。超過時は Vertex 負荷 or ADK Runner ハング疑い → Pod ログ (`kubectl logs biblio-orchestrator-0 -c orchestrator --since=5m`) で `adk.dispatcher.invoke` event 以降の trace を確認
 - **verify-slack-e2e-gke.sh と verify-m4-b.sh は別 channel を対象** — 誤って同じ agent_group を両経路で使うと race。運用上は claude CLI 経路 agent group と ADK 経路 agent group を **別 folder** (= 別 agent_group_id) で分離する (init-cli-agent.ts vs init-adk-agent.ts の folder 引数が別値になっている前提)
 - **inspect-tool.ts guard の REJECT + schema_invalid は LLM 応答経路で正しく伝わる** — silent failure ではない。LLM は tool 応答の `verdict=REJECT + reason=schema_invalid + detail=...` を受けて patron に理由 (例: "検品で REJECT: biblioName の形式が不正です") を伝達する。structured log `adk.tool.inspect.schema_invalid` が warn として出力される (Cloud Logging で filterable)

@@ -199,10 +199,11 @@ CREATE INDEX idx_agent_dest_target ON agent_destinations(target_type, target_id)
 
 ### 1.11 `pending_approvals`
 
-2 つのワークフローがこのテーブルを共有する:
+3 つのワークフローがこのテーブルを共有する:
 
 - **セッション結合 MCP 承認** — `install_packages`、`add_mcp_server`。`session_id` が設定される。
 - **OneCLI クレデンシャル承認** — `session_id` は NULL の可能性;`agent_group_id` + `channel_type` + `platform_id` が admin カードをルーティングする。
+- **ADK HITL 承認** (`action: 'adk_confirm'`、M4-B Phase 4 追加) — 破壊操作 tool (`enkin_biblio` / `shokyaku_biblio`) の admin 承認。`session_id` は NULL (NanoClaw session を経由しない in-process ADK Runner のため)、`payload` に ADK session id / functionCallId / userId / channel 情報を JSON serialize して保持。発行: `src/modules/approvals/adk-approvals.ts:requestAdkApproval`、resume: `src/adk/approval-dispatcher.ts:resolveAdkApproval` (response-handler.ts の adk_confirm 分岐から呼出)。
 
 ```sql
 CREATE TABLE pending_approvals (
@@ -226,7 +227,7 @@ CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, st
 
 - `status`:`pending` | `approved` | `rejected` | `expired`。
 - `platform_message_id` により、判断後に host が admin カードを場所そのままで編集できる。
-- アクセスレイヤ:`src/db/sessions.ts`;sweep + 配信:`src/onecli-approvals.ts`。
+- アクセスレイヤ:`src/db/sessions.ts`;OneCLI 配信 + sweep:`src/modules/approvals/onecli-approvals.ts`;ADK 配信:`src/modules/approvals/adk-approvals.ts` + `src/adk/approval-dispatcher.ts`。
 
 ### 1.12 `unregistered_senders`
 
