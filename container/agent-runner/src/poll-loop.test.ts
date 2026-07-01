@@ -125,6 +125,32 @@ describe('accumulate gate (trigger column)', () => {
     expect(messages.map((m) => m.id).sort()).toEqual(['m1', 'm2']);
   });
 
+  it('follow-up poller predicate: trigger=0-only pending batch must not push into active query', () => {
+    // The processQuery follow-up poller must apply the same predicate as the
+    // outer loop — otherwise engage_mode=mention + accumulate devolves into
+    // mention-sticky whenever a thread's Claude SDK query is still alive.
+    insertMessage('m1', 'chat', { sender: 'A', text: 'thread reply 1' }, { trigger: 0 });
+    insertMessage('m2', 'chat', { sender: 'B', text: 'thread reply 2' }, { trigger: 0 });
+    const pending = getPendingMessages();
+    // Follow-up poller filter+gate contract:
+    const newMessages = pending.filter((m) => m.kind !== 'system');
+    expect(newMessages).toHaveLength(2);
+    // If false, the poller must return WITHOUT calling query.push(), leaving
+    // messages `pending` for the next trigger=1 batch to ride along with.
+    expect(newMessages.some((m) => m.trigger === 1)).toBe(false);
+  });
+
+  it('follow-up poller predicate: mixed batch (trigger=0 + trigger=1) proceeds', () => {
+    // When a new mention arrives while an active query is running, accumulated
+    // context rides along with the wake-eligible mention.
+    insertMessage('m1', 'chat', { sender: 'A', text: 'earlier accumulated' }, { trigger: 0 });
+    insertMessage('m2', 'chat', { sender: 'B', text: 'new mention @bot' }, { trigger: 1 });
+    const pending = getPendingMessages();
+    const newMessages = pending.filter((m) => m.kind !== 'system');
+    expect(newMessages).toHaveLength(2);
+    expect(newMessages.some((m) => m.trigger === 1)).toBe(true);
+  });
+
   it('trigger column defaults to 1 for legacy inserts without explicit value', () => {
     // The schema default is 1 (see src/db/schema.ts INBOUND_SCHEMA) — existing
     // rows / tests without the column set are effectively wake-eligible.
