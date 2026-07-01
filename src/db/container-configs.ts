@@ -19,7 +19,7 @@ const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages
  * router/container-runner to branch on the ADK path.
  *
  *   - `'claude'`  — NanoClaw 上流の claude CLI provider (agent-runner container 経路、既存)
- *   - `'opencode'` — NanoClaw 上流の opencode CLI provider (channels/providers ブランチ経由)
+ *   - `'opencode'` — NanoClaw 上流の opencode CLI provider (`providers` ブランチ経由、`channels` ブランチは channel adapter 専用)
  *   - `'adk'`     — biblio-claw M4-B Phase 3 で追加。orchestrator 内 in-process ADK Runner
  *                    経路 (agent-runner container を起動しない = router.ts で分岐)。
  */

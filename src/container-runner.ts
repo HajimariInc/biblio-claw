@@ -148,15 +148,23 @@ async function spawnContainer(session: Session): Promise<void> {
         // Defense-in-depth: `provider='adk'` runs in-process via `src/adk/dispatcher.ts`
         // (M4-B Phase 3) — no container spawn. `deliverToAgent` in `src/router.ts`
         // intercepts before reaching here, so this branch fires only on a router bug
-        // or a direct `spawnContainer` call. Warn loudly rather than build a spurious
-        // container spec (which would then fail at runtime with a misleading error).
+        // or a direct `spawnContainer` call.
+        //
+        // **Must `throw`, not `return`** (silent-failure-hunter #2 = PR #101 review 指摘 +
+        // 同ファイル :120-126 の M3 Phase 2 spawn-verify で修正済のパターンと同じ問題):
+        // `wakeContainer` は `spawnContainer(session).then(() => true).catch(() => false)` で
+        // 成否を判定する。ここで `return` (void) すると `wakeContainer` が **`true`
+        // (成功)** を返す。`host-sweep.ts` (60s tick) や `container-restart.ts` は
+        // provider チェックなく wakeContainer を叩くため、旧 claude group を
+        // `ncl groups config update --provider adk` で切り替えた際、残っていた古い
+        // セッションの未処理メッセージが 60s ごとに warn ログを出しながら永久 silent
+        // retry する経路が実在する。`throw` して `wakeContainer` に `false` を返させ、
+        // host-sweep の既存 stuck 検出ロジックに乗せる。
         if (provider === 'adk') {
-          log.warn('spawnContainer called with provider=adk — should be routed via ADK dispatcher (in-process)', {
-            event: 'container.spawn.adk_provider_skip',
-            session_id: session.id,
-            agent_group_id: session.agent_group_id,
-          });
-          return;
+          throw new Error(
+            `spawnContainer called with provider=adk (session=${session.id}, agent_group=${session.agent_group_id}) ` +
+              `— ADK path must be routed via src/adk/dispatcher.ts (in-process, no container spawn)`,
+          );
         }
 
         const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);

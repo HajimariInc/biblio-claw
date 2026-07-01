@@ -130,13 +130,22 @@ info '  → keyless 4 面すべて OK'
 # =============================================================================
 info '=== [3/7] deploy 成立 ==='
 
-POD_READY="$(kubectl get statefulset/biblio-orchestrator -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)"
-[[ "$POD_READY" == "1" ]] || fail "orchestrator StatefulSet readyReplicas != 1: $POD_READY"
+# kubectl の stderr を必ずキャプチャする (I7 = PR #101 review 指摘: `2>/dev/null` で
+# 認証切れ / context 誤り等の実エラーが握りつぶされる silent failure)。fail 時は
+# LAST_HARNESS_STDERR 経由で操作者に展開する (同 script 内の他 section と同流儀)。
+POD_READY="$(kubectl get statefulset/biblio-orchestrator -n "$NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>"$STDERR_DIR/statefulset-get.stderr" || echo 0)"
+if [[ "$POD_READY" != "1" ]]; then
+  LAST_HARNESS_STDERR="$STDERR_DIR/statefulset-get.stderr"
+  fail "orchestrator StatefulSet readyReplicas != 1: $POD_READY"
+fi
 
 # 実 Pod 上の image tag を確認 (manifest 上ではなく実 runtime を見る)
 # `kubectl get pod` は `-c` flag を受け付けない (exec/logs 専用) — jsonpath の
 # container name filter で狙う。
-POD_IMAGE="$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}' 2>/dev/null || echo '')"
+POD_IMAGE="$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}' 2>"$STDERR_DIR/pod-get.stderr" || echo '')"
+if [ -z "$POD_IMAGE" ]; then
+  LAST_HARNESS_STDERR="$STDERR_DIR/pod-get.stderr"
+fi
 IMAGE_TAG="$(printf '%s' "$POD_IMAGE" | awk -F: '{print $NF}')"
 [[ "$IMAGE_TAG" =~ ^m4b-p3 ]] \
   || fail "orchestrator Pod image tag が m4b-p3* ではない: '$IMAGE_TAG' (image=$POD_IMAGE)
@@ -229,9 +238,21 @@ if [ -z "$TRACE_ID" ]; then
 fi
 
 if ! [[ "$TRACE_ID" =~ ^[a-f0-9]{32}$ ]]; then
-  fail "Pod ログから trace_id (32 hex) を抽出できなかった
+  # $POD_LOGS は取得済 (非空) だが該当 event 行が見つからないケース = 実際のログ内容を
+  # 表示して operator が何が起きているか判断可能にする (I7 = PR #101 review 指摘)。
+  DEBUG_LOG="$STDERR_DIR/trace-id-extract-debug.log"
+  {
+    echo "== Pod log 抜粋 (直近 3m、trace_id 抽出対象の adk.tool.acquire.invoke / adk.anthropic_vertex_llm.init event 抜き出し) =="
+    printf '%s\n' "$POD_LOGS" | grep -E '"event":"adk\.(tool\.acquire\.invoke|anthropic_vertex_llm\.init)"' | tail -n 5 || echo "  (該当 event 不在)"
+    echo ""
+    echo "== Pod log 末尾 20 行 (全 event、trace_id 抽出手掛かり用) =="
+    printf '%s\n' "$POD_LOGS" | tail -n 20
+  } > "$DEBUG_LOG"
+  LAST_HARNESS_STDERR="$DEBUG_LOG"
+  fail "Pod ログから trace_id (32 hex) を抽出できなかった (TRACE_ID='$TRACE_ID')
     対処: (1) instrumentation.ts が --import 経路で起動されているか /
-          (2) Cloud Logging に trace field が出ているか (JSON structured log の logging.googleapis.com/trace)"
+          (2) Cloud Logging に trace field が出ているか (JSON structured log の logging.googleapis.com/trace) /
+          (3) Section 4 の chat 発火後、adk.tool.acquire.invoke event が出力されたか (上の LAST_HARNESS_STDERR 参照)"
 fi
 
 info "  TRACE_ID=$TRACE_ID"

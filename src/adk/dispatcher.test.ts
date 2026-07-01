@@ -101,7 +101,7 @@ describe('getSharedRunner — module-level singleton', () => {
 });
 
 describe('dispatchToAdk — happy path', () => {
-  it('isFinalResponse 検知 → finalText で adapter.deliver を呼ぶ', async () => {
+  it('isFinalResponse 検知 → finalText で adapter.deliver を呼ぶ (delivery_id 返却時は delivered ログ)', async () => {
     const events = [
       { content: { parts: [{ text: 'thinking...' }] } },
       { content: { parts: [{ text: '仕入れ完了です!📦' }] } },
@@ -111,6 +111,8 @@ describe('dispatchToAdk — happy path', () => {
       const ev = e as { content?: { parts?: { text?: string }[] } };
       return ev.content?.parts?.[0]?.text === '仕入れ完了です!📦';
     });
+    // Slack adapter 等が delivery_id を返す経路: delivered ログが出る
+    deliverMock.mockResolvedValue('delivery-abc-123');
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
 
     await dispatchToAdk({ ...BASE_PARAMS });
@@ -122,8 +124,26 @@ describe('dispatchToAdk — happy path', () => {
     });
     expect(vi.mocked(log.info)).toHaveBeenCalledWith(
       'ADK dispatcher: delivered',
-      expect.objectContaining({ event: 'adk.dispatcher.delivered' }),
+      expect.objectContaining({ event: 'adk.dispatcher.delivered', delivery_id: 'delivery-abc-123' }),
     );
+  });
+
+  it('adapter が undefined 返却時 (CLI 経路の client 未接続等) → not_delivered warn ログで silent 化を防ぐ (C1 対処)', async () => {
+    runEphemeralMock.mockReturnValue(asyncGen([{ content: { parts: [{ text: 'ok' }] } }]));
+    isFinalResponseMock.mockReturnValue(true);
+    // undefined 返却 = CLI adapter client 未接続時等
+    deliverMock.mockResolvedValue(undefined);
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
+
+    await dispatchToAdk({ ...BASE_PARAMS });
+
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('adapter returned undefined'),
+      expect.objectContaining({ event: 'adk.dispatcher.not_delivered' }),
+    );
+    // delivered ログは絶対に出ない (silent 偽成功防止)
+    expect(vi.mocked(log.info)).not.toHaveBeenCalledWith('ADK dispatcher: delivered', expect.anything());
   });
 
   it('userId 明示指定時は platformId ではなく userId を採用', async () => {
@@ -181,13 +201,48 @@ describe('dispatchToAdk — no adapter', () => {
 });
 
 describe('dispatchToAdk — 空 patronText', () => {
-  it('空文字列 / whitespace のみは early return + warn', async () => {
+  it('空文字列 / whitespace のみ → runEphemeral は呼ばず patron に「認識できませんでした」応答 (S5 対処)', async () => {
+    deliverMock.mockResolvedValue('delivery-empty-fallback');
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
+
     await dispatchToAdk({ ...BASE_PARAMS, patronText: '   ' });
+
     expect(runEphemeralMock).not.toHaveBeenCalled();
-    expect(getChannelAdapterMock).not.toHaveBeenCalled();
+    // patron feedback を送る (silent drop 防止 = 唯一の validation)
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(deliverMock).toHaveBeenCalledWith('local', null, {
+      kind: 'chat',
+      content: { text: expect.stringContaining('メッセージを認識できませんでした') },
+    });
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
-      'ADK dispatcher: empty patronText, skipping',
+      'ADK dispatcher: empty patronText',
       expect.objectContaining({ event: 'adk.dispatcher.empty_input' }),
+    );
+  });
+});
+
+describe('dispatchToAdk — runner init failure (I1 対処)', () => {
+  it('getSharedRunner が throw → patron に system error fallback を送る (throw contract 完全化)', async () => {
+    // buildRootAgent が throw する経路を再現 (= LLMRegistry validation エラー等)
+    const rootAgentMod = await import('./root-agent.js');
+    vi.mocked(rootAgentMod.buildRootAgent).mockImplementationOnce(() => {
+      throw new Error('LLMRegistry: no model registered for pattern claude-*');
+    });
+    deliverMock.mockResolvedValue('delivery-init-fail-fallback');
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
+
+    // throw contract: dispatchToAdk は resolves.toBeUndefined() (router の catch に頼らない)
+    await expect(dispatchToAdk({ ...BASE_PARAMS })).resolves.toBeUndefined();
+
+    expect(runEphemeralMock).not.toHaveBeenCalled();
+    expect(deliverMock).toHaveBeenCalledTimes(1);
+    expect(deliverMock).toHaveBeenCalledWith('local', null, {
+      kind: 'chat',
+      content: { text: expect.stringContaining('システム初期化に失敗') },
+    });
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      'ADK dispatcher: runner init failed',
+      expect.objectContaining({ event: 'adk.dispatcher.runner_init_failed' }),
     );
   });
 });

@@ -414,14 +414,29 @@ async function deliverToAgent(
   // - session concept なし (= `runEphemeral` が都度 ephemeral session を作る)
   // - Command gate / typing indicator は既存 claude 経路のみに適用 (ADK 経路では
   //   dispatcher 内で応答返却まで完結するため typing の意味が薄い)
-  // - `wake=false` は「傍受中、message 蓄積のみ」の意味だが、ADK 経路は session なし
-  //   ので silent drop (= 既存 accumulate 経路と等価な挙動)
+  // - `wake=false` は「傍受中、message 蓄積のみ or 完全ドロップ」の 2 ポリシーが
+  //   `ignored_message_policy` で分岐するが、ADK 経路は session なし = **accumulate
+  //   相当の永続化手段を持たない**。よってどちらのポリシーでも実質 drop 挙動になる
+  //   (I5 = PR #101 review 指摘)。`ignored_message_policy='accumulate'` を ADK
+  //   provider の wiring に設定しても実際には蓄積されず silent に消える点に注意 —
+  //   `init-adk-agent.ts` は現状 `'drop'` 固定で作成するため今は顕在化しないが、
+  //   将来 accumulate を選ぶ運用で silent data loss を招く。Phase 4/90 で session
+  //   永続化を導入するか、accumulate ポリシーを ADK provider では reject する経路
+  //   を検討する。
   //
   // 実装 note: `resolveProviderName` (container-runner.ts) を import せず inline 化するのは、
-  // 既存 test 群が `vi.mock('./container-runner.js', ...)` で wakeContainer のみを部分 mock
-  // している都合 (= `resolveProviderName` を追加 export しても既存 mock 側で unimport になり
-  // 15+ 箇所の mock を書き換える必要が生じる)。ADK 分岐は container_configs.provider だけ
-  // 見れば十分 (= session.agent_provider は session 作成前の deliverToAgent 冒頭では未確定)。
+  // 既存 test 群が `vi.mock('./container-runner.js', ...)` で 4 関数 stub (wakeContainer /
+  // isContainerRunning / getActiveContainerCount / killContainer) している都合。
+  // `resolveProviderName` を追加 export しても既存 mock 側で unimport になり、複数の
+  // test file (host-core.test.ts / channel-registry.test.ts / channel-approval.test.ts /
+  // sender-approval.test.ts / delivery.test.ts / container-restart.test.ts / agent-route.test.ts
+  // / destinations.test.ts / groups.test.ts 等 10+ 箇所) の mock 追記が必要になる。
+  // ADK 分岐は container_configs.provider だけ見れば十分 (= session.agent_provider は
+  // session 作成前の deliverToAgent 冒頭では未確定)。
+  //
+  // TODO(Phase 4/90): 将来 session.agent_provider を non-null に更新する mutator が
+  // 追加されたら、本 inline 版も追従して session.agent_provider を優先する経路が要る
+  // (現状 `ncl sessions` は read-only で該当 mutator 不在のため実害ゼロ)。
   const containerConfig = getContainerConfig(agentGroup.id);
   const providerName = (containerConfig?.provider ?? 'claude').toLowerCase();
   if (providerName === 'adk') {
@@ -455,13 +470,32 @@ async function deliverToAgent(
       });
     } catch (err) {
       // dispatcher は throw しない contract (内部で catch + fallback text)。
-      // 万一の unexpected throw を silent 化しないため保険で拾う。
+      // 万一の unexpected throw を silent 化しないため保険で拾う + patron に最終砦
+      // fallback を送る (I6 = PR #101 review 指摘、dispatcher の contract 破綻時に
+      // patron が完全無応答になる二重の脆さを解消)。
       log.error('ADK dispatcher threw (should not happen)', {
         event: 'router.dispatch.adk_unexpected_throw',
         agent_group_id: agent.agent_group_id,
         request_id: requestId,
         err: err instanceof Error ? err.message : String(err),
       });
+      const adapter = getChannelAdapter(event.channelType);
+      if (adapter) {
+        // deliver 自体の失敗は log 拾って swallow (= 循環 catch 防止、routeInbound 全体
+        // を throw させない)
+        await adapter
+          .deliver(event.platformId, event.threadId, {
+            kind: 'chat',
+            content: { text: 'エラー: システムエラーが発生しました。しばらくして再度お試しください。' },
+          })
+          .catch((deliverErr) => {
+            log.error('ADK dispatcher fallback deliver also failed', {
+              event: 'router.dispatch.adk_fallback_deliver_failed',
+              request_id: requestId,
+              err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+            });
+          });
+      }
     }
     return;
   }

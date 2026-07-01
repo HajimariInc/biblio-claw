@@ -36,6 +36,7 @@ import {
   createMessagingGroup,
   createMessagingGroupAgent,
   getMessagingGroupAgentByPair,
+  getMessagingGroupAgents,
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
@@ -79,7 +80,21 @@ function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** CLI messaging group を idempotent に upsert し、ADK agent group に wire する。 */
+/**
+ * CLI messaging group を idempotent に upsert し、ADK agent group に wire する。
+ *
+ * **fan-out 二重発火防止** (I4 = PR #101 review 指摘):
+ * `router.ts:routeInbound` は 1 メッセージにつき、その messaging_group に紐づく全 agent
+ * (fan-out 全件) に対して `deliverToAgent` を呼ぶ設計。`init-cli-agent.ts` と本 script は
+ * どちらも `cli/local` messaging group に engage_mode='pattern' + engage_pattern='.' で
+ * wire するため、両者が同一 DB に共存すると `pnpm run chat "..."` の 1 メッセージが
+ * **claude-container 経路 + ADK in-process 経路の両方**に同時 fan-out され、patron は
+ * 応答を 2 回受け取る (実 SLA / rate limit 問題も発生)。
+ *
+ * ここで既存の別 agent group への wire を検出したら **fail-fast + 手動対応の prompt** を
+ * 出す。DEN さんが「先に既存 CLI agent group から wire を削除する」か「ADK 用に
+ * platform_id を分離する (未実装、Phase 4/90 で検討)」を判断する。
+ */
 function wireCliChannel(ag: AgentGroup, now: string): void {
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
   if (!cliMg) {
@@ -97,6 +112,27 @@ function wireCliChannel(ag: AgentGroup, now: string): void {
     console.log(`Created CLI messaging group: ${cliMg.id}`);
   } else {
     console.log(`Reusing CLI messaging group: ${cliMg.id}`);
+    // 既存 CLI wire を fan-out 二重発火の観点で検査 (fail-fast)。
+    const existingWirings = getMessagingGroupAgents(cliMg.id);
+    const otherWirings = existingWirings.filter((w) => w.agent_group_id !== ag.id);
+    if (otherWirings.length > 0) {
+      console.error('');
+      console.error(`ERROR: cli/local channel is already wired to ${otherWirings.length} other agent group(s):`);
+      for (const w of otherWirings) {
+        console.error(`  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`);
+      }
+      console.error('');
+      console.error('router.ts:routeInbound is fan-out (all wired agents engage), so `pnpm run chat "..."`');
+      console.error('will double-invoke both the existing agent(s) and the ADK agent group.');
+      console.error('');
+      console.error('Resolve either by:');
+      console.error('  (a) Removing existing wire(s) with `ncl wirings remove --id <mga.id>` before re-running');
+      console.error('      (recommended if you intend to migrate the cli channel to ADK)');
+      console.error('  (b) Manually editing the DB to use a separate platform_id for the ADK agent group');
+      console.error('      (Phase 4/90 will formalize `local-adk` split + `pnpm run chat --to local-adk` flag)');
+      console.error('');
+      process.exit(1);
+    }
   }
 
   const existing = getMessagingGroupAgentByPair(cliMg.id, ag.id);
@@ -207,18 +243,23 @@ async function main(): Promise<void> {
       'ROOT_AGENT_INSTRUCTION が保持)。\n',
   });
 
-  if (isNewGroup) {
-    // provider='adk' が本 script の中核設定。router.ts:deliverToAgent がこの値を
-    // 見て orchestrator 内 dispatcher に patron 命令を流す。
-    // model は agent-runner 経路と偶然同値 (claude-sonnet-4-6) — ADK 経路では
-    // LlmAgent.model の hardcode 側が実際の解決者、container_configs.model は本経路で
-    // は参照されない。運用一貫性のため揃えておく。
-    updateContainerConfigScalars(ag.id, {
-      provider: 'adk',
-      model: 'claude-sonnet-4-6',
-    });
-    console.log(`Set container_config: provider='adk', model='claude-sonnet-4-6'`);
-  }
+  // provider='adk' が本 script の中核設定。router.ts:deliverToAgent がこの値を
+  // 見て orchestrator 内 dispatcher に patron 命令を流す。
+  // model は agent-runner 経路と偶然同値 (claude-sonnet-4-6) — ADK 経路では
+  // LlmAgent.model の hardcode 側が実際の解決者、container_configs.model は本経路で
+  // は参照されない。運用一貫性のため揃えておく。
+  //
+  // **isNewGroup gate から外して毎回 assert** (I2 = PR #101 review 指摘):
+  // initGroupFilesystem 途中の fs 書込み failure 等で agent_group 行だけ残り
+  // updateContainerConfigScalars が飛ばされた場合、次回実行時に isNewGroup=false と
+  // 判定されて provider='adk' が永久に設定されない (silent 破綻)。毎回 assert する
+  // 方が真の意味での冪等・自己修復に近い (updateContainerConfigScalars は同値
+  // upsert = 副作用ゼロ)。
+  updateContainerConfigScalars(ag.id, {
+    provider: 'adk',
+    model: 'claude-sonnet-4-6',
+  });
+  console.log(`Ensured container_config: provider='adk', model='claude-sonnet-4-6'`);
 
   // 3. CLI channel wire (必須 — verify + DEN さん手動テスト用)。
   wireCliChannel(ag, now);
