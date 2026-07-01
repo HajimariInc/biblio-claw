@@ -17,11 +17,19 @@
  *
  * # `functionResponse.name = 'adk_request_confirmation'` の由来
  *
- * adk-js@1.3.0 の `RequestConfirmationLlmRequestProcessor` (`agents/processors/*`) が
- * `requestConfirmation()` 発火時に internal で "adk_request_confirmation" name を用いて
- * function call を組み立てる。resume 時にも同じ name の functionResponse を送ることで
- * ADK 側の `handleFunctionCalls` (functions.ts) が pause tool を再実行する経路が成立する
- * (plan §意思決定ログ + web-researcher 調査結果より)。
+ * adk-js@1.3.0 の実装で pause と resume は担当関数が別:
+ *   - **pause 構築**: `generateRequestConfirmationEvent` (`agents/functions.js:129-170`) が
+ *     `requestConfirmation()` 発火時に定数 `REQUEST_CONFIRMATION_FUNCTION_CALL_NAME =
+ *     'adk_request_confirmation'` (`agents/functions.js:56`) を name に持つ wrapper function call
+ *     を組み立てる。呼び出し元は `LlmAgent.postprocess` (`agents/llm_agent.js:527-534`)
+ *   - **resume 検知**: `RequestConfirmationLlmRequestProcessor.runAsync`
+ *     (`agents/processors/request_confirmation_llm_request_processor.js:74`) が次ターン開始時に
+ *     session history を遡り、同 name の function call とそれに紐づく functionResponse を
+ *     突き合わせて pause tool を再実行する経路が成立する
+ *
+ * したがって resume 時に送る `functionResponse.name` を `'adk_request_confirmation'` に固定
+ * する必要があり、`id` は pause 時の wrapper function call id (Phase 4 review C1 参照) を使う
+ * (Phase 4 review CM1 対応: 旧 comment は pause 構築を processor に誤帰属していたため訂正)。
  *
  * # silent failure 撲滅方針
  *
@@ -99,7 +107,8 @@ export async function resolveAdkApproval(payload: AdkApprovalPayload, selectedOp
   // Session 存在確認 (Pod 再起動対応 = InMemorySessionService が消えていれば undefined)。
   // adk-js@1.3.0 の `BaseSessionService.getSession(request)` は request object 引数
   // `{appName, userId, sessionId}` を受け `Promise<Session | undefined>` を返す
-  // (session/base_session_service.d.ts:31-42 準拠)。
+  // (session/base_session_service.d.ts:33-42 `GetSessionRequest` interface 準拠、
+  // Phase 4 review CM5 対応で行番号厳密化)。
   const existingSession = await sessionService.getSession({
     appName: BIBLIO_M4B_APP_NAME,
     userId: payload.userId,
