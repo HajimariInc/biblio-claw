@@ -1185,7 +1185,7 @@ kubectl get pod biblio-orchestrator-0 -c orchestrator -n biblio-claw \
 # 期待: ...biblio-claw:m4b-p3
 ```
 
-`k8s/10-orchestrator-statefulset.yaml` の image tag は orchestrator container (line 135) のみ `m4b-p3` に更新。sidecar 2 image (biblio-sidecar-gh / biblio-sidecar-vertex) は Phase 3 で変更なしのため `m4b-p2` のまま。
+`k8s/10-orchestrator-statefulset.yaml` の image tag は **4 箇所全て** (orchestrator container `image` (line 135) + agent container の `CONTAINER_IMAGE` env (line 153) + `gh-token-rotator` sidecar `image` (line 231) + `vertex-token-rotator` sidecar `image` (line 277)) を `m4b-p3` に更新される。`init-project-gcp-image-sync.sh` が 4 image を単一 `--tag` で一括 build/push + manifest 同期する仕様のため、sidecar 2 image (biblio-sidecar-gh / biblio-sidecar-vertex) の実装内容自体に Phase 3 の変更はないが、tag はまとめて bump される (= sidecar image が `m4b-p2` タグのまま残ることはない、`m4b-p3` タグが Artifact Registry に build/push 済)。
 
 ### ADK agent group + CLI channel wire (deploy 後 1 回)
 
@@ -1297,9 +1297,9 @@ kubectl logs biblio-orchestrator-0 -c orchestrator --since=3m \
 - **verify-slack-e2e-gke.sh と verify-m4-b.sh は別 channel を対象** — 誤って同じ agent_group を両経路で使うと race。運用上は claude CLI 経路 agent group と ADK 経路 agent group を **別 folder** (= 別 agent_group_id) で分離する (init-cli-agent.ts vs init-adk-agent.ts の folder 引数が別値になっている前提)
 - **inspect-tool.ts guard の REJECT + schema_invalid は LLM 応答経路で正しく伝わる** — silent failure ではない。LLM は tool 応答の `verdict=REJECT + reason=schema_invalid + detail=...` を受けて patron に理由 (例: "検品で REJECT: biblioName の形式が不正です") を伝達する。structured log `adk.tool.inspect.schema_invalid` が warn として出力される (Cloud Logging で filterable)
 
-### GKE 実機 verify で判明した罠 (7 件)
+### GKE 実機 verify で判明した罠 (8 件)
 
-M4-B PASS 取得 (2026-07-01、PR #97) 時、`verify-m4-b.sh` 初回実装から実 GKE でしか判明しない不具合が 7 件発見された。同 verify script + Cloud Trace API の後続利用時のリファレンスとして残す (fix commit `44a66ba`)。
+M4-B PASS 取得 (2026-07-01、PR #101) 時、`verify-m4-b.sh` 初回実装から実 GKE でしか判明しない不具合が 8 件発見された。同 verify script + Cloud Trace API の後続利用時のリファレンスとして残す (fix commit `44a66ba`)。
 
 - **`kubectl get pod -c orchestrator` の `-c` は `get` で効かない** — `-c` は `exec` / `logs` 専用の container 指定。`get` に渡すと silent に無視されて `.spec.containers[*].image` 相当が空になる。正しくは jsonpath 側で container 名を絞る (`{.spec.containers[?(@.name=="orchestrator")].image}`)。同様に `kubectl exec` / `kubectl logs` の `-c` は valid なので混同しない
 - **`scripts/q.ts data/v2.db` (相対パス) は GKE 経路で ENOENT** — orchestrator container の Dockerfile WORKDIR は `/app`、相対 `data/v2.db` は `/app/data/v2.db` に解決される。しかし GKE では PVC mount で `/data/v2.db` (`DATA_DIR=/data` env) が実体。**q.ts / init-adk-agent.ts 等の Pod 内 DB 直叩き script は必ず絶対パス `/data/v2.db` で叩く**
