@@ -1350,6 +1350,177 @@ bash scripts/verify-m4-b.sh
 
 ---
 
+## M4-B Phase 4: remaining-host-actions + HITL 統合 (9 tool + 承認カード)
+
+### 概要
+
+Phase 3 で確立した ADK Runner 経路 (root `LlmAgent` + 3 FunctionTool) に、**残 host action 6 tool** を追加して 9 tool 化 + **破壊操作の HITL 承認機構** を統合する:
+
+- **追加 tool (6 種)**:
+  - `categorize_biblio` (Vertex × Anthropic による 4 namespace 分類)
+  - `list_biblio` (棚 marketplace.json からの蔵書一覧、category filter)
+  - `shelve_biblio_multi` (複数 skill を複数 category 跨ぎで 1 PR に陳列、原子性維持)
+  - `update_config` (`ACQUIRE_SKILL_THRESHOLD` allowlist 動的変更)
+  - `enkin_biblio` (禁書 = 棚除去 + 装備源残置、**admin 承認必須**)
+  - `shokyaku_biblio` (焼却 = 棚除去 + 装備源物理削除、**admin 承認必須**、再装備不可)
+
+- **HITL 統合**: adk-js@1.3.0 `Context.requestConfirmation` API を活用し、破壊 tool 呼出時に **runner が自動 pause**。dispatcher (`src/adk/dispatcher.ts`) が `event.longRunningToolIds` を検知して `requestAdkApproval` を発火、既存 delivery adapter 経由で **Slack DM Approve/Reject カード**を admin に配信。admin 押下 → `response-handler.ts` の `adk_confirm` 分岐 → `resolveAdkApproval` (`src/adk/approval-dispatcher.ts`) → 同 sessionId で `runner.runAsync` 再呼出 → tool.execute 再実行の pause/resume パターン。
+
+- **dispatcher 経路の切替**: Phase 3 の `runEphemeral` (= ephemeral session 使い捨て) を **`sessionService.createSession + runner.runAsync + 明示 deleteSession`** に切替 (HITL pause で session 保持が必要になったため)。通常経路は最後に `deleteSession`、pending 経路は resume 側 (approval-dispatcher.ts) が cleanup する分業。
+
+### HITL 承認 flow の全体図
+
+```
+patron 「@bot 禁書 wf--test biblio-dev」
+   ↓ (Slack / CLI channel adapter)
+router.ts:deliverToAgent (provider='adk' 分岐)
+   ↓
+dispatcher.ts:dispatchToAdk
+   sessionService.createSession → runner.runAsync
+   ↓
+LLM (Claude Sonnet 4.6 on Vertex) が enkin_biblio 自律呼出
+   ↓
+enkin-tool.ts:execute (初回 = toolConfirmation 不在)
+   → tool_context.requestConfirmation({hint, payload: {biblioName, category, action: 'enkin'}})
+   ↓
+ADK runner が event に longRunningToolIds + requestedToolConfirmations を populate
+   ↓
+dispatcher.ts が event.longRunningToolIds 検知
+   → requestAdkApproval({...}) 呼出
+      (session 保持、deleteSession skip、break で event stream 消費打切り)
+   → patron に中間応答「承認を admin にお願いしました」deliver
+   ↓
+adk-approvals.ts:requestAdkApproval
+   pickApprover(agentGroupId) → pickApprovalDelivery(approvers, channelType)
+   → chat-sdk bridge で ask_question card を admin DM (Slack) に配信
+   → createPendingApproval({session_id: null, action: 'adk_confirm', payload})
+   ↓
+[待機: admin 操作待ち = 数秒〜数分]
+   ↓
+admin が Slack DM で ✅ Approve or ❌ Reject 押下
+   ↓
+response-handler.ts:handleApprovalsResponse
+   getPendingApproval → action='adk_confirm' 分岐
+   → resolveAdkApproval(payload, selectedOption)
+   ↓
+approval-dispatcher.ts:resolveAdkApproval
+   sessionService.getSession (Pod 再起動なら undefined → patron に「失効」通知)
+   → runner.runAsync({sessionId, newMessage: functionResponse(confirmed)})
+   ↓
+enkin-tool.ts:execute (resume = toolConfirmation.confirmed で分岐)
+   → confirmed=true: 実 enkin() 呼出 (Git Data API で削除 PR 作成)
+   → confirmed=false: {ok: false, reason: 'config_error', detail: 'admin 拒否'} return
+   ↓
+LLM が結果を日本語整形
+   → adapter.deliver で patron に最終応答
+   → sessionService.deleteSession で session cleanup
+```
+
+### Deploy 手順 (= orchestrator only、sidecar 無改変)
+
+```bash
+# 1. dry-run で空打ち確認
+bash scripts/init-project-gcp-image-sync.sh --tag m4b-p4 --dry-run
+
+# 2. 本番実行 (= 4 image build + AR push + manifest tag bump + kubectl apply + rollout)
+bash scripts/init-project-gcp-image-sync.sh --tag m4b-p4 --confirm
+
+# 3. Pod 実 image tag 確認
+kubectl get pod biblio-orchestrator-0 -c orchestrator -n biblio-claw \
+  -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}'
+# 期待: ...biblio-claw:m4b-p4
+```
+
+Phase 3 と同流儀で 4 image (orchestrator + agent + gh-token-rotator + vertex-token-rotator) を単一 `--tag` で一括更新。sidecar 2 image の実装は無変更だが tag はまとめて bump される。
+
+### Verify 手順 (= Phase 4 完成判定、CLI 経由)
+
+Phase 3 の `verify-m4-b.sh` を 7 section → 9 section に拡張:
+
+- **Section 4.5**: 拡張 tool smoke (`list_biblio` + `update_config` を chat 経由発火して stdout 検証)
+- **Section 6.5**: HITL flow smoke (`enkin` を dummy biblio 名で発火 → dispatcher の pending 経路 event 発火 + `pending_approvals` row 作成の 2 point を assert + cleanup DELETE)
+
+```bash
+# 1. deploy 済 (m4b-p4 tag) 前提で verify 実行
+bash scripts/verify-m4-b.sh
+
+# 期待: 全 9 section 通過 + 末尾に "M4-B PASS" 出力 + exit 0
+# 2 連続実行で両方 exit 0 (= 冪等、副作用は draft PR + dummy pending row のみ = 毎回別 branch or cleanup)
+bash scripts/verify-m4-b.sh  # 2 回目 = 同 PASS
+```
+
+**必須 env**: `GCP_PROJECT_ID` / `BQ_DATASET_ID` (Phase 3 と同じ)。
+**任意 env**: `VERIFY_M4B_BIBLIO` (acquire 対象 repo)、`VERIFY_M4B_INCLUDE_REGRESSION=1` (Section 7 有効化)。
+
+### Pod 再起動時の対処
+
+`InMemorySessionService` は Pod 内メモリ保持のため、**Pod 再起動時に pause 中の全 ADK session が消失**する。既に Slack DM に配信済の pending_approvals row から admin が承認カードを押下しても、`resolveAdkApproval` が `sessionService.getSession(...)` で `undefined` を検知して patron に「Pod 再起動により承認セッションが失効しました。もう一度 tool 呼出をお願いします。」通知を deliver する (= silent 失敗しない)。
+
+**stale pending_approvals row の cleanup** (= 手動 or 起動時 sweep):
+
+```bash
+# 起動時に停留している adk_confirm row の一覧 (= Pod 再起動前の pending)
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  pnpm exec tsx scripts/q.ts /data/v2.db \
+  "SELECT approval_id, agent_group_id, title, created_at FROM pending_approvals WHERE action='adk_confirm' AND status='pending'"
+
+# 全削除 (= Pod 再起動後は resume できないため無効化)
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  pnpm exec tsx scripts/q.ts /data/v2.db \
+  "DELETE FROM pending_approvals WHERE action='adk_confirm' AND status='pending'"
+```
+
+将来 `sweepStaleAdkApprovals` を起動時 hook で自動化する (onecli-approvals.ts の `sweepStaleApprovals` パターン踏襲) 案は Phase 90 送り (= runbook §Phase 4 で扱わない論点)。
+
+### 既知の罠 / gotcha
+
+1. **`update_config` の admin check が ADK 経路で省略されている**: delivery 経路の `config-action.ts` は `isConfigChangeAllowed(session)` で agent_group スコープの admin check を持つが、ADK 経路には session がないため実装省略 (plan §Out of Scope)。実運用では `dispatchToAdk` に到達する時点で `agent_group_members` 経由 routing check 済のため二重防御はしないが、Phase 90 の routing 一本化時に再検討する
+2. **`Context.requestConfirmation` が adk-js@1.3.0 `@experimental`**: minor version bump で breaking change の可能性。`package.json` は `@google/adk@^1.3.0` に pin (major 手動レビュー)、シグネチャ変更検知は `src/adk/tools/enkin-tool.test.ts` の requestConfirmation mock 引数 shape assert で担保
+3. **admin 拒否 (`confirmed=false`) 時の reason 分類**: 既存 `UnshelveFailureReason` に `user_rejected` 相当がないため `config_error` に集約 (= detail 文字列で patron 認知)。将来 Phase 90 で型追加検討
+4. **container_config.model 二重管理**: `src/adk/root-agent.ts` の `model: 'claude-sonnet-4-6'` hardcode を Phase 4 でも維持。`init-adk-agent.ts` の container_config.model 削除は Phase 90 で解消
+5. **HITL flow の unit test は完全 integration ではない**: `dispatcher.test.ts` + `approval-dispatcher.test.ts` + `adk-approvals.test.ts` で分離した単体経路の cover。tool.execute → runner pause → dispatcher pending 検知 → resolveAdkApproval → runAsync resume の完全 end-to-end は verify-m4-b.sh Section 6.5 と Level 7 (実 Slack 手動確認) が担う
+
+### CLI 経由 patron 命令のテスト手順 (DEN さん手動確認用、9 tool 網羅)
+
+```bash
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "cd /app && pnpm run chat \"@bot 仕入れて wf/test-biblio-minimal\""
+# → acquire_biblio 発火 + patron 応答
+
+# 蔵書一覧
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "cd /app && pnpm run chat \"@bot 蔵書\""
+# → list_biblio 発火 (category 未指定 = 全件)
+
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "cd /app && pnpm run chat \"@bot 蔵書 biblio-dev\""
+# → list_biblio 発火 + category filter
+
+# 設定変更
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "cd /app && pnpm run chat \"@bot 設定 ACQUIRE_SKILL_THRESHOLD 15\""
+# → update_config 発火
+
+# 禁書 (実装確認、admin 承認は Slack 経由で手動テスト)
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  sh -c "cd /app && pnpm run chat \"@bot 禁書 wf--dummy biblio-dev\""
+# → enkin_biblio 発火 → 中間応答「承認を admin にお願いしました」
+```
+
+### 関連
+
+- `src/adk/tools/{categorize,list-biblio,shelve-multi,config,enkin,shokyaku}-tool.ts` (= 6 新 tool)
+- `src/adk/dispatcher.ts` (= Phase 4 で `runAsync` 経路 + pending 検知に書換)
+- `src/adk/approval-dispatcher.ts` (= HITL resume 経路、`resolveAdkApproval`)
+- `src/modules/approvals/adk-approvals.ts` (= `requestAdkApproval` + `ADK_CONFIRM_ACTION`)
+- `src/modules/approvals/response-handler.ts` (= adk_confirm 分岐追加)
+- `src/adk/runner.ts` (= `SharedRunnerContext` shape 拡張、sessionService expose)
+- `src/adk/root-agent.ts` (= 9 tools + HITL 判断規範 instruction)
+- `src/biblio/config-validation.ts` (= `validateValueForKey` を config-action.ts から切り出し、副作用なし)
+- `scripts/verify-m4-b.sh` (= Section 4.5 + 6.5 追加、9 section 化)
+
+---
+
 ## Vertex 401 ACCESS_TOKEN_EXPIRED retry loop の対症手順
 
 ### 症状
