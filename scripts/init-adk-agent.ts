@@ -158,12 +158,16 @@ function wireCliChannel(ag: AgentGroup, now: string): void {
 /** Slack channel wire (env `SLACK_WIRE_CHANNEL_ID` 指定時のみ実行される optional path)。 */
 function wireSlackChannel(ag: AgentGroup, channelId: string, now: string): void {
   const SLACK_CHANNEL = 'slack';
-  let slackMg: MessagingGroup | undefined = getMessagingGroupByPlatform(SLACK_CHANNEL, channelId);
+  // Chat SDK bridge の channelIdFromThreadId() は `slack:<channel>` を返す
+  // (@chat-adapter/slack)。router.ts:routeInbound の lookup key もこの encoded
+  // 形式で来るため、messaging_groups.platform_id も同じ形式で保存する必要がある。
+  const encodedPlatformId = `${SLACK_CHANNEL}:${channelId}`;
+  let slackMg: MessagingGroup | undefined = getMessagingGroupByPlatform(SLACK_CHANNEL, encodedPlatformId);
   if (!slackMg) {
     slackMg = {
       id: generateId('mg'),
       channel_type: SLACK_CHANNEL,
-      platform_id: channelId,
+      platform_id: encodedPlatformId,
       name: `ADK demo (${channelId})`,
       is_group: 1,
       unknown_sender_policy: 'public',
