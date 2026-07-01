@@ -21,14 +21,14 @@ jobs:
             const body = context.payload.pull_request.body || '';
             const labels = [];
 
-            if (body.includes('[x] **Feature skill**'))       { labels.push('PR: Skill'); labels.push('PR: Feature'); }
-            else if (body.includes('[x] **Utility skill**'))   labels.push('PR: Skill');
-            else if (body.includes('[x] **Operational/container skill**')) labels.push('PR: Skill');
-            else if (body.includes('[x] **Fix**'))             labels.push('PR: Fix');
-            else if (body.includes('[x] **Simplification**'))  labels.push('PR: Refactor');
-            else if (body.includes('[x] **Documentation**'))   labels.push('PR: Docs');
+            if (body.includes('[x] **Feature**'))             labels.push('PR: Feature');
+            else if (body.includes('[x] **Infrastructure**')) labels.push('PR: Infrastructure');
+            else if (body.includes('[x] **Verify**'))         labels.push('PR: Verify');
+            else if (body.includes('[x] **Fix**'))            labels.push('PR: Fix');
+            else if (body.includes('[x] **Refactor**'))       labels.push('PR: Refactor');
+            else if (body.includes('[x] **Docs**'))           labels.push('PR: Docs');
 
-            if (body.includes('contributing-guide: v1')) labels.push('follows-guidelines');
+            if (body.includes('biblio-claw-pr-template: v1')) labels.push('follows-guidelines');
 
             if (labels.length > 0) {
               await github.rest.issues.addLabels({

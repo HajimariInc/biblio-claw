@@ -167,19 +167,37 @@ esac
 # 形式から init-project-gcp Phase 2 で切替済 = commit 9c113f0)。ANSI escape は JSON
 # 経路では一切出力されないため剥離は不要。
 #
-# 判定対象は直近 120s のログのみに絞る = "起動 → credentials missing で再起動"
-# のような複合履歴が tail に残っているとき、古い起動成功ログに先にマッチして
-# 最新の credentials missing 状態を見落とす偽陽性を防ぐ (--since=120s)。
+# 窓分離 (issue #83): "Channel adapter started" は Pod 起動時 1 回限りのため
+# Pod 起動以降の全期間 (--since-time=$pod_start_time) で grep する。"Channel
+# credentials missing" は最新状態の鮮度確保のため --since=120s を維持する
+# (= "missing → credentials 投入 → 手動 Pod restart" の複合履歴で旧 missing に
+# 誤マッチする偽陽性回避)。判定順は missing 先 → started 後 (missing が最新で
+# 見えていれば即 fail)。
+#
+# -c orchestrator: M2 PRD A Phase 3 (commit 4d3de46) で OneCLI / rotator が
+# Native sidecar として統合され Pod は 3 main container 構成 (orchestrator /
+# gh-token-rotator / vertex-token-rotator) になったため、kubectl logs は -c
+# 指定必須 (issue #83 副次 fix)。-c 不在では複数 container エラーが返り
+# 2>/dev/null で消えて常時 else → fail() に到達する構造になっていた。
+#
 # kubectl logs が空 (Pod 異常 / ログ未生成) と取得失敗を fail メッセージで
-# 区別できるよう、Pod phase も読む。
-orch_logs="$(kubectl logs "$orch_pod" -n "$NS" --since=120s 2>/dev/null || true)"
-if echo "$orch_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
-  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致)"
-elif echo "$orch_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
-  fail "[slack] Slack credentials が adapter から見えていない — env.ts の process.env fallback 動作 + biblio-slack-tokens Secret 投入 (kubectl get secret biblio-slack-tokens -n $NS) を確認"
+# 区別できるよう、Pod phase + startTime を読む。
+pod_start_time="$(kubectl get pod "$orch_pod" -n "$NS" -o jsonpath='{.status.startTime}' 2>/dev/null || echo '')"
+if [ -n "$pod_start_time" ]; then
+  startup_logs="$(kubectl logs "$orch_pod" -c orchestrator -n "$NS" --since-time="$pod_start_time" 2>/dev/null || true)"
+else
+  # startTime 取得失敗 (= Pod 異常 / metadata 未生成) は全期間 fallback
+  startup_logs="$(kubectl logs "$orch_pod" -c orchestrator -n "$NS" 2>/dev/null || true)"
+fi
+recent_logs="$(kubectl logs "$orch_pod" -c orchestrator -n "$NS" --since=120s 2>/dev/null || true)"
+
+if echo "$recent_logs" | grep -E '"message":"Channel credentials missing[^"]*"[^}]*"channel":"slack"' >/dev/null; then
+  fail "[slack] Slack credentials が adapter から見えていない (直近 120s 内に missing 検出) — env.ts の process.env fallback 動作 + biblio-slack-tokens Secret 投入 (kubectl get secret biblio-slack-tokens -n $NS) を確認"
+elif echo "$startup_logs" | grep -E '"message":"Channel adapter started"[^}]*"channel":"slack"' >/dev/null; then
+  ok "[slack] Slack adapter 起動済 (Channel adapter started + \"channel\":\"slack\" 両一致, Pod 起動時刻起点で確認)"
 else
   pod_phase="$(kubectl get pod "$orch_pod" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo 'unknown')"
-  fail "[slack] Slack adapter 起動痕跡も credentials missing 痕跡も見えない (Pod phase=$pod_phase) — Pod が Running 以外なら kubectl describe pod/$orch_pod -n $NS で原因確認、Running ならログ未生成の可能性 (--since=120s 範囲外) のため kubectl logs $orch_pod -n $NS で生ログ確認"
+  fail "[slack] Slack adapter 起動痕跡も credentials missing 痕跡も見えない (Pod phase=$pod_phase, startTime=$pod_start_time) — Pod が Running 以外なら kubectl describe pod/$orch_pod -n $NS で原因確認、Running ならログ未生成の可能性のため kubectl logs $orch_pod -c orchestrator -n $NS で生ログ確認"
 fi
 
 ok "==== Phase 2 GKE wiring assertion 全 pass (A 案) ===="
