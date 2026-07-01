@@ -145,6 +145,20 @@ async function spawnContainer(session: Session): Promise<void> {
         // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
         const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
+        // Defense-in-depth: `provider='adk'` runs in-process via `src/adk/dispatcher.ts`
+        // (M4-B Phase 3) — no container spawn. `deliverToAgent` in `src/router.ts`
+        // intercepts before reaching here, so this branch fires only on a router bug
+        // or a direct `spawnContainer` call. Warn loudly rather than build a spurious
+        // container spec (which would then fail at runtime with a misleading error).
+        if (provider === 'adk') {
+          log.warn('spawnContainer called with provider=adk — should be routed via ADK dispatcher (in-process)', {
+            event: 'container.spawn.adk_provider_skip',
+            session_id: session.id,
+            agent_group_id: session.agent_group_id,
+          });
+          return;
+        }
+
         const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
         const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
         // OneCLI agent identifier is always the agent group id — stable across
@@ -240,6 +254,13 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
  *   sessions.agent_provider
  *     → container_configs.provider
  *     → 'claude'
+ *
+ * Return type is `string` (schemaless — providers are registered via
+ * `src/providers/`); see `KNOWN_PROVIDERS` in `src/db/container-configs.ts`
+ * for the values recognized by biblio-claw. In particular, `'adk'` is
+ * intercepted by `deliverToAgent` (`src/router.ts`) and never reaches
+ * `spawnContainer`; the guard here (see `spawnContainer` early return) is
+ * a defense-in-depth against a router bug or a direct `spawnContainer` call.
  *
  * Pure so the precedence can be unit-tested without a DB or filesystem.
  */

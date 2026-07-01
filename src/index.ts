@@ -147,7 +147,11 @@ async function main(): Promise<void> {
   await containerRuntime.cleanupOrphans();
   log.info(`container runtime = ${containerRuntime.name}`);
 
-  // 3. Channel adapters
+  // 3. Channel adapters — CLI/Slack/etc. のメッセージが `routeInbound` に届くようになる。
+  // M4-B Phase 3 で router.ts:deliverToAgent が `provider='adk'` を検知した場合、
+  // `src/adk/dispatcher.ts` の `getSharedRunner()` が初回呼出時に lazy 初期化される。
+  // ここに到達する時点で `registerAnthropicVertexLlm()` (:93) + `initHostProxy()` +
+  // `setupVertexProxy()` は全て完了済 = dispatcher の Vertex SDK 認証は解決可能な状態。
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
