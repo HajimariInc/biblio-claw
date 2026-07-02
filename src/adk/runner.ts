@@ -64,7 +64,14 @@ export function buildRunner(agent: BaseAgent): SharedRunnerContext {
     appName: BIBLIO_M4B_APP_NAME,
   });
   // InMemoryRunner は必ず InMemorySessionService を内部生成する (adk-js@1.3.0 実装契約)。
-  // Runner 親クラスの readonly public field 経由で取得。cast の安全性は本ファイル冒頭
-  // ドキュメント参照。
-  return { runner, sessionService: runner.sessionService as InMemorySessionService };
+  // Runner 親クラスの readonly public field 経由で取得。契約の runtime 検証で cast の
+  // 安全性を機械的に保証 (本ファイル冒頭ドキュメント参照、silent failure 撲滅)。
+  const sessionService = runner.sessionService;
+  if (!(sessionService instanceof InMemorySessionService)) {
+    throw new Error(
+      `InMemoryRunner.sessionService is not an InMemorySessionService instance ` +
+        `(got: ${sessionService.constructor.name}). adk-js のバージョンを確認してください。`,
+    );
+  }
+  return { runner, sessionService };
 }
