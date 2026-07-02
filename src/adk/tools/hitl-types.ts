@@ -16,33 +16,40 @@
  *
  *   - PR #105 レビューで「3 箇所の重複定義」「`Record<string, unknown>` 経由の型情報損失」
  *     が指摘されたため named type に統一
- *   - 新 HITL tool 追加時は `HitlToolAction` に値を追加すると、型を経由する箇所 (adk-approvals /
- *     approval-dispatcher / tool 側 payload 構築) は自動的に型 error で検知される。
- *     dispatcher.ts の runtime 判定は `isHitlAction` type guard 経由で行うため `HITL_ACTIONS`
- *     配列に値追加が要る (忘れると unknown action として skip される silent 経路)。
- *     `adk-approvals.ts:120` の title 三項比較は exhaustiveness check 機構がないため型 error で
- *     検知されない (issue #108 scope 外、別 issue で対応検討)
+ *   - `HITL_ACTIONS` 配列を single source of truth とし、`HitlToolAction` 型は
+ *     `(typeof HITL_ACTIONS)[number]` で導出、`isHitlAction()` type guard も同配列を参照する
+ *     (array-first パターン、`BIBLIO_CATEGORIES` / `BIBLIO_SETTING_KEYS` と同じ)。新 HITL tool
+ *     追加時は 1 箇所 (`HITL_ACTIONS`) の更新で型 error と runtime 判定が同時に追従する
+ *   - `adk-approvals.ts:120` の title 三項比較は exhaustiveness check 機構がないため
+ *     `HitlToolAction` に値追加しても型 error で検知されない (issue #108 scope 外、
+ *     別 issue で対応検討)
  */
 import type { BiblioCategory } from '../../biblio/types.js';
 
 /**
- * HITL 承認 tool の action 名 closed union。
+ * HITL 承認 tool の action 名 allowlist (single source of truth)。
  *
- * 新 HITL tool 追加時は本 union に値を追加する:
- *   1. `HitlToolAction` に値追加
- *   2. `src/adk/tools/<新>-tool.ts` を Pattern 2 (enkin-tool.ts) 踏襲で作成
- *   3. `src/adk/root-agent.ts` の tools 配列に追加
- *   4. dispatcher の pending 判定 (`src/adk/dispatcher.ts`) は本型で narrow されるため
- *      自動的に型 error で検知される
+ * `HitlToolAction` 型は本配列から `(typeof HITL_ACTIONS)[number]` で導出、`isHitlAction`
+ * type guard も本配列を参照する。biblio-claw 標準の `BIBLIO_CATEGORIES` (types.ts:145-146)
+ * / `BIBLIO_SETTING_KEYS` (types.ts:169) と同じ array-first パターン。
+ *
+ * 新 HITL tool 追加時は本配列に値を追加するだけで:
+ *   1. `HitlToolAction` union は自動追従 (型を経由する adk-approvals / approval-dispatcher /
+ *      tool 側 payload 構築は自動的に型 error で検知される)
+ *   2. `isHitlAction()` の runtime 判定も自動追従 (dispatcher.ts の pending 判定が新値を受理)
+ * その後の作業:
+ *   3. `src/adk/tools/<新>-tool.ts` を Pattern 2 (enkin-tool.ts) 踏襲で作成
+ *   4. `src/adk/root-agent.ts` の tools 配列に追加
+ *   5. `adk-approvals.ts:120` の title 三項比較を更新 (exhaustiveness check 機構がないため
+ *      型 error で検知されない = 手動 review 必須、issue #108 scope 外)
  */
-export type HitlToolAction = 'enkin' | 'shokyaku';
+export const HITL_ACTIONS = ['enkin', 'shokyaku'] as const;
 
 /**
- * `HitlToolAction` の union 値を列挙した readonly array。
- * `isHitlAction` type guard + 将来の exhaustiveness check に使用。
- * biblio-claw 標準の `BIBLIO_CATEGORIES` (types.ts:145-146) パターン踏襲。
+ * HITL 承認 tool の action 名 closed union。
+ * `HITL_ACTIONS` から `(typeof)[number]` で導出することで手動同期を排除。
  */
-export const HITL_ACTIONS: readonly HitlToolAction[] = ['enkin', 'shokyaku'] as const;
+export type HitlToolAction = (typeof HITL_ACTIONS)[number];
 
 /**
  * `unknown` 由来の値が `HitlToolAction` かどうかの runtime 検証 type guard。
