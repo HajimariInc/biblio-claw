@@ -1,5 +1,5 @@
 /**
- * scripts/fake-fugue-client.ts — Fugue channel adapter (M4-E Phase 1) 疎通確認用の
+ * scripts/fake-fugue-client.ts — Fugue channel adapter (M4-E Phase 1-2) 疎通確認用の
  * Fake Fugue クライアント CLI。
  *
  * Fugue Cloud Run 実結線前の local dev 検証用に、biblio-claw 側の HTTP endpoint に
@@ -7,8 +7,12 @@
  * (Phase 6 = 任意予定) にも耐えるよう exit code は 0 (成功) / 2 (usage error) /
  * 3 (harness crash) の 3 分岐。
  *
+ * Phase 2 で consult subcommand に `--query <str>` / `--mode <literal>` オプションを
+ * 追加。equip subcommand は Phase 3 まで skeleton (schema_version + request_id のみ) を温存。
+ *
  * Usage:
- *   pnpm exec tsx scripts/fake-fugue-client.ts consult
+ *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "Figma" --mode "review-with-ad"
+ *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "test"
  *   pnpm exec tsx scripts/fake-fugue-client.ts equip
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --bad-token
  */
@@ -30,13 +34,24 @@ function isSubcommand(v: string | undefined): v is Subcommand {
   return v === 'consult' || v === 'equip';
 }
 
+/**
+ * `--foo <value>` 形式の option を取り出す。option 名が存在しても値が続かない場合は
+ * undefined を返す (usage error にはしない = server 側の Zod で reject させる)。
+ */
+function parseOption(argv: string[], name: string): string | undefined {
+  const idx = argv.indexOf(`--${name}`);
+  return idx >= 0 && idx + 1 < argv.length ? argv[idx + 1] : undefined;
+}
+
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   const subcommand = argv[0];
   const badToken = argv.includes('--bad-token');
 
   if (!isSubcommand(subcommand)) {
-    process.stderr.write('usage: fake-fugue-client.ts <consult|equip> [--bad-token]\n');
+    process.stderr.write(
+      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>]\n',
+    );
     return 2;
   }
 
@@ -50,13 +65,34 @@ async function main(): Promise<number> {
   const url = `http://${host}:${port}/v1/channels/fugue/${subcommand}`;
 
   const startedAt = Date.now();
+
+  // Phase 2: consult は full spec (`query` / `mode`)、equip は skeleton のまま (Phase 3 対象)。
+  // `context_hint` は Phase 2 では検索ロジックに反映されないため、options 化しない
+  // (over-thinking-avoidance: 使わない可変性は入れない、必要になったら追加)。
+  let body: Record<string, unknown>;
+  if (subcommand === 'consult') {
+    body = {
+      schema_version: '1',
+      request_id: `fake-${startedAt}`,
+      query: parseOption(argv, 'query') ?? 'default consult query',
+      // --mode 未指定時は 'ask-ad'。server 側 Zod が invalid literal を reject するため
+      // ここでは client 側 validate せず、意図的に不正値を送る verify テストにも耐える。
+      mode: parseOption(argv, 'mode') ?? 'ask-ad',
+    };
+  } else {
+    body = {
+      schema_version: '1',
+      request_id: `fake-${startedAt}`,
+    };
+  }
+
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify({ schema_version: '1', request_id: `fake-${startedAt}` }),
+    body: JSON.stringify(body),
   });
   const duration_ms = Date.now() - startedAt;
   // I2 対応: 疎通確認用ツールが疎通異常時に沈黙するのを防ぐ。実際に parse に失敗するのは
