@@ -115,16 +115,20 @@ interface PartLike {
   text?: string;
   /**
    * ADK/genai `Part.functionCall` (= `@google/genai::FunctionCall`) の structural mirror。
-   * `id` と `name` は `tool_use` block への必須 field (`convertContentsToAnthropicMessages:381-384`)、
-   * `args` は tool 入力 payload。id/name 欠けは silent-failure-hunter H1 対応で log.warn + skip。
+   * `id` と `name` は `convertContentsToAnthropicMessages` の functionCall 分岐で
+   * `tool_use` block への必須 field として参照、`args` は tool 入力 payload。
+   * id/name 欠けは silent-failure-hunter H1 対応で log.warn + skip
+   * (event: `adk.anthropic_vertex_llm.skip_invalid_function_call`)。
    */
   functionCall?: { id?: string; name?: string; args?: unknown };
   /**
    * ADK/genai `Part.functionResponse` (= `@google/genai::FunctionResponse`, `genai.d.ts:4315-4329`) の
-   * structural mirror。`id` と `response` は `tool_result` block のコア field
-   * (`convertContentsToAnthropicMessages:396-403`)。**`name` はコア変換パスでは未参照だが**、
-   * id 欠け skip 時の log.warn payload (`:413`) で「どの tool の functionResponse が drop されたか」の
-   * 可観測性のために参照する (= silent-failure-hunter H1 対応、debug hint)。
+   * structural mirror。`id` と `response` は `convertContentsToAnthropicMessages` の
+   * functionResponse 分岐で `tool_result` block のコア field として参照
+   * (id → tool_use_id、response → content)。**`name` はコア変換パスでは未参照だが**、
+   * id 欠け skip 時の log.warn payload で「どの tool の functionResponse が drop されたか」の
+   * 可観測性のために参照する (event: `adk.anthropic_vertex_llm.skip_invalid_function_response`、
+   * silent-failure-hunter H1 対応、debug hint)。
    */
   functionResponse?: { id?: string; name?: string; response?: unknown };
 }
