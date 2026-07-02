@@ -1454,17 +1454,25 @@ bash scripts/verify-m4-b.sh  # 2 回目 = 同 PASS
 **必須 env**: `GCP_PROJECT_ID` / `BQ_DATASET_ID` (Phase 3 と同じ)。
 **任意 env**: `VERIFY_M4B_BIBLIO` (acquire 対象 repo)、`VERIFY_M4B_INCLUDE_REGRESSION=1` (Section 7 有効化)。
 
-### Pod 再起動時の対処
+### Pod 再起動 / admin 未応答時の対処 (issue #106 で自動化)
 
 `InMemorySessionService` は Pod 内メモリ保持のため、**Pod 再起動時に pause 中の全 ADK session が消失**する。既に Slack DM に配信済の pending_approvals row から admin が承認カードを押下しても、`resolveAdkApproval` が `sessionService.getSession(...)` で `undefined` を検知して patron に「Pod 再起動により承認セッションが失効しました。もう一度 tool 呼出をお願いします。」通知を deliver する (= silent 失敗しない)。
 
-**stale pending_approvals row の cleanup** (= 手動 or 起動時 sweep):
+**通常の admin 未応答 (無反応で放置) 時のタイムアウト** も issue #106 で自動化済:
+
+- **Layer 1 (expires_at 設定)**: `pending_approvals.expires_at = now + 30 min` を書き込む (`src/modules/approvals/adk-approvals.ts` の Layer 1)。env `ADK_APPROVAL_TIMEOUT_MS` (単位 ms) で override 可能 (= 短縮 verify や運用短縮に活用)
+- **Layer 2 (setTimeout expiry)**: 呼出時に `setTimeout` で expiry timer を仕込み、時間切れで `expireAdkApproval` が「row status='expired' + Slack card 'Expired (no response)' 化 + patron に「承認がタイムアウトしました」通知 + `sessionService.deleteSession` (session leak 解消) + row 削除」を実行
+- **Layer 3 (起動時 sweep)**: `startAdkApprovalHandler` が `onDeliveryAdapterReady` で発火し、Pod 再起動で残った stale row を「Expired (host restarted)」で edit + patron 通知 + row 削除で cleanup (= sessionService は Pod 再起動後空なので `deleteSession` は skip)
+
+Admin が timer 発火直前に応答したケースは `response-handler.ts:adk_confirm` 分岐冒頭で `clearAdkApprovalTimer(approvalId)` を呼び、二重処理を防ぐ。
+
+通常は手動介入不要。**緊急時のフォールバック** (sweep 失敗 / hook 未配線での起動失敗 / stale row の手動確認) として下記の手動 SQL 手順を保持する:
 
 ```bash
-# 起動時に停留している adk_confirm row の一覧 (= Pod 再起動前の pending)
+# 停留している adk_confirm row の一覧
 kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
   pnpm exec tsx scripts/q.ts /data/v2.db \
-  "SELECT approval_id, agent_group_id, title, created_at FROM pending_approvals WHERE action='adk_confirm' AND status='pending'"
+  "SELECT approval_id, agent_group_id, title, created_at, expires_at, status FROM pending_approvals WHERE action='adk_confirm'"
 
 # 全削除 (= Pod 再起動後は resume できないため無効化)
 kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
@@ -1472,7 +1480,14 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
   "DELETE FROM pending_approvals WHERE action='adk_confirm' AND status='pending'"
 ```
 
-将来 `sweepStaleAdkApprovals` を起動時 hook で自動化する (onecli-approvals.ts の `sweepStaleApprovals` パターン踏襲) 案は Phase 90 送り (= runbook §Phase 4 で扱わない論点)。
+**タイムアウト値の短縮 (verify / demo 用)**:
+
+```bash
+# StatefulSet env で override (30 秒に短縮する例)
+kubectl set env statefulset/biblio-orchestrator -n biblio-claw ADK_APPROVAL_TIMEOUT_MS=30000
+# 元に戻す (= env 削除で default 30 min)
+kubectl set env statefulset/biblio-orchestrator -n biblio-claw ADK_APPROVAL_TIMEOUT_MS-
+```
 
 ### 既知の罠 / gotcha
 

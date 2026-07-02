@@ -22,7 +22,7 @@ import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
-import { ADK_CONFIRM_ACTION } from './adk-approvals.js';
+import { ADK_CONFIRM_ACTION, clearAdkApprovalTimer } from './adk-approvals.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler } from './primitive.js';
 
@@ -47,6 +47,11 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   // 既存 module-registered 分岐 (下の `handleRegisteredApproval`) は session_id 有り前提のため
   // 先に adk_confirm を捌く必要がある。
   if (approval.action === ADK_CONFIRM_ACTION) {
+    // issue #106: admin が timeout 前に応答したので expiry timer を先に取り除く。
+    // これを resolveAdkApproval の前で呼ぶことで「timer 発火直前 vs admin 応答」の race を防ぐ
+    // (= expireAdkApproval が row missing で早期 return する経路になり、二重 patron 通知を防止)。
+    clearAdkApprovalTimer(payload.questionId);
+
     let adkPayload: AdkApprovalPayload;
     try {
       adkPayload = JSON.parse(approval.payload) as AdkApprovalPayload;
