@@ -29,6 +29,18 @@ interface Result {
   response_body: unknown;
   response_body_parse_error: boolean;
   used_token_kind: 'valid' | 'bad' | 'missing';
+  /**
+   * `--traceparent <hex>` を指定した際に実際に送出した W3C `traceparent` header 値
+   * (未指定時は `null`、Phase 4 review S2 対応で `undefined` → `null` に変更 =
+   * `JSON.stringify` は値が `undefined` のキーを **出力から drop** するため、`RESULT=<json>`
+   * の中身が「未指定時にキー自体が消える」/「指定時にキー + string 値」の 2 形になり、
+   * `'used_traceparent' in result` 判定が false negative を起こす。`null` なら常にキー保持)。
+   * Phase 4 で追加、dev 検証で trace 継承を biblio-claw 側 log から追跡するための marker。
+   * grammar validation は biblio 側 propagator の silent-ignore 挙動を尊重して行わない
+   * (client は raw 値を forward するのみ、malformed の可視化は biblio 側 log
+   * `fugue.traceparent.malformed` event で担う)。
+   */
+  used_traceparent: string | null;
 }
 
 function isSubcommand(v: string | undefined): v is Subcommand {
@@ -51,10 +63,11 @@ async function main(): Promise<number> {
 
   if (!isSubcommand(subcommand)) {
     process.stderr.write(
-      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>]\n',
+      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>] [--traceparent <00-32hex-16hex-flags>]\n',
     );
     return 2;
   }
+  const traceparent = parseOption(argv, 'traceparent');
 
   const env = readEnvFile(['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST']);
   // --bad-token 指定時は auth 分岐 `bad_token` を発火させるため、意図的に不正 token を送る
@@ -104,6 +117,12 @@ async function main(): Promise<number> {
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      // Phase 4: `--traceparent` 指定時のみ W3C header を送出する。未指定時は biblio 側
+      // `extractTraceContextFromHttpHeaders` が active context (Phase 4 時点は effectively
+      // ROOT_CONTEXT) を返し、`fugue.consult` / `fugue.equip` span がそれを親として新規
+      // trace_id を発行する (Phase 5 で auto HttpInstrumentation が ESM で機能するようになった
+      // 場合は、SERVER span が active に乗り、fugue span はその子として nest される)。
+      ...(traceparent ? { traceparent } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -130,6 +149,7 @@ async function main(): Promise<number> {
     response_body,
     response_body_parse_error,
     used_token_kind,
+    used_traceparent: traceparent ?? null,
   };
   process.stdout.write(`RESULT=${JSON.stringify(result)}\n`);
   return 0;

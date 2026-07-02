@@ -91,6 +91,13 @@ export async function withBiblioActionSpan<T>(
         const errorRecord = err instanceof Error ? err : new Error(String(err));
         span.recordException(errorRecord);
         span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+        // Phase 4 review I1 (silent-failure #1): throw 経路では必ず outcome=failure を反映。
+        // 成功経路で `setAttribute('biblio.outcome', ...)` を呼ぶ現行実装では、その setAttribute
+        // より後段 (未想定例外) で outcome 属性が欠落し、Cloud Trace / BQ の outcome ベース
+        // ダッシュボードから failure が消える silent failure が発生していた。catch 経路での
+        // 上書きは「throw したなら outcome は必ず failure が正」なので意味論的に安全。
+        // 10+ の biblio handler すべてに恩恵がある一般化。
+        span.setAttribute('biblio.outcome', 'failure');
         throw err;
       } finally {
         span.end();
