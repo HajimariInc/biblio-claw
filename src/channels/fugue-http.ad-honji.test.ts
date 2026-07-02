@@ -105,6 +105,33 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       ).toBe(1);
     });
 
+    // Phase 4 review S1 (type-design-analyzer): 全 200 応答分岐で fugueSpan.setAttribute('fugue.outcome', ...)
+    // が刻まれていることを静的 grep で強制。withFugueEntrySpan の型では強制せず (over-engineering、
+    // BiblioActionName / fugue.outcome の domain logic を呼び出し側が決める既存流儀を維持) の代わりに、
+    // 対称性の機械保証で silent gap を塞ぐ。将来 200 応答分岐が追加された際、fugue.outcome の
+    // setAttribute を忘れると本 test が fail する = Cloud Trace の outcome ベースダッシュボードから
+    // silent に消える regression の構造的防止。
+    // 例外: writeJson(res, 200, ...) は withBiblioActionSpan の中で呼ばれる想定だが、fugueSpan は
+    // withFugueEntrySpan のクロージャで見えるので、全 200 分岐で刻める。
+    it('static grep: writeJson(res, 200, ...) の分岐数と fugueSpan.setAttribute(fugue.outcome) の呼出数が一致', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
+      // writeJson の 2 番目引数が literal 200 の箇所のみ抽出 (writeError の内部呼び出しは status
+      // 変数経由なので `writeJson(res, status,` 形式 = 本 regex では拾わない)。
+      const writeJson200Matches = source.match(/writeJson\(res,\s*200,/g) ?? [];
+      const setFugueOutcomeMatches = source.match(/fugueSpan\.setAttribute\('fugue\.outcome',/g) ?? [];
+      expect(
+        setFugueOutcomeMatches.length,
+        `writeJson(res, 200, ...) = ${writeJson200Matches.length} 箇所、` +
+          `fugueSpan.setAttribute('fugue.outcome', ...) = ${setFugueOutcomeMatches.length} 箇所。` +
+          `全 200 応答分岐で outcome 属性を刻むべき (Cloud Trace outcome ベース集計からの silent drop 防止)。`,
+      ).toBe(writeJson200Matches.length);
+      // 参考値の retention: Phase 4 完了時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
+      // partial_B + success)。追加/削除時は本 assertion が fail するので、意図された対称性の範囲で
+      // 数を updateする。
+      expect(writeJson200Matches.length).toBeGreaterThanOrEqual(6);
+    });
+
     it('listBiblio throw is served as 200 + status:error (not 5xx)', async () => {
       const { listBiblio } = await import('../biblio/list-biblio.js');
       vi.mocked(listBiblio).mockRejectedValueOnce(new Error('simulated network failure'));

@@ -207,4 +207,84 @@ describe('FugueHttpServer trace log correlation (Phase 4, LOG_FORMAT=json)', () 
     expect(completed!['logging.googleapis.com/trace']).toMatch(/^[0-9a-f]{32}$/);
     expect(completed!['logging.googleapis.com/spanId']).toMatch(/^[0-9a-f]{16}$/);
   });
+
+  // Phase 4 review I3 (pr-test-analyzer #2): 部分失敗経路 (log.error) の trace 相関 field 検証。
+  // 従来は成功経路の completed event のみ確認していたが、trace 相関ログの実運用価値は
+  // 「失敗した request を trace_id から辿って原因を見る」場面で最大化する。partial_failure ログが
+  // 同じ active span context 内 (withFugueEntrySpan → withBiblioActionSpan の中、span.end() 前) で
+  // 呼ばれていることを実測する = 「log.error の呼び出し位置を早期 return の外に出す」ような一見
+  // 無害なリファクタで無警告に壊れる regression を検知する。
+  it('consult partial_failure (listBiblio throw) log にも trace 相関 field が付与される', async () => {
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    vi.mocked(listBiblio).mockRejectedValueOnce(new Error('simulated network error'));
+    const { FugueHttpServer } = await import('./fugue-http.js');
+    const server = new FugueHttpServer({ port: 0, host: '127.0.0.1', expectedToken: TOKEN });
+    const started = await server.start();
+    const baseUrl = `http://127.0.0.1:${started.port}`;
+
+    const parentTraceId = '7e5c9f2d1b8a4e6c3f0a5d8e2b7c9f4e';
+    try {
+      const res = await fetch(`${baseUrl}/v1/channels/fugue/consult`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${TOKEN}`,
+          traceparent: `00-${parentTraceId}-a1b2c3d4e5f60718-01`,
+        },
+        body: JSON.stringify({
+          schema_version: '1',
+          request_id: 'req-log-cpf',
+          query: 'x',
+          mode: 'ask-ad',
+        }),
+      });
+      // AD の本義: 200 + status:'error' (5xx でない)。
+      expect(res.status).toBe(200);
+    } finally {
+      await server.stop();
+    }
+
+    const payloads = parseJsonWrites();
+    const partial = payloads.find((p) => p.event === 'fugue.consult.partial_failure');
+    expect(partial, 'fugue.consult.partial_failure payload missing').toBeDefined();
+    expect(partial!.channel).toBe('fugue');
+    expect(typeof partial!.processing_time_ms).toBe('number');
+    // trace 相関 field が partial_failure log にも付いていることが本 test の主眼。
+    expect(partial!['logging.googleapis.com/trace']).toMatch(/^[0-9a-f]{32}$/);
+    expect(partial!['logging.googleapis.com/spanId']).toMatch(/^[0-9a-f]{16}$/);
+    // 継承した trace_id と一致する = 「失敗した request を Fugue 側の trace_id から追跡可能」。
+    expect(partial!['logging.googleapis.com/trace']).toBe(parentTraceId);
+  });
+
+  it('equip partial_failure (listBiblio throw) log にも trace 相関 field が付与される', async () => {
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    vi.mocked(listBiblio).mockRejectedValueOnce(new Error('simulated gh outage'));
+    const { FugueHttpServer } = await import('./fugue-http.js');
+    const server = new FugueHttpServer({ port: 0, host: '127.0.0.1', expectedToken: TOKEN });
+    const started = await server.start();
+    const baseUrl = `http://127.0.0.1:${started.port}`;
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/channels/fugue/equip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({
+          schema_version: '1',
+          request_id: 'req-log-epf',
+          skill_id: 'HajimariInc--figma-reviewer',
+          channel: 'fugue',
+        }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      await server.stop();
+    }
+
+    const payloads = parseJsonWrites();
+    const partial = payloads.find((p) => p.event === 'fugue.equip.partial_failure');
+    expect(partial, 'fugue.equip.partial_failure payload missing').toBeDefined();
+    expect(partial!.channel).toBe('fugue');
+    expect(partial!['logging.googleapis.com/trace']).toMatch(/^[0-9a-f]{32}$/);
+    expect(partial!['logging.googleapis.com/spanId']).toMatch(/^[0-9a-f]{16}$/);
+  });
 });
