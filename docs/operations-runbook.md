@@ -503,7 +503,7 @@ M2 verify の前提セットアップ(上記 1-7)に加えて:
 | # | 項目 | コマンド/確認 |
 | :---: | :--- | :--- |
 | M3-a | `nanoclaw-agent:latest` image が build 済 | `./container/build.sh` 実行後、`docker image inspect nanoclaw-agent:latest` で確認。`build.sh` は install-slug 付き tag(= `nanoclaw-agent-v2-<hash>:latest`)を打つため、`verify-m3-phase-2.sh` が固定参照する `nanoclaw-agent:latest` への alias 貼りが必要な場合は `docker tag <slug>:latest nanoclaw-agent:latest` |
-| M3-b | shelf に biblio が 1 件以上 main merge 済 | `pnpm exec tsx scripts/biblio-list.ts` で `total > 0` を確認。0 件の場合は `acquire → inspect → categorize → shelve` の 4 段 CLI で 1 件投入 → GitHub UI で draft PR を merge(= verify-m2 の auto-cleanup を経ない経路、verify-m3 では destructive 経路の対象 biblio が必要なため) |
+| M3-b | shelf に biblio が 1 件以上 main merge 済(推奨) | `pnpm exec tsx scripts/biblio-list.ts` で `total > 0` を確認。0 件の場合は list-biblio assertion (5/6) が fail するため 1 件は必要。**Phase 3 destructive の対象 biblio (`VERIFY_M3_P3_BIBLIO`) が shelf に merge 済でない場合は verify 側で warn 継続 PASS 経路が発火する** (= issue #98 対応、`verify-m3-phase-3.sh` で enkin 側が `not_shelved` を許容)。ただし fixture 経路が実行されないため実装変更後の regression 網羅性は下がる = 定期的に fixture 復活 (`acquire → inspect → categorize → shelve` の 4 段 CLI で投入 → GitHub UI で draft PR を merge) が推奨。 |
 | M3-c | OneCLI token が両方フレッシュ | `bash scripts/onecli-vertex-secret.sh && bash scripts/onecli-gh-secret.sh`(= verify-m3 は Vertex(spawn-verify が container 内で claude CLI 経由)+ GitHub(fetchMarketplace / unshelve PR 作成)の両方を叩く。token 失効 ~60min で `401 Bad credentials` / `model not available` に倒れるため、verify-m3 実行直前に refresh するのが安全) |
 
 ### 実行
@@ -517,6 +517,10 @@ VERIFY_M3_P3_CATEGORY=biblio-ai \
 # 引数省略 = both(local + GKE)、--gke-only = GKE 経路のみ。ただし assertion 5/6(list-biblio)
 # は常に local 実行のため、`M3 PASS (gke)` は「Phase 2 GKE assertion 通過 + assertion 5/6 が
 # local で通った」を意味する。完全 GKE-native 検証は将来 phase で別途。
+#
+# 注: 指定した fixture が shelf に main merge 済でない場合、verify-m3.sh は warn 継続で
+# `M3 PASS` を出す(= issue #98 対応、destructive 経路 skip)。完全 destructive 網羅には
+# 上の 4 段 CLI + GitHub UI merge で fixture を復活させておくこと。
 ```
 
 全 6 assertion 緑 → `M3 PASS (local|gke|both)` を stdout に出して exit 0。実時間 ~36 秒(= 全段順次)。`trap cleanup EXIT INT TERM` で:
@@ -527,7 +531,9 @@ VERIFY_M3_P3_CATEGORY=biblio-ai \
 ### 後始末(verify 中断時)
 
 - **draft PR が残った(= trap 走らず)**: `gh pr list --repo HajimariInc/biblio-shelf --state open --search 'in:title enkin OR in:title shokyaku' | head -10` で目視 → `gh pr close --repo HajimariInc/biblio-shelf --delete-branch <PR#>` で個別 close
-- **shelve 済 biblio が消えた(= destructive 経路で焼却された)**: 次回 verify-m3.sh 実行前に同 biblio を再 shelve + main merge(= 連続 run の `not_shelved` 連鎖の救済は `verify-m3-phase-3.sh:247-255` で吸収されるが、`total > 0` を維持するため次回前に投入推奨)
+- **shelve 済 biblio が消えた(= destructive 経路で焼却された)**: verify-m3.sh 実行は成功する(= issue #98 対応で enkin 側も `not_shelved` を許容、warn 継続 PASS 経路)。ただし destructive 経路の実質検証は skip されるため、下記いずれかで復活推奨:
+  - (推奨) `pnpm exec tsx scripts/biblio-acquire.ts <owner>/<biblio> → biblio-inspect → biblio-categorize → biblio-shelve` の 4 段 CLI で新規 shelve → GitHub UI で **draft PR を非 draft 化 + squash merge** → shelf main の marketplace.json に entry 復活
+  - `total > 0`(= assertion 5/6 の list-biblio 前提)は他の shelve 済 biblio が 1 件でもあれば維持されるため、fixture 復活自体は destructive 網羅性のためだけの作業
 - **agent_shared session の cross-run 干渉**: `pnpm exec tsx scripts/q.ts data/v2.db "DELETE FROM sessions WHERE agent_group_id = 'ag-biblio-equip-verify'; DELETE FROM agent_groups WHERE id = 'ag-biblio-equip-verify';"` + `rm -rf data/v2-sessions/ag-biblio-equip-verify groups/biblio-equip-verify` + container 残存があれば `docker ps -a --filter 'name=nanoclaw-v2-biblio-equip-verify' --format '{{.ID}}' | xargs -r docker rm -f`
 
 ### トラブルシューティング
