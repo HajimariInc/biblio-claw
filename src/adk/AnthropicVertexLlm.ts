@@ -113,7 +113,19 @@ const DEFAULT_REGION = 'global';
  */
 interface PartLike {
   text?: string;
+  /**
+   * ADK/genai `Part.functionCall` (= `@google/genai::FunctionCall`) の structural mirror。
+   * `id` と `name` は `tool_use` block への必須 field (`convertContentsToAnthropicMessages:381-384`)、
+   * `args` は tool 入力 payload。id/name 欠けは silent-failure-hunter H1 対応で log.warn + skip。
+   */
   functionCall?: { id?: string; name?: string; args?: unknown };
+  /**
+   * ADK/genai `Part.functionResponse` (= `@google/genai::FunctionResponse`, `genai.d.ts:4315-4329`) の
+   * structural mirror。`id` と `response` は `tool_result` block のコア field
+   * (`convertContentsToAnthropicMessages:396-403`)。**`name` はコア変換パスでは未参照だが**、
+   * id 欠け skip 時の log.warn payload (`:413`) で「どの tool の functionResponse が drop されたか」の
+   * 可観測性のために参照する (= silent-failure-hunter H1 対応、debug hint)。
+   */
   functionResponse?: { id?: string; name?: string; response?: unknown };
 }
 
