@@ -21,13 +21,20 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
+import { withBiblioActionSpan } from '../biblio/action-helpers.js';
+import { listBiblio } from '../biblio/list-biblio.js';
+import { readListEnv } from '../biblio/shelf-gh.js';
+import type { ListBiblioItem, ListBiblioResult } from '../biblio/types.js';
 import { log } from '../log.js';
 
 import {
-  FugueConsultRequestSkeleton,
+  FugueConsultRequest,
   FugueEquipRequestSkeleton,
+  type FugueConsultMode,
+  type FugueConsultReply,
   type FugueErrorResponse,
   type FugueSkeletonResponse,
+  type SkillRef,
 } from './fugue-schemas.js';
 
 const CONSULT_PATH = '/v1/channels/fugue/consult';
@@ -109,6 +116,79 @@ function writeJson<T>(res: http.ServerResponse, status: number, body: T): void {
  */
 function writeError(res: http.ServerResponse, status: number, body: FugueErrorResponse): void {
   writeJson(res, status, body);
+}
+
+/**
+ * `query` を `ListBiblioItem` の name + description に case-insensitive substring match
+ * する。Phase 2 判断 C: LLM 意図抽出は Phase 対象外、substring match のみで検索経路
+ * を作る。将来 Fugue Stage 5+ で LLM 経由の意図抽出に切替予定。
+ */
+function queryMatches(item: ListBiblioItem, query: string): boolean {
+  const q = query.toLowerCase();
+  return item.name.toLowerCase().includes(q) || item.description.toLowerCase().includes(q);
+}
+
+/**
+ * `ListBiblioItem[]` を Fugue 契約の `SkillRef[]` に写像し、上位 N 件で truncate する。
+ *
+ * - `manifest_url`: 棚 GitHub tree URL に組み立て (biblio-claw 側で組み立て、Fugue 側は
+ *   URL を UI で表示する用途を想定)。
+ * - `equipped`: Phase 2 は常に `false` (判断 B、Fugue は session 概念なし)。
+ * - `limit`: Fugue 契約 (`skills_found` max_length=10) 整合、10 件で cut off。
+ */
+function toSkillRefs(items: ListBiblioItem[], shelfOwner: string, shelfRepo: string, limit = 10): SkillRef[] {
+  return items.slice(0, limit).map((item) => ({
+    id: item.name,
+    name: item.name,
+    description: item.description,
+    manifest_url: `https://github.com/${shelfOwner}/${shelfRepo}/tree/main/${item.category}/${item.name}`,
+    equipped: false,
+  }));
+}
+
+/**
+ * Fugue LLM 発話素材用の `summary` を生成する (500 字以内、日本語テンプレート)。
+ *
+ * Phase 2 判断 A: LLM は使わず、件数 / カテゴリ内訳 / 上位 3 件名を構造化した日本語文で
+ * 返す。500 字超過は `.slice(0, 497) + '...'` で trim (絵文字を含めないため surrogate
+ * pair 割断のリスクなし)。将来 Fugue LLM 生成に置換予定 (Solution Approach)。
+ */
+function summarizeConsult(
+  result: ListBiblioResult,
+  filtered: ListBiblioItem[],
+  query: string,
+  mode: FugueConsultMode,
+): string {
+  if (filtered.length === 0) {
+    return `該当なし。棚には現在 ${result.total} 件登録されていますが、query "${query.slice(0, 40)}" に一致する skill は見つかりませんでした (mode: ${mode})。`;
+  }
+  const countsParts: string[] = [];
+  for (const cat of ['biblio-dev', 'biblio-art', 'biblio-bf', 'biblio-ai'] as const) {
+    const n = result.counts[cat];
+    if (n > 0) countsParts.push(`${cat}:${n}`);
+  }
+  const topNames = filtered
+    .slice(0, 3)
+    .map((i) => i.name)
+    .join(', ');
+  const raw = `${filtered.length} 件見つかりました (棚全体 ${result.total} 件、内訳 [${countsParts.join(' / ')}])。上位: ${topNames}。query: "${query.slice(0, 60)}", mode: ${mode}。`;
+  return raw.length > 500 ? raw.slice(0, 497) + '...' : raw;
+}
+
+/**
+ * `listBiblio()` 経由の throw を 503 response の `reason` field に載せるための分類器。
+ *
+ * `shelf-gh.ts` の `GhHttpError` / `MarketplaceParseError` は `Error` を継承していて
+ * `this.name` を明示 set しているため、`err.name` の string 判定で分類する
+ * (`instanceof` は import 増と dep tree 拡大を避けるために採らない、Task 2 GOTCHA)。
+ */
+function classifyListBiblioError(err: unknown): 'env_missing' | 'github_http' | 'marketplace_parse' | 'other' {
+  if (err instanceof Error) {
+    if (err.name === 'MarketplaceParseError') return 'marketplace_parse';
+    if (err.name === 'GhHttpError') return 'github_http';
+    if (err.message.includes('required env missing')) return 'env_missing';
+  }
+  return 'other';
 }
 
 export class FugueHttpServer {
@@ -250,6 +330,10 @@ export class FugueHttpServer {
   }
 
   private async handleConsult(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    // Phase 2 判断 H: `processing_time_ms` を response + log に載せる。Fugue 側契約 §5.2
+    // で必須 field。計測開始は handler 入り口 = body read 込みの全 duration。
+    const startedAt = performance.now();
+
     let body: unknown;
     try {
       body = await readJsonBody(req);
@@ -283,7 +367,7 @@ export class FugueHttpServer {
       });
       return;
     }
-    const parsed = FugueConsultRequestSkeleton.safeParse(body);
+    const parsed = FugueConsultRequest.safeParse(body);
     if (!parsed.success) {
       log.warn('Fugue consult schema validation failed', {
         event: 'fugue.consult.schema_invalid',
@@ -294,20 +378,95 @@ export class FugueHttpServer {
       writeError(res, 400, { error: 'invalid_input', issues: parsed.error.issues });
       return;
     }
-    const response: FugueSkeletonResponse = {
-      schema_version: '1',
-      request_id: parsed.data.request_id,
-      operation: 'consult',
-      status: 'ok',
-      stub: true,
-    };
-    log.info('Fugue consult skeleton stub returned', {
-      event: 'fugue.consult.skeleton_stub',
+
+    const { request_id, query, mode, context_hint } = parsed.data;
+
+    log.info('Fugue consult invoked', {
+      event: 'fugue.consult.invoked',
       channel: 'fugue',
-      outcome: 'success',
-      request_id: parsed.data.request_id,
+      request_id,
+      mode,
+      query_length: query.length,
+      // PII 保護: context_hint の中身は emit しない、key 名のみログに残す (判断 E)。
+      context_hint_keys: Object.keys(context_hint ?? {}),
     });
-    writeJson(res, 200, response);
+
+    // Phase 2 判断 I: `withBiblioActionSpan('list', ...)` に相乗り → M4-A の biblio.list
+    // span 集計に channel 横断で載る (Cloud Trace の gen_ai semconv とは別 span)。
+    // sessionId は Fugue に session 概念なし = 空文字 (action-helpers.ts:60 signature 許容)。
+    // Phase 4 で Fugue 独自 span (`biblio.fugue.consult`) をこの外側に enclose 予定。
+    await withBiblioActionSpan('list', request_id, '', async () => {
+      try {
+        const result = await listBiblio({}, { ctx: { requestId: request_id, sessionId: '' } });
+
+        // Phase 2 判断 C: query filter (case-insensitive substring match) + category=unknown 除外 + top 10。
+        // 'unknown' は source パース失敗の item = manifest_url を安全に組み立てられない
+        // ため skills_found に含めない (Task 2 GOTCHA)。
+        const filtered = result.items.filter((i) => i.category !== 'unknown').filter((i) => queryMatches(i, query));
+
+        // shelfOwner / shelfRepo を SkillRef.manifest_url に注入するため readListEnv() を
+        // 呼ぶ。listBiblio() は既に readListEnv を通っているので、ここでの再呼出は
+        // process.env の同期読み出しのみで I/O なし = cost 無視可 (Risk table 参照)。
+        const env = readListEnv();
+        const skills_found = toSkillRefs(filtered, env.shelfOwner, env.shelfRepo);
+        const summary = summarizeConsult(result, filtered, query, mode);
+
+        const processing_time_ms = Math.round(performance.now() - startedAt);
+        const status: 'ok' | 'not_found' = filtered.length > 0 ? 'ok' : 'not_found';
+
+        const reply: FugueConsultReply = {
+          schema_version: '1',
+          request_id,
+          operation: 'consult',
+          status,
+          summary,
+          skills_found,
+          raw: {
+            listBiblio: {
+              total: result.total,
+              counts: result.counts,
+              appliedFilter: result.appliedFilter,
+            },
+            query,
+            mode,
+          },
+          processing_time_ms,
+          warnings: [],
+        };
+
+        log.info('Fugue consult completed', {
+          event: status === 'ok' ? 'fugue.consult.completed' : 'fugue.consult.not_found',
+          channel: 'fugue',
+          outcome: status === 'ok' ? 'success' : 'not_found',
+          request_id,
+          mode,
+          status,
+          processing_time_ms,
+          skills_found_count: skills_found.length,
+          total_shelf_items: result.total,
+        });
+
+        writeJson(res, 200, reply);
+      } catch (err) {
+        // Phase 2 判断 D: listBiblio throw (env_missing / github_http / marketplace_parse
+        // / other) は一律 503 OFFLINE で Fugue 側 AD ラウンド省略判断を明確化。
+        // fn 内で 503 変換まで完結させることで withBiblioActionSpan の outcome が正常終了扱い
+        // になるが、log.error 側で failure が可視化されるため trace/log の一貫性は担保。
+        const reason = classifyListBiblioError(err);
+        const processing_time_ms = Math.round(performance.now() - startedAt);
+        log.error('Fugue consult failed', {
+          event: 'fugue.consult.failed',
+          channel: 'fugue',
+          outcome: 'failure',
+          request_id,
+          mode,
+          reason,
+          processing_time_ms,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        writeError(res, 503, { error: 'unavailable', reason });
+      }
+    });
   }
 
   private async handleEquip(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
