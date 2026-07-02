@@ -38,8 +38,13 @@ import { getDb, hasTable } from '../db/connection.js';
 import { setBiblioSetting } from '../db/biblio-settings.js';
 import { log } from '../log.js';
 import { withBiblioActionSpan, writeBackMessage } from './action-helpers.js';
+import { validateValueForKey } from './config-validation.js';
 import { BIBLIO_SETTING_KEYS, type BiblioSettingKey } from './types.js';
 import type { Session } from '../types.js';
+
+// Re-export for backward compatibility with existing config-action.ts consumers.
+// New consumers should import directly from './config-validation.js'.
+export { validateValueForKey };
 
 /** `BIBLIO_SETTING_KEYS` allowlist の type guard (= 文字列 key を型レベルで絞り込む)。 */
 function isAllowlistedKey(key: string): key is BiblioSettingKey {
@@ -65,26 +70,6 @@ export function isConfigChangeAllowed(session: Session): boolean {
     )
     .get(session.agent_group_id);
   return row != null;
-}
-
-/**
- * key ごとの value semantic validation。allowlist 通過後に呼ぶ。
- *
- * `ACQUIRE_SKILL_THRESHOLD` は正整数を要求するため、`"abc"` / `"0"` / `"-5"` 等の意味的に
- * 不正な値を「設定完了」として patron に返すと、次回 `acquire()` の `resolveSkillThreshold`
- * で silent fallback (= DEFAULT 10 に倒れる) が起き、patron 認知と実態が乖離する。
- * 本関数で書き込み前に reject することで、patron への通知と DB の実態を整合させる。
- *
- * 戻り値: null = 妥当、string = patron 向けエラーメッセージ。
- */
-function validateValueForKey(key: BiblioSettingKey, value: string): string | null {
-  if (key === 'ACQUIRE_SKILL_THRESHOLD') {
-    const n = Number.parseInt(value, 10);
-    if (!Number.isFinite(n) || n < 1) {
-      return `${key} は 1 以上の整数を指定してください (指定: "${value}")。`;
-    }
-  }
-  return null;
 }
 
 registerDeliveryAction('update_config', async (content, session, inDb) => {

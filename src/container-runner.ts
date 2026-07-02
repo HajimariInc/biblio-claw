@@ -145,6 +145,28 @@ async function spawnContainer(session: Session): Promise<void> {
         // buildMounts and buildContainerSpec so side effects (mkdir, etc.) fire once.
         const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
+        // Defense-in-depth: `provider='adk'` runs in-process via `src/adk/dispatcher.ts`
+        // (M4-B Phase 3) — no container spawn. `deliverToAgent` in `src/router.ts`
+        // intercepts before reaching here, so this branch fires only on a router bug
+        // or a direct `spawnContainer` call.
+        //
+        // **Must `throw`, not `return`** (silent-failure-hunter #2 = PR #101 review 指摘 +
+        // 同ファイル :120-126 の M3 Phase 2 spawn-verify で修正済のパターンと同じ問題):
+        // `wakeContainer` は `spawnContainer(session).then(() => true).catch(() => false)` で
+        // 成否を判定する。ここで `return` (void) すると `wakeContainer` が **`true`
+        // (成功)** を返す。`host-sweep.ts` (60s tick) や `container-restart.ts` は
+        // provider チェックなく wakeContainer を叩くため、旧 claude group を
+        // `ncl groups config update --provider adk` で切り替えた際、残っていた古い
+        // セッションの未処理メッセージが 60s ごとに warn ログを出しながら永久 silent
+        // retry する経路が実在する。`throw` して `wakeContainer` に `false` を返させ、
+        // host-sweep の既存 stuck 検出ロジックに乗せる。
+        if (provider === 'adk') {
+          throw new Error(
+            `spawnContainer called with provider=adk (session=${session.id}, agent_group=${session.agent_group_id}) ` +
+              `— ADK path must be routed via src/adk/dispatcher.ts (in-process, no container spawn)`,
+          );
+        }
+
         const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
         const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
         // OneCLI agent identifier is always the agent group id — stable across
@@ -240,6 +262,13 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
  *   sessions.agent_provider
  *     → container_configs.provider
  *     → 'claude'
+ *
+ * Return type is `string` (schemaless — providers are registered via
+ * `src/providers/`); see `KNOWN_PROVIDERS` in `src/db/container-configs.ts`
+ * for the values recognized by biblio-claw. In particular, `'adk'` is
+ * intercepted by `deliverToAgent` (`src/router.ts`) and never reaches
+ * `spawnContainer`; the guard here (see `spawnContainer` early return) is
+ * a defense-in-depth against a router bug or a direct `spawnContainer` call.
  *
  * Pure so the precedence can be unit-tested without a DB or filesystem.
  */

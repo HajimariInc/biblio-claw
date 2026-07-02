@@ -39,6 +39,11 @@ vi.mock('./container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
+// Mock ADK dispatcher for the M4-B Phase 3 provider='adk' branch tests (I8 = PR #101 review 追加)。
+vi.mock('./adk/dispatcher.js', () => ({
+  dispatchToAdk: vi.fn().mockResolvedValue(undefined),
+}));
+
 // Override DATA_DIR for tests
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual('./config.js');
@@ -1028,5 +1033,169 @@ describe('delivery', () => {
 
     expect(undelivered).toHaveLength(1);
     expect(JSON.parse(undelivered[0].content).text).toBe('Agent response');
+  });
+});
+
+// I8 = PR #101 review 追加: router.ts の provider='adk' 分岐 unit test。
+// dispatcher 側 (dispatcher.test.ts) では dispatchToAdk 単体の contract を、
+// verify-m4-b.sh では E2E を carrier しているが、その中間 = router.ts 側の
+// 「container_configs.provider を見て dispatchToAdk に委譲する / claude 経路に戻す /
+// wake=false drop する / dispatcher throw 時に patron fallback を送る」を独立検証する。
+describe('router: ADK provider branch (M4-B Phase 3)', () => {
+  beforeEach(() => {
+    createAgentGroup({
+      id: 'ag-adk',
+      name: 'ADK Test Agent',
+      folder: 'adk-test-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-cli',
+      channel_type: 'cli',
+      platform_id: 'local',
+      name: 'Local CLI',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-cli-adk',
+      messaging_group_id: 'mg-cli',
+      agent_group_id: 'ag-adk',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    // container_configs 行を作成 + provider='adk' を明示 upsert。
+    // ensureContainerConfig は agent_group_id と updated_at のみ INSERT なので
+    // updateContainerConfigScalars で provider を明示する必要。
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO container_configs (
+        agent_group_id, provider, model, effort, image_tag, assistant_name,
+        max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
+        additional_mounts, updated_at
+      ) VALUES (?, 'adk', 'claude-sonnet-4-6', NULL, NULL, NULL, NULL, '[]', '{}', '[]', '[]', '[]', ?)`,
+    ).run('ag-adk', now());
+  });
+
+  it("provider='adk' の agent group で routeInbound → dispatchToAdk に委譲する (wakeContainer 呼ばない)", async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { dispatchToAdk } = await import('./adk/dispatcher.js');
+
+    vi.mocked(dispatchToAdk).mockClear();
+    vi.mocked(wakeContainer).mockClear();
+
+    await routeInbound({
+      channelType: 'cli',
+      platformId: 'local',
+      threadId: null,
+      message: {
+        id: 'msg-adk-1',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '@bot 仕入れて wf/x' }),
+        timestamp: now(),
+      },
+    });
+
+    expect(dispatchToAdk).toHaveBeenCalledTimes(1);
+    expect(dispatchToAdk).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentGroupId: 'ag-adk',
+        messagingGroupId: 'mg-cli',
+        channelType: 'cli',
+        platformId: 'local',
+        threadId: null,
+        patronText: expect.stringContaining('仕入れて'),
+        requestId: expect.any(String),
+      }),
+    );
+    // 従来経路 (session/container spawn) は呼ばれない
+    expect(wakeContainer).not.toHaveBeenCalled();
+  });
+
+  it('dispatchToAdk が throw しても routeInbound は resolve する (I6 = router 防御的 catch + fallback)', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { dispatchToAdk } = await import('./adk/dispatcher.js');
+
+    vi.mocked(dispatchToAdk).mockRejectedValueOnce(new Error('unexpected contract break'));
+
+    // dispatchToAdk が throw しても routeInbound は throw しない (silent 失敗防止)
+    await expect(
+      routeInbound({
+        channelType: 'cli',
+        platformId: 'local',
+        threadId: null,
+        message: {
+          id: 'msg-adk-throw',
+          kind: 'chat',
+          content: JSON.stringify({ sender: 'User', text: '@bot test' }),
+          timestamp: now(),
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(dispatchToAdk).toHaveBeenCalled();
+  });
+
+  it("provider='claude' (or null fallback) の agent group では ADK 分岐に入らず従来経路 (wakeContainer)", async () => {
+    // 別 agent group を provider=null (未指定 = 'claude' fallback) で作成
+    createAgentGroup({
+      id: 'ag-claude',
+      name: 'Claude Test Agent',
+      folder: 'claude-test-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-discord',
+      channel_type: 'discord',
+      platform_id: 'chan-999',
+      name: 'Discord Test',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-discord-claude',
+      messaging_group_id: 'mg-discord',
+      agent_group_id: 'ag-claude',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { dispatchToAdk } = await import('./adk/dispatcher.js');
+
+    vi.mocked(dispatchToAdk).mockClear();
+    vi.mocked(wakeContainer).mockClear();
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-999',
+      threadId: null,
+      message: {
+        id: 'msg-claude-1',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: 'Hello!' }),
+        timestamp: now(),
+      },
+    });
+
+    // ADK 分岐に入らず既存経路
+    expect(dispatchToAdk).not.toHaveBeenCalled();
+    expect(wakeContainer).toHaveBeenCalled();
   });
 });

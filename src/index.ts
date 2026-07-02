@@ -5,6 +5,7 @@
  * start delivery polls, start sweep, handle shutdown.
  */
 import { getDsnProvider, getSecretProvider } from './adapters/index.js';
+import { registerAnthropicVertexLlm } from './adk/llm-registry-setup.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { incrementBootCounter } from './boot-counter.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
@@ -86,6 +87,11 @@ import { shutdownOtel } from './observability/index.js';
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
+  // M4-B Phase 0: ADK `LLMRegistry` に `AnthropicVertexLlm` を登録。`LlmAgent({model:
+  // 'claude-sonnet-4-6'})` の文字列モデル ID 解決経路を成立させる (Phase 1 sub-agent 化の前提)。
+  // OTel init は `--import` 経路で main() より前に完了済 = ここでは register のみ。
+  registerAnthropicVertexLlm();
+
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
@@ -141,7 +147,11 @@ async function main(): Promise<void> {
   await containerRuntime.cleanupOrphans();
   log.info(`container runtime = ${containerRuntime.name}`);
 
-  // 3. Channel adapters
+  // 3. Channel adapters — CLI/Slack/etc. のメッセージが `routeInbound` に届くようになる。
+  // M4-B Phase 3 で router.ts:deliverToAgent が `provider='adk'` を検知した場合、
+  // `src/adk/dispatcher.ts` の `getSharedRunner()` が初回呼出時に lazy 初期化される。
+  // ここに到達する時点で `registerAnthropicVertexLlm()` (:93) + `initHostProxy()` +
+  // `setupVertexProxy()` は全て完了済 = dispatcher の Vertex SDK 認証は解決可能な状態。
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {

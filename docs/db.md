@@ -106,7 +106,7 @@ data/
 | `sessions` | central | `src/db/sessions.ts`、`src/session-manager.ts` | delivery、sweep、コンテナ runner |
 | `pending_questions` | central | `src/db/sessions.ts`(`ask_user_question` 経由) | コンテナ応答マッチャ |
 | `agent_destinations` | central | `src/db/agent-destinations.ts`、migration 004 backfill | `writeDestinations()`、配信 ACL |
-| `pending_approvals` | central | `src/db/sessions.ts`、`src/onecli-approvals.ts` | admin カード配信、sweep |
+| `pending_approvals` | central | `src/db/sessions.ts`、`src/modules/approvals/onecli-approvals.ts`、`src/modules/approvals/adk-approvals.ts` (M4-B Phase 4) | admin カード配信、sweep、ADK HITL 承認 |
 | `unregistered_senders` | central | `src/db/dropped-messages.ts` | 運用ツール |
 | `chat_sdk_*` | central | `src/state-sqlite.ts` | Chat SDK ブリッジ |
 | `schema_version` | central | `src/db/migrations/index.ts` | マイグレーションランナー |

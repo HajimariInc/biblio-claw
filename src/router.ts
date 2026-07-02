@@ -17,9 +17,13 @@
  * drops (no agent wired, no trigger match); the access gate writes rows
  * for policy refusals.
  */
+import { randomUUID } from 'node:crypto';
+
+import { dispatchToAdk } from './adk/dispatcher.js';
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
   createMessagingGroup,
@@ -403,6 +407,99 @@ async function deliverToAgent(
   adapterSupportsThreads: boolean,
   wake: boolean,
 ): Promise<void> {
+  // Provider dispatch (M4-B Phase 3): agent_group が provider='adk' を選択している
+  // 場合、agent-runner container 経路 (= session / container spawn) をスキップし、
+  // orchestrator 内 in-process ADK Runner に patron 命令を直接流す。
+  //
+  // - session concept なし (= `runEphemeral` が都度 ephemeral session を作る)
+  // - Command gate / typing indicator は既存 claude 経路のみに適用 (ADK 経路では
+  //   dispatcher 内で応答返却まで完結するため typing の意味が薄い)
+  // - `wake=false` は「傍受中、message 蓄積のみ or 完全ドロップ」の 2 ポリシーが
+  //   `ignored_message_policy` で分岐するが、ADK 経路は session なし = **accumulate
+  //   相当の永続化手段を持たない**。よってどちらのポリシーでも実質 drop 挙動になる
+  //   (I5 = PR #101 review 指摘)。`ignored_message_policy='accumulate'` を ADK
+  //   provider の wiring に設定しても実際には蓄積されず silent に消える点に注意 —
+  //   `init-adk-agent.ts` は現状 `'drop'` 固定で作成するため今は顕在化しないが、
+  //   将来 accumulate を選ぶ運用で silent data loss を招く。Phase 4/90 で session
+  //   永続化を導入するか、accumulate ポリシーを ADK provider では reject する経路
+  //   を検討する。
+  //
+  // 実装 note: `resolveProviderName` (container-runner.ts) を import せず inline 化するのは、
+  // 既存 test 群が `vi.mock('./container-runner.js', ...)` で 4 関数 stub (wakeContainer /
+  // isContainerRunning / getActiveContainerCount / killContainer) している都合。
+  // `resolveProviderName` を追加 export しても既存 mock 側で unimport になり、複数の
+  // test file (host-core.test.ts / channel-registry.test.ts / channel-approval.test.ts /
+  // sender-approval.test.ts / delivery.test.ts / container-restart.test.ts / agent-route.test.ts
+  // / destinations.test.ts / groups.test.ts 等 10+ 箇所) の mock 追記が必要になる。
+  // ADK 分岐は container_configs.provider だけ見れば十分 (= session.agent_provider は
+  // session 作成前の deliverToAgent 冒頭では未確定)。
+  //
+  // TODO(Phase 4/90): 将来 session.agent_provider を non-null に更新する mutator が
+  // 追加されたら、本 inline 版も追従して session.agent_provider を優先する経路が要る
+  // (現状 `ncl sessions` は read-only で該当 mutator 不在のため実害ゼロ)。
+  const containerConfig = getContainerConfig(agentGroup.id);
+  const providerName = (containerConfig?.provider ?? 'claude').toLowerCase();
+  if (providerName === 'adk') {
+    if (!wake) {
+      log.debug('ADK path: non-wake message dropped (in-process = no session accumulation)', {
+        agentGroupId: agent.agent_group_id,
+        messagingGroupId: mg.id,
+      });
+      return;
+    }
+    const parsed = safeParseContent(event.message.content);
+    const patronText = parsed.text ?? '';
+    const requestId = randomUUID();
+    log.info('routeInbound → ADK dispatcher', {
+      event: 'router.dispatch.adk',
+      agent_group_id: agent.agent_group_id,
+      messaging_group_id: mg.id,
+      channel_type: event.channelType,
+      request_id: requestId,
+    });
+    try {
+      await dispatchToAdk({
+        agentGroupId: agent.agent_group_id,
+        messagingGroupId: mg.id,
+        channelType: event.channelType,
+        platformId: event.platformId,
+        threadId: event.threadId,
+        userId,
+        patronText,
+        requestId,
+      });
+    } catch (err) {
+      // dispatcher は throw しない contract (内部で catch + fallback text)。
+      // 万一の unexpected throw を silent 化しないため保険で拾う + patron に最終砦
+      // fallback を送る (I6 = PR #101 review 指摘、dispatcher の contract 破綻時に
+      // patron が完全無応答になる二重の脆さを解消)。
+      log.error('ADK dispatcher threw (should not happen)', {
+        event: 'router.dispatch.adk_unexpected_throw',
+        agent_group_id: agent.agent_group_id,
+        request_id: requestId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      const adapter = getChannelAdapter(event.channelType);
+      if (adapter) {
+        // deliver 自体の失敗は log 拾って swallow (= 循環 catch 防止、routeInbound 全体
+        // を throw させない)
+        await adapter
+          .deliver(event.platformId, event.threadId, {
+            kind: 'chat',
+            content: { text: 'エラー: システムエラーが発生しました。しばらくして再度お試しください。' },
+          })
+          .catch((deliverErr) => {
+            log.error('ADK dispatcher fallback deliver also failed', {
+              event: 'router.dispatch.adk_fallback_deliver_failed',
+              request_id: requestId,
+              err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+            });
+          });
+      }
+    }
+    return;
+  }
+
   // Apply the adapter thread policy: threaded adapter in a group chat →
   // per-thread session regardless of wiring. agent-shared preserved (it's
   // a cross-channel directive the adapter doesn't know about). DMs collapse
