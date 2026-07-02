@@ -1348,7 +1348,7 @@ bash scripts/verify-m4-b.sh
 - `src/router.ts:deliverToAgent` (= provider 分岐、~397 行)
 - `src/adk/tools/inspect-tool.ts` (= BIBLIO_NAME_RE guard、Phase 3 で追加)
 - `scripts/init-adk-agent.ts` (= ADK 用 agent group + CLI 自動 wire + Slack optional wire)
-- `scripts/verify-m4-b.sh` (= 7 section、CLI 経由 E2E、M4-B PASS marker)
+- `scripts/verify-m4-b.sh` (= 7 section、CLI 経由 E2E、M4-B PASS marker。**Phase 4 で 9 section 拡張済 = Section 4.5 拡張 tool smoke + Section 6.5 HITL flow smoke を追加、詳細は §M4-B Phase 4 参照**)
 
 ---
 
