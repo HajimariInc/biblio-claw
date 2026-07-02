@@ -29,3 +29,18 @@ export interface FugueSkeletonResponse {
   status: 'ok';
   stub: true;
 }
+
+/**
+ * Fugue エラー応答 body の型付き契約。writeError() 経由で 401/404/400/413/500 の
+ * すべての error response を型付けする (S10 対応)。field 名 typo を compile-time で
+ * 検知するために `error` は closed union、他 field は optional。
+ *
+ * Phase 2 で PRD 記載の `UNAUTHORIZED` / `INVALID_INPUT` 定数化・code 体系化と併せて
+ * 再設計する予定 (現状は Phase 1 skeleton で 5 種類の error 状況を扱う最小契約)。
+ */
+export interface FugueErrorResponse {
+  error: 'unauthorized' | 'not_found' | 'invalid_input' | 'invalid_url' | 'payload_too_large' | 'internal';
+  detail?: string;
+  path?: string;
+  issues?: unknown[];
+}

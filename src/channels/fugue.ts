@@ -13,13 +13,34 @@ import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js
 import { registerChannelAdapter } from './channel-registry.js';
 import { FugueHttpServer } from './fugue-http.js';
 
+const DEFAULT_PORT = 8080;
+
+/**
+ * S3 対応: FUGUE_HTTP_PORT の値検証。非数値 (`abc`) / range 外 (`70000`) / 小数 (`8080.5`) は
+ * default に fallback + warn ログを出す (silent に `NaN` → `http.listen` 低レベル例外に落とすと
+ * 「設定ミス」であることが一目で分からない、`config-validation.ts:validateValueForKey` パターン)。
+ * 空文字 (env 未設定) は default 8080 に倒すが warn は出さない (=想定内)。
+ */
+function resolveFuguePort(raw: string | undefined): number {
+  if (!raw) return DEFAULT_PORT;
+  const parsed = Number(raw);
+  if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 65535) return parsed;
+  log.warn('Fugue FUGUE_HTTP_PORT invalid, falling back to default', {
+    event: 'fugue.config.invalid_port',
+    channel: 'fugue',
+    raw,
+    fallback: DEFAULT_PORT,
+  });
+  return DEFAULT_PORT;
+}
+
 function createFugueAdapter(): ChannelAdapter | null {
   const env = readEnvFile(['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST']);
   // Slack と同じく credential 欠落なら null (warn ログのみで adapter 未起動)。
   // half-config で HTTP server を起動すると認証穴になるため、token 空文字も未起動扱い。
   if (!env.FUGUE_SHARED_TOKEN) return null;
 
-  const port = parseInt(env.FUGUE_HTTP_PORT || '8080', 10);
+  const port = resolveFuguePort(env.FUGUE_HTTP_PORT);
   const host = env.FUGUE_HTTP_HOST || '127.0.0.1';
   const server = new FugueHttpServer({ port, host, expectedToken: env.FUGUE_SHARED_TOKEN });
 

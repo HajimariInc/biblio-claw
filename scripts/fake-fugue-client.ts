@@ -22,6 +22,7 @@ interface Result {
   status: number;
   duration_ms: number;
   response_body: unknown;
+  response_body_parse_error: boolean;
   used_token_kind: 'valid' | 'bad' | 'missing';
 }
 
@@ -58,7 +59,18 @@ async function main(): Promise<number> {
     body: JSON.stringify({ schema_version: '1', request_id: `fake-${startedAt}` }),
   });
   const duration_ms = Date.now() - startedAt;
-  const response_body = await res.json().catch(() => ({}));
+  // I2 対応: 疎通確認用ツールが疎通異常時に沈黙するのを防ぐ。実際に parse に失敗するのは
+  // 「想定外の応答が来た」ことを意味する (proxy のエラーページ / port 違い / 接続途中切断)。
+  // stderr に warn を出し、`parse_error: true` marker を返して `{}` と区別できるようにする
+  // (将来 verify script が RESULT= を assert 消費するときの誤グリーン判定を防ぐ)。
+  let response_body_parse_error = false;
+  const response_body = await res.json().catch((err: unknown) => {
+    response_body_parse_error = true;
+    process.stderr.write(
+      `warn: response body is not valid JSON: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return { parse_error: true };
+  });
 
   const used_token_kind: Result['used_token_kind'] = badToken ? 'bad' : realToken ? 'valid' : 'missing';
   const result: Result = {
@@ -67,6 +79,7 @@ async function main(): Promise<number> {
     status: res.status,
     duration_ms,
     response_body,
+    response_body_parse_error,
     used_token_kind,
   };
   process.stdout.write(`RESULT=${JSON.stringify(result)}\n`);
