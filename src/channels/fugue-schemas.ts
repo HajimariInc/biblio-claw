@@ -121,17 +121,35 @@ export interface FugueConsultReply {
  *   consult と同様の PRD「AD の本義」節に従い 5xx を出さない
  *
  * 5xx (401 / 413 / 500) は認可 / 上限超過 / biblio-claw 自体の応答不能 (uncaught exception) に限定。
+ *
+ * **型設計 (PR #117 review、type-design-analyzer)**: `status` × `skill` の相関 (equipped/
+ * already_equipped は skill 非 null、not_found/error は skill: null) を discriminated union で
+ * 型レベル強制する。5 か所の object literal (fugue-http.ts の handleEquip 内) は既に正しく
+ * ペア化されているため object literal 自体は無変更で narrowing が成立する。将来 status/skill
+ * の不整合 (例: `status:'not_found'` で skill を書く / `status:'equipped'` で skill:null にする)
+ * は compile error として検知される。
  */
-export interface FugueEquipReply {
-  schema_version: '1';
-  request_id: string;
-  operation: 'equip';
-  status: 'equipped' | 'already_equipped' | 'not_found' | 'error';
-  summary: string;
-  skill: SkillRef | null;
-  processing_time_ms: number;
-  warnings: string[];
-}
+export type FugueEquipReply =
+  | {
+      schema_version: '1';
+      request_id: string;
+      operation: 'equip';
+      status: 'equipped' | 'already_equipped';
+      summary: string;
+      skill: SkillRef;
+      processing_time_ms: number;
+      warnings: string[];
+    }
+  | {
+      schema_version: '1';
+      request_id: string;
+      operation: 'equip';
+      status: 'not_found' | 'error';
+      summary: string;
+      skill: null;
+      processing_time_ms: number;
+      warnings: string[];
+    };
 
 /**
  * biblio-claw 内部の分類 code — 蔵書検索の失敗を Fugue 側に伝えるために使う。

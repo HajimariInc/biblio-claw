@@ -40,7 +40,8 @@ vi.mock('../biblio/shelf-gh.js', async (importOriginal) => {
 
 // Phase 3: fugue_equipped_biblios の DB 実体を mock 化。channel test は DB 疎通を触らない
 // (DB 実体は fugue-equipped-biblios.test.ts で担保、判断 K の layering)。
-// default は [] / true を返し、既存 24 consult case が壊れない。
+// default は [] / true を返し、既存 test case (lifecycle / auth / 404 / port + consult 実装 +
+// port release probe を含む合計 24 case) が壊れない。
 vi.mock('../db/fugue-equipped-biblios.js', () => ({
   insertFugueEquippedBiblio: vi.fn(() => true),
   getFugueEquippedBiblioNames: vi.fn(() => []),
@@ -55,6 +56,19 @@ vi.mock('../modules/approvals/primitive.js', async (importOriginal) => {
   return {
     ...original,
     requestApproval: vi.fn(),
+  };
+});
+
+// Phase 3 HITL defensive guard 用: requiresApproval の実装 (Fugue 契約 §6.2) を保ちつつ、
+// test でだけ mockReturnValueOnce(true) で defensive branch を発火させ、handleEquip が
+// 200 + status:'error' + skill:null + warnings に HITL required 文言で閉じる挙動を検証する
+// (PR #117 review、silent-failure-hunter MEDIUM 2 + pr-test-analyzer sev 6 対応)。
+// default では現行 matrix 通り false を返し、既存の 12 equip case は無変更で PASS する。
+vi.mock('../biblio/hitl-policy.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../biblio/hitl-policy.js')>();
+  return {
+    ...original,
+    requiresApproval: vi.fn(original.requiresApproval),
   };
 });
 
@@ -380,7 +394,7 @@ describe('handleConsult (Phase 2 implementation)', () => {
     expect(body.summary).toContain('該当なし');
   });
 
-  it('SkillRef shape: id / name / description / manifest_url / equipped=false', async () => {
+  it('SkillRef shape: id / name / description / manifest_url / equipped (default mock で false)', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/consult`, {
       method: 'POST',
       headers: {
@@ -407,7 +421,10 @@ describe('handleConsult (Phase 2 implementation)', () => {
     expect(typeof first.id).toBe('string');
     expect(typeof first.name).toBe('string');
     expect(typeof first.description).toBe('string');
-    // equipped は常に false (Fugue に session 概念なし、型でも literal false)。
+    // equipped は Phase 3 で `boolean` (fugue_equipped_biblios membership に基づく)。
+    // 本 test suite の default mock は `getFugueEquippedBiblioNames → []` (装備ゼロ) のため
+    // ここでは false を観測する。実データ true/false 両観測は
+    // `describe('handleConsult equipped flag (Phase 3)')` の membership test でカバー。
     expect(first.equipped).toBe(false);
     // manifest_url は棚 GitHub tree URL に組み立て済 (readListEnv() の mock 値を経由)。
     expect(first.manifest_url).toMatch(
@@ -930,6 +947,42 @@ describe('handleEquip (Phase 3 implementation)', () => {
     expect(vi.mocked(requestApproval)).not.toHaveBeenCalled();
   });
 
+  it('HITL defensive guard: requiresApproval が true を返すと 200 + status:error + skill:null + HITL required warning で閉じる', async () => {
+    // Phase 3 判断 D: 現行 matrix では `requiresApproval('equip','fugue') === false` のため
+    // 到達しない defensive 経路。将来 matrix が変わったときに Fugue equip が silent に HITL bypass
+    // しないよう明示的に閉じているコード (fugue-http.ts:663) をリグレッションから守るため、
+    // mock で true にして応答形状を assert する
+    // (PR #117 review、silent-failure-hunter MEDIUM 2 + pr-test-analyzer sev 6 対応)。
+    const { requiresApproval } = await import('../biblio/hitl-policy.js');
+    vi.mocked(requiresApproval).mockReturnValueOnce(true);
+    // listBiblio / DB は本経路に到達しない (guard で早期 return) が、default mock は temp 有効。
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-hitl-guard',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200); // sync 200 (5xx にはしない = AD の本義)
+    const body = (await res.json()) as {
+      operation: string;
+      status: string;
+      skill: unknown;
+      summary: string;
+      warnings: string[];
+      processing_time_ms: number;
+    };
+    expect(body.operation).toBe('equip');
+    expect(body.status).toBe('error');
+    expect(body.skill).toBeNull();
+    expect(body.warnings).toContain('HITL approval required: please approve via Slack channel');
+    expect(body.summary).toContain('承認');
+    expect(body.processing_time_ms).toBeGreaterThanOrEqual(0);
+    // Slack HITL 経路 (`primitive.requestApproval`) は Fugue defensive branch でも呼ばない
+    // (bridge が Fugue channel に wire されていないため、log warn + fail-closed で返す設計)。
+    const { requestApproval } = await import('../modules/approvals/primitive.js');
+    expect(vi.mocked(requestApproval)).not.toHaveBeenCalled();
+  });
+
   it('401 with valid POST body + bad Bearer even on /equip (auth-before-routing invariant)', async () => {
     const res = await postEquip(
       {
@@ -976,10 +1029,9 @@ describe('handleConsult equipped flag (Phase 3)', () => {
       body: JSON.stringify({
         schema_version: '1',
         request_id: 'req-eq-mem',
-        // "runner" は fixture 3 件のうち 'HajimariInc--test-runner' の description に含まれるためヒット。
-        // また 'HajimariInc--figma-reviewer' も description の 'review' 経路で漏れるため 'e' で包括的に打つ手もあるが
-        // ここでは name + description の substring 一致条件を素直に活用する。
-        // 3 件全ヒットのために mock はそのまま。
+        // query='e' は fixture 3 件全ての name / description の substring 一致にヒットする
+        // (`HajimariInc--figma-reviewer` の 'review' 等)。3 件全観測で装備 1 件 + 未装備 2 件の
+        // equipped: true/false 混在を 1 request で検証するため、包括ヒットを狙って 'e' を選ぶ。
         query: 'e',
         mode: 'ask-ad',
       }),

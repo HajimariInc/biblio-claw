@@ -8,7 +8,7 @@
  * 3 (harness crash) の 3 分岐。
  *
  * Phase 2 で consult subcommand に `--query <str>` / `--mode <literal>` オプションを
- * 追加。Phase 3 で equip subcommand を full spec 化 (`--skill_id <str>` 必須 + `channel:'fugue'`
+ * 追加。Phase 3 で equip subcommand を full spec 化 (`--skill-id <str>` 必須 + `channel:'fugue'`
  * 自動付与)。
  *
  * Usage:

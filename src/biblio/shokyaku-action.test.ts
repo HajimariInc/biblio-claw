@@ -159,9 +159,15 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     const notifiedText = notifyMock.mock.calls[0][0] as string;
     expect(notifiedText).toContain('焼却完了');
     expect(notifiedText).toContain('https://github.com/HajimariInc/biblio-shelf/pull/88');
-    // cleanup 失敗を patron に明示 (= 「物理削除しました」と無条件通知しない)
-    expect(notifiedText).toContain('装備源の物理削除に失敗');
+    // cleanup 失敗を patron に明示 (= 「物理削除しました」と無条件通知しない)。
+    // PR #117 review (silent-failure-hunter HIGH) 対応でヘッドラインを理由非依存に一般化:
+    // 「装備源の物理削除に失敗」→「装備状態のクリーンアップに一部失敗しました」に変更。
+    // 個別の失敗詳細は cleanupWarning 経由でメッセージ末尾に残る (EACCES 等)。
+    expect(notifiedText).toContain('装備状態のクリーンアップに一部失敗しました');
     expect(notifiedText).toContain('EACCES');
+    // 是正指示も理由非依存に (装備源 dir / 装備リスト DB / Fugue 装備状態 DB のどれが
+    // 失敗したか cleanupWarning 詳細で確認して個別対処してもらう形)
+    expect(notifiedText).toContain('個別に対処');
     // 「再装備不可」は false の状態なので含まれない
     expect(notifiedText).not.toContain('= 再装備不可)');
   });

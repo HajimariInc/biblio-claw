@@ -4,6 +4,8 @@
  * `unshelve()` で shelf PR を作った後、`<DATA_DIR>/biblio-equipped/<biblioName>/` を `fs.rmSync` で
  * 物理削除し、`session_equipped_biblios` から該当 biblio を **全 session** で個別削除する
  * (= `equip.ts` の `equipped biblio dir not found, skipping` warn が次回 spawn 以降に再発しないようにする)。
+ * M4-E Phase 3 追加: `fugue_equipped_biblios` (channel-scoped store) からも並置削除する
+ * (= 焼却→再仕入れ→再 shelve 後の Fugue equip が `already_equipped` を誤返答する ghost row 問題の防止)。
  *
  * 設計方針:
  *   - shelf PR 作成 (= unshelve) が成功すれば、後続の host 側 cleanup (= rmSync + DB delete) が
@@ -65,13 +67,14 @@ function removeEquipDir(equipDir: string, biblioName: string): string | null {
 }
 
 /**
- * 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName`。
+ * 焼却 = `unshelve()` + `fs.rmSync` + `deleteEquippedBiblioByName` + `deleteFugueEquippedBiblioByName`。
  *
  * 1. `unshelve()` で shelf PR を作る (= 失敗なら早期 return、host 側 cleanup は走らない)
  * 2. 装備源 dir を物理削除 (= 失敗しても warn のみで続行、`cleanupWarning` に蓄積)
  * 3. 全 session の装備リストから該当 biblio を消す (= equip.ts skip warn ノイズ抑制、失敗時は `cleanupWarning` に追記)
+ * 4. Fugue channel-scoped 装備状態からも削除する (M4-E Phase 3、ghost row 問題防止、失敗時は `cleanupWarning` に追記)
  *
- * 2-3 の失敗は ok=true を維持しつつ `cleanupWarning` で patron に伝える。
+ * 2-4 の失敗は ok=true を維持しつつ `cleanupWarning` で patron に伝える。
  */
 export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Promise<ShokyakuResult> {
   const { biblioName, category } = req;

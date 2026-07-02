@@ -8,8 +8,10 @@
  * 用途:
  *   - `insertFugueEquippedBiblio`: equip endpoint の実行本体 (`INSERT OR IGNORE` + `changes` 判定で
  *     `equipped` / `already_equipped` を atomic に判別、race-free)
- *   - `getFugueEquippedBiblioNames`: consult / equip 応答で `SkillRef.equipped` を実データ化する
- *     ための membership 判定用 (Fugue 契約 §5.2)
+ *   - `getFugueEquippedBiblioNames`: **consult 応答のみ**で `SkillRef.equipped` を実データ化する
+ *     ための membership 判定用 (Fugue 契約 §5.2)。equip 応答は `insertFugueEquippedBiblio` 成功
+ *     直後に「対象 skill_id を装備した」既知の状態を `new Set([skill_id])` で直接構築するため、
+ *     equip 経路では本関数を呼ばない (DB 再読み出し不要)
  *   - `deleteFugueEquippedBiblioByName`: 焼却 (shokyaku) 時の cleanup (`shokyaku.ts` から呼出、
  *     `deleteEquippedBiblioByName` (session 側) と並置)
  *
@@ -44,13 +46,23 @@ export function insertFugueEquippedBiblio(biblioName: string, requestId: string)
 }
 
 /**
- * 装備中の biblio_name 一覧を返す (= consult / equip 応答で SkillRef.equipped を実データ化するため)。
+ * 装備中の biblio_name 一覧を返す (= **consult 応答**で `SkillRef.equipped` を実データ化するため)。
  *
  * 順序保証なし (fugue 側は order 概念を持たないため、consult は `Set` に投入して membership 判定
  * のみに使う)。0 件なら空配列。
+ *
+ * **equip 経路は呼ばない**: equip は `insertFugueEquippedBiblio` 成功直後に「対象 skill_id が
+ * 装備された」既知の状態を持つため、`new Set([skill_id])` を直接構築して `toSkillRefs` に渡す
+ * (`fugue-http.ts:handleEquip` 成功パス参照)。DB 再読み出しは不要 = round-trip 節約 + 直後の
+ * 別リクエストが並列に走っていても本 equip 応答の `SkillRef.equipped` は自身の書き込みを
+ * 反映する構造。
  */
 export function getFugueEquippedBiblioNames(): string[] {
-  return (getDb().prepare('SELECT biblio_name FROM fugue_equipped_biblios').all() as { biblio_name: string }[]).map(
+  // 型 cast は `FugueEquippedBiblioRow` (biblio_name / equipped_at / request_id) に結線 =
+  // migration 019 のカラム定義が変わったとき Row 型の追従漏れを compile-time で検知する
+  // (PR #117 review、type-design-analyzer 案 (b))。SELECT は biblio_name のみだが、Row 型は
+  // 全カラムを持つため .map の r.biblio_name アクセスは narrow 型で保証される。
+  return (getDb().prepare('SELECT biblio_name FROM fugue_equipped_biblios').all() as FugueEquippedBiblioRow[]).map(
     (r) => r.biblio_name,
   );
 }

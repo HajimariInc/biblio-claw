@@ -1,11 +1,11 @@
 /**
  * Fugue channel adapter (M4-E) — 独立 HTTP server (Node built-in `http.createServer`)。
  *
- * Phase 1 の scope (skeleton):
+ * Phase 1 の scope (skeleton、Phase 2/3 で consult/equip endpoint はそれぞれ full spec 化):
  *   - Bearer auth (timing-safe compare) → no_header / bad_scheme / bad_token を 401 で返す
  *     (client 応答は `{error: 'unauthorized'}` のみ、reason はサーバログ限定 = 未認証
  *     クライアントに auth oracle を漏らさない)
- *   - path routing (`/v1/channels/fugue/{consult,equip}`) → skeleton 応答
+ *   - path routing (`/v1/channels/fugue/{consult,equip}`) の frame (endpoint 実体は Phase 2/3)
  *   - 未知 path → 404 / URL parse 失敗 → 400 (log 付き) / JSON parse 失敗 → 400 /
  *     body 上限超過 (1 MiB) → 413 / Zod validation 失敗 → 400 / 内部エラー → 500
  *   - lifecycle: start() / stop() を Promise 化 (`src/cli/socket-server.ts` の `startCliServer`
@@ -20,6 +20,21 @@
  *     (5xx を出さず、Fugue 側の AD ラウンド継続判断を阻害しない)
  *   - `withBiblioActionSpan('list', ...)` に相乗り (M4-A biblio.list span に channel 横断集計)
  *   - `processing_time_ms` を response + log に載せる
+ *
+ * Phase 3 の scope (equip full spec):
+ *   - `handleEquip`: `FugueEquipRequest` (skill_id + channel:'fugue') 受理 → `BIBLIO_NAME_RE`
+ *     guard で fail-closed 400 (path traversal 防御、`inspect-tool.ts` 執行と同流儀) →
+ *     `requiresApproval('equip','fugue')` guard (現行 matrix では到達しない defensive 経路 =
+ *     将来 matrix 変更時の silent HITL bypass 防止) → `withBiblioActionSpan('equip',...)` で
+ *     M4-A biblio.equip span に channel-agnostic 集計 → `listBiblio()` 棚存在確認 (`category !==
+ *     'unknown' && name === skill_id`) → `insertFugueEquippedBiblio()` の `INSERT OR IGNORE` +
+ *     `info.changes` で `equipped` / `already_equipped` を atomic 判別 → 4 status 応答
+ *     (`equipped` / `already_equipped` / `not_found` / `error`)
+ *   - `handleConsult` 拡張: `toSkillRefs` に `equippedNames: ReadonlySet<string>` 引数追加、
+ *     `getFugueEquippedBiblioNames()` DB read failure 時は空 Set fallback + `warnings.push`
+ *     (AD の本義: 装飾情報の欠落で検索自体を殺さない)
+ *   - 部分失敗経路は consult と対称 = `listBiblio` throw / DB write throw どちらも 200 +
+ *     `status:'error'` + `warnings`、5xx は 401/413/500 (uncaught) に限定
  *
  * Chat SDK webhook (`src/webhook-server.ts`) とは path 形式が違うため独立 server として新設。
  * `webhook-server.ts` からは createServer 外殻 + try/catch → 500 fallback の骨格のみ写経、

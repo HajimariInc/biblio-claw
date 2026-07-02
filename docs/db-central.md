@@ -362,6 +362,7 @@ CREATE TABLE boots (
 | 016 | `016-boots.ts` | `boots` — biblio-claw 追加。Phase 2 verify 用の決定的指紋 (PVC + SQLite 永続化アサーション) |
 | 017 | `017-session-equipped-biblios.ts` | `session_equipped_biblios` — biblio-claw 追加 (M3 Phase 2)。session 単位の装備リスト (session_id + biblio_name + order_index + equipped_at、PK = (session_id, biblio_name)、ON DELETE CASCADE) |
 | 018 | `018-biblio-settings.ts` | `biblio_settings` — biblio-claw 追加 (個別 PRD `individual-skill-shiire` Phase 5 dynamic-config)。biblio 設定値の動的変更を persist (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)。初期行なし = 空 table = `acquire.ts:resolveSkillThreshold` の DB → env → DEFAULT 3 層 fallback で env 経路に降りる |
+| 019 | `019-fugue-equipped-biblios.ts` | `fugue_equipped_biblios` — biblio-claw 追加 (M4-E Phase 3 equip-hitl)。Fugue channel の装備状態を channel-scoped で永続化 (biblio_name TEXT PRIMARY KEY, equipped_at TEXT NOT NULL, request_id TEXT NOT NULL)。`sessions(id)` FK なし = Fugue に `supportsThreads: false`(session 概念なし)のため `session_equipped_biblios` とは別テーブル。焼却 (`shokyaku`) 時に `deleteFugueEquippedBiblioByName` で並置削除 |
 
 005 と 006 は意図的に欠番 — 初期開発中にマイグレーションが番号付け直された。
 

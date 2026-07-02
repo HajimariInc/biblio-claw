@@ -212,6 +212,10 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
   `src/biblio/shokyaku-action.ts` + `scripts/biblio-shokyaku.ts` で実装。`fs.rmSync(...)`
   で装備源 dir を物理削除 + `deleteEquippedBiblioByName` で全 session の装備リストから
   個別削除 (= 次回 spawn 以降の `equipped biblio dir not found` warn ノイズ抑制)。
+  **M4-E Phase 3 追加**: `deleteFugueEquippedBiblioByName` で Fugue channel-scoped
+  装備状態 (`fugue_equipped_biblios`、本書が扱う session-scoped mount topology とは別 store。
+  詳細は [db-central.md](db-central.md) migration 019 参照) からも同時に除去。禁書 (enkin)
+  は両 store とも touch しない対称性を維持 (= 装備状態残置で再装備可)。
 - **HITL 経路**: 禁書 / 焼却の MCP tool 発火 → `requestApproval('enkin_confirm' /
   'shokyaku_confirm', ...)` で admin (DEN) DM カード → 承認後に `registerApprovalHandler`
   callback が `enkin()` / `shokyaku()` を実行 → `notify()` で patron に PR URL 通知。
