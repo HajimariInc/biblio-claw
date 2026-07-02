@@ -26,8 +26,10 @@
  * `InMemoryRunner` の constructor は `sessionService` option を受けない (adk-js@1.3.0 の
  * `in_memory_runner.d.ts:37-41` 参照) が、`Runner` の親クラス public readonly field
  * (`runner.sessionService: BaseSessionService`) で外部アクセス可能。`InMemoryRunner` は内部で必ず
- * `InMemorySessionService` を自動生成するため、`as InMemorySessionService` の cast は安全
- * (= adk-js@1.3.0 実装契約に依存、major version bump 時は検証必須)。
+ * `InMemorySessionService` を自動生成する (= adk-js@1.3.0 実装契約)。`buildRunner` は
+ * `instanceof InMemorySessionService` の runtime assertion で本契約を検証し、契約違反時は
+ * throw で fail-fast する (issue #109 対応、下記 L61 以降参照)。major version bump 時は本
+ * assertion が発火することで検知される。
  *
  * **GOTCHA (plan Task 10)**:
  *   - `appName` は `(appName, userId, sessionId)` triple の session key 構成要素。Phase 1-4 では
