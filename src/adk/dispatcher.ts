@@ -57,7 +57,7 @@ import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
 
 import { buildRootAgent } from './root-agent.js';
 import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
-import type { HitlConfirmationPayload } from './tools/hitl-types.js';
+import { isHitlAction, type HitlConfirmationPayload } from './tools/hitl-types.js';
 
 /** module-scope singleton。SDK オブジェクト構築コストを起動時 1 回に抑える。 */
 let sharedContext: SharedRunnerContext | undefined;
@@ -294,7 +294,7 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
             continue;
           }
           const action = toolPayload.action;
-          if (action !== 'enkin' && action !== 'shokyaku') {
+          if (!isHitlAction(action)) {
             log.warn('ADK dispatcher: unknown confirmation action, skipping', {
               event: 'adk.dispatcher.pending_unknown_action',
               request_id: requestId,
