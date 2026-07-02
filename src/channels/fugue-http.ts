@@ -44,7 +44,7 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
-import { context, SpanStatusCode } from '@opentelemetry/api';
+import { context, SpanStatusCode, trace } from '@opentelemetry/api';
 
 import { BIBLIO_NAME_RE, withBiblioActionSpan } from '../biblio/action-helpers.js';
 import { requiresApproval } from '../biblio/hitl-policy.js';
@@ -339,12 +339,29 @@ export class FugueHttpServer {
         return;
       }
 
-      // Fugue → biblio-claw の trace 継承。auto HttpInstrumentation が既に active 化して
-      // いる場合は propagator が idempotent なので上書きしないが、明示 extract で
-      // silent regression を防ぐ (M4-A で auto instrumentation が disable された将来変更で
-      // 気付かず trace が切れないよう明示 fallback)。auth 判定 (401) は本ブロックの外に
-      // 置き、未認証クライアントに path 存在を漏らさない不変条件を保つ。
+      // Fugue → biblio-claw の trace 継承。extract の base は `context.active()` (デフォルト
+      // 引数、Phase 4 review C1) なので、traceparent header 不在時は auto server span
+      // (Phase 5 で ESM フック整備後に発火予定) を含む active context をそのまま保持し、
+      // 有時は remote span 由来の trace_id で active を切り替える。auth 判定 (401) は本
+      // ブロックの外に置き、未認証クライアントに path 存在を漏らさない不変条件を保つ。
       const extractedCtx = extractTraceContextFromHttpHeaders(req.headers);
+      // Phase 4 review M3 (silent-failure #4): malformed traceparent は W3C spec §3.2 準拠で
+      // silently root context に fallback するが、「header 不在 (正常)」と「header 存在するが壊れ
+      // (Fugue 側 bug)」を区別できないと Fugue 側の trace 送信 regression が無警告で潜伏する。
+      // header 存在時に extract 結果に valid span が乗らないケースを warn で明示可視化する。
+      if (req.headers.traceparent !== undefined) {
+        const extractedSpan = trace.getSpan(extractedCtx);
+        const traceId = extractedSpan?.spanContext().traceId;
+        if (!traceId || traceId === '00000000000000000000000000000000') {
+          log.warn('Fugue traceparent header malformed, falling back to new trace', {
+            event: 'fugue.traceparent.malformed',
+            channel: 'fugue',
+            outcome: 'warn',
+            raw_traceparent: String(req.headers.traceparent).slice(0, 128),
+            path: pathname,
+          });
+        }
+      }
       const runInContext = <T>(fn: () => Promise<T>): Promise<T> => context.with(extractedCtx, fn);
 
       if (pathname === CONSULT_PATH) {
@@ -443,10 +460,13 @@ export class FugueHttpServer {
       context_hint_keys: Object.keys(context_hint ?? {}),
     });
 
-    // 3 段 span 構造 (Phase 4):
-    //   auto HTTP POST server span (kind=SERVER、HttpInstrumentation 自動生成)
-    //     └─ fugue.consult (Phase 4 で新設、kind=INTERNAL、channel='fugue')
-    //          └─ biblio.list (既存、kind=INTERNAL、M4-A `biblio.<action>` 集計に channel-agnostic に相乗り)
+    // 2 段 span 構造 (Phase 4、review C1 対応で明示):
+    //   fugue.consult (Phase 4 で新設、kind=INTERNAL、channel='fugue')
+    //     └─ biblio.list (既存、kind=INTERNAL、M4-A `biblio.<action>` 集計に channel-agnostic に相乗り)
+    // auto HTTP POST server span 層 (kind=SERVER、HttpInstrumentation 経由) は本 repo の ESM
+    // + `--import` 起動構成では現状発火せず (require-in-the-middle 依存 + `module.register()`
+    // 未整備)、Phase 5 で ESM フック追加 or 2 段構造を正式仕様として運用の判断予定。
+    // 詳細: `docs/operations-runbook.md` §M4-E Phase 4 §関連する scope 境界。
     // sessionId は Fugue に session 概念なし = 空文字 (action-helpers.ts の signature が空文字を許容)。
     await withFugueEntrySpan('consult', request_id, async (fugueSpan) => {
       fugueSpan.setAttribute('fugue.mode', mode);
@@ -535,6 +555,11 @@ export class FugueHttpServer {
             request_id,
             err: err instanceof Error ? err.message : String(err),
           });
+          // Phase 4 review M1 (silent-failure #2): 装備状態欠落は「劣化成功」= response body /
+          // log には warn として可視化されるが、Cloud Trace の outcome ベース集計では通常の
+          // 成功と区別できず silent degraded になる。span 属性 `fugue.degraded=true` で
+          // categorical signal を刻み、UI / BQ 側で「劣化した成功」を separately 集計可能にする。
+          fugueSpan.setAttribute('fugue.degraded', true);
         }
 
         const skills_found = toSkillRefs(filtered, env.shelfOwner, env.shelfRepo, equippedNames);
@@ -676,40 +701,42 @@ export class FugueHttpServer {
       skill_id,
     });
 
-    // HITL 政策 guard (判断 D、defensive 経路)。現行 matrix では `requiresApproval('equip', 'fugue') === false`
-    // (Fugue 契約 §6.2 の HITL 簡略化) のため到達しないが、将来 matrix が変わったときに Fugue equip が
-    // silent に HITL bypass しないよう明示的に閉じる (silent failure 撲滅)。
-    if (requiresApproval('equip', 'fugue')) {
-      const processing_time_ms = Math.round(performance.now() - startedAt);
-      log.warn('Fugue equip requires approval but HITL bridge is not wired for fugue channel', {
-        event: 'fugue.equip.hitl_required',
-        channel: 'fugue',
-        outcome: 'reject',
-        request_id,
-        skill_id,
-        processing_time_ms,
-      });
-      const reply: FugueEquipReply = {
-        schema_version: '1',
-        request_id,
-        operation: 'equip',
-        status: 'error',
-        summary: '装備には人間による承認が必要です。Slack channel から承認を受けてください。',
-        skill: null,
-        processing_time_ms,
-        warnings: ['HITL approval required: please approve via Slack channel'],
-      };
-      writeJson(res, 200, reply);
-      return;
-    }
-
-    // 3 段 span 構造 (Phase 4、consult 側と対称):
-    //   auto HTTP POST server span → fugue.equip → biblio.equip
+    // 2 段 span 構造 (Phase 4、review C1 対応で明示、consult 側と対称):
+    //   fugue.equip → biblio.equip
+    // auto HTTP POST server span 層は Phase 5 で ESM フック追加後に発火 or 2 段構造を
+    // 正式仕様として運用の判断予定 (詳細: `docs/operations-runbook.md` §M4-E Phase 4)。
     // sessionId は Fugue に session 概念なし = 空文字 (approval 経路と同慣習)。
-    // HITL 政策 guard 経路 (defensive path) は withFugueEntrySpan の外側で 200 応答するため
-    // fugue span 未発火。現行 matrix で `requiresApproval('equip','fugue') === false` のため
-    // 通常経路では常に本 span が発火する。
+    // **HITL 政策 guard 経路 (defensive path、Phase 4 review M2 = silent-failure #3 対応)**:
+    // withFugueEntrySpan の **内側** に配置し、`fugue.outcome='hitl_required'` を span に刻む。
+    // 現行 matrix では `requiresApproval('equip', 'fugue') === false` (Fugue 契約 §6.2 の HITL
+    // 簡略化) のため到達しない dead path だが、将来 matrix が変わったときに Fugue equip が
+    // (a) silent に HITL bypass する応答経路の穴、および (b) Cloud Trace 上で完全不可視になる
+    // telemetry の穴、の両方を明示的に閉じる。
     await withFugueEntrySpan('equip', request_id, async (fugueSpan) => {
+      if (requiresApproval('equip', 'fugue')) {
+        fugueSpan.setAttribute('fugue.outcome', 'hitl_required');
+        const processing_time_ms = Math.round(performance.now() - startedAt);
+        log.warn('Fugue equip requires approval but HITL bridge is not wired for fugue channel', {
+          event: 'fugue.equip.hitl_required',
+          channel: 'fugue',
+          outcome: 'reject',
+          request_id,
+          skill_id,
+          processing_time_ms,
+        });
+        const reply: FugueEquipReply = {
+          schema_version: '1',
+          request_id,
+          operation: 'equip',
+          status: 'error',
+          summary: '装備には人間による承認が必要です。Slack channel から承認を受けてください。',
+          skill: null,
+          processing_time_ms,
+          warnings: ['HITL approval required: please approve via Slack channel'],
+        };
+        writeJson(res, 200, reply);
+        return;
+      }
       await withBiblioActionSpan('equip', request_id, '', async (span) => {
         let result: ListBiblioResult;
         try {
