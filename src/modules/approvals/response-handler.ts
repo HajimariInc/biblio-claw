@@ -48,9 +48,19 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   // 先に adk_confirm を捌く必要がある。
   if (approval.action === ADK_CONFIRM_ACTION) {
     // issue #106: admin が timeout 前に応答したので expiry timer を先に取り除く。
-    // これを resolveAdkApproval の前で呼ぶことで「timer 発火直前 vs admin 応答」の race を防ぐ
-    // (= expireAdkApproval が row missing で早期 return する経路になり、二重 patron 通知を防止)。
-    clearAdkApprovalTimer(payload.questionId);
+    // **戻り値 false = timer callback が既に pending Map から entry を pop 済み**
+    // (= `expireAdkApproval` が in-flight or 完了済み) を意味する。この場合は expire 経路で
+    // patron に「タイムアウトしました」通知 + row 削除が既に走った (or 走る) ため、ここで
+    // resolveAdkApproval を呼ぶと patron に矛盾する 2 通目 (実 resume 応答 or session_lost 通知)
+    // が届いてしまう。二重処理を避けるため skip する (code-review 指摘 #1 対応)。
+    if (!clearAdkApprovalTimer(payload.questionId)) {
+      log.warn('ADK approval response arrived after expiry timer already fired, dropping', {
+        event: 'adk.approval.response_after_expiry',
+        approval_id: approval.approval_id,
+      });
+      // row 削除は expireAdkApproval 側が最終的に必ず消すため、二重 DELETE を避ける。
+      return true;
+    }
 
     let adkPayload: AdkApprovalPayload;
     try {

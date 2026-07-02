@@ -496,9 +496,24 @@ describe('requestAdkApproval — Layer 2: setTimeout expiry', () => {
     expect(deliverMock.mock.calls.length).toBe(deliverCallsBefore);
   });
 
-  it('clearAdkApprovalTimer — 未登録 approval_id は no-op (throw しない)', () => {
+  it('clearAdkApprovalTimer — 未登録 approval_id は false 返却 (no-op、throw なし)', () => {
     // 事前に何も register していない状態でも安全に呼べる
-    expect(() => clearAdkApprovalTimer('adk-nonexistent')).not.toThrow();
+    expect(clearAdkApprovalTimer('adk-nonexistent')).toBe(false);
+  });
+
+  it('clearAdkApprovalTimer — 登録済 approval_id は true 返却 (= admin 応答が先勝ちを claim)', async () => {
+    vi.useFakeTimers();
+    setupHappyMocks();
+    getPendingApprovalsByActionMock.mockReturnValue([]);
+    startAdkApprovalHandler({ deliver: deliverMock } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    await requestAdkApproval(BASE_OPTS);
+    const approvalId = createPendingApprovalMock.mock.calls[0]![0].approval_id as string;
+
+    // 初回 clear は true (admin 応答が timer 発火前)
+    expect(clearAdkApprovalTimer(approvalId)).toBe(true);
+    // 2 回目は false (pending Map から既に pop 済)
+    expect(clearAdkApprovalTimer(approvalId)).toBe(false);
   });
 
   it('deleteSession throw → warn only、card edit + patron notify + row delete は完遂', async () => {
@@ -660,6 +675,68 @@ describe('startAdkApprovalHandler + sweepStaleAdkApprovals — Layer 3', () => {
     await new Promise((resolve) => setImmediate(resolve));
     // getPendingApprovalsByAction は 1 回だけ呼ばれる (sweep が 2 回目 skip される)
     expect(getPendingApprovalsByActionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('1 row の cleanup が throw しても残り row の sweep は継続 (code-review #3 対応)', async () => {
+    const makeStaleRow = (id: string) =>
+      ({
+        approval_id: id,
+        session_id: null,
+        request_id: id,
+        action: ADK_CONFIRM_ACTION,
+        payload: JSON.stringify({
+          adkSessionId: 'sess-' + id,
+          functionCallId: 'fc-' + id,
+          userId: 'local',
+          agentGroupId: 'ag-1',
+          channelType: 'cli',
+          platformId: 'local',
+          threadId: null,
+          hint: '',
+          innerAction: 'enkin',
+          toolPayload: { biblioName: 'wf--test-' + id, category: 'biblio-dev', action: 'enkin' },
+        }),
+        created_at: new Date().toISOString(),
+        expires_at: null,
+        agent_group_id: 'ag-1',
+        channel_type: 'slack',
+        platform_id: 'slack:U123-dm',
+        platform_message_id: 'platform-msg-' + id,
+        status: 'pending',
+        title: '禁書の承認',
+        options_json: '[]',
+      }) as unknown as PendingApproval;
+    const row1 = makeStaleRow('aaaa1111');
+    const row2 = makeStaleRow('bbbb2222');
+
+    getPendingApprovalsByActionMock.mockReturnValue([row1, row2]);
+    getPendingApprovalMock.mockImplementation((id: string) => (id === row1.approval_id ? row1 : row2));
+    // row1 の updatePendingApprovalStatus で throw、row2 は成功
+    updatePendingApprovalStatusMock.mockImplementation((id: string) => {
+      if (id === row1.approval_id) throw new Error('db locked');
+    });
+    getChannelAdapterMock.mockReturnValue({ deliver: fallbackDeliverMock });
+    fallbackDeliverMock.mockResolvedValue('patron-delivery-id');
+    deliverMock.mockResolvedValue('edit-ok');
+
+    startAdkApprovalHandler({ deliver: deliverMock } as never);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // row1 の cleanup は throw で中断 = row 削除に到達しない
+    expect(deletePendingApprovalMock).not.toHaveBeenCalledWith(row1.approval_id);
+    // row2 は無事完遂 = row 削除される
+    expect(deletePendingApprovalMock).toHaveBeenCalledWith(row2.approval_id);
+    // per-row error は log.error される
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      expect.stringContaining('sweep: row cleanup failed'),
+      expect.objectContaining({ event: 'adk.approval.sweep_row_failed', approval_id: row1.approval_id }),
+    );
+    // sweep_done log の failed count が 1
+    expect(vi.mocked(log.info)).toHaveBeenCalledWith(
+      expect.stringContaining('Swept stale ADK approvals'),
+      expect.objectContaining({ event: 'adk.approval.sweep_done', count: 2, failed: 1 }),
+    );
   });
 });
 

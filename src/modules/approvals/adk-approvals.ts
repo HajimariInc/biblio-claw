@@ -36,8 +36,14 @@
  * 早期 return する経路も防御される (= 二重処理防止)。
  */
 import type { AdkApprovalPayload } from '../../adk/approval-dispatcher.js';
-import { getSharedRunner } from '../../adk/dispatcher.js';
 import { BIBLIO_M4B_APP_NAME } from '../../adk/runner.js';
+// NOTE: `getSharedRunner` は `dispatcher.ts` にあるが、dispatcher.ts は本ファイルから
+// `requestAdkApproval` を static import している (Phase 4 で導入)。両者を static import で
+// 相互参照すると循環依存になるため (`adk-approvals ↔ dispatcher`)、本ファイル側は
+// `deleteAdkSessionSafe` 内で dynamic import (= await import()) で解決する。ESM の dynamic
+// import は module graph の evaluation 順序を runtime に遅延させるため循環を閉じられる。
+// また `deleteAdkSessionSafe` は expire 発火時にしか呼ばれないため、host 起動時の
+// 初期 import cost には載らない (= 副作用ゼロで循環回避)。
 import type { HitlConfirmationPayload, HitlToolAction } from '../../adk/tools/hitl-types.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import {
@@ -321,13 +327,20 @@ export async function requestAdkApproval(opts: RequestAdkApprovalOptions): Promi
  * `response-handler.ts` の `adk_confirm` 分岐冒頭から呼ばれる。timer 発火直前の race を防ぐ
  * ため、`resolveAdkApproval` (実際の resume) 呼出**前**に本関数を呼ぶ設計。
  *
- * 未登録 approval_id (= 既に expire 済 / 既に clear 済 / 別プロセスで作成) は no-op で抜ける。
+ * **戻り値**: `true` なら「admin 応答が expiry timer より先勝ちして claim できた」= 呼出元は
+ * そのまま resume 処理に進んでよい。`false` なら「timer callback が既に pending Map から
+ * 該当 entry を pop 済み (= expiry cleanup が in-flight or 完了済み)」= 呼出元は resume 処理を
+ * skip すべき (二重 patron 通知防止)。
+ *
+ * この boolean 契約により、`response-handler.ts` は expire と admin 応答の race window
+ * (expire 発火から row 削除完了までの間に admin 応答が届いた場合) で、二重処理を避けられる。
  */
-export function clearAdkApprovalTimer(approvalId: string): void {
+export function clearAdkApprovalTimer(approvalId: string): boolean {
   const state = pending.get(approvalId);
-  if (!state) return;
+  if (!state) return false;
   clearTimeout(state.timer);
   pending.delete(approvalId);
+  return true;
 }
 
 /**
@@ -474,6 +487,9 @@ async function deleteAdkSessionSafe(row: PendingApproval): Promise<void> {
   }
 
   try {
+    // Lazy dynamic import で `adk-approvals ↔ dispatcher` の static 循環を閉じる (top-level
+    // コメント参照)。expire 経路以外では evaluate されないため boot cost に載らない。
+    const { getSharedRunner } = await import('../../adk/dispatcher.js');
     const { sessionService } = getSharedRunner();
     await sessionService.deleteSession({
       appName: BIBLIO_M4B_APP_NAME,
@@ -582,6 +598,10 @@ export function stopAdkApprovalHandler(): void {
  * `expireAdkApproval` を reason='host restarted' で呼び出すことで、通常の expiry フローを
  * 再利用しつつ内部の `deleteAdkSessionSafe` を skip する分岐に落とす (= Pod 再起動後は
  * `InMemorySessionService` が空)。
+ *
+ * per-row の try/catch を挟むことで、`updatePendingApprovalStatus` / `deletePendingApproval`
+ * の raw DB 呼出が例外を投げても残りの row の sweep を継続する (= 「Layer 3 は起動時に
+ * 確実に一掃する安全網」という契約を守る、code-review 指摘 #3 対応)。
  */
 async function sweepStaleAdkApprovals(): Promise<void> {
   const rows = getPendingApprovalsByAction(ADK_CONFIRM_ACTION);
@@ -590,11 +610,22 @@ async function sweepStaleAdkApprovals(): Promise<void> {
     event: 'adk.approval.sweep_start',
     count: rows.length,
   });
+  let failed = 0;
   for (const row of rows) {
-    await expireAdkApproval(row.approval_id, 'host restarted');
+    try {
+      await expireAdkApproval(row.approval_id, 'host restarted');
+    } catch (err) {
+      failed++;
+      log.error('ADK approval sweep: row cleanup failed, continuing with remaining rows', {
+        event: 'adk.approval.sweep_row_failed',
+        approval_id: row.approval_id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
   log.info('Swept stale ADK approvals', {
     event: 'adk.approval.sweep_done',
     count: rows.length,
+    failed,
   });
 }

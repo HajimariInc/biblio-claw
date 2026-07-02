@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const {
   resolveOneCLIApprovalMock,
   resolveAdkApprovalMock,
+  clearAdkApprovalTimerMock,
   getPendingApprovalMock,
   deletePendingApprovalMock,
   getSessionMock,
@@ -22,6 +23,7 @@ const {
 } = vi.hoisted(() => ({
   resolveOneCLIApprovalMock: vi.fn(),
   resolveAdkApprovalMock: vi.fn(),
+  clearAdkApprovalTimerMock: vi.fn(),
   getPendingApprovalMock: vi.fn(),
   deletePendingApprovalMock: vi.fn(),
   getSessionMock: vi.fn(),
@@ -37,6 +39,14 @@ vi.mock('./onecli-approvals.js', () => ({
 
 vi.mock('../../adk/approval-dispatcher.js', () => ({
   resolveAdkApproval: (...args: unknown[]) => resolveAdkApprovalMock(...args),
+}));
+
+// issue #106: response-handler.ts が `clearAdkApprovalTimer` を import するようになったため
+// mock 化。`./adk-approvals.js` の実 module load を避けることで、adk-approvals.ts が dynamic
+// import している `dispatcher.js` の副作用 (実 adk-js @google/adk load) を切り離す。
+vi.mock('./adk-approvals.js', () => ({
+  ADK_CONFIRM_ACTION: 'adk_confirm',
+  clearAdkApprovalTimer: (...args: unknown[]) => clearAdkApprovalTimerMock(...args),
 }));
 
 vi.mock('../../db/sessions.js', () => ({
@@ -77,6 +87,9 @@ beforeEach(() => {
   resolveOneCLIApprovalMock.mockReturnValue(false);
   resolveAdkApprovalMock.mockReset();
   resolveAdkApprovalMock.mockResolvedValue(undefined);
+  clearAdkApprovalTimerMock.mockReset();
+  // default: admin 応答が timer より先勝ち = true。expiry-race テストでのみ false に上書き。
+  clearAdkApprovalTimerMock.mockReturnValue(true);
   getPendingApprovalMock.mockReset();
   deletePendingApprovalMock.mockReset();
   getSessionMock.mockReset();
@@ -129,7 +142,7 @@ describe('handleApprovalsResponse — ONECLI_ACTION row (in-memory resolver 不�
 });
 
 describe('handleApprovalsResponse — Phase 4 ADK HITL 分岐 (adk_confirm)', () => {
-  it('action=adk_confirm → resolveAdkApproval 呼出 + row 削除 + return true', async () => {
+  it('action=adk_confirm → clearAdkApprovalTimer → resolveAdkApproval 呼出 + row 削除 + return true', async () => {
     const adkPayload = {
       adkSessionId: 'sess-1',
       functionCallId: 'fc-1',
@@ -152,6 +165,8 @@ describe('handleApprovalsResponse — Phase 4 ADK HITL 分岐 (adk_confirm)', ()
     const result = await handleApprovalsResponse(BASE_PAYLOAD);
 
     expect(result).toBe(true);
+    // issue #106: clearAdkApprovalTimer が payload.questionId で呼ばれる (race 防止の要)
+    expect(clearAdkApprovalTimerMock).toHaveBeenCalledWith('appr-1');
     expect(resolveAdkApprovalMock).toHaveBeenCalledWith(
       expect.objectContaining({
         adkSessionId: 'sess-1',
@@ -164,6 +179,26 @@ describe('handleApprovalsResponse — Phase 4 ADK HITL 分岐 (adk_confirm)', ()
     expect(deletePendingApprovalMock).toHaveBeenCalledWith('appr-1');
     // module-registered handler 経路は経由しない (getApprovalHandler 呼ばれない)
     expect(getApprovalHandlerMock).not.toHaveBeenCalled();
+  });
+
+  it('clearAdkApprovalTimer が false 返却 → expire 先勝ち = resolveAdkApproval + row 削除を skip (code-review #1 対応)', async () => {
+    // race scenario: timer callback が既に pending Map から entry を pop 済み
+    clearAdkApprovalTimerMock.mockReturnValue(false);
+    resolveOneCLIApprovalMock.mockReturnValue(false);
+    getPendingApprovalMock.mockReturnValue({
+      approval_id: 'appr-race',
+      action: 'adk_confirm',
+      payload: JSON.stringify({ adkSessionId: 's', functionCallId: 'f', userId: 'u' }),
+    });
+
+    const result = await handleApprovalsResponse({ ...BASE_PAYLOAD, questionId: 'appr-race' });
+
+    expect(result).toBe(true);
+    expect(clearAdkApprovalTimerMock).toHaveBeenCalledWith('appr-race');
+    // resolveAdkApproval は skip される (二重 patron 通知防止)
+    expect(resolveAdkApprovalMock).not.toHaveBeenCalled();
+    // row 削除も skip (expire 経路が最終的に消すため二重 DELETE 回避)
+    expect(deletePendingApprovalMock).not.toHaveBeenCalled();
   });
 
   it('reject 経路も同流儀: resolveAdkApproval に value=reject が渡る', async () => {
