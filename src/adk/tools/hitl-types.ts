@@ -16,9 +16,12 @@
  *
  *   - PR #105 レビューで「3 箇所の重複定義」「`Record<string, unknown>` 経由の型情報損失」
  *     が指摘されたため named type に統一
- *   - 新 HITL tool 追加時は `HitlToolAction` に値を追加するだけで、dispatcher / adk-approvals /
- *     approval-dispatcher の全経路が型 error で検知される (= 更新漏れが silent に fail-safe 経路
- *     に倒れる旧挙動を撲滅)
+ *   - 新 HITL tool 追加時は `HitlToolAction` に値を追加すると、型を経由する箇所 (adk-approvals /
+ *     approval-dispatcher / tool 側 payload 構築) は自動的に型 error で検知される。
+ *     dispatcher.ts の runtime 判定は `isHitlAction` type guard 経由で行うため `HITL_ACTIONS`
+ *     配列に値追加が要る (忘れると unknown action として skip される silent 経路)。
+ *     `adk-approvals.ts:120` の title 三項比較は exhaustiveness check 機構がないため型 error で
+ *     検知されない (issue #108 scope 外、別 issue で対応検討)
  */
 import type { BiblioCategory } from '../../biblio/types.js';
 
@@ -33,6 +36,25 @@ import type { BiblioCategory } from '../../biblio/types.js';
  *      自動的に型 error で検知される
  */
 export type HitlToolAction = 'enkin' | 'shokyaku';
+
+/**
+ * `HitlToolAction` の union 値を列挙した readonly array。
+ * `isHitlAction` type guard + 将来の exhaustiveness check に使用。
+ * biblio-claw 標準の `BIBLIO_CATEGORIES` (types.ts:145-146) パターン踏襲。
+ */
+export const HITL_ACTIONS: readonly HitlToolAction[] = ['enkin', 'shokyaku'] as const;
+
+/**
+ * `unknown` 由来の値が `HitlToolAction` かどうかの runtime 検証 type guard。
+ *
+ * dispatcher が adk-js event stream 経由で受け取る `toolConfirmation.payload.action`
+ * は unsafe type assertion 経由の `HitlToolAction` narrow でしかないため、実運用上は
+ * 予期外の string が来る可能性があり (ADK 実装契約変更 / payload 注入)、本 guard で
+ * fail-closed 判定する。
+ */
+export function isHitlAction(v: unknown): v is HitlToolAction {
+  return typeof v === 'string' && (HITL_ACTIONS as readonly string[]).includes(v);
+}
 
 /**
  * `tool_context.requestConfirmation({payload})` で渡す payload の共通 shape。
