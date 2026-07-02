@@ -70,7 +70,7 @@ const CONSULT_PATH = '/v1/channels/fugue/consult';
 const EQUIP_PATH = '/v1/channels/fugue/equip';
 /**
  * Request body の最大バイト数 (1 MiB)。Phase 2 の consult payload は小さい (query 500 char +
- * context_hint dict) ため余裕。TODO(M4-E Phase 4+): 実運用サイズが判明したら見直す。
+ * context_hint dict) ため余裕。TODO(M4-E Phase 5+): 実運用サイズが判明したら見直す。
  * 上限超過は 413 Payload Too Large + log.warn。
  */
 const MAX_BODY_SIZE_BYTES = 1024 * 1024;
@@ -149,7 +149,7 @@ function writeError(res: http.ServerResponse, status: number, body: FugueErrorRe
 
 /**
  * `query` を `ListBiblioItem` の name + description に case-insensitive substring match
- * する。TODO(M4-E Phase 4+): LLM 経由の意図抽出に切り替え、substring match は fallback に。
+ * する。TODO(M4-E Phase 5+): LLM 経由の意図抽出に切り替え、substring match は fallback に。
  */
 function queryMatches(item: ListBiblioItem, query: string): boolean {
   const q = query.toLowerCase();
@@ -194,7 +194,7 @@ function toSkillRefs(
  * 自由入力 (文字種制約なし) なので絵文字を含みうる。500 字超過時に truncation 境界が
  * `query` 由来の surrogate pair 中間に来る可能性は理論上残る (mojibake 応答になるが
  * Fugue 側 UI 表示レベルで問題にならない範囲、Phase 2 では許容)。
- * TODO(M4-E Phase 4+): Fugue LLM 生成に置換して trim ロジック自体を撤去。
+ * TODO(M4-E Phase 5+): Fugue LLM 生成に置換して trim ロジック自体を撤去。
  */
 function summarizeConsult(
   result: ListBiblioResult,
