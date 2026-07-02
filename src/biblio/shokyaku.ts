@@ -21,6 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { DATA_DIR } from '../config.js';
+import { deleteFugueEquippedBiblioByName } from '../db/fugue-equipped-biblios.js';
 import { deleteEquippedBiblioByName } from '../db/session-equipped-biblios.js';
 import { log } from '../log.js';
 import { unshelve } from './unshelve.js';
@@ -125,6 +126,31 @@ export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Pr
       err,
     });
     warnings.push(`装備リスト DB の個別削除に失敗: ${detail}`);
+  }
+
+  // Fugue channel-scoped 装備状態からも除去 (M4-E Phase 3 判断 J、session 側と対称)。
+  // 焼却 = 物理削除 + 全装備リストからの除去、が M3 で確立した意味論。fugue store に ghost 行が
+  // 残ると、焼却→再仕入れ→再 shelve 後の equip が already_equipped を誤返答する問題を防ぐ。
+  // enkin (禁書) には追加しない = 装備状態残置で再装備可の対称性 (session 側と同じ)。
+  try {
+    const changes = deleteFugueEquippedBiblioByName(biblioName);
+    if (changes > 0) {
+      log.info('shokyaku: removed from fugue equipped biblios', {
+        event: 'biblio.shokyaku',
+        outcome: 'success',
+        biblio_name: biblioName,
+        changes,
+      });
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn('shokyaku: DB delete from fugue_equipped_biblios failed', {
+      event: 'biblio.shokyaku',
+      outcome: 'failure',
+      biblio_name: biblioName,
+      err,
+    });
+    warnings.push(`Fugue 装備状態 DB の削除に失敗: ${detail}`);
   }
 
   return {

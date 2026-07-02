@@ -26,10 +26,15 @@ import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
 /**
  * biblio action handler の span 名を closed union で固定する。
  * acquire / inspect / categorize / shelve / multi-shelve / enkin / shokyaku /
- * list-biblio / config の 9 handler が共通で使う + HITL 2 経路 (enkin_request /
+ * list-biblio / config / equip の 10 handler が共通で使う + HITL 2 経路 (enkin_request /
  * shokyaku_request = delivery 申請境界、enkin / shokyaku = approval 承認境界) を
  * 区別する。新 handler 追加時は本 union を必ず拡張する (= 拡張なしで呼び出すと
  * compile error)。
+ *
+ * `equip` は M4-E Phase 3 で追加。Fugue channel の装備操作 (`fugue-http.ts:handleEquip`)
+ * が `withBiblioActionSpan('equip', request_id, '', fn)` で包むことで、M4-A の
+ * `biblio.${action}` 集計に channel-agnostic に載せる (sessionId 空文字は Fugue に
+ * session 概念なしのため。approval 経路 と同じ空文字慣習)。
  */
 export type BiblioActionName =
   | 'acquire'
@@ -42,14 +47,15 @@ export type BiblioActionName =
   | 'enkin_request'
   | 'shokyaku'
   | 'shokyaku_request'
-  | 'config';
+  | 'config'
+  | 'equip';
 
 /**
  * biblio action handler 共通の span ラッパ。
  *
  * acquire / inspect / categorize / shelve / multi-shelve / enkin / shokyaku /
- * list-biblio / config の 9 handler が共通で使う (= 11 span 名は [[BiblioActionName]]
- * で固定)。`biblio.${action}` 名で span を開始し、`biblio.request_id` /
+ * list-biblio / config / equip の 10 handler が共通で使う (= 12 span 名は
+ * [[BiblioActionName]] で固定)。`biblio.${action}` 名で span を開始し、`biblio.request_id` /
  * `biblio.session_id` / `biblio.action` を属性として記録する。exception は
  * recordException + ERROR status で記録、span は finally で必ず end する。
  *

@@ -8,12 +8,13 @@
  * 3 (harness crash) の 3 分岐。
  *
  * Phase 2 で consult subcommand に `--query <str>` / `--mode <literal>` オプションを
- * 追加。equip subcommand は Phase 3 まで skeleton (schema_version + request_id のみ) を温存。
+ * 追加。Phase 3 で equip subcommand を full spec 化 (`--skill_id <str>` 必須 + `channel:'fugue'`
+ * 自動付与)。
  *
  * Usage:
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "Figma" --mode "review-with-ad"
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "test"
- *   pnpm exec tsx scripts/fake-fugue-client.ts equip
+ *   pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id "HajimariInc--figma-reviewer"
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --bad-token
  */
 import { readEnvFile } from '../src/env.js';
@@ -50,7 +51,7 @@ async function main(): Promise<number> {
 
   if (!isSubcommand(subcommand)) {
     process.stderr.write(
-      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>]\n',
+      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>]\n',
     );
     return 2;
   }
@@ -66,8 +67,8 @@ async function main(): Promise<number> {
 
   const startedAt = Date.now();
 
-  // Phase 2: consult は full spec (`query` / `mode`)、equip は skeleton のまま (Phase 3 対象)。
-  // `context_hint` は Phase 2 では検索ロジックに反映されないため、options 化しない
+  // Phase 2: consult は full spec (`query` / `mode`)、Phase 3: equip も full spec (`skill_id` +
+  // `channel:'fugue'`)。`context_hint` は Phase 2 では検索ロジックに反映されないため、options 化しない
   // (over-thinking-avoidance: 使わない可変性は入れない、必要になったら追加)。
   let body: Record<string, unknown>;
   if (subcommand === 'consult') {
@@ -80,9 +81,21 @@ async function main(): Promise<number> {
       mode: parseOption(argv, 'mode') ?? 'ask-ad',
     };
   } else {
+    // equip 経路 (Phase 3)。`--skill-id` は状態変更対象を指定するため default 値なし = 未指定は usage error。
+    // channel は Fugue 契約 §5.3 の HITL 簡略化 discriminator (literal 'fugue')。
+    const skillId = parseOption(argv, 'skill-id');
+    if (!skillId) {
+      process.stderr.write(
+        'usage: fake-fugue-client.ts equip --skill-id <str> [--bad-token]\n' +
+          '  --skill-id is required (a biblio name from consult SkillRef.id, e.g. "HajimariInc--figma-reviewer").\n',
+      );
+      return 2;
+    }
     body = {
       schema_version: '1',
       request_id: `fake-${startedAt}`,
+      skill_id: skillId,
+      channel: 'fugue',
     };
   }
 
