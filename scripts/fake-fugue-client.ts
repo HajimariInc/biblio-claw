@@ -29,6 +29,13 @@ interface Result {
   response_body: unknown;
   response_body_parse_error: boolean;
   used_token_kind: 'valid' | 'bad' | 'missing';
+  /**
+   * `--traceparent <hex>` を指定した際に実際に送出した W3C `traceparent` header 値
+   * (未指定時は undefined)。Phase 4 で追加、dev 検証で trace 継承を biblio-claw 側 log から
+   * 追跡するための marker。grammar validation は biblio 側 auto HttpInstrumentation の
+   * silent-ignore 挙動を尊重して行わない (client は raw 値を forward するのみ)。
+   */
+  used_traceparent: string | undefined;
 }
 
 function isSubcommand(v: string | undefined): v is Subcommand {
@@ -51,10 +58,11 @@ async function main(): Promise<number> {
 
   if (!isSubcommand(subcommand)) {
     process.stderr.write(
-      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>]\n',
+      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>] [--traceparent <00-32hex-16hex-flags>]\n',
     );
     return 2;
   }
+  const traceparent = parseOption(argv, 'traceparent');
 
   const env = readEnvFile(['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST']);
   // --bad-token 指定時は auth 分岐 `bad_token` を発火させるため、意図的に不正 token を送る
@@ -104,6 +112,10 @@ async function main(): Promise<number> {
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      // Phase 4: `--traceparent` 指定時のみ W3C header を送出する。未指定時は auto
+      // HttpInstrumentation が新規 trace_id を発行 (biblio 側 fugue.consult / fugue.equip
+      // span の parent が root context = 新 trace になる)。
+      ...(traceparent ? { traceparent } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -130,6 +142,7 @@ async function main(): Promise<number> {
     response_body,
     response_body_parse_error,
     used_token_kind,
+    used_traceparent: traceparent,
   };
   process.stdout.write(`RESULT=${JSON.stringify(result)}\n`);
   return 0;

@@ -1631,6 +1631,135 @@ orchestrator PVC を Regional Persistent Disk に切替えることで agent Pod
 
 ---
 
+## M4-E Phase 4: observability-ad-honji (Fugue channel の OTel 3 段構造 + AD の本義)
+
+M4-E PRD の Phase 4 で Fugue channel adapter (`src/channels/fugue-http.ts`) に 3 段 trace 構造 + trace 相関 log field + AD 本義契約の unit test 網羅を実装した(PR は本 Phase 完成後に別途起票)。**Phase 4 は local 完結 = Cloud Trace への実 push と BQ sink 動作確認は Phase 5 (Prod deploy) の scope**、Phase 4 では InMemorySpanExporter + `LOG_FORMAT=json` + stdout spy で内部整合を担保する。
+
+### 3 段 trace 構造(実装本体)
+
+```
+auto HTTP POST /v1/channels/fugue/{consult,equip}   (SERVER, HttpInstrumentation 自動)
+  └─ fugue.consult / fugue.equip                    (INTERNAL, Phase 4 新設 withFugueEntrySpan)
+       └─ biblio.list / biblio.equip                (INTERNAL, M4-A withBiblioActionSpan 継承)
+```
+
+- 中央層 `fugue.<operation>` は `src/observability/fugue-entry-span.ts` の `withFugueEntrySpan` が生成する。M4-A の `withBiblioActionSpan` の Fugue channel 版として位置付ける(signature を最小化 = `sessionId` 引数なし、`channel:'fugue'` を span 属性として持たせる、Cloud Trace UI で channel filter 可能)
+- 上層 (auto server span) は `@opentelemetry/auto-instrumentations-node` の `HttpInstrumentation` が既定で生成する(disable しない = Slack adapter との対称性維持)
+- 下層 (`biblio.<action>`) は M4-A 既存、Phase 4 で touch しない = M4-A `biblio.<action>` 集計は channel-agnostic に温存
+
+### span 名 / 属性一覧
+
+| span 名               | kind     | 主な属性                                                                                                        |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------- |
+| `HTTP POST /v1/...`   | SERVER   | `http.method` / `http.route` / `http.status_code` / `net.peer.*`(auto)                                          |
+| `fugue.consult`       | INTERNAL | `channel='fugue'` / `fugue.operation='consult'` / `fugue.request_id` / `fugue.outcome ∈ {ok, not_found, error}` / `fugue.mode` |
+| `fugue.equip`         | INTERNAL | `channel='fugue'` / `fugue.operation='equip'` / `fugue.request_id` / `fugue.outcome ∈ {equipped, already_equipped, not_found, error}` |
+| `biblio.list`         | INTERNAL | `biblio.action='list'` / `biblio.request_id` / `biblio.session_id=''` / `biblio.outcome ∈ {success, failure, not_found}` |
+| `biblio.equip`        | INTERNAL | `biblio.action='equip'` / `biblio.request_id` / `biblio.session_id=''` / `biblio.outcome ∈ {success, failure, not_found}` |
+
+- `fugue.outcome` と `biblio.outcome` は **別軸**。fugue.outcome は Fugue 契約 §5.2 / §5.3 の応答 `status` フィールドと 1:1、biblio.outcome は M4-A 集計の 3 値。両者は分岐直後に「対称に並置」して設定する grep 検知可能な流儀(`fugue-http.ts` 内で `span.setAttribute('biblio.outcome', ...)` の直後に `fugueSpan.setAttribute('fugue.outcome', ...)` を並べる)
+
+### event 名対応表(PRD 記述 ↔ 実装)
+
+| PRD 記述(underscore)          | 実装(dot-separated、既存)              | 意味                                       |
+| ---------------------------- | -------------------------------------- | ------------------------------------------ |
+| `fugue_consult_requested`    | `fugue.consult.invoked`                | request 受信 + schema 通過                 |
+| `fugue_consult_completed`    | `fugue.consult.completed`              | 200 応答完了(成功)                       |
+| `fugue_consult_completed`    | `fugue.consult.not_found`              | 200 応答完了(蔵書 0 件)                  |
+| `fugue_consult_failed`       | `fugue.consult.partial_failure`        | 200 応答完了(部分失敗、AD の本義)         |
+| `fugue_consult_failed`       | `fugue.handler.error`                  | 500 応答(catch-all uncaught)              |
+| `fugue_equip_requested`      | `fugue.equip.invoked`                  | 同上(equip 側)                            |
+| `fugue_equip_completed`      | `fugue.equip.completed`                | 200 応答(装備成立)                        |
+| `fugue_equip_completed`      | `fugue.equip.already_equipped`         | 200 応答(既装備)                          |
+| `fugue_equip_failed`         | `fugue.equip.partial_failure`          | 200 応答(部分失敗、listBiblio / DB write) |
+
+- 命名は既存 dot-separated 維持(Phase 4 は scope 最小化、event rename は Phase 6 verify 前の cleanup で判断)
+
+### `LOG_FORMAT=json` の運用注意
+
+`src/log.ts:31` の `FORMAT = process.env.LOG_FORMAT === 'json' ? 'json' : 'text'` により **`LOG_FORMAT=json` でなければ `getTraceLogFields()` 経由の trace 相関 field は log payload に載らない**:
+
+- Prod GKE 経路: `k8s/10-orchestrator-statefulset.yaml` で `LOG_FORMAT=json` 投入済 → BQ sink 経路で trace 相関可能
+- dev 経路(`pnpm run dev`): default `text` = trace 相関 field なし、span 発火は独立に動く(Cloud Trace UI で observe 可能)
+- unit test: `LOG_FORMAT=json` を先に `process.env` にセットしてから `await import('./fugue-http.js')` で dynamic import(`src/channels/fugue-http.otel-log.test.ts` 参照、log-trace.test.ts と同流儀)
+
+### Cloud Trace UI での検索(Phase 5 以降)
+
+```
+# fugue channel 経由の呼び出しを operation 別に集計
+span:fugue.consult
+span:fugue.equip
+
+# channel 属性による filter (M4-A の biblio.* span には channel 属性がない)
+attribute:channel=fugue
+
+# Fugue Cloud Run → biblio-claw の 1 trace 串刺し (Phase 5 実結線後)
+trace:<parent-trace-id>  # Fugue 側 request の trace_id
+```
+
+### BQ sink 集計 SQL(Phase 5 稼働後)
+
+```sql
+-- fugue channel の event 別カウント (直近 24h)
+SELECT
+  jsonPayload.channel AS channel,
+  jsonPayload.event   AS event,
+  COUNT(*)            AS count
+FROM `<PROJECT>.<DATASET>.logs_biblio_claw`
+WHERE
+  timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+  AND jsonPayload.channel = 'fugue'
+GROUP BY 1, 2
+ORDER BY 3 DESC;
+
+-- 特定 request の trace 相関ログ抽出
+SELECT
+  timestamp,
+  jsonPayload.event,
+  jsonPayload.processing_time_ms,
+  jsonPayload
+FROM `<PROJECT>.<DATASET>.logs_biblio_claw`
+WHERE jsonPayload.`logging.googleapis.com/trace` = '<32-hex-trace-id>'
+ORDER BY timestamp ASC;
+```
+
+### 既知の罠 3 件
+
+1. **auto HttpInstrumentation が disable された将来変更で silent regression 発生**:
+   - `getNodeAutoInstrumentations()` (src/observability/otel.ts:62) から HTTP instrumentation を disable すると auto server span が消え、`fugue.consult` は root context 直下の span になる(親不在)。回避:disable する場合は `fugue-entry-span.ts` の kind を SERVER に格上げする代替が必要(Slack adapter との非対称性が発生するため慎重に判断)。
+   - 検知経路:`fugue-http.otel.test.ts` の traceparent 継承 test が fail する(auto extract が動かない場合 fugue span の trace_id が新規発行される)
+
+2. **`LOG_FORMAT` env が json でないと trace 相関 field は log に載らない**:
+   - 症状:Cloud Trace UI で span は見えるが Cloud Logging Trace サイドバーから log がリンクされない
+   - 確認:orchestrator Pod の `env` に `LOG_FORMAT=json` があるか(`kubectl exec biblio-orchestrator-0 -c orchestrator -- env | grep LOG_FORMAT`)
+   - 回避:`k8s/10-orchestrator-statefulset.yaml` で継続投入。dev 経路で trace 相関を見たい場合のみ `LOG_FORMAT=json pnpm run dev` で立ち上げる
+
+3. **Fake Fugue client の `--traceparent` は W3C spec 準拠の 32+16 hex format 必須**:
+   - malformed だと biblio 側 propagator が silent に root context に fallback(`http-propagation.test.ts` の malformed case で挙動固定)
+   - client 側は grammar validation を持たない = raw 値を forward するのみ、biblio 側 log に `event:'fugue.consult.completed'` の `logging.googleapis.com/trace` を確認して 32-hex が入っていれば継承成立、新規 UUID なら fallback 発生
+
+### Phase 4 で追加した test 一覧
+
+| test file                                                     | case 数 | 検証対象                                                                 |
+| ------------------------------------------------------------- | ------- | ------------------------------------------------------------------------ |
+| `src/observability/__tests__/http-propagation.test.ts`        | 8       | httpHeadersGetter の 5 case + `extractTraceContextFromHttpHeaders` の 3 case |
+| `src/observability/__tests__/fugue-entry-span.test.ts`        | 6       | span 名 + attributes / extraAttributes / exception (Error + non-Error) / finally / biblio 子 span 親子 |
+| `src/channels/fugue-http.otel.test.ts`                        | 6       | 3 段構造 / traceparent 継承 / outcome=ok/not_found/error / equip 成功                        |
+| `src/channels/fugue-http.otel-log.test.ts`                    | 2       | LOG_FORMAT=json での trace 相関 field 付与(consult / equip)                              |
+| `src/channels/fugue-http.ad-honji.test.ts`                    | 14      | 5xx catch-all only(静的 grep + 5 case)+ 200 partial failure(5 case)+ processing_time_ms(3 case) |
+| **合計**                                                      | **36**  | Phase 4 完成判定の unit test 網羅(plan 想定 30+ を上回る)                                  |
+
+### Phase 5 に押しやる項目(scope boundary)
+
+- Cloud Trace への実 push の verify(Prod Fugue Cloud Run 接続後)
+- BQ sink での fugue event log 集計 SQL の実データ確認
+- GKE Ingress manifest(`k8s/25-ingress-fugue-channel.yaml`)の apply
+- Terraform module(`terraform/fugue-channel/`)の apply
+- `SecretManagerSecretProvider` の実装
+- `scripts/verify-m4-e.sh` の統合 verify(任意 Phase 6)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)
