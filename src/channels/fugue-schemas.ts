@@ -2,10 +2,10 @@
  * Fugue channel adapter (M4-E) の Zod schemas + response 型定義。
  *
  * Phase 2 で consult endpoint を full spec 化 (query / mode / context_hint)。
- * equip 側 (`FugueEquipRequestSkeleton` + `FugueSkeletonResponse` の equip 分岐) は
- * TODO(M4-E Phase 3): consult と同様に full spec 化する。`.strict()` は使わない
- * (codebase 慣習、schema 進化に対して unknown field を許容する保守的な姿勢のほうが
- * Fugue 側 schema の進化に耐える)。
+ * Phase 3 で equip endpoint を full spec 化 (skill_id / channel) + `SkillRef.equipped` を
+ * `false` literal → `boolean` に緩和 (`fugue_equipped_biblios` の channel-scoped store で
+ * decidable 化)。`.strict()` は使わない (codebase 慣習、schema 進化に対して unknown field を
+ * 許容する保守的な姿勢のほうが Fugue 側 schema の進化に耐える)。
  */
 import { z } from 'zod';
 
@@ -42,28 +42,42 @@ export const FugueConsultRequest = z.object({
 });
 export type FugueConsultRequestT = z.infer<typeof FugueConsultRequest>;
 
-export const FugueEquipRequestSkeleton = z.object({
-  schema_version: z.literal('1').describe('Schema version. Phase 1 accepts "1" only.'),
+/**
+ * Fugue equip endpoint の Request full spec (Phase 3)。
+ *
+ * `skill_id` は棚 item の name (consult SkillRef.id と同一空間)。`BIBLIO_NAME_RE` guard は
+ * handler 側で fail-closed に適用する (path traversal 防御、fugue-schemas.ts は zod-only に
+ * 保つ設計方針で regex 依存を作らない)。`channel` は Fugue 契約 §5.3 の HITL 簡略化
+ * discriminator (literal `'fugue'` で固定、他値は Zod で 400 reject)。
+ */
+export const FugueEquipRequest = z.object({
+  schema_version: z.literal('1').describe('Schema version. Phase 3 accepts "1" only.'),
   request_id: z.string().min(1).max(64).describe('Client-provided idempotency key (max 64 chars).'),
+  skill_id: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe('Biblio name from consult SkillRef.id ("<owner>--<repo>" or "<owner>--<repo>--<skill>" form).'),
+  channel: z
+    .literal('fugue')
+    .describe('HITL simplification discriminator (Fugue contract §5.3). Only "fugue" is accepted here.'),
 });
-
-export type FugueEquipRequestSkeletonT = z.infer<typeof FugueEquipRequestSkeleton>;
+export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 
 /**
- * biblio-shelf の 1 skill を Fugue Director に返すときの参照型 (Phase 2)。
+ * biblio-shelf の 1 skill を Fugue Director に返すときの参照型 (Phase 3 で decidable 化)。
  *
  * biblio-claw 側で組み立てて返すのみで、Fugue 側から受け取ることはない → interface で
- * 型担保のみ、Zod schema にしない。`equipped` は Phase 2 では常に `false` を literal 型で
- * 強制する (Fugue は `supportsThreads: false` = session 概念なしのため装備状態が
- * decidable でない)。TODO(M4-E Phase 4+): Fugue Stage 5+ で session 概念導入時に
- * `boolean` へ緩める。
+ * 型担保のみ、Zod schema にしない。`equipped` は Phase 3 で `fugue_equipped_biblios`
+ * (channel-scoped store) の membership に基づき決まる (session 概念とは独立、Fugue Director
+ * 1 人前提の channel-scoped 装備セット)。
  */
 export interface SkillRef {
   id: string;
   name: string;
   description: string;
   manifest_url: string;
-  equipped: false;
+  equipped: boolean;
 }
 
 /**
@@ -93,13 +107,49 @@ export interface FugueConsultReply {
   warnings: string[];
 }
 
-export interface FugueSkeletonResponse {
-  schema_version: '1';
-  request_id: string;
-  operation: 'consult' | 'equip';
-  status: 'ok';
-  stub: true;
-}
+/**
+ * Fugue equip endpoint の Reply body (Phase 3)。
+ *
+ * status の意味:
+ *
+ * - `equipped` = 新規装備成功 (`fugue_equipped_biblios` に新規 INSERT、`skill` に対象を返す)
+ * - `already_equipped` = 既に装備中 (`INSERT OR IGNORE` で changes=0、200 でエラーではない。
+ *   `skill.equipped: true` + summary で「既に装備済み」を返す = 冪等性の担保)
+ * - `not_found` = `skill_id` が棚に存在しない (200、Fugue 側は「棚に無い」と扱う。
+ *   consult の可視範囲 (= `category !== 'unknown'`) と整合。`skill: null`)
+ * - `error` = 部分失敗 (listBiblio 障害 / DB write 失敗、`warnings` に理由 + `skill: null`)。
+ *   consult と同様の PRD「AD の本義」節に従い 5xx を出さない
+ *
+ * 5xx (401 / 413 / 500) は認可 / 上限超過 / biblio-claw 自体の応答不能 (uncaught exception) に限定。
+ *
+ * **型設計 (PR #117 review、type-design-analyzer)**: `status` × `skill` の相関 (equipped/
+ * already_equipped は skill 非 null、not_found/error は skill: null) を discriminated union で
+ * 型レベル強制する。5 か所の object literal (fugue-http.ts の handleEquip 内) は既に正しく
+ * ペア化されているため object literal 自体は無変更で narrowing が成立する。将来 status/skill
+ * の不整合 (例: `status:'not_found'` で skill を書く / `status:'equipped'` で skill:null にする)
+ * は compile error として検知される。
+ */
+export type FugueEquipReply =
+  | {
+      schema_version: '1';
+      request_id: string;
+      operation: 'equip';
+      status: 'equipped' | 'already_equipped';
+      summary: string;
+      skill: SkillRef;
+      processing_time_ms: number;
+      warnings: string[];
+    }
+  | {
+      schema_version: '1';
+      request_id: string;
+      operation: 'equip';
+      status: 'not_found' | 'error';
+      summary: string;
+      skill: null;
+      processing_time_ms: number;
+      warnings: string[];
+    };
 
 /**
  * biblio-claw 内部の分類 code — 蔵書検索の失敗を Fugue 側に伝えるために使う。

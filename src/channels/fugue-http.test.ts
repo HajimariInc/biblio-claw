@@ -38,6 +38,40 @@ vi.mock('../biblio/shelf-gh.js', async (importOriginal) => {
   };
 });
 
+// Phase 3: fugue_equipped_biblios の DB 実体を mock 化。channel test は DB 疎通を触らない
+// (DB 実体は fugue-equipped-biblios.test.ts で担保、判断 K の layering)。
+// default は [] / true を返し、既存 test case (lifecycle / auth / 404 / port + consult 実装 +
+// port release probe を含む合計 24 case) が壊れない。
+vi.mock('../db/fugue-equipped-biblios.js', () => ({
+  insertFugueEquippedBiblio: vi.fn(() => true),
+  getFugueEquippedBiblioNames: vi.fn(() => []),
+  deleteFugueEquippedBiblioByName: vi.fn(() => 0),
+}));
+
+// Phase 3 HITL regression 用: Slack HITL 経路の requestApproval が Fugue equip から呼ばれない
+// ことを spy で固定する。fugue-http.ts が import していないので default で never called、
+// リファクタで誤って呼び込んだら test が fail する保険。
+vi.mock('../modules/approvals/primitive.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../modules/approvals/primitive.js')>();
+  return {
+    ...original,
+    requestApproval: vi.fn(),
+  };
+});
+
+// Phase 3 HITL defensive guard 用: requiresApproval の実装 (Fugue 契約 §6.2) を保ちつつ、
+// test でだけ mockReturnValueOnce(true) で defensive branch を発火させ、handleEquip が
+// 200 + status:'error' + skill:null + warnings に HITL required 文言で閉じる挙動を検証する
+// (PR #117 review、silent-failure-hunter MEDIUM 2 + pr-test-analyzer sev 6 対応)。
+// default では現行 matrix 通り false を返し、既存の 12 equip case は無変更で PASS する。
+vi.mock('../biblio/hitl-policy.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../biblio/hitl-policy.js')>();
+  return {
+    ...original,
+    requiresApproval: vi.fn(original.requiresApproval),
+  };
+});
+
 // 基本 fixture — 3 items (biblio-art x 1, biblio-dev x 2)。既存の hit/miss テスト用。
 const FIXTURE_RESULT: ListBiblioResult = {
   ok: true,
@@ -204,25 +238,10 @@ describe('FugueHttpServer', () => {
   // Phase 2 の consult 応答は下段 `describe('handleConsult (Phase 2 implementation)', ...)`
   // で fixture を注入した 13 case が担保する。equip 側 skeleton stub は Phase 3 まで温存。
 
-  it('200 skeleton response on POST /v1/channels/fugue/equip with valid Bearer + body', async () => {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/equip`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${TOKEN}`,
-      },
-      body: JSON.stringify({ schema_version: '1', request_id: 'req-equip-ok' }),
-    });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({
-      schema_version: '1',
-      request_id: 'req-equip-ok',
-      operation: 'equip',
-      status: 'ok',
-      stub: true,
-    });
-  });
+  // NOTE (Phase 3): 旧 Phase 1 skeleton 応答テスト (schema_version + request_id の 2 field 受理 →
+  // {status:'ok', stub:true}) は Phase 3 で equip full spec 化により削除済。Phase 3 の equip 応答は
+  // 下段 `describe('handleEquip (Phase 3 implementation)', ...)` で fixture を注入した 12+ case が
+  // 担保する (skill_id / channel 必須、4 status 応答、HITL regression 含む)。
 
   it('404 on unknown path even with valid Bearer', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/invoke`, {
@@ -375,7 +394,7 @@ describe('handleConsult (Phase 2 implementation)', () => {
     expect(body.summary).toContain('該当なし');
   });
 
-  it('SkillRef shape: id / name / description / manifest_url / equipped=false', async () => {
+  it('SkillRef shape: id / name / description / manifest_url / equipped (default mock で false)', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/consult`, {
       method: 'POST',
       headers: {
@@ -402,7 +421,10 @@ describe('handleConsult (Phase 2 implementation)', () => {
     expect(typeof first.id).toBe('string');
     expect(typeof first.name).toBe('string');
     expect(typeof first.description).toBe('string');
-    // equipped は常に false (Fugue に session 概念なし、型でも literal false)。
+    // equipped は Phase 3 で `boolean` (fugue_equipped_biblios membership に基づく)。
+    // 本 test suite の default mock は `getFugueEquippedBiblioNames → []` (装備ゼロ) のため
+    // ここでは false を観測する。実データ true/false 両観測は
+    // `describe('handleConsult equipped flag (Phase 3)')` の membership test でカバー。
     expect(first.equipped).toBe(false);
     // manifest_url は棚 GitHub tree URL に組み立て済 (readListEnv() の mock 値を経由)。
     expect(first.manifest_url).toMatch(
@@ -684,6 +706,377 @@ describe('handleConsult (Phase 2 implementation)', () => {
     expect(body.status).toBe('error');
     expect(body.warnings).toContain('consult failed: other');
     expect(body.raw).toMatchObject({ reason: 'other' });
+  });
+});
+
+describe('handleEquip (Phase 3 implementation)', () => {
+  let server: FugueHttpServer;
+  let port: number;
+
+  beforeEach(async () => {
+    server = new FugueHttpServer({ port: 0, host: '127.0.0.1', expectedToken: TOKEN });
+    const started = await server.start();
+    port = started.port;
+    // 各 test で default fixture を注入。棚に skill_id で完全一致する item を用意。
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    vi.mocked(listBiblio).mockResolvedValue(FIXTURE_RESULT);
+    // DB mock の default を復元 (別 test で override された前提のクリア)
+    const { insertFugueEquippedBiblio, getFugueEquippedBiblioNames } = await import('../db/fugue-equipped-biblios.js');
+    vi.mocked(insertFugueEquippedBiblio).mockReturnValue(true);
+    vi.mocked(getFugueEquippedBiblioNames).mockReturnValue([]);
+  });
+
+  afterEach(async () => {
+    await server.stop();
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  async function postEquip(body: unknown, opts?: { badToken?: boolean }): Promise<Response> {
+    return fetch(`http://127.0.0.1:${port}/v1/channels/fugue/equip`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: opts?.badToken ? 'Bearer wrong-token' : `Bearer ${TOKEN}`,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('200 status:equipped + skill.equipped=true + processing_time_ms>=0 + operation:equip (正常経路)', async () => {
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-ok',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      operation: string;
+      status: string;
+      skill: { id: string; name: string; equipped: boolean; manifest_url: string } | null;
+      summary: string;
+      processing_time_ms: number;
+      warnings: unknown[];
+      request_id: string;
+      schema_version: string;
+    };
+    expect(body.operation).toBe('equip');
+    expect(body.status).toBe('equipped');
+    expect(body.request_id).toBe('req-eq-ok');
+    expect(body.schema_version).toBe('1');
+    expect(body.skill).not.toBeNull();
+    expect(body.skill!.id).toBe('HajimariInc--figma-reviewer');
+    expect(body.skill!.equipped).toBe(true);
+    expect(body.skill!.manifest_url).toMatch(
+      /^https:\/\/github\.com\/MockOwner\/mock-shelf\/tree\/main\/biblio-art\/HajimariInc--figma-reviewer$/,
+    );
+    expect(body.processing_time_ms).toBeGreaterThanOrEqual(0);
+    expect(body.warnings).toEqual([]);
+    expect(body.summary).toContain('装備しました');
+  });
+
+  it('200 status:already_equipped + skill.equipped=true when insertFugueEquippedBiblio returns false', async () => {
+    const { insertFugueEquippedBiblio } = await import('../db/fugue-equipped-biblios.js');
+    vi.mocked(insertFugueEquippedBiblio).mockReturnValueOnce(false);
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-dup',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; skill: { equipped: boolean } | null; summary: string };
+    expect(body.status).toBe('already_equipped');
+    expect(body.skill).not.toBeNull();
+    expect(body.skill!.equipped).toBe(true);
+    expect(body.summary).toContain('既に装備済み');
+  });
+
+  it('200 status:not_found + skill=null when skill_id not present in shelf', async () => {
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-miss',
+      skill_id: 'nonexist--nope',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; skill: unknown; summary: string; warnings: unknown[] };
+    expect(body.status).toBe('not_found');
+    expect(body.skill).toBeNull();
+    expect(body.summary).toContain('棚に見つかりません');
+    expect(body.warnings).toEqual([]);
+  });
+
+  it('200 status:not_found when target item has category=unknown (consult 除外と整合)', async () => {
+    // fixture に 'unknown' item を注入 → 対応 skill_id を equip すると not_found
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    vi.mocked(listBiblio).mockResolvedValueOnce(buildFixtureWithUnknown());
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-unk',
+      skill_id: 'HajimariInc--broken',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; skill: unknown };
+    expect(body.status).toBe('not_found');
+    expect(body.skill).toBeNull();
+  });
+
+  it('400 invalid_input when skill_id is missing (Zod issues)', async () => {
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-missing-skill',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; issues?: unknown[] };
+    expect(body.error).toBe('invalid_input');
+    expect(Array.isArray(body.issues)).toBe(true);
+    expect(body.issues!.length).toBeGreaterThan(0);
+  });
+
+  it('400 invalid_input when skill_id exceeds 200 chars', async () => {
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-long',
+      skill_id: 'a'.repeat(201),
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; issues?: unknown[] };
+    expect(body.error).toBe('invalid_input');
+    expect(Array.isArray(body.issues)).toBe(true);
+  });
+
+  it('400 invalid_input when channel is "slack" (literal violation)', async () => {
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-slack',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'slack',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; issues?: unknown[] };
+    expect(body.error).toBe('invalid_input');
+    expect(Array.isArray(body.issues)).toBe(true);
+  });
+
+  it('400 invalid_input + detail when skill_id violates BIBLIO_NAME_RE (path traversal defense)', async () => {
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-traversal',
+      skill_id: '../etc/passwd',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; detail?: string };
+    expect(body.error).toBe('invalid_input');
+    expect(body.detail).toContain('skill_id');
+    expect(body.detail).toContain('owner');
+  });
+
+  it('200 status:error + warnings reason=env_missing when listBiblio throws env-missing error (partial failure)', async () => {
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    vi.mocked(listBiblio).mockRejectedValueOnce(
+      new Error('list: required env missing: SHELF_REPO_OWNER, SHELF_REPO_NAME'),
+    );
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-env',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; skill: unknown; warnings: string[]; summary: string };
+    expect(body.status).toBe('error');
+    expect(body.skill).toBeNull();
+    expect(body.warnings).toContain('equip failed: env_missing');
+    expect(body.summary).toContain('env_missing');
+  });
+
+  it('200 status:error + warnings reason=github_http when listBiblio throws GhHttpError (instanceof)', async () => {
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    const { GhHttpError } = await import('../biblio/shelf-gh.js');
+    vi.mocked(listBiblio).mockRejectedValueOnce(
+      new GhHttpError('GET contents/marketplace.json', 503, 'Service Unavailable'),
+    );
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-gh',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; warnings: string[] };
+    expect(body.status).toBe('error');
+    expect(body.warnings).toContain('equip failed: github_http');
+  });
+
+  it('200 status:error + warnings "equip state write failed" when insertFugueEquippedBiblio throws (DB write failure)', async () => {
+    const { insertFugueEquippedBiblio } = await import('../db/fugue-equipped-biblios.js');
+    vi.mocked(insertFugueEquippedBiblio).mockImplementationOnce(() => {
+      throw new Error('SQLITE_BUSY: database is locked');
+    });
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-dbfail',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; skill: unknown; warnings: string[] };
+    expect(body.status).toBe('error');
+    expect(body.skill).toBeNull();
+    expect(body.warnings.some((w) => w.startsWith('equip state write failed'))).toBe(true);
+    expect(body.warnings.some((w) => w.includes('SQLITE_BUSY'))).toBe(true);
+  });
+
+  it('HITL regression: Fugue equip returns sync 200 without invoking Slack requestApproval', async () => {
+    // 判断 K の代替データ証明: Fugue equip = HITL 簡略化 → Slack primitive.requestApproval が
+    // never called。fugue-http.ts が import しないので default で 0 回、リファクタで呼び込んだら fail する。
+    const { requestApproval } = await import('../modules/approvals/primitive.js');
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-hitl',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200); // sync 応答 (pause なし)
+    expect(vi.mocked(requestApproval)).not.toHaveBeenCalled();
+  });
+
+  it('HITL defensive guard: requiresApproval が true を返すと 200 + status:error + skill:null + HITL required warning で閉じる', async () => {
+    // Phase 3 判断 D: 現行 matrix では `requiresApproval('equip','fugue') === false` のため
+    // 到達しない defensive 経路。将来 matrix が変わったときに Fugue equip が silent に HITL bypass
+    // しないよう明示的に閉じているコード (fugue-http.ts:663) をリグレッションから守るため、
+    // mock で true にして応答形状を assert する
+    // (PR #117 review、silent-failure-hunter MEDIUM 2 + pr-test-analyzer sev 6 対応)。
+    const { requiresApproval } = await import('../biblio/hitl-policy.js');
+    vi.mocked(requiresApproval).mockReturnValueOnce(true);
+    // listBiblio / DB は本経路に到達しない (guard で早期 return) が、default mock は temp 有効。
+    const res = await postEquip({
+      schema_version: '1',
+      request_id: 'req-eq-hitl-guard',
+      skill_id: 'HajimariInc--figma-reviewer',
+      channel: 'fugue',
+    });
+    expect(res.status).toBe(200); // sync 200 (5xx にはしない = AD の本義)
+    const body = (await res.json()) as {
+      operation: string;
+      status: string;
+      skill: unknown;
+      summary: string;
+      warnings: string[];
+      processing_time_ms: number;
+    };
+    expect(body.operation).toBe('equip');
+    expect(body.status).toBe('error');
+    expect(body.skill).toBeNull();
+    expect(body.warnings).toContain('HITL approval required: please approve via Slack channel');
+    expect(body.summary).toContain('承認');
+    expect(body.processing_time_ms).toBeGreaterThanOrEqual(0);
+    // Slack HITL 経路 (`primitive.requestApproval`) は Fugue defensive branch でも呼ばない
+    // (bridge が Fugue channel に wire されていないため、log warn + fail-closed で返す設計)。
+    const { requestApproval } = await import('../modules/approvals/primitive.js');
+    expect(vi.mocked(requestApproval)).not.toHaveBeenCalled();
+  });
+
+  it('401 with valid POST body + bad Bearer even on /equip (auth-before-routing invariant)', async () => {
+    const res = await postEquip(
+      {
+        schema_version: '1',
+        request_id: 'req-eq-badauth',
+        skill_id: 'HajimariInc--figma-reviewer',
+        channel: 'fugue',
+      },
+      { badToken: true },
+    );
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ error: 'unauthorized' });
+  });
+});
+
+describe('handleConsult equipped flag (Phase 3)', () => {
+  let server: FugueHttpServer;
+  let port: number;
+
+  beforeEach(async () => {
+    server = new FugueHttpServer({ port: 0, host: '127.0.0.1', expectedToken: TOKEN });
+    const started = await server.start();
+    port = started.port;
+    const { listBiblio } = await import('../biblio/list-biblio.js');
+    vi.mocked(listBiblio).mockResolvedValue(FIXTURE_RESULT);
+    const { getFugueEquippedBiblioNames } = await import('../db/fugue-equipped-biblios.js');
+    vi.mocked(getFugueEquippedBiblioNames).mockReturnValue([]);
+  });
+
+  afterEach(async () => {
+    await server.stop();
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('SkillRef.equipped は fugue_equipped_biblios の membership に基づく (true / false 両方を観測)', async () => {
+    const { getFugueEquippedBiblioNames } = await import('../db/fugue-equipped-biblios.js');
+    // fixture の 3 件のうち 'HajimariInc--figma-reviewer' だけ装備中と mock
+    vi.mocked(getFugueEquippedBiblioNames).mockReturnValueOnce(['HajimariInc--figma-reviewer']);
+    const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/consult`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        schema_version: '1',
+        request_id: 'req-eq-mem',
+        // query='e' は fixture 3 件全ての name / description の substring 一致にヒットする
+        // (`HajimariInc--figma-reviewer` の 'review' 等)。3 件全観測で装備 1 件 + 未装備 2 件の
+        // equipped: true/false 混在を 1 request で検証するため、包括ヒットを狙って 'e' を選ぶ。
+        query: 'e',
+        mode: 'ask-ad',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { skills_found: { name: string; equipped: boolean }[] };
+    expect(body.skills_found.length).toBeGreaterThan(0);
+    const equippedItem = body.skills_found.find((s) => s.name === 'HajimariInc--figma-reviewer');
+    expect(equippedItem).toBeDefined();
+    expect(equippedItem!.equipped).toBe(true);
+    const nonEquipped = body.skills_found.find((s) => s.name !== 'HajimariInc--figma-reviewer');
+    expect(nonEquipped).toBeDefined();
+    expect(nonEquipped!.equipped).toBe(false);
+  });
+
+  it('getFugueEquippedBiblioNames throw → consult は 200 のまま + warnings に equipped state unavailable', async () => {
+    const { getFugueEquippedBiblioNames } = await import('../db/fugue-equipped-biblios.js');
+    vi.mocked(getFugueEquippedBiblioNames).mockImplementationOnce(() => {
+      throw new Error('SQLITE_LOCKED: locked');
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/consult`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        schema_version: '1',
+        request_id: 'req-eq-dbfail',
+        query: 'formatter',
+        mode: 'ask-ad',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      status: string;
+      skills_found: { equipped: boolean }[];
+      warnings: string[];
+    };
+    // 検索は成功 (formatter → 1 件)、equipped state だけが unavailable
+    expect(body.status).toBe('ok');
+    expect(body.skills_found.length).toBeGreaterThan(0);
+    // すべての skill が equipped=false に fallback
+    for (const s of body.skills_found) {
+      expect(s.equipped).toBe(false);
+    }
+    expect(body.warnings.some((w) => w.startsWith('equipped state unavailable'))).toBe(true);
+    expect(body.warnings.some((w) => w.includes('SQLITE_LOCKED'))).toBe(true);
   });
 });
 

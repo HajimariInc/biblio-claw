@@ -1,11 +1,11 @@
 /**
  * Fugue channel adapter (M4-E) — 独立 HTTP server (Node built-in `http.createServer`)。
  *
- * Phase 1 の scope (skeleton):
+ * Phase 1 の scope (skeleton、Phase 2/3 で consult/equip endpoint はそれぞれ full spec 化):
  *   - Bearer auth (timing-safe compare) → no_header / bad_scheme / bad_token を 401 で返す
  *     (client 応答は `{error: 'unauthorized'}` のみ、reason はサーバログ限定 = 未認証
  *     クライアントに auth oracle を漏らさない)
- *   - path routing (`/v1/channels/fugue/{consult,equip}`) → skeleton 応答
+ *   - path routing (`/v1/channels/fugue/{consult,equip}`) の frame (endpoint 実体は Phase 2/3)
  *   - 未知 path → 404 / URL parse 失敗 → 400 (log 付き) / JSON parse 失敗 → 400 /
  *     body 上限超過 (1 MiB) → 413 / Zod validation 失敗 → 400 / 内部エラー → 500
  *   - lifecycle: start() / stop() を Promise 化 (`src/cli/socket-server.ts` の `startCliServer`
@@ -21,6 +21,21 @@
  *   - `withBiblioActionSpan('list', ...)` に相乗り (M4-A biblio.list span に channel 横断集計)
  *   - `processing_time_ms` を response + log に載せる
  *
+ * Phase 3 の scope (equip full spec):
+ *   - `handleEquip`: `FugueEquipRequest` (skill_id + channel:'fugue') 受理 → `BIBLIO_NAME_RE`
+ *     guard で fail-closed 400 (path traversal 防御、`inspect-tool.ts` 執行と同流儀) →
+ *     `requiresApproval('equip','fugue')` guard (現行 matrix では到達しない defensive 経路 =
+ *     将来 matrix 変更時の silent HITL bypass 防止) → `withBiblioActionSpan('equip',...)` で
+ *     M4-A biblio.equip span に channel-agnostic 集計 → `listBiblio()` 棚存在確認 (`category !==
+ *     'unknown' && name === skill_id`) → `insertFugueEquippedBiblio()` の `INSERT OR IGNORE` +
+ *     `info.changes` で `equipped` / `already_equipped` を atomic 判別 → 4 status 応答
+ *     (`equipped` / `already_equipped` / `not_found` / `error`)
+ *   - `handleConsult` 拡張: `toSkillRefs` に `equippedNames: ReadonlySet<string>` 引数追加、
+ *     `getFugueEquippedBiblioNames()` DB read failure 時は空 Set fallback + `warnings.push`
+ *     (AD の本義: 装飾情報の欠落で検索自体を殺さない)
+ *   - 部分失敗経路は consult と対称 = `listBiblio` throw / DB write throw どちらも 200 +
+ *     `status:'error'` + `warnings`、5xx は 401/413/500 (uncaught) に限定
+ *
  * Chat SDK webhook (`src/webhook-server.ts`) とは path 形式が違うため独立 server として新設。
  * `webhook-server.ts` からは createServer 外殻 + try/catch → 500 fallback の骨格のみ写経、
  * lazy-start は使わず `setup()` から明示 start() する (Fugue adapter は adapter lifecycle に
@@ -31,19 +46,21 @@ import { timingSafeEqual } from 'node:crypto';
 
 import { SpanStatusCode } from '@opentelemetry/api';
 
-import { withBiblioActionSpan } from '../biblio/action-helpers.js';
+import { BIBLIO_NAME_RE, withBiblioActionSpan } from '../biblio/action-helpers.js';
+import { requiresApproval } from '../biblio/hitl-policy.js';
 import { listBiblio } from '../biblio/list-biblio.js';
 import { GhHttpError, MarketplaceParseError, readListEnv } from '../biblio/shelf-gh.js';
 import type { ListBiblioItem, ListBiblioResult } from '../biblio/types.js';
+import { getFugueEquippedBiblioNames, insertFugueEquippedBiblio } from '../db/fugue-equipped-biblios.js';
 import { log } from '../log.js';
 
 import {
   FugueConsultRequest,
-  FugueEquipRequestSkeleton,
+  FugueEquipRequest,
   type FugueConsultMode,
   type FugueConsultReply,
+  type FugueEquipReply,
   type FugueErrorResponse,
-  type FugueSkeletonResponse,
   type FugueUnavailableReason,
   type SkillRef,
 } from './fugue-schemas.js';
@@ -143,16 +160,25 @@ function queryMatches(item: ListBiblioItem, query: string): boolean {
  *
  * - `manifest_url`: 棚 GitHub tree URL に組み立て (biblio-claw 側で組み立て、Fugue 側は
  *   URL を UI で表示する用途を想定)。
- * - `equipped`: Phase 2 では常に `false` (Fugue に session 概念なし)。型で literal 強制。
+ * - `equipped`: Phase 3 で `fugue_equipped_biblios` (channel-scoped store) の membership に
+ *   基づき決定。`equippedNames` に item.name が含まれるかどうかで判定 (Set の O(1) lookup)。
+ *   equip 側からも `equip 対象の 1 件` を単独 SkillRef 化するために再利用される
+ *   (`toSkillRefs([item], owner, repo, new Set([item.name]))[0]` の形)。
  * - `limit`: Fugue 側 skills_found の推奨上限 (= 10 件)。10 件で cut off。
  */
-function toSkillRefs(items: ListBiblioItem[], shelfOwner: string, shelfRepo: string, limit = 10): SkillRef[] {
+function toSkillRefs(
+  items: ListBiblioItem[],
+  shelfOwner: string,
+  shelfRepo: string,
+  equippedNames: ReadonlySet<string>,
+  limit = 10,
+): SkillRef[] {
   return items.slice(0, limit).map((item) => ({
     id: item.name,
     name: item.name,
     description: item.description,
     manifest_url: `https://github.com/${shelfOwner}/${shelfRepo}/tree/main/${item.category}/${item.name}`,
-    equipped: false,
+    equipped: equippedNames.has(item.name),
   }));
 }
 
@@ -476,7 +502,27 @@ export class FugueHttpServer {
       // (env.ts:22-29 参照、caching なし)。小さいファイル前提で cost 無視可、hot path 化
       // したら listBiblio 戻り値に env を含める refactor を検討。
       const env = readListEnv();
-      const skills_found = toSkillRefs(filtered, env.shelfOwner, env.shelfRepo);
+
+      // 装備状態 (Phase 3) — fugue_equipped_biblios の membership で `SkillRef.equipped` を実データ化。
+      // DB read 失敗は consult を殺さない (AD の本義: 装飾情報の欠落で検索自体を失敗にしない)。
+      // 空 Set に fallback + warnings に理由を積み上げて Fugue 側で検知可能に。
+      let equippedNames: ReadonlySet<string>;
+      let equippedStateWarning: string | null = null;
+      try {
+        equippedNames = new Set(getFugueEquippedBiblioNames());
+      } catch (err) {
+        equippedNames = new Set();
+        equippedStateWarning = `equipped state unavailable: ${err instanceof Error ? err.message : String(err)}`;
+        log.warn('Fugue consult equipped state read failed, continuing with empty set', {
+          event: 'fugue.consult.equipped_state_unavailable',
+          channel: 'fugue',
+          outcome: 'warn',
+          request_id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      const skills_found = toSkillRefs(filtered, env.shelfOwner, env.shelfRepo, equippedNames);
       const summary = summarizeConsult(result, filtered, query, mode);
 
       const processing_time_ms = Math.round(performance.now() - startedAt);
@@ -484,6 +530,9 @@ export class FugueHttpServer {
       // warnings に truncation / unknown 除外を反映する。summary の件数表示と
       // skills_found.length の食い違いを client 側 (Fugue) が検知できるようにする。
       const warnings: string[] = [];
+      if (equippedStateWarning) {
+        warnings.push(equippedStateWarning);
+      }
       if (unknownCount > 0) {
         warnings.push(`omitted ${unknownCount} item(s) with unknown category from skills_found`);
       }
@@ -534,6 +583,10 @@ export class FugueHttpServer {
   }
 
   private async handleEquip(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    // Phase 3: equip full spec 実装 (handleConsult の構造を機械踏襲、判断 D-J)。
+    // Fugue 契約 §5.3 の FugueEquipRequest/Reply を満たす。
+    const startedAt = performance.now();
+
     let body: unknown;
     try {
       body = await readJsonBody(req);
@@ -565,7 +618,7 @@ export class FugueHttpServer {
       });
       return;
     }
-    const parsed = FugueEquipRequestSkeleton.safeParse(body);
+    const parsed = FugueEquipRequest.safeParse(body);
     if (!parsed.success) {
       log.warn('Fugue equip schema validation failed', {
         event: 'fugue.equip.schema_invalid',
@@ -576,19 +629,194 @@ export class FugueHttpServer {
       writeError(res, 400, { error: 'invalid_input', issues: parsed.error.issues });
       return;
     }
-    const response: FugueSkeletonResponse = {
-      schema_version: '1',
-      request_id: parsed.data.request_id,
-      operation: 'equip',
-      status: 'ok',
-      stub: true,
-    };
-    log.info('Fugue equip skeleton stub returned', {
-      event: 'fugue.equip.skeleton_stub',
+    const { request_id, skill_id } = parsed.data;
+
+    // BIBLIO_NAME_RE guard (判断 F): safeParse 通過後に fail-closed で 400 REJECT。
+    // 棚 item は shelve 経路で BIBLIO_NAME_RE 適合が保証されているため正当な id は必ず通る。
+    // path traversal / DB 汚染への防御線 (inspect-tool.ts の execute 冒頭 guard と同流儀)。
+    if (!BIBLIO_NAME_RE.test(skill_id)) {
+      log.warn('Fugue equip skill_id rejected by BIBLIO_NAME_RE', {
+        event: 'fugue.equip.schema_invalid',
+        channel: 'fugue',
+        outcome: 'reject',
+        reason: 'biblio_name_re',
+        request_id,
+        skill_id,
+      });
+      writeError(res, 400, {
+        error: 'invalid_input',
+        detail: 'skill_id must match "<owner>--<repo>" or "<owner>--<repo>--<skill>"',
+      });
+      return;
+    }
+
+    log.info('Fugue equip invoked', {
+      event: 'fugue.equip.invoked',
       channel: 'fugue',
-      outcome: 'success',
-      request_id: parsed.data.request_id,
+      request_id,
+      skill_id,
     });
-    writeJson(res, 200, response);
+
+    // HITL 政策 guard (判断 D、defensive 経路)。現行 matrix では `requiresApproval('equip', 'fugue') === false`
+    // (Fugue 契約 §6.2 の HITL 簡略化) のため到達しないが、将来 matrix が変わったときに Fugue equip が
+    // silent に HITL bypass しないよう明示的に閉じる (silent failure 撲滅)。
+    if (requiresApproval('equip', 'fugue')) {
+      const processing_time_ms = Math.round(performance.now() - startedAt);
+      log.warn('Fugue equip requires approval but HITL bridge is not wired for fugue channel', {
+        event: 'fugue.equip.hitl_required',
+        channel: 'fugue',
+        outcome: 'reject',
+        request_id,
+        skill_id,
+        processing_time_ms,
+      });
+      const reply: FugueEquipReply = {
+        schema_version: '1',
+        request_id,
+        operation: 'equip',
+        status: 'error',
+        summary: '装備には人間による承認が必要です。Slack channel から承認を受けてください。',
+        skill: null,
+        processing_time_ms,
+        warnings: ['HITL approval required: please approve via Slack channel'],
+      };
+      writeJson(res, 200, reply);
+      return;
+    }
+
+    // 棚確認 + DB 記録 (判断 G): `withBiblioActionSpan('equip', ...)` で M4-A 集計に載せる。
+    // sessionId は Fugue に session 概念なし = 空文字 (approval 経路と同慣習)。
+    await withBiblioActionSpan('equip', request_id, '', async (span) => {
+      let result: ListBiblioResult;
+      try {
+        result = await listBiblio({}, { ctx: { requestId: request_id, sessionId: '' } });
+      } catch (err) {
+        // 部分失敗経路 (判断 H): 200 + status:'error' + warnings で運ぶ (AD の本義)。
+        const reason = classifyListBiblioError(err);
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: `list_biblio_${reason}` });
+        span.setAttribute('biblio.outcome', 'failure');
+
+        const processing_time_ms = Math.round(performance.now() - startedAt);
+        log.error('Fugue equip listBiblio failed, returning partial-failure reply', {
+          event: 'fugue.equip.partial_failure',
+          channel: 'fugue',
+          outcome: 'failure',
+          request_id,
+          skill_id,
+          reason,
+          processing_time_ms,
+          err: errorRecord.message,
+        });
+        const reply: FugueEquipReply = {
+          schema_version: '1',
+          request_id,
+          operation: 'equip',
+          status: 'error',
+          summary: `装備準備で問題が発生しました (reason: ${reason})。しばらくしてから再度お試しください。`,
+          skill: null,
+          processing_time_ms,
+          warnings: [`equip failed: ${reason}`],
+        };
+        writeJson(res, 200, reply);
+        return;
+      }
+
+      // 棚存在確認 — consult と同じ unknown 除外 + 完全一致。
+      const item = result.items.find((i) => i.category !== 'unknown' && i.name === skill_id);
+      if (!item) {
+        span.setAttribute('biblio.outcome', 'not_found');
+        const processing_time_ms = Math.round(performance.now() - startedAt);
+        log.info('Fugue equip target not found in shelf', {
+          event: 'fugue.equip.not_found',
+          channel: 'fugue',
+          outcome: 'not_found',
+          request_id,
+          skill_id,
+          processing_time_ms,
+        });
+        const reply: FugueEquipReply = {
+          schema_version: '1',
+          request_id,
+          operation: 'equip',
+          status: 'not_found',
+          summary: `『${skill_id}』は棚に見つかりませんでした。consult で棚を検索してから装備してください。`,
+          skill: null,
+          processing_time_ms,
+          warnings: [],
+        };
+        writeJson(res, 200, reply);
+        return;
+      }
+
+      // INSERT OR IGNORE (判断 C): atomic な already_equipped 判定。
+      let inserted: boolean;
+      try {
+        inserted = insertFugueEquippedBiblio(skill_id, request_id);
+      } catch (err) {
+        // DB write 失敗 (判断 H): consult と同じく 200 + status:'error' + warnings で運ぶ。
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: 'equip_state_write_failed' });
+        span.setAttribute('biblio.outcome', 'failure');
+
+        const processing_time_ms = Math.round(performance.now() - startedAt);
+        log.error('Fugue equip DB write failed, returning partial-failure reply', {
+          event: 'fugue.equip.partial_failure',
+          channel: 'fugue',
+          outcome: 'failure',
+          request_id,
+          skill_id,
+          reason: 'db_write_failed',
+          processing_time_ms,
+          err: errorRecord.message,
+        });
+        const reply: FugueEquipReply = {
+          schema_version: '1',
+          request_id,
+          operation: 'equip',
+          status: 'error',
+          summary: `装備状態の記録に失敗しました。しばらくしてから再度お試しください。`,
+          skill: null,
+          processing_time_ms,
+          warnings: [`equip state write failed: ${errorRecord.message}`],
+        };
+        writeJson(res, 200, reply);
+        return;
+      }
+
+      // 成功経路 (equipped or already_equipped): SkillRef 組み立て + reply 返送。
+      // toSkillRefs を再利用して単一 SkillRef を作る (重複実装を避ける、判断 E の consult / equip 対称性)。
+      const env = readListEnv();
+      const skill = toSkillRefs([item], env.shelfOwner, env.shelfRepo, new Set([skill_id]))[0];
+      const status: 'equipped' | 'already_equipped' = inserted ? 'equipped' : 'already_equipped';
+
+      span.setAttribute('biblio.outcome', 'success');
+      const processing_time_ms = Math.round(performance.now() - startedAt);
+      const summary = inserted ? `『${item.name}』を装備しました。` : `『${item.name}』は既に装備済みです。`;
+      const reply: FugueEquipReply = {
+        schema_version: '1',
+        request_id,
+        operation: 'equip',
+        status,
+        summary,
+        skill,
+        processing_time_ms,
+        warnings: [],
+      };
+
+      log.info(inserted ? 'Fugue equip completed' : 'Fugue equip already-equipped', {
+        event: inserted ? 'fugue.equip.completed' : 'fugue.equip.already_equipped',
+        channel: 'fugue',
+        outcome: 'success',
+        request_id,
+        skill_id,
+        status,
+        processing_time_ms,
+      });
+
+      writeJson(res, 200, reply);
+    });
   }
 }
