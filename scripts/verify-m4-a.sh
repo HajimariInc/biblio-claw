@@ -7,6 +7,7 @@
 #   3. emit-test-span.ts 実行 → TRACE_ID / REQUEST_ID 抽出
 #   4. Cloud Trace API ポーリング (sleep 3 × 30 回 = 90s timeout、span >= 1 で break)
 #   5. BigQuery ポーリング (sleep 10 × 30 回 = 5 min timeout、stdout_* / stderr_* UNION)
+#   5.5. BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡)
 #   6. summary SQL 実行 → hit_count >= 1 + marker = 'M4A_OK'
 #   7. ネガティブ対照 (random trace_id で BQ 0 行 + sink filter 静的 grep)
 #
@@ -307,6 +308,44 @@ if [ "$bq_found" -ne 1 ]; then
           (2) GKE orchestrator Pod が稼働中か (kubectl get pods -n biblio-claw) /
           (3) sink writer_identity に roles/bigquery.dataEditor 付与済か /
           (4) sink filter (k8s_container + namespace_name=biblio-claw) が biblio-claw Pod にマッチしているか"
+fi
+
+# =============================================================================
+# Section 5.5: BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡)
+# =============================================================================
+# Cloud Logging Console UI "View trace" リンクの直接自動化は困難だが、BQ sink 上で
+# top-level `trace` 列が resource name 形式 (= projects/<PROJECT_ID>/traces/<32-hex>)
+# に昇格していれば、Fluent Bit / Cloud Logging 取り込み層の projectId 自動補完が成立
+# している証跡として、"View trace" 遷移動作を間接担保できる (issue #81 実機検証 2026-07-03)。
+# 将来 Cloud Logging 側の仕様変更で補完が壊れた場合、この assertion で早期検知する。
+info '=== [5.5/7] BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡) ==='
+
+TRACE_SHAPE_QUERY="SELECT trace FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.stdout\`
+   WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+     AND jsonPayload.event LIKE 'biblio.%'
+     AND trace IS NOT NULL
+   LIMIT 1"
+
+TRACE_SHAPE="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
+  "$TRACE_SHAPE_QUERY" 2>"$STDERR_DIR/bq-shape.stderr" | tail -n1 || true)"
+
+if [ -z "$TRACE_SHAPE" ] || [ "$TRACE_SHAPE" = 'trace' ]; then
+  # trace 列が空 or CSV header 行のみ = 過去 1h に trace 付き biblio.* event が届いていない。
+  # withBiblioActionSpan wrap 外の path (= HTTP 到達なしの early return 等) だけの場合に発生。
+  # fail ではなく warn (regression 検知の early warning、M4-A PASS 全体は温存)。
+  warn "  BQ 上の trace 付き biblio.* event が過去 1h 不在 (issue #81 実機検証の後段証跡スキップ)"
+  [ -s "$STDERR_DIR/bq-shape.stderr" ] && warn "  stderr: $(tail -c 200 "$STDERR_DIR/bq-shape.stderr" | tr '\n' ' ')"
+elif [[ "$TRACE_SHAPE" =~ ^projects/${GCP_PROJECT_ID}/traces/[0-9a-f]{32}$ ]]; then
+  info "  ✓ trace 列 shape OK: $TRACE_SHAPE"
+  info "    → Fluent Bit / Cloud Logging 取り込み層が bare 32-hex → resource name 形式に自動補完"
+  info "    → 'View trace' UI 遷移動作の間接担保 (issue #81 実機検証済 2026-07-03)"
+else
+  # shape が想定外 (bare 32-hex のまま or 別形式) = 自動補完が壊れた可能性。fail ではなく
+  # warn で残す (現状の biblio-claw 運用では trace 列不使用の SQL クエリが多数、即 fail は
+  # 不要。Option G 適用検討の signal として出す)。
+  warn "  ⚠ trace 列 shape 想定外: '$TRACE_SHAPE'"
+  warn "    → issue #81 実機検証済の前提 (= 自動補完成立) が崩れている可能性"
+  warn "    → docs/operations-runbook.md §M4-A Phase 2 log↔trace 連携 の Option G 適用検討"
 fi
 
 # =============================================================================
