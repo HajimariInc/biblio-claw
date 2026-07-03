@@ -173,63 +173,89 @@ run_destructive() {
   mkdir -p "${equip_dir}"
   echo 'destructive-sentinel' > "${equip_dir}/sentinel.txt"
 
-  # 1. enkin: ok=true + prUrl + 装備源残置
-  info '  - enkin (destructive、ok=true 期待)'
+  # 1. enkin: ok=true + prUrl + 装備源残置。not_shelved は fixture 消失 (= 別経路で
+  #    marketplace.json から entry が消えた) として warn 継続 (= shokyaku 側の許容 pattern
+  #    と対称化、issue #98)。fixture 復活には別途 shelve + main merge が必要な点は
+  #    runbook M3-b 節で案内。
+  info '  - enkin (destructive、ok=true 期待、not_shelved も許容)'
   LAST_HARNESS_STDERR="$STDERR_DIR/enkin-destructive.stderr"
   local enkin_result
   enkin_result="$(pnpm exec tsx scripts/biblio-enkin.ts "${VERIFY_M3_P3_BIBLIO}" "${VERIFY_M3_P3_CATEGORY}" \
     2>"$LAST_HARNESS_STDERR" | extract_result)"
   [ -n "${enkin_result}" ] || fail 'enkin CLI が RESULT を出さなかった (destructive)'
 
-  local enkin_ok enkin_url
+  local enkin_ok enkin_url enkin_reason enkin_skipped
   enkin_ok="$(json_field "$enkin_result" 'ok')"
   enkin_url="$(json_field "$enkin_result" 'prUrl')"
-  [ "${enkin_ok}" = 'true' ] || \
-    fail "enkin destructive で ok!=true (= shelf state 想定外?): ${enkin_result}"
-  case "${enkin_url}" in
-    https://github.com/*/pull/*) info "  → enkin PR 作成: ${enkin_url}" ;;
-    *) fail "enkin prUrl が GitHub URL 形式でない: ${enkin_url}" ;;
-  esac
-  # 装備源残置 (= 禁書の不変条件)
-  [ -d "${equip_dir}" ] || fail "禁書後に装備源 dir が消えた (= 禁書 vs 焼却の区別が壊れている): ${equip_dir}"
-
-  # 2. shokyaku: ok=true + prUrl + 装備源物理削除
-  # ※ enkin は draft PR を作るが main へ merge しないため main の marketplace.json には entry が残る。
-  #    `fetchMarketplace()` は default branch (= main) の HEAD を参照するため、直後に shokyaku を
-  #    実行すると entry が見つかり通常 ok=true になる。ただし shelf 側の状態が予期せず変化している
-  #    場合 (= 別経路で手動 merge 済 / enkin PR を即 merge した等) は not_shelved になる可能性が
-  #    あるため、その場合は warn して PASS 扱いとする。
-  info '  - shokyaku (destructive、ok=true 期待、not_shelved も許容)'
-  LAST_HARNESS_STDERR="$STDERR_DIR/shokyaku-destructive.stderr"
-  local shokyaku_result
-  shokyaku_result="$(pnpm exec tsx scripts/biblio-shokyaku.ts "${VERIFY_M3_P3_BIBLIO}" "${VERIFY_M3_P3_CATEGORY}" \
-    2>"$LAST_HARNESS_STDERR" | extract_result)"
-  [ -n "${shokyaku_result}" ] || fail 'shokyaku CLI が RESULT を出さなかった (destructive)'
-
-  local shokyaku_ok shokyaku_url shokyaku_reason
-  shokyaku_ok="$(json_field "$shokyaku_result" 'ok')"
-  shokyaku_url="$(json_field "$shokyaku_result" 'prUrl')"
-  shokyaku_reason="$(json_field "$shokyaku_result" 'reason')"
-  if [ "${shokyaku_ok}" = 'true' ]; then
-    case "${shokyaku_url}" in
-      https://github.com/*/pull/*) info "  → shokyaku PR 作成: ${shokyaku_url}" ;;
-      *) fail "shokyaku prUrl が GitHub URL 形式でない: ${shokyaku_url}" ;;
+  enkin_reason="$(json_field "$enkin_result" 'reason')"
+  enkin_skipped=0
+  if [ "${enkin_ok}" = 'true' ]; then
+    case "${enkin_url}" in
+      https://github.com/*/pull/*) info "  → enkin PR 作成: ${enkin_url}" ;;
+      *) fail "enkin prUrl が GitHub URL 形式でない: ${enkin_url}" ;;
     esac
-    # 物理削除 assert
-    [ ! -d "${equip_dir}" ] || fail "焼却後に装備源 dir が残った (= 焼却の不変条件違反): ${equip_dir}"
-    info '  → shokyaku 物理削除 OK'
+    # 装備源残置 (= 禁書の不変条件)
+    [ -d "${equip_dir}" ] || fail "禁書後に装備源 dir が消えた (= 禁書 vs 焼却の区別が壊れている): ${equip_dir}"
   else
-    # enkin が draft で merge されていないため main は未変更 → 2 回目 shokyaku が not_shelved に倒れる
-    # この場合は装備源 dir は残置されているはずなので cleanup
-    if [ "${shokyaku_reason}" = 'not_shelved' ]; then
-      warn "  → shokyaku not_shelved (= enkin PR が未 merge のため main marketplace に entry が残っていない、想定内)"
+    if [ "${enkin_reason}" = 'not_shelved' ]; then
+      warn "  → enkin not_shelved (= fixture ${VERIFY_M3_P3_BIBLIO} が main marketplace に未 merge / 過去焼却で消失、想定内)"
+      warn "     復活手順: docs/operations-runbook.md §M3-b (shelve → 手動 squash merge)"
+      # fixture 不在なら shokyaku も same reason で not_shelved 確定 → destructive skip
+      enkin_skipped=1
+      # 装備源 fixture が作られたままなので cleanup (= shokyaku まで到達しないため)
       [ -d "${equip_dir}" ] && rm -rf "${equip_dir}"
     else
-      fail "shokyaku destructive で想定外: ok=${shokyaku_ok}, reason=${shokyaku_reason}, result=${shokyaku_result}"
+      fail "enkin destructive で想定外: ok=${enkin_ok}, reason=${enkin_reason}, result=${enkin_result}"
     fi
   fi
 
-  info '[Phase 3 destructive] PASS (enkin PR 作成 + 装備源残置確認 + shokyaku 経路確認)'
+  # enkin が not_shelved で skip された場合、shokyaku も同じ reason で確定 not_shelved になる。
+  # shelf 状態を再確認する API 呼出を追加で走らせても情報は増えないため、フラグで skip する (issue #98)。
+  if [ "${enkin_skipped}" -eq 1 ]; then
+    info '  - shokyaku (skipped: enkin not_shelved で fixture 不在確定)'
+  else
+    # 2. shokyaku: ok=true + prUrl + 装備源物理削除
+    # ※ enkin は draft PR を作るが main へ merge しないため main の marketplace.json には entry が残る。
+    #    `fetchMarketplace()` は default branch (= main) の HEAD を参照するため、直後に shokyaku を
+    #    実行すると entry が見つかり通常 ok=true になる。ただし shelf 側の状態が予期せず変化している
+    #    場合 (= 別経路で手動 merge 済 / enkin PR を即 merge した等) は not_shelved になる可能性が
+    #    あるため、その場合は warn して PASS 扱いとする。
+    info '  - shokyaku (destructive、ok=true 期待、not_shelved も許容)'
+    LAST_HARNESS_STDERR="$STDERR_DIR/shokyaku-destructive.stderr"
+    local shokyaku_result
+    shokyaku_result="$(pnpm exec tsx scripts/biblio-shokyaku.ts "${VERIFY_M3_P3_BIBLIO}" "${VERIFY_M3_P3_CATEGORY}" \
+      2>"$LAST_HARNESS_STDERR" | extract_result)"
+    [ -n "${shokyaku_result}" ] || fail 'shokyaku CLI が RESULT を出さなかった (destructive)'
+
+    local shokyaku_ok shokyaku_url shokyaku_reason
+    shokyaku_ok="$(json_field "$shokyaku_result" 'ok')"
+    shokyaku_url="$(json_field "$shokyaku_result" 'prUrl')"
+    shokyaku_reason="$(json_field "$shokyaku_result" 'reason')"
+    if [ "${shokyaku_ok}" = 'true' ]; then
+      case "${shokyaku_url}" in
+        https://github.com/*/pull/*) info "  → shokyaku PR 作成: ${shokyaku_url}" ;;
+        *) fail "shokyaku prUrl が GitHub URL 形式でない: ${shokyaku_url}" ;;
+      esac
+      # 物理削除 assert
+      [ ! -d "${equip_dir}" ] || fail "焼却後に装備源 dir が残った (= 焼却の不変条件違反): ${equip_dir}"
+      info '  → shokyaku 物理削除 OK'
+    else
+      # enkin が draft で merge されていないため main は未変更 → 2 回目 shokyaku が not_shelved に倒れる
+      # この場合は装備源 dir は残置されているはずなので cleanup
+      if [ "${shokyaku_reason}" = 'not_shelved' ]; then
+        warn "  → shokyaku not_shelved (= enkin PR が未 merge のため main marketplace に entry が残っていない、想定内)"
+        [ -d "${equip_dir}" ] && rm -rf "${equip_dir}"
+      else
+        fail "shokyaku destructive で想定外: ok=${shokyaku_ok}, reason=${shokyaku_reason}, result=${shokyaku_result}"
+      fi
+    fi
+  fi
+
+  if [ "${enkin_skipped}" -eq 1 ]; then
+    info '[Phase 3 destructive] PASS (skipped: fixture 不在、enkin/shokyaku 経路の実 shelf 書換なし)'
+  else
+    info '[Phase 3 destructive] PASS (enkin PR 作成 + 装備源残置確認 + shokyaku 経路確認)'
+  fi
 }
 
 # --- 実行 ---
