@@ -118,10 +118,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- Local mode 必須 env fail-fast ---
+# --- Local mode 必須 env + 必須ファイル fail-fast ---
+#
+# PR #132 review I5 対応: `data/v2.db` 不在は「host orchestrator 未起動」= 前提条件違反であり、
+# 個別 section の warn skip 経路 (Section 3 Point 3 / Section 4 全体) で吸収すると
+# 「5 軸中 1 軸 (channel 分離) を未検証で PASS を名乗る」silent 縮退が起きる。preflight で
+# fail-fast することで「LOCAL 3 軸 (Section 2-4) を全部走らせる」契約を担保する。
 if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   : "${FUGUE_SHARED_TOKEN:?preflight fail-fast: local mode で FUGUE_SHARED_TOKEN 未設定 (.env or env 直接投入)}"
   info "  local: FUGUE_SHARED_TOKEN 設定済 (len=$(printf %s "$FUGUE_SHARED_TOKEN" | wc -c))"
+  [ -f data/v2.db ] \
+    || fail "preflight fail-fast: local mode で data/v2.db 不在 (host orchestrator 未起動)
+    対処: (1) docker compose up -d --wait 実行済か / (2) host で pnpm run dev 起動済か
+          (Section 3 Point 3 + Section 4 は data/v2.db 前提で走るため、不在で silent skip すると
+           channel 分離軸が未検証で M4-E PASS (local) を出す silent 縮退が起きる)"
+  info "  local: data/v2.db 存在確認 OK"
 fi
 
 # --- Prod mode 必須 env fail-fast + kubectl context + Secret Manager Token/Domain 取得 ---
@@ -209,7 +220,7 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   LAST_HARNESS_STDERR="$STDERR_DIR/local-consult.stderr"
   consult_result="$(pnpm exec tsx scripts/fake-fugue-client.ts consult \
     --query "typescript" --mode "ask-ad" \
-    2>"$LAST_HARNESS_STDERR" | extract_result)"
+    2>"$LAST_HARNESS_STDERR" | extract_result || true)"
   [ -n "$consult_result" ] || fail "local consult が RESULT を出さなかった"
 
   status="$(json_field "$consult_result" 'status')"
@@ -229,7 +240,7 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   CLEANUP_LOCAL_DIRTY=1
   equip_result="$(pnpm exec tsx scripts/fake-fugue-client.ts equip \
     --skill-id "$SKILL_ID" \
-    2>"$LAST_HARNESS_STDERR" | extract_result)"
+    2>"$LAST_HARNESS_STDERR" | extract_result || true)"
   [ -n "$equip_result" ] || fail "local equip が RESULT を出さなかった"
 
   equip_status="$(json_field "$equip_result" 'status')"
@@ -245,7 +256,7 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   LAST_HARNESS_STDERR="$STDERR_DIR/local-auth-fail.stderr"
   auth_fail_result="$(pnpm exec tsx scripts/fake-fugue-client.ts consult --bad-token \
     --query "test" \
-    2>"$LAST_HARNESS_STDERR" | extract_result)"
+    2>"$LAST_HARNESS_STDERR" | extract_result || true)"
   [ -n "$auth_fail_result" ] || fail "local auth-fail consult が RESULT を出さなかった"
 
   auth_fail_status="$(json_field "$auth_fail_result" 'status')"
@@ -296,21 +307,19 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   fi
 
   # Point 3: local SQLite の pending_approvals に該当 payload の row が 0 件
-  if [ -f data/v2.db ]; then
-    LAST_HARNESS_STDERR="$STDERR_DIR/local-pending.stderr"
-    pending_count="$(pnpm exec tsx scripts/q.ts data/v2.db \
-      "SELECT COUNT(*) FROM pending_approvals WHERE payload LIKE '%${SKILL_ID}%' AND action='adk_confirm'" \
-      2>"$LAST_HARNESS_STDERR" | tail -n1 || echo '')"
-    if ! [[ "$pending_count" =~ ^[0-9]+$ ]]; then
-      fail "local pending_approvals COUNT 取得失敗 ('$pending_count')"
-    fi
-    if [ "$pending_count" -ne 0 ]; then
-      fail "HITL 簡略化違反 Point 3: local pending_approvals に skill_id='$SKILL_ID' + action='adk_confirm' の row が $pending_count 件 (期待 0)"
-    fi
-    info "  Point 3 OK: local pending_approvals count=0"
-  else
-    warn "  Point 3 skip: data/v2.db 不在 (host orchestrator 未起動可能性)"
+  # PR #132 review I5 対応: `data/v2.db` は Section 1 preflight で存在保証済 (前提条件)、
+  # skip 経路を撤去。DB クエリ失敗は fail() で明示的に検知される。
+  LAST_HARNESS_STDERR="$STDERR_DIR/local-pending.stderr"
+  pending_count="$(pnpm exec tsx scripts/q.ts data/v2.db \
+    "SELECT COUNT(*) FROM pending_approvals WHERE payload LIKE '%${SKILL_ID}%' AND action='adk_confirm'" \
+    2>"$LAST_HARNESS_STDERR" | tail -n1 || echo '')"
+  if ! [[ "$pending_count" =~ ^[0-9]+$ ]]; then
+    fail "local pending_approvals COUNT 取得失敗 ('$pending_count')"
   fi
+  if [ "$pending_count" -ne 0 ]; then
+    fail "HITL 簡略化違反 Point 3: local pending_approvals に skill_id='$SKILL_ID' + action='adk_confirm' の row が $pending_count 件 (期待 0)"
+  fi
+  info "  Point 3 OK: local pending_approvals count=0"
 fi
 
 # =============================================================================
@@ -319,9 +328,10 @@ fi
 if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   info '=== [4/10] LOCAL channel 分離 (SQLite 2 table 独立性) ==='
 
-  if [ ! -f data/v2.db ]; then
-    warn "  Section 4 skip: data/v2.db 不在 (host orchestrator 未起動)"
-  else
+  # PR #132 review I5 対応: `data/v2.db` は Section 1 preflight で存在保証済 (前提条件)、
+  # Section 4 全体を skip する経路を撤去 (「5 軸中 1 軸 (channel 分離) を未検証で PASS を名乗る」
+  # silent 縮退を撲滅)。
+
     # (4-1) table 存在確認 (2 table が両方存在すること)
     LAST_HARNESS_STDERR="$STDERR_DIR/local-tables.stderr"
     tables_present="$(pnpm exec tsx scripts/q.ts data/v2.db \
@@ -378,14 +388,25 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
     fi
     info "  (4-3) session 側無影響 OK (Fugue equip は session_equipped_biblios に書かない実装契約)"
 
-    # (4-4) schema 独立性: 静的 grep で「Fugue equip は shokyaku.ts の並置削除以外に session
-    # 側 table を触らない」ことを担保。shokyaku.ts と fugue-http.ts の 2 file grep で近似確認。
-    if grep -q "session_equipped_biblios" src/channels/fugue-http.ts 2>/dev/null; then
-      fail "channel 分離違反 (4-4): src/channels/fugue-http.ts が session_equipped_biblios を参照
+    # (4-4) schema 独立性: 静的 grep で「Fugue equip は fugue_equipped_biblios のみを touch する」
+    # 実装契約を担保。**fugue-http.ts の 1 file grep** で近似確認 (shokyaku.ts は Fugue equip の
+    # cleanup で `deleteEquippedBiblioByName` (session 側削除) を正当に呼ぶため grep 対象に含めない
+    # = shokyaku.ts に session_equipped_biblios の参照があっても違反ではない)。
+    #
+    # PR #132 review I1 対応: `grep -q PATTERN FILE 2>/dev/null` を `if ... then fail; fi` で
+    # 使うと exit 1 (パターン不一致) と exit 2 (ファイル不在) を同一視 → ファイルがリネームされた
+    # 瞬間に silent に無効化される柵。ファイル存在を先行 assert して防御する。
+    # PR #132 review I2 対応: コメント文言「2 file grep」→「1 file grep」に訂正
+    # (実装は元から 1 file、コメントが実装を超えて誇張していた誤修正リスク源)。
+    FUGUE_HTTP_SRC="src/channels/fugue-http.ts"
+    [ -f "$FUGUE_HTTP_SRC" ] \
+      || fail "channel 分離チェック (4-4) 対象ファイル不在: $FUGUE_HTTP_SRC
+      対処: ファイルがリネーム/移動された場合は本 verify script 側のパスも追従修正すること"
+    if grep -q "session_equipped_biblios" "$FUGUE_HTTP_SRC"; then
+      fail "channel 分離違反 (4-4): $FUGUE_HTTP_SRC が session_equipped_biblios を参照
       対処: Fugue channel は fugue_equipped_biblios のみを touch する実装契約 (M4-E Phase 3)"
     fi
     info "  (4-4) 静的 grep OK: fugue-http.ts は session_equipped_biblios を参照しない"
-  fi
 fi
 
 # =============================================================================
@@ -394,20 +415,31 @@ fi
 if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   info '=== [5/10] PROD 疎通 + 認証 (Prod HTTPS 経由) ==='
 
-  # (5-1) Prod HTTPS /healthz (罠 14 対策: 1 回 fail 時に 1 回 retry)
+  # (5-1) Prod HTTPS /healthz (罠 14 対策: cert Active 直後 + LB frontend rollout 1-5 min の吸収)
+  #
+  # PR #132 review I6 対応: 元の 2×3s ≈ 26s は runbook §M4-E Phase 5 の実測 (罠 14: cert Active 化
+  # 直後 1-5 min propagation) を吸収できない。runbook Step 4.5 の deploy 側 poll ループ
+  # (12×30s = 6 min) と同 budget に揃える。定常状態運用では 1 回目で PASS するため wall-clock
+  # 影響なし、rollout 直後の flaky false negative を排除。
+  HEALTHZ_MAX_ATTEMPTS=12
+  HEALTHZ_SLEEP_SEC=30
   healthz_ok=0
-  for attempt in 1 2; do
-    if curl -sS --max-time 10 "https://${DOMAIN}/healthz" 2>"$STDERR_DIR/prod-healthz-$attempt.stderr" \
+  for attempt in $(seq 1 "$HEALTHZ_MAX_ATTEMPTS"); do
+    if curl -sS --max-time 10 "https://${DOMAIN}/healthz" \
+         2>"$STDERR_DIR/prod-healthz-$attempt.stderr" \
        | grep -q '^ok$'; then
       healthz_ok=1
+      [ "$attempt" -gt 1 ] && info "  [healthz attempt $attempt/$HEALTHZ_MAX_ATTEMPTS] OK after ~$(( (attempt-1) * HEALTHZ_SLEEP_SEC ))s"
       break
     fi
-    info "  [healthz attempt $attempt/2] fail, sleep 3s"
-    sleep 3
+    if [ "$attempt" -lt "$HEALTHZ_MAX_ATTEMPTS" ]; then
+      info "  [healthz attempt $attempt/$HEALTHZ_MAX_ATTEMPTS] fail, sleep ${HEALTHZ_SLEEP_SEC}s"
+      sleep "$HEALTHZ_SLEEP_SEC"
+    fi
   done
   if [ "$healthz_ok" -ne 1 ]; then
-    LAST_HARNESS_STDERR="$STDERR_DIR/prod-healthz-2.stderr"
-    fail "Prod HTTPS /healthz が 'ok' を返さない (罠 14: cert Active 化直後の 1-5 min propagation 遅延の可能性、または罠 3: NEG annotation 欠落)
+    LAST_HARNESS_STDERR="$STDERR_DIR/prod-healthz-${HEALTHZ_MAX_ATTEMPTS}.stderr"
+    fail "Prod HTTPS /healthz が 6 min ($HEALTHZ_MAX_ATTEMPTS×${HEALTHZ_SLEEP_SEC}s) 以内に 'ok' を返さない (罠 14: cert Active 化直後の 1-5 min propagation を超過、または罠 3: NEG annotation 欠落)
     対処: (1) gcloud compute ssl-certificates describe biblio-fugue-cert --format='value(managed.status)' で ACTIVE 確認 /
           (2) kubectl get svc biblio-fugue-channel -o jsonpath='{.metadata.annotations.cloud\\.google\\.com/neg}' で NEG annotation 確認 /
           (3) curl --resolve $DOMAIN:443:<Ingress IP> で DNS 未反映を切り分け"
@@ -537,7 +569,7 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
     pnpm exec tsx scripts/fake-fugue-client.ts consult \
     --query "verify-trace" --mode "ask-ad" \
     --traceparent "$TRACEPARENT" \
-    2>"$LAST_HARNESS_STDERR" | extract_result)"
+    2>"$LAST_HARNESS_STDERR" | extract_result || true)"
   [ -n "$trace_result" ] || fail "Prod consult (traceparent) が RESULT を出さなかった"
 
   used_traceparent="$(json_field "$trace_result" 'used_traceparent')"
@@ -553,13 +585,18 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
     || { LAST_HARNESS_STDERR="$STDERR_DIR/adc-token.stderr"; fail "ADC access token 取得失敗"; }
 
   # (7-3) Cloud Trace REST API v1 retry (30×3s = 90s max)、fugue.consult + biblio.list の両 span 揃い待ち
+  #
+  # PR #132 review I7 対応: jq の stderr を破棄せず個別ファイルに保存し、fail() 時に $TRACE_BODY
+  # 先頭抜粋を dump する。Cloud Trace API のスキーマ変更 / v1 破壊的変更 / .spans 構造想定外を
+  # 「90s timeout」の対処法 (ADC 権限 / instrumentation.ts) に誤誘導される silent 経路を撲滅。
   TRACE_BODY=''
   for i in $(seq 1 30); do
     body="$(curl -fsS -H "Authorization: Bearer $TOKEN_ADC" \
       "https://cloudtrace.googleapis.com/v1/projects/${GCP_PROJECT_ID}/traces/${TRACE_ID}" \
       2>"$STDERR_DIR/prod-trace-curl-$i.stderr" || true)"
     if [ -n "$body" ]; then
-      span_names_partial="$(printf '%s' "$body" | jq -r '.spans[].name' 2>/dev/null || true)"
+      span_names_partial="$(printf '%s' "$body" \
+        | jq -r '.spans[].name' 2>"$STDERR_DIR/prod-trace-jq-names-$i.stderr" || true)"
       if printf '%s' "$span_names_partial" | grep -qE '^fugue\.consult$' \
          && printf '%s' "$span_names_partial" | grep -qE '^biblio\.list$'; then
         TRACE_BODY="$body"
@@ -582,12 +619,25 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
 
   # (7-4) 親子関係 assert: fugue.consult.spanId == biblio.list.parentSpanId
   FUGUE_SPAN_ID="$(printf '%s' "$TRACE_BODY" \
-    | jq -r '.spans[] | select(.name=="fugue.consult") | .spanId' 2>/dev/null || echo '')"
+    | jq -r '.spans[] | select(.name=="fugue.consult") | .spanId' 2>"$STDERR_DIR/prod-trace-jq-fugue.stderr" || echo '')"
   BIBLIO_PARENT_ID="$(printf '%s' "$TRACE_BODY" \
-    | jq -r '.spans[] | select(.name=="biblio.list") | .parentSpanId' 2>/dev/null || echo '')"
+    | jq -r '.spans[] | select(.name=="biblio.list") | .parentSpanId' 2>"$STDERR_DIR/prod-trace-jq-biblio.stderr" || echo '')"
 
   if [ -z "$FUGUE_SPAN_ID" ] || [ -z "$BIBLIO_PARENT_ID" ]; then
-    fail "trace span 抽出失敗: fugue.consult.spanId='$FUGUE_SPAN_ID' biblio.list.parentSpanId='$BIBLIO_PARENT_ID'"
+    # jq stderr + TRACE_BODY 抜粋を診断情報として展開 (I7: Cloud Trace API v1 スキーマ変更検知経路)。
+    {
+      echo "== jq stderr (fugue.consult 抽出) =="
+      cat "$STDERR_DIR/prod-trace-jq-fugue.stderr" 2>/dev/null || echo "  (empty)"
+      echo "== jq stderr (biblio.list 抽出) =="
+      cat "$STDERR_DIR/prod-trace-jq-biblio.stderr" 2>/dev/null || echo "  (empty)"
+      echo "== TRACE_BODY 抜粋 (先頭 500 char) =="
+      printf '%s' "$TRACE_BODY" | head -c 500
+    } > "$STDERR_DIR/prod-trace-extract-debug.log"
+    LAST_HARNESS_STDERR="$STDERR_DIR/prod-trace-extract-debug.log"
+    fail "trace span 抽出失敗: fugue.consult.spanId='$FUGUE_SPAN_ID' biblio.list.parentSpanId='$BIBLIO_PARENT_ID'
+    対処: (1) Cloud Trace REST API v1 のスキーマが変わっていないか (jq stderr で確認) /
+          (2) TRACE_BODY 抜粋で実際に返された JSON 構造を確認 /
+          (3) 予期しない .spans 配下の形の場合、jq クエリの見直し要"
   fi
   [ "$FUGUE_SPAN_ID" = "$BIBLIO_PARENT_ID" ] \
     || fail "親子関係不一致: fugue.consult.spanId='$FUGUE_SPAN_ID' vs biblio.list.parentSpanId='$BIBLIO_PARENT_ID'
@@ -596,10 +646,13 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
 
   # (7-5) channel 属性: fugue.consult.labels.channel == 'fugue'
   CHANNEL_ATTR="$(printf '%s' "$TRACE_BODY" \
-    | jq -r '.spans[] | select(.name=="fugue.consult") | .labels["channel"] // ""' 2>/dev/null || echo '')"
-  [ "$CHANNEL_ATTR" = 'fugue' ] \
-    || fail "fugue.consult.labels.channel != 'fugue' (got '$CHANNEL_ATTR')
+    | jq -r '.spans[] | select(.name=="fugue.consult") | .labels["channel"] // ""' \
+      2>"$STDERR_DIR/prod-trace-jq-channel.stderr" || echo '')"
+  if [ "$CHANNEL_ATTR" != 'fugue' ]; then
+    LAST_HARNESS_STDERR="$STDERR_DIR/prod-trace-jq-channel.stderr"
+    fail "fugue.consult.labels.channel != 'fugue' (got '$CHANNEL_ATTR')
     対処: withFugueEntrySpan で channel:'fugue' 属性が set されているか確認 (fugue-entry-span.ts)"
+  fi
   info "  (7-5) channel='fugue' label OK"
 fi
 
@@ -628,8 +681,17 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   auth_fail_streak=0
   AUTH_FAIL_MAX=3
   SINK_PROBE_MAX=6
+  LAST_BQ_ATTEMPT=0
+
+  # PR #132 review I8 対応: 個別テーブルごとの失敗回数を保持し、部分失敗 (stdout 成功 / stderr 恒常失敗)
+  # 経路でも fail() 時に「どのテーブルが何回失敗したか」の集計 + 個別 stderr を診断情報として展開する。
+  declare -A BQ_TABLE_FAIL_COUNT
+  for T in $BQ_TABLES; do
+    BQ_TABLE_FAIL_COUNT["$T"]=0
+  done
 
   for i in $(seq 1 "$SINK_PROBE_MAX"); do
+    LAST_BQ_ATTEMPT="$i"
     BQ_TOTAL=0
     outer_auth_fails=0
     outer_table_count=0
@@ -644,6 +706,7 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
         [ "$BQ_TOTAL" -ge 1 ] && break
       else
         outer_auth_fails=$((outer_auth_fails + 1))
+        BQ_TABLE_FAIL_COUNT["$T"]=$(( BQ_TABLE_FAIL_COUNT["$T"] + 1 ))
       fi
     done
 
@@ -670,10 +733,26 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   done
 
   if [ "$bq_found" -ne 1 ]; then
+    # 部分失敗診断: どのテーブルが何回失敗したかを集計 + 直近 stderr を dump (I8 対応)。
+    {
+      echo "== BQ table 別失敗回数 ($SINK_PROBE_MAX attempts 中) =="
+      for T in $BQ_TABLES; do
+        echo "  table=$T fail_count=${BQ_TABLE_FAIL_COUNT[$T]}/$SINK_PROBE_MAX"
+      done
+      echo "== 直近 attempt ($LAST_BQ_ATTEMPT) の stderr 抜粋 =="
+      for T in $BQ_TABLES; do
+        if [ -s "$STDERR_DIR/bq-poll-${LAST_BQ_ATTEMPT}-${T}.stderr" ]; then
+          echo "--- table=$T ---"
+          tail -c 400 "$STDERR_DIR/bq-poll-${LAST_BQ_ATTEMPT}-${T}.stderr"
+        fi
+      done
+    } > "$STDERR_DIR/bq-poll-summary.log"
+    LAST_HARNESS_STDERR="$STDERR_DIR/bq-poll-summary.log"
     fail "BQ sink 疎通確認 fail: channel='fugue' の row が 60s 以内に到達しない
     対処: (1) Section 5/7 の consult が実際に Prod Pod で処理されたか /
           (2) Cloud Logging → BQ sink filter (k8s_container + namespace=biblio-claw) が biblio-claw に mapping /
-          (3) sink export lag (通常 数s-30s、稀に 1-2min)"
+          (3) sink export lag (通常 数s-30s、稀に 1-2min) /
+          (4) 上の LAST_HARNESS_STDERR 内の「BQ table 別失敗回数」を確認 = 部分失敗 (stdout 成功 / stderr のみ恒常失敗)なら別要因"
   fi
 fi
 
@@ -690,7 +769,7 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   prod_equip_result="$(FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$PROD_TOKEN" \
     pnpm exec tsx scripts/fake-fugue-client.ts equip \
     --skill-id "$SKILL_ID" \
-    2>"$LAST_HARNESS_STDERR" | extract_result)"
+    2>"$LAST_HARNESS_STDERR" | extract_result || true)"
   [ -n "$prod_equip_result" ] || fail "Prod equip が RESULT を出さなかった"
 
   prod_equip_http="$(json_field "$prod_equip_result" 'status')"
@@ -766,8 +845,14 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   fi
 
   # (9-6) 静的 grep: fugue-http.ts が session_equipped_biblios を触らない実装契約 (Section 4-4 と対称)
-  if grep -q "session_equipped_biblios" src/channels/fugue-http.ts 2>/dev/null; then
-    fail "Prod channel 分離違反 (9-6): src/channels/fugue-http.ts が session_equipped_biblios を参照
+  #
+  # PR #132 review I1 対応: Section 4-4 と同流儀でファイル存在を先行 assert (exit 1 と exit 2 の同一視回避)。
+  FUGUE_HTTP_SRC="src/channels/fugue-http.ts"
+  [ -f "$FUGUE_HTTP_SRC" ] \
+    || fail "channel 分離チェック (9-6) 対象ファイル不在: $FUGUE_HTTP_SRC
+    対処: ファイルがリネーム/移動された場合は本 verify script 側のパスも追従修正すること"
+  if grep -q "session_equipped_biblios" "$FUGUE_HTTP_SRC"; then
+    fail "Prod channel 分離違反 (9-6): $FUGUE_HTTP_SRC が session_equipped_biblios を参照
     対処: 実装契約違反 (M4-E Phase 3、fugue channel は fugue_equipped_biblios のみを touch)"
   fi
   info "  (9-6) 静的 grep OK: fugue-http.ts は session_equipped_biblios を参照しない"
@@ -779,9 +864,12 @@ fi
 if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   info '=== [10/10] PROD keyless 3 段 assert (KSA + GSA IAM + no USER_MANAGED key) ==='
 
-  GSA_EMAIL='biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com'
+  # PR #132 review I3 対応: project ID / namespace を hardcode せず、preflight で解決した
+  # $GCP_PROJECT_ID / $NAMESPACE を展開する。VERIFY_FUGUE_NAMESPACE env override が silent に
+  # 無視される DRY 違反を解消 + 将来の project 切替に自動追従。
+  GSA_EMAIL="biblio-orchestrator@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
   KSA_NAME='biblio-orchestrator-ksa'
-  WI_MEMBER='serviceAccount:hajimari-ai-hackathon-2026.svc.id.goog[biblio-claw/biblio-orchestrator-ksa]'
+  WI_MEMBER="serviceAccount:${GCP_PROJECT_ID}.svc.id.goog[${NAMESPACE}/${KSA_NAME}]"
 
   # (10-a) KSA annotation: iam.gke.io/gcp-service-account が GSA email と一致
   KSA_ANNOT="$(kubectl get sa "$KSA_NAME" -n "$NAMESPACE" \
