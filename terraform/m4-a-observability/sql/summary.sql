@@ -25,6 +25,11 @@
 -- - 一方、Cloud Logging reserved field の `trace` / `spanId` / `traceSampled` は **トップレベル**
 --   STRING / STRING / BOOL カラムに展開される (= `WHERE trace = 'projects/.../traces/...'`)。
 --   個別 trace 検索は `jsonPayload` ではなく top-level `trace` カラムを使う。
+--   `trace` 列は gcloud logging + BQ 両経路で実測 (2026-07-03, issue #81) して resource
+--   name 形式 (= `projects/<PROJECT_ID>/traces/<32-hex>`) に自動昇格されることを確認済。
+--   `trace-fields.ts` 側は Preferred Format (bare 32-hex) で送出し、Fluent Bit /
+--   Cloud Logging 取り込み層が projectId 補完する設計 (詳細 docs/operations-runbook.md
+--   §M4-A Phase 2 log↔trace 連携)。
 -- - `DATE(timestamp, 'Asia/Tokyo')` で JST 基準 (auto memory m4-a-phase-3-bq-sink-lessons.md
 --   「DATE(timestamp) TZ bug」回避、デフォルト UTC 評価で朝の時間帯に 0 件症状を防ぐ)。
 -- - latency / token usage は span attribute としてのみ記録 (Cloud Trace 側)。
