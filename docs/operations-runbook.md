@@ -859,7 +859,7 @@ GKE `biblio-claw` namespace で Cloud Logging Console UI の "View trace" リン
 
 #### 実運用の Cloud Logging 到達経路 (3 + 1)
 
-日常 debug で Cloud Logging に到達する経路は用途別に 4 種類ある。**経路 2 (Console 直行 + Saved Query) をベース**にして、状況で他経路を使い分ける。
+日常 debug で Cloud Logging に到達する経路は用途別に 4 種類 (UI 経由 3 + CLI 経由 1) ある。**経路 2 (Console 直行 + Saved Query) をベース**にして、状況で他経路を使い分ける。
 
 | # | 用途 | 経路 | 手順 | 向き不向き |
 |---|------|------|------|-----------|
@@ -1077,13 +1077,14 @@ Phase 4 当初は「emit-test-span の TRACE_ID と BQ row を個別マッチ」
 - **Section 5-6 (BQ sink)**: TRACE_ID 個別マッチを諦め、**「過去 1h に GKE 起源の biblio.* event log が >= 1 件 BQ 到達」だけ assert** (= sink 疎通の証跡、M4-A Phase 3 deliverable の動作確認として value 十分、本番副作用なし)
 - **Section 7 (静的反証)**: 動的ネガティブ対照は TRACE_ID 個別マッチ前提のため案 C ではスコープ外、sink filter の `k8s_container` + `namespace` 縛り保持の静的 grep のみ
 
-### 内部フロー (7 セクション)
+### 内部フロー (7 セクション + 5.5 追加)
 
 1. **preflight** — `.env` 読み + 必須 env (`GCP_PROJECT_ID` / `BQ_DATASET_ID`) + CLI 存在 (gcloud / bq / jq / node)
 2. **keyless 4 面** — `GOOGLE_APPLICATION_CREDENTIALS` 未設定 / ADC type が authorized_user|external_account|impersonated_service_account / repo 内に SA key json 不在 / TF に `google_service_account_key` resource 不在
 3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag)
 4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert (= TRACE_ID 個別マッチ)
 5. **BQ sink 疎通確認** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND jsonPayload.event LIKE 'biblio.%'` で sleep 10 × 6 (1 min) ポーリング、count >= 1 で break (= 過去 1h に biblio action 由来 log が sink 到達している証跡)
+5.5. **BQ sink trace 列 shape 確認** (issue #81 実機検証の後段証跡) — `stdout` + `stderr` UNION の trace 付き biblio.\* event 1 件を SELECT、`trace` 列が `projects/<PROJECT_ID>/traces/<32-hex>` 形式か assert。fail ではなく warn (regression の early warning、M4-A PASS 全体をブロックしない意図的判断)。BQ query 失敗は sentinel `BQ_SHAPE_QUERY_FAIL` で 0 件不在と区別 (Section 5 と同じ pattern)
 6. **summary SQL** — `sed` で `<PROJECT_ID>` / `<DATASET_ID>` を置換した `terraform/m4-a-observability/sql/summary.sql` を実行、`hit_count >= 1` + `marker = 'M4A_OK'` を assert
 7. **静的反証** — `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを grep で確認 (= sink の責任範囲縛りが消失していないことの証跡)
 
@@ -1154,7 +1155,7 @@ bash scripts/verify-phase-2-adk-gke.sh
 # (b) 既存 GKE wiring regression (= 9 assertion)
 bash scripts/verify-phase-2-wiring.sh
 
-# (c) M4-A 観測経路 regression (= 7 セクション、Section 5 BQ sink は直近 1h biblio activity 依存)
+# (c) M4-A 観測経路 regression (= 7 セクション + 5.5、Section 5/5.5 BQ sink は直近 1h biblio activity 依存)
 bash scripts/verify-m4-a.sh
 
 # (d) ローカル経路 regression (= M2 / M3 完成判定)
