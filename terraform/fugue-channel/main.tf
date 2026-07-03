@@ -20,9 +20,13 @@ resource "google_compute_global_address" "fugue_channel_ip" {
 }
 
 # ------------------- Google-managed SSL certificate ---------------------------
-# `.cloud.goog` sub-domain も Load Balancer authorization (A record が LB static IP に
-# 向いていること) で発行可能。provisioning は DNS 反映後に開始、Active 化は最大 60 分
-# (通常 15-30 分)。runbook §M4-E Phase 5 参照。
+# `.cloud.goog` sub-domain も Load Balancer authorization で発行可能。ただし Active 化には
+# **K8s Ingress apply (LB backend authorization) が前提条件** = Terraform apply 直後に
+# cert Active を待っても `PROVISIONING` + `FAILED_NOT_VISIBLE` で無限 stuck する
+# (Phase 5 実 deploy で判明、`docs/operations-runbook.md` §M4-E Phase 5 罠 13 参照)。
+# 正しい順序: Terraform apply → DNS 反映 (`.cloud.goog` = 通常 5-10 分) → K8s Ingress apply
+# (`k8s/25-ingress-fugue-channel.yaml`) → cert Active 待ち (Ingress apply 後 15-30 分、
+# 最大 60 分)。
 resource "google_compute_managed_ssl_certificate" "fugue_channel_cert" {
   name = "biblio-fugue-channel-cert"
   managed {

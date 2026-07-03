@@ -18,7 +18,7 @@
  *   `writeFileSync('/tmp/boot-complete'` の出現位置 < `await startCliServer()` の出現位置
  *   < `writeFileSync('/tmp/host-ready'` の出現位置
  *
- * = boot-complete = migration + backfill 完了 → CLI socket server 起動 → host-ready = 全
+ * = boot-complete = DB migration 完了 → CLI socket server 起動 → host-ready = 全
  * subsystem 完了、の順序が保証される。
  */
 import { readFileSync } from 'node:fs';

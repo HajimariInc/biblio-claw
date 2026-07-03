@@ -2126,7 +2126,7 @@ echo "token prefix: ${TF_VAR_fugue_shared_token:0:8}..."
 ```bash
 cd terraform/fugue-channel
 terraform init
-terraform plan   # 期待: 8 resource create (IP + Endpoints Service + cert + secret x2 +
+terraform plan   # 期待: 9 resource create (IP + Endpoints Service + cert + secret x2 +
                  # secret_version x2 + IAM binding x2)
 terraform apply
 terraform output # static_ip_address / cert_name / endpoints_service_name / secret 2 個の名前

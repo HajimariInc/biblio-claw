@@ -37,7 +37,7 @@ gcloud services enable endpoints.googleapis.com \
 export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
 export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
 
-# Step 2: Terraform apply (8 resource create: IP + Endpoints Service + cert + secret x2 +
+# Step 2: Terraform apply (9 resource create: IP + Endpoints Service + cert + secret x2 +
 # secret_version x2 + IAM binding x2)
 terraform init
 terraform plan
@@ -67,6 +67,11 @@ dig +short "$DOMAIN"
 # 期待: static IP アドレス (terraform output static_ip_address と一致)
 
 # 3. Managed cert Active 化待ち (最大 60 分、通常 15-30 分)
+# ⚠️ **重要な順序前提**: cert Active 化には **Ingress apply (Load Balancer authorization) が
+# 前提条件**。K8s Ingress (k8s/25-ingress-fugue-channel.yaml) apply を先に済ませてから本
+# ステップを実行すること。Terraform apply 直後に本ステップを走らせると cert が
+# `PROVISIONING` + `FAILED_NOT_VISIBLE` で無限 stuck する (Phase 5 実 deploy で判明、
+# `docs/operations-runbook.md` §M4-E Phase 5 罠 13 参照)。
 while true; do
   status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
     --global --format='value(managed.status)')
@@ -111,10 +116,12 @@ terraform destroy
    Step 0 の `gcloud services enable endpoints.googleapis.com` を skip すると Terraform apply
    が `google_endpoints_service` resource で `SERVICE_DISABLED` error になる。初回は必須。
 
-3. **DNS 反映 → Cert Active の順序**:
-   Managed cert の Active 化は **DNS record が propagate 済** の状態で始まるのが最短。
-   `.cloud.goog` は Google 内部 DNS = 通常 5-10 分で反映するが、cert Active はそこから
-   さらに 15-30 分 (最大 60 分) かかる。
+3. **DNS 反映 → Ingress apply → Cert Active の順序 (Phase 5 実 deploy で判明)**:
+   Managed cert の Active 化には **Ingress apply (Load Balancer authorization) が前提条件**
+   になる。Terraform apply 直後に cert Active 化を待つと `PROVISIONING` + `FAILED_NOT_VISIBLE`
+   で無限 stuck する。正しい順序は Terraform apply → DNS 反映 (`.cloud.goog` = 通常 5-10 分) →
+   K8s Ingress apply (`k8s/25-ingress-fugue-channel.yaml`) → cert Active 待ち (Ingress apply
+   後 15-30 分、最大 60 分)。詳細は `docs/operations-runbook.md` §M4-E Phase 5 罠 13 参照。
 
 4. **Teardown 順序 (Ingress + K8s Secret → terraform destroy)**:
    `google_compute_managed_ssl_certificate` が Ingress に attach されたままだと destroy が

@@ -3,21 +3,24 @@
 // 対象: Fugue channel adapter (`src/channels/fugue-http.ts`) が Fugue Cloud Run 側から
 // 受け取る `traceparent` / `tracestate` HTTP header。
 //
-// **Phase 4 review C1 対応** (2 段構造 + auto server span は Phase 5 で検証):
+// **Phase 4 review C1 対応** (2 段構造は Phase 5 で正式化として確定):
 //
-//   現行 (Phase 4): fugue.consult / fugue.equip → biblio.list / biblio.equip
+//   確定形 (Phase 5): fugue.consult / fugue.equip → biblio.list / biblio.equip
 //     (auto server span 層は本 repo の ESM + `--import` 起動構成では未発火 =
 //      `@opentelemetry/instrumentation-http` の core module patch が
 //      `require-in-the-middle` 依存で、ESM で機能させるには `module.register()`
-//      が別途必要。Phase 5 で実測 + フック追加を判断する scope の未完了項目。
-//      詳細は `docs/operations-runbook.md` §M4-E Phase 4 の §関連する scope 境界 参照)
+//      が別途必要。Phase 5 の ESM フック判断で **2 段構造を正式仕様として採用** = Node 24.15.0
+//      `module.register()` DEP0205 documentation-only 非推奨化 + Node 26.0.0 runtime
+//      deprecation 予定を根拠に 3 段化投資を見送り、詳細は
+//      `docs/operations-runbook.md` §M4-E Phase 4 §ESM フック判断 参照)
 //
 // 経路の非破壊性を保つ二重の保険:
 //   1. **extract の base を `context.active()` にデフォルト引数化**
-//      (Phase 5 で auto server span 層が発火するようになった際に、`context.with()`
+//      (将来 auto server span 層が発火するようになった際に、`context.with()`
 //      で active context を丸ごと置換せず、既存 SERVER span 上に extract を適用できる。
 //      W3C propagator は traceparent 不在時に `return context;` を返すため、
-//      header 不在の現状経路でも active context を破壊しない)
+//      header 不在の現状経路でも active context を破壊しない = 2 段構造の可逆性を保つ
+//      設計と対)
 //   2. propagator の副作用のなさ (`propagation.extract` は純粋関数、複数回呼んでも
 //      同じ結果 = idempotent)
 //
@@ -61,13 +64,13 @@ export const httpHeadersGetter: TextMapGetter<IncomingHttpHeaders> = {
  * HTTP request headers から W3C Trace Context (`traceparent` / `tracestate`) を extract し、
  * その context を返す。
  *
- * **base 引数の重要性 (Phase 4 review C1 対応)**:
+ * **base 引数の重要性 (Phase 4 review C1 対応、Phase 5 で 2 段構造確定後も継続的に有効)**:
  * base はデフォルトで `context.active()` を採用する。理由:
- *   - Phase 5 で auto HttpInstrumentation が機能するようになった際に、既に active 化された
+ *   - 将来 auto HttpInstrumentation が機能するようになった際に、既に active 化された
  *     SERVER span を保持したまま extract を適用できる (呼び出し元の `context.with(extractedCtx, fn)`
- *     が active context を置換しても SERVER span が失われない)
+ *     が active context を置換しても SERVER span が失われない = 2 段構造の可逆性を保つ設計)
  *   - traceparent header 不在時: W3C propagator は `return context;` を返すため、`context.active()`
- *     をそのまま返す = 現状の header 不在経路 (Phase 4 の主経路) でも active context を破壊しない
+ *     をそのまま返す = 現状の header 不在経路でも active context を破壊しない
  *   - traceparent header 有時: base の SpanContext が上書きされ、header 由来の trace_id が active になる
  *
  * base に `ROOT_CONTEXT` を明示的に渡す用法は、test 環境で auto instrumentation を無視して

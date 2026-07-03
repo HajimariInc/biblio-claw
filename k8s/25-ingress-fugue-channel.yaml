@@ -19,14 +19,17 @@
 # 前提: `envsubst` (`gettext` package) がインストール済。WSL2 AlmaLinux 9 では
 #   `sudo dnf install gettext` で導入 (未インストールなら sh error で気付ける)。
 #
-# Apply 順序 (docs/operations-runbook.md §M4-E Phase 5):
+# Apply 順序 (docs/operations-runbook.md §M4-E Phase 5、Phase 5 実 deploy で罠 13 判明後の確定順序):
 #   1. Terraform apply (static IP + Endpoints Service + cert + Secret Manager 2 個)
-#   2. Cloud Endpoints DNS 反映 + cert の Active 化待ち (最大 60 分)
+#   2. Cloud Endpoints DNS 反映待ち (.cloud.goog = 通常 5-10 分)
 #   3. K8s Secret 手動 sync (biblio-fugue-shared-token)
 #   4. StatefulSet update (envFrom + probe + ports) → rolling restart
 #   5. Service + BackendConfig apply (k8s/26)
 #   6. NetworkPolicy apply (k8s/27)
 #   7. Ingress apply (本 file、envsubst 経由) ← NEG + backend health 反映は最大 5 分
+#   8. Cert Active 化待ち (Ingress apply 後の 15-30 分、最大 60 分) ← Ingress apply が
+#      **cert Active の前提条件** (LB backend authorization 経由)、Step 7 より前に待つと
+#      `PROVISIONING` + `FAILED_NOT_VISIBLE` で無限 stuck (runbook §罠 13)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

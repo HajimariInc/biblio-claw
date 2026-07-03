@@ -1,15 +1,16 @@
 /**
- * scripts/fake-fugue-client.ts — Fugue channel adapter (M4-E Phase 1-2) 疎通確認用の
+ * scripts/fake-fugue-client.ts — Fugue channel adapter (M4-E Phase 1-5) 疎通確認用の
  * Fake Fugue クライアント CLI。
  *
- * Fugue Cloud Run 実結線前の local dev 検証用に、biblio-claw 側の HTTP endpoint に
- * Bearer 付き POST を打って RESULT=<json> を stdout に吐く。verify script 呼び出し
- * (Phase 6 = 任意予定) にも耐えるよう exit code は 0 (成功) / 2 (usage error) /
- * 3 (harness crash) の 3 分岐。
+ * biblio-claw 側の HTTP endpoint に Bearer 付き POST を打って RESULT=<json> を stdout に
+ * 吐く。**Phase 6 で `scripts/verify-fugue-channel.sh` から consult / equip の 5 箇所 (Section 2,
+ * 3, 5, 7, 9) で実際に呼び出される** ため、exit code は 0 (成功) / 2 (usage error) /
+ * 3 (harness crash) の 3 分岐で verify script assertion に耐える。
  *
  * Phase 2 で consult subcommand に `--query <str>` / `--mode <literal>` オプションを
  * 追加。Phase 3 で equip subcommand を full spec 化 (`--skill-id <str>` 必須 + `channel:'fugue'`
- * 自動付与)。
+ * 自動付与)。Phase 4 で `--traceparent <hex>` オプション (W3C Trace Context 継承検証用)。
+ * Phase 5 で `FUGUE_URL` env サポート (Prod HTTPS URL 全体切替、末尾 `/` strip)。
  *
  * Usage:
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "Figma" --mode "review-with-ad"

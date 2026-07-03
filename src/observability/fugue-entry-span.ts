@@ -5,26 +5,30 @@
 //   fugue.consult (or fugue.equip)  (この helper、kind=INTERNAL)
 //     └─ biblio.list (or biblio.equip)  (`withBiblioActionSpan` 経由、M4-A 集計に相乗り)
 //
-// **auto HTTP SERVER span 層は Phase 5 で検証**:
+// **auto HTTP SERVER span 層は Phase 5 で 2 段構造を正式化として確定**:
 // 本 repo は `"type": "module"` の純 ESM プロジェクトで、起動は `node --import
 // ./dist/instrumentation.js`。`@opentelemetry/instrumentation-http` の core module patch は
 // `require-in-the-middle` に依存し、ESM で機能させるには `module.register()` 等の
-// ESM フックが別途必要 (本 repo に未整備)。Phase 5 で ESM フック追加 or 2 段構造を正式仕様と
-// して運用の判断予定 (詳細: `docs/operations-runbook.md` §M4-E Phase 4)。
+// ESM フックが別途必要 (本 repo に未整備)。Phase 5 の ESM フック判断で **2 段構造を正式仕様として
+// 採用** (Node 24.15.0 `module.register()` DEP0205 documentation-only 非推奨化 + Node 26.0.0
+// runtime deprecation 予定を根拠に 3 段化投資を見送り、詳細: `docs/operations-runbook.md`
+// §M4-E Phase 4 §ESM フック判断)。
 //
-// **将来 auto server span 層が発火するようになった際の親子関係**:
+// **将来 auto server span 層が発火するようになった際の親子関係 (保険設計)**:
 // `withFugueEntrySpan` は `tracer.startActiveSpan()` で child span を生成するため、その時点で
 // active context に SERVER span があれば自動的にその子として nest される
 // (`extractTraceContextFromHttpHeaders` の base が `context.active()` = 破壊しない設計)。
+// = 2 段構造は「実質 3 段が発火しないから 2 段」に留めているだけで、将来 auto SERVER span 層
+// が発火すれば AsyncLocalStorage 経由で自動的に 3 段化される可逆判断。
 //
-// M4-A `withBiblioActionSpan` (src/biblio/action-helpers.ts:66-100) の写経で、
-// span 名 / attributes / signature を Fugue channel 用に最小化した helper:
+// M4-A `withBiblioActionSpan` (src/biblio/action-helpers.ts の `withBiblioActionSpan` 関数) の
+// 写経で、span 名 / attributes / signature を Fugue channel 用に最小化した helper:
 //   - span 名: `fugue.${operation}` (operation ∈ 'consult' | 'equip')
-//   - kind: INTERNAL (auto server span 層は Phase 5 で実装検証)
+//   - kind: INTERNAL (2 段構造 = 上に SERVER 層を積まない、上記 ESM フック判断で確定)
 //   - attributes: `channel: 'fugue'` を span level で持ち、Cloud Trace UI で channel filter 可能に
 //                 (M4-A biblio.* は channel-agnostic 集計を維持するため biblio 側では付与しない)
-//   - `sessionId` 引数なし — Fugue channel は session 概念なし (`fugue-http.ts:441, :689` で
-//     既存 `withBiblioActionSpan` に `sessionId=''` を渡している既存挙動と対称)
+//   - `sessionId` 引数なし — Fugue channel は session 概念なし (`fugue-http.ts` の handleConsult /
+//     handleEquip 内で既存 `withBiblioActionSpan` に `sessionId=''` を渡している既存挙動と対称)
 //   - `fugue.outcome` は helper では強制せず、呼び出し側 (`handleConsult` / `handleEquip`) が
 //     分岐ごとに `span.setAttribute('fugue.outcome', ...)` する (withBiblioActionSpan の
 //     `biblio.outcome` と同流儀 = outcome は domain logic が決めるべきで helper で強制しない)

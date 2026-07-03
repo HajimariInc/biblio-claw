@@ -91,7 +91,7 @@ export interface SkillRef {
  *   等) だが biblio-claw 自体は応答可能な状態。200 + `warnings` に理由を載せることで
  *   Fugue 側の AD ラウンド継続判断を許容する (5xx を出さない設計、PRD「AD の本義」節)。
  *
- * 5xx (401 / 413 / 503) は認可 / 上限超過 / biblio-claw 自体の応答不能に限定。
+ * 4xx/5xx (401 / 413 / 500) は認可 / 上限超過 / biblio-claw 自体の応答不能に限定。
  * `raw` は Phase 2 では listBiblio 結果の一部 (total / counts / appliedFilter) +
  * query + mode。TODO(M4-E Phase 5+): NanoClaw response を含める。
  */
@@ -157,7 +157,9 @@ export type FugueEquipReply =
  * consult 経路では:
  *
  * - 部分失敗時 (200 + `status:'error'`): `warnings` に `consult failed: ${reason}` として emit
- * - biblio-claw 自体の応答不能時 (503 + `error:'unavailable'`): `FugueErrorResponse.reason` に emit
+ * - biblio-claw 自体の応答不能時 (`error:'unavailable'`): `FugueErrorResponse.reason` に emit
+ *   (現状 `writeError()` の 5xx path は 500 `error:'internal'` のみ発火、`unavailable` variant
+ *   は未実装の予備 = discriminated union で reason を持てる契約だけ用意している)
  *
  * 4 分類:
  *
@@ -171,7 +173,7 @@ export type FugueEquipReply =
 export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplace_parse' | 'other';
 
 /**
- * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 500 / 503
+ * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 500
  * のすべての error response を型付け)。
  *
  * discriminated union で `error='unavailable'` の場合のみ `reason` を必須にし、他の

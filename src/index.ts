@@ -120,9 +120,13 @@ async function main(): Promise<void> {
     log.warn('Boot counter failed — PVC persistence may be broken, continuing startup', { dbPath });
   }
 
-  // Phase 5: 長時間 boot init (DB init + migration + backfill 完了) の signal。
+  // Phase 5: DB init + migration 完了の signal (backfill 実行前に書く点に注意 =
+  // 「schema が最新であることが確定した」時点の checkpoint として debug 用に残す。
+  // backfill は本 sentinel の後段で実行されるが、backfill 失敗時は throw で
+  // main().catch → Pod 再起動なので、backfill 中の crash は次 boot の incrementBootCounter
+  // で reset される)。
   // StatefulSet の startupProbe は host-ready (下記) を待つが、boot-complete は
-  // 「migration が終わった」時点の checkpoint として debug 用に残す。synchronous write =
+  // migration 完了の checkpoint として debug 用に残す。synchronous write =
   // log と一貫した書き込み順序を保証。/tmp は Pod tmpfs = 再起動で消えるが、boot ごとの
   // 再作成が期待挙動。log には構造化 context (`sentinel` + `path`) を付与 = trace 相関
   // 経路 / BQ sink 集計での grep が可能 (PR #126 review W1 対応)。
@@ -165,7 +169,7 @@ async function main(): Promise<void> {
   // 3. Channel adapters — CLI/Slack/etc. のメッセージが `routeInbound` に届くようになる。
   // M4-B Phase 3 で router.ts:deliverToAgent が `provider='adk'` を検知した場合、
   // `src/adk/dispatcher.ts` の `getSharedRunner()` が初回呼出時に lazy 初期化される。
-  // ここに到達する時点で `registerAnthropicVertexLlm()` (:93) + `initHostProxy()` +
+  // ここに到達する時点で `registerAnthropicVertexLlm()` + `initHostProxy()` +
   // `setupVertexProxy()` は全て完了済 = dispatcher の Vertex SDK 認証は解決可能な状態。
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {

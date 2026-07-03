@@ -48,8 +48,21 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
-    # 同 namespace 内 Pod (agent Pod からの OneCLI :10254/:10255 通信、
-    # CLI channel Unix socket 以外の in-cluster 通信を維持)
+    # 同 namespace 内 Pod からの ingress (全ポート許可)。`ports:` 省略 = orchestrator Pod の
+    # 全 port へのアクセスを同 namespace 内 Pod に対して許可する。
+    #
+    # なぜ全ポート許可か:
+    # - agent Pod (K8s Job spawn) → OneCLI proxy sidecar :10254 (MITM) / :10255 (health) の
+    #   2 経路が主用途だが、これらは同 Pod 内 sidecar 間通信 (=localhost) のため NetworkPolicy
+    #   非対象。ここで許可する対象は「別 Pod からの ingress」で、実質的には `pnpm run chat` CLI
+    #   Unix socket 以外の in-cluster 通信 (将来の debug 用 exec / Prometheus scrape / 内部
+    #   verify script 等) が該当する。
+    # - port allowlist に絞ると新規 port 追加時に silent block を招く (例: 追加した internal
+    #   endpoint が同 namespace の Pod から見えない不整合)。同 namespace という信頼境界内では
+    #   NetworkPolicy より Pod 側 auth (Bearer / IP allowlist) で守るほうが実用的、というのが
+    #   本 rule の設計判断。
+    # - 外部 (Fugue) 経由の Ingress は Bearer auth (fugue-http.ts) で拒否する = 全ポート許可でも
+    #   attack surface は Bearer 検証の後段に留まる。
     - from:
         - namespaceSelector:
             matchLabels:
