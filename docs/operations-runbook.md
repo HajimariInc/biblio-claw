@@ -1,6 +1,6 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-06-27
+最終更新:2026-07-03
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
 
@@ -2254,6 +2254,11 @@ Fugue 側 Cloud Run:
 
 **M4-E PRD 完了判定** = 上記 4 assertion + Fugue チーム側 verify 合同 exit 0。
 
+> **Phase 6 で自動化済** (2026-07-03): 上記 4 assertion は `scripts/verify-fugue-channel.sh --prod`
+> の Section 5-8 に組み込まれ、1 command で pass/fail 判定できるようになった。今後は手動で
+> `curl` / `kubectl describe` / `bq query` を叩き直す代わりに verify script 実行を推奨。
+> 詳細は §M4-E Phase 6 (下記) 参照。
+
 ### 再デプロイ手順 (image 更新のみ)
 
 ```bash
@@ -2552,7 +2557,7 @@ echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
 ### 関連
 
 - Source PRD: `.claude/PRPs/prds/m4/m4-e-fugue-integration.prd.md` (Phase 6)
-- Source Plan: `.claude/PRPs/plans/phase-6-verify-fugue-channel.plan.md` (実装完了後は `completed/` へ)
+- Source Plan (archived): `.claude/PRPs/plans/completed/phase-6-verify-fugue-channel.plan.md`
 - verify script: `scripts/verify-fugue-channel.sh` (Section 1-10) + `scripts/verify-m4.sh` (統合 chain)
 - 継承元 §M4-E Phase 5 (本 runbook 上部): 罠 14 件 + Prod deploy 手順 + 4 assertion 手動確認
 
