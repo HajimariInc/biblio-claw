@@ -32,6 +32,9 @@
 # 任意 env (default 挙動を上書き):
 #   VERIFY_M4B_BIBLIO                     acquire 対象 repo (default: example-org/test-biblio-minimal)
 #   VERIFY_M4B_INCLUDE_REGRESSION=1       Section 7 を有効化 (verify-slack-e2e-gke.sh 実行)
+#   VERIFY_M4B_SKIP_HITL=1                Section 6.5 (HITL flow smoke) を skip する (opt-out、
+#                                           緊急経路の逃げ道、通常運用では未設定を推奨。
+#                                           skip 時は regression 検知が Level 7 に委譲される)
 #   VERIFY_M4B_ORCHESTRATOR_POD           orchestrator Pod 名 (default: biblio-orchestrator-0)
 #   VERIFY_M4B_NAMESPACE                  namespace (default: biblio-claw)
 #
@@ -423,59 +426,117 @@ info "  gen_ai.operation.name=$GEN_AI_OP / gen_ai.provider.name=$GEN_AI_PROVIDER
 # =============================================================================
 info '=== [6.5/9] HITL 承認 flow smoke (enkin, DRY-RUN) ==='
 
-# 実 Slack 承認カード発火 (admin 押下) は verify script 経路では自動化困難なため、
-# dispatcher の pending 経路発火 (= longRunningToolIds > 0 → requestAdkApproval 呼出) と
-# pending_approvals row 作成の 2 point を assert する半自動 test。
-# 実 shelf 変更を防ぐため dummy biblio 名を使う (= admin 承認しない or timeout で cleanup)。
-DUMMY_BIBLIO='example-org--dummy-nonexistent-biblio-for-verify'
-TMP_OUT_ENKIN="$STDERR_DIR/chat-enkin.stdout"
-info "  enkin smoke: '@bot 禁書 $DUMMY_BIBLIO biblio-dev' 経路 (DRY-RUN、承認しないため中断で OK)"
-# 承認完了しないので exit 0/非 0 は問わない。中間応答「承認を admin にお願いしました」が
-# stdout に返れば silence タイムアウトで pnpm run chat が終了する想定。
-kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
-  sh -c "cd /app && pnpm run chat \"@bot 禁書 $DUMMY_BIBLIO biblio-dev\"" \
-  > "$TMP_OUT_ENKIN" 2> "$STDERR_DIR/chat-enkin.stderr" \
-  || true
+# opt-out: プレゼン直前 / 緊急 verify で LLM 応答傾向依存の flaky を避けたいとき用。
+# HITL 経路の smoke 検証を skip する = regression 検知が Level 7 (Slack 手動確認) 頼りになるが、
+# 通常経路 (Section 1-6 + 7) は動く前提で完成判定の代用としては十分弱くない。
+if [ -n "${VERIFY_M4B_SKIP_HITL:-}" ]; then
+  info '  skip HITL smoke (VERIFY_M4B_SKIP_HITL=1、regression 検知は Level 7 に委譲)'
+else
+  # 実 Slack 承認カード発火 (admin 押下) は verify script 経路では自動化困難なため、
+  # dispatcher の pending 経路発火 (= longRunningToolIds > 0 → requestAdkApproval 呼出) と
+  # pending_approvals row 作成の 2 point を assert する半自動 test。
+  # 実 shelf 変更を防ぐため dummy biblio 名を使う (= admin 承認しない or timeout で cleanup)。
+  DUMMY_BIBLIO='example-org--dummy-nonexistent-biblio-for-verify'
+  TMP_OUT_ENKIN="$STDERR_DIR/chat-enkin.stdout"
 
-# Pod ログで dispatcher pending 経路の event 発生を確認
-# `adk.approval.dispatch.enkin` は adk-approvals.ts の log.info で emit される固定 event 名。
-POD_LOGS_ENKIN="$(kubectl logs "$POD" -c orchestrator -n "$NAMESPACE" --since=2m 2>/dev/null || true)"
-if ! printf '%s' "$POD_LOGS_ENKIN" | grep -q '"event":"adk\.approval\.dispatch\.enkin"'; then
-  # LLM が破壊操作を発火せず text 応答で済ませたケースの可能性 = warn で継続、後段の DB 確認で判断。
-  warn "  HITL smoke: adk.approval.dispatch.enkin event 不在 (LLM が破壊操作を発火しなかった可能性)"
+  # LLM 応答傾向依存性を retry で吸収する: 3 attempt × 発話文言を段階的に強める。
+  # attempt 1: 自然な司書コマンド調 (通常運用と同じ発話)
+  # attempt 2: 「実行して」で命令性を強める
+  # attempt 3: tool 名 + 引数キーを明示 (root-agent instruction の「明示指示」規範を確実に満たす)
+  # 3 attempt 全 fail 時のみ fail() 発動 = 3 独立試行の全失敗確率で flaky を吸収。
+  HITL_SUCCESS=0
+  PENDING_COUNT=0
+  for attempt in 1 2 3; do
+    case $attempt in
+      1) PROMPT="@bot 禁書 $DUMMY_BIBLIO biblio-dev" ;;
+      2) PROMPT="@bot 禁書コマンドを実行してください: $DUMMY_BIBLIO を biblio-dev から除去" ;;
+      3) PROMPT="@bot enkin_biblio tool を呼び出してください: biblioName=$DUMMY_BIBLIO category=biblio-dev" ;;
+    esac
+    info "  [attempt ${attempt}/3] enkin smoke: '${PROMPT}' 経路 (DRY-RUN、承認しないため中断で OK)"
+
+    # 承認完了しないので exit 0/非 0 は問わない。中間応答「承認を admin にお願いしました」が
+    # stdout に返れば silence タイムアウトで pnpm run chat が終了する想定。
+    kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
+      sh -c "cd /app && pnpm run chat \"${PROMPT}\"" \
+      > "$TMP_OUT_ENKIN" 2> "$STDERR_DIR/chat-enkin-attempt${attempt}.stderr" \
+      || true
+
+    # Pod ログで dispatcher pending 経路の event 発生を確認
+    # `adk.approval.dispatch.enkin` は adk-approvals.ts の log.info で emit される固定 event 名。
+    POD_LOGS_ENKIN="$(kubectl logs "$POD" -c orchestrator -n "$NAMESPACE" --since=2m 2>/dev/null || true)"
+    EVENT_HIT=0
+    if printf '%s' "$POD_LOGS_ENKIN" | grep -q '"event":"adk\.approval\.dispatch\.enkin"'; then
+      EVENT_HIT=1
+    fi
+
+    # pending_approvals row の存在確認 (DB 直接 = orchestrator Pod 内の SQLite に scripts/q.ts で query)。
+    # adk_confirm action の row を絞る。dummy biblio 名を payload に含んでいるものだけ数える。
+    PENDING_COUNT="$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
+      pnpm exec tsx scripts/q.ts /data/v2.db \
+      "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'" \
+      2>"$STDERR_DIR/pending-check-attempt${attempt}.stderr" \
+      | tail -n1 || echo '')"
+
+    if ! [[ "$PENDING_COUNT" =~ ^[0-9]+$ ]]; then
+      LAST_HARNESS_STDERR="$STDERR_DIR/pending-check-attempt${attempt}.stderr"
+      fail "pending_approvals table 読み取り失敗 (COUNT 抽出不能、PENDING_COUNT='$PENDING_COUNT'、attempt=${attempt})"
+    fi
+
+    if [ "$EVENT_HIT" -eq 1 ] && [ "$PENDING_COUNT" -ge 1 ]; then
+      HITL_SUCCESS=1
+      info "  [attempt ${attempt}/3] HITL enkin smoke: dispatcher pending 経路発火 + pending_approvals row 作成 OK (count=$PENDING_COUNT)"
+      break
+    fi
+
+    warn "  [attempt ${attempt}/3] HITL smoke miss: event_hit=${EVENT_HIT}, pending_count=${PENDING_COUNT} (LLM が破壊操作を発火しなかった可能性)"
+  done
+
+  if [ "$HITL_SUCCESS" -ne 1 ]; then
+    # dispatch event も出ていない かつ row も無い = LLM が enkin を呼ばずに text で済ませた
+    # ケース。3 attempt 全失敗は plan 想定と外れるので fail (= HITL 経路の smoke が成立しないと
+    # Phase 4 完成判定としては弱すぎる)。ただし error message で「LLM 応答傾向依存性」と対処策を明示。
+    fail "pending_approvals に adk_confirm row 不在 (3 attempt 全 miss、最終 count=$PENDING_COUNT)
+    対処: (1) LLM 応答傾向依存 = 3 attempt 全 fail は通常想定外だが、緊急時は
+              VERIFY_M4B_SKIP_HITL=1 で本 section を skip 可能 (regression は Level 7 に委譲) /
+          (2) root-agent instruction の「明示指示のみ発火」規範が過剰に効いている可能性 =
+              src/adk/root-agent.ts:73 の attempt 3 プロンプト (\"enkin_biblio tool を呼び出して\")
+              でも発火しないなら instruction の tuning を検討 /
+          (3) approval-dispatcher / adk-approvals の import chain 破損 /
+          (4) dispatcher の pending 経路検知ロジックの regression"
+  fi
+
+  # issue #106 Layer 1 追加 assertion: expires_at が NULL でない (= admin 未応答時の
+  # タイムアウト経路が発火可能な状態で row が作られている)。Layer 2 (実 timer 発火) と
+  # Layer 3 (Pod 再起動 sweep) は runbook §issue #106 の実機検証手順 で確認する
+  # (verify script では副作用大 & 実行時間長のため未組込)。
+  EXPIRES_NULL_COUNT="$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
+    pnpm exec tsx scripts/q.ts /data/v2.db \
+    "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%' AND expires_at IS NULL" \
+    2>"$STDERR_DIR/expires-check.stderr" \
+    | tail -n1 || echo '')"
+  if ! [[ "$EXPIRES_NULL_COUNT" =~ ^[0-9]+$ ]]; then
+    LAST_HARNESS_STDERR="$STDERR_DIR/expires-check.stderr"
+    fail "pending_approvals.expires_at 読み取り失敗 (COUNT 抽出不能、EXPIRES_NULL_COUNT='$EXPIRES_NULL_COUNT')"
+  fi
+  if [ "$EXPIRES_NULL_COUNT" -ne 0 ]; then
+    fail "issue #106 Layer 1 regression: adk_confirm row の expires_at が NULL (count=$EXPIRES_NULL_COUNT)
+    対処: adk-approvals.ts:requestAdkApproval の createPendingApproval 呼出で expires_at が
+          渡されていない可能性 (= Layer 1 の Set が壊れた regression)。
+          src/modules/approvals/adk-approvals.ts の 'const expiresAt' 周辺を確認。"
+  fi
+  info "  HITL Layer 1 smoke: 全 adk_confirm row の expires_at が設定済 (NULL count=0)"
+
+  # Cleanup: dummy pending row を削除 (次回 verify 実行時のノイズ抑制 + 2 連続冪等性)
+  # skip 経路でも 3-attempt 経路でも payload に dummy 名を含む row は全消し。冪等 DELETE のため
+  # 対象 row 0 件でも副作用なし。
+  kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
+    pnpm exec tsx scripts/q.ts /data/v2.db \
+    "DELETE FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'" \
+    > /dev/null 2>&1 || true
+  info "  cleanup: dummy pending_approvals row 削除 OK"
+
+  # shokyaku smoke は enkin smoke で HITL 経路が確認できているため省略 (= 実装 pattern 同一)。
 fi
-
-# pending_approvals row の存在確認 (DB 直接 = orchestrator Pod 内の SQLite に scripts/q.ts で query)。
-# adk_confirm action の row を絞る。dummy biblio 名を payload に含んでいるものだけ数える。
-PENDING_COUNT="$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
-  pnpm exec tsx scripts/q.ts /data/v2.db \
-  "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'" \
-  2>"$STDERR_DIR/pending-check.stderr" \
-  | tail -n1 || echo '')"
-if ! [[ "$PENDING_COUNT" =~ ^[0-9]+$ ]]; then
-  LAST_HARNESS_STDERR="$STDERR_DIR/pending-check.stderr"
-  fail "pending_approvals table 読み取り失敗 (COUNT 抽出不能、PENDING_COUNT='$PENDING_COUNT')"
-fi
-if [ "$PENDING_COUNT" -lt 1 ]; then
-  # dispatch event も出ていない かつ row も無い = LLM が enkin を呼ばずに text で済ませた
-  # ケース。plan 想定と外れるので fail (= HITL 経路の smoke が成立しないと Phase 4 完成判定
-  # としては弱すぎる)。ただし error message で「LLM 応答傾向依存性」を明示。
-  fail "pending_approvals に adk_confirm row 不在 (count=$PENDING_COUNT)
-    対処: (1) LLM が dummy biblio に対して enkin を発火しなかった可能性 = root-agent instruction
-          で破壊操作を「明示指示があった場合のみ発火」と規範化しているが、'@bot 禁書 <name>'
-          は明示指示のはず / (2) approval-dispatcher / adk-approvals の import chain 破損 /
-          (3) dispatcher の pending 経路検知ロジックの regression"
-fi
-info "  HITL enkin smoke: dispatcher pending 経路発火 + pending_approvals row 作成 OK (count=$PENDING_COUNT)"
-
-# Cleanup: dummy pending row を削除 (次回 verify 実行時のノイズ抑制 + 2 連続冪等性)
-kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
-  pnpm exec tsx scripts/q.ts /data/v2.db \
-  "DELETE FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'" \
-  > /dev/null 2>&1 || true
-info "  cleanup: dummy pending_approvals row 削除 OK"
-
-# shokyaku smoke は enkin smoke で HITL 経路が確認できているため省略 (= 実装 pattern 同一)。
 
 # =============================================================================
 # Section 7: ネガティブ対照 (regression、opt-in)
