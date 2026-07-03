@@ -58,13 +58,19 @@ export function insertFugueEquippedBiblio(biblioName: string, requestId: string)
  * 反映する構造。
  */
 export function getFugueEquippedBiblioNames(): string[] {
-  // 型 cast は `FugueEquippedBiblioRow` (biblio_name / equipped_at / request_id) に結線 =
-  // migration 019 のカラム定義が変わったとき Row 型の追従漏れを compile-time で検知する
-  // (PR #117 review、type-design-analyzer 案 (b))。SELECT は biblio_name のみだが、Row 型は
-  // 全カラムを持つため .map の r.biblio_name アクセスは narrow 型で保証される。
-  return (getDb().prepare('SELECT biblio_name FROM fugue_equipped_biblios').all() as FugueEquippedBiblioRow[]).map(
-    (r) => r.biblio_name,
-  );
+  // 型 cast は SELECT した列のみ主張する `Pick<FugueEquippedBiblioRow, 'biblio_name'>[]` を採用
+  // (PR #135 review 提案 9、type-design-analyzer 指摘)。`FugueEquippedBiblioRow[]` 全型を主張すると
+  // 実際の SELECT には含まれない `equipped_at` / `request_id` へのアクセスを型は許すが実行時は
+  // `undefined` になる silent 乖離を招く。`Pick` で narrow することで:
+  //   - migration 019 のカラム定義変更時、`FugueEquippedBiblioRow` から `biblio_name` を除去した瞬間に
+  //     compile error になる (追従漏れの検知は維持される)
+  //   - `.map` 内で誤って `r.request_id` 等に手を伸ばした場合、型が block する
+  return (
+    getDb().prepare('SELECT biblio_name FROM fugue_equipped_biblios').all() as Pick<
+      FugueEquippedBiblioRow,
+      'biblio_name'
+    >[]
+  ).map((r) => r.biblio_name);
 }
 
 /**

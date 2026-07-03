@@ -59,17 +59,31 @@ export type HitlOperation = 'consult' | 'equip' | 'shiire' | 'tekkyo';
 /**
  * Fugue 契約 §6.2 の requires_approval matrix。
  *
- * 実装は素直な if 連鎖で書く (matrix の直訳)。将来 channel / operation が増えたら
- * exhaustive check を導入する余地は残すが、現状は 2×4 = 8 通りに閉じるため簡潔さ優先。
+ * **switch + `never` exhaustive check パターン** (type-design-analyzer 指摘、
+ * PR #135 review Important 3): 政策関数の default は「HITL 不要」= fail-open 側なため、
+ * 将来 `HitlOperation` に破壊的な値 (例 `'reorder'`) を追加した際に本関数を更新し忘れると
+ * 「新規操作は無警告で承認不要になる」silent HITL bypass に倒れる。switch + `never` で
+ * 網羅漏れを compile-time で block する (2×4=8 通りしかないが、security-relevant な政策
+ * 関数のためコストパフォーマンスを取る)。
  */
 export function requiresApproval(operation: HitlOperation, channel: HitlChannel): boolean {
-  // Fugue equip = HITL 簡略化 (装備状態が channel-scoped で closure、Fugue Director 1 人前提)
-  if (channel === 'fugue' && operation === 'equip') return false;
-  // 破壊操作 (棚状態変更) は channel を問わず HITL
-  if (operation === 'shiire' || operation === 'tekkyo') return true;
-  // 上記以外の equip = HITL (Slack 経路の equip は現状経路なし = M3 Phase 3.5 申し送り、
-  // 実装されたら本 branch が実効化する)
-  if (operation === 'equip') return true;
-  // consult は読み取り = HITL 不要
-  return false;
+  switch (operation) {
+    case 'consult':
+      // consult は読み取り = 全 channel で HITL 不要
+      return false;
+    case 'equip':
+      // Fugue equip = HITL 簡略化 (装備状態が channel-scoped で closure、Fugue Director 1 人前提)
+      // Slack equip は現状経路なし = M3 Phase 3.5 申し送り、実装されたら本 branch が実効化する
+      return channel !== 'fugue';
+    case 'shiire':
+    case 'tekkyo':
+      // 破壊操作 (棚状態変更) は channel を問わず HITL
+      return true;
+    default: {
+      // exhaustive check: HitlOperation に新しい値が追加されたら compile error にする
+      // (fail-open デフォルト回避、silent HITL bypass 撲滅)。
+      const _exhaustive: never = operation;
+      return _exhaustive;
+    }
+  }
 }

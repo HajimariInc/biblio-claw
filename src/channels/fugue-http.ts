@@ -269,28 +269,43 @@ export class FugueHttpServer {
     const server = http.createServer((req, res) => {
       void this.handleRequest(req, res);
     });
-    this.server = server;
 
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(this.opts.port, this.opts.host, () => {
-        server.removeListener('error', reject);
-        // Post-listen 恒久 error listener: 起動後に emit される runtime error (EMFILE /
-        // accept 失敗 等) が uncaughtException 経路に落ちて host 全体を巻き込むのを防ぐ。
-        // 既存パターン (`socket-server.ts` / `webhook-server.ts`) より一段厳しく扱う理由:
-        // Fugue は外部到達可能な attack surface で blast radius が広い。
-        server.on('error', (err) => {
-          log.error('Fugue HTTP server runtime error', {
-            event: 'fugue.server.error',
-            channel: 'fugue',
-            outcome: 'failure',
-            err,
+    // Note: `this.server = server` は listen 成功後に代入する。listen 失敗時は catch で
+    // `this.server` を null 状態に保つ = 再度 `start()` が呼ばれた際に (1)「既に起動済」と
+    // 誤判定して偽の成功を返す silent failure 撲滅 + (2) 実際に再試行される (start() の
+    // 冪等契約が listen 失敗後の再呼出でも実質的に成立する、silent-failure-hunter 指摘、
+    // PR #135 review Important 2)。
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(this.opts.port, this.opts.host, () => {
+          server.removeListener('error', reject);
+          // Post-listen 恒久 error listener: 起動後に emit される runtime error (EMFILE /
+          // accept 失敗 等) が uncaughtException 経路に落ちて host 全体を巻き込むのを防ぐ。
+          // 既存パターン (`socket-server.ts` / `webhook-server.ts`) より一段厳しく扱う理由:
+          // Fugue は外部到達可能な attack surface で blast radius が広い。
+          server.on('error', (err) => {
+            log.error('Fugue HTTP server runtime error', {
+              event: 'fugue.server.error',
+              channel: 'fugue',
+              outcome: 'failure',
+              err,
+            });
           });
+          resolve();
         });
-        resolve();
       });
-    });
+    } catch (err) {
+      // listen 失敗 (EADDRINUSE / EACCES 等) → server は listen 前の状態のまま。this.server を
+      // 「未起動」に戻すことで、次の start() 呼出が「if (this.server)」で早期 return せず、
+      // 実際に listen を再試行できる状態を保つ (silent-failure-hunter 指摘)。
+      this.server = null;
+      throw err;
+    }
 
+    // listen 成功が確定した時点で server を保持 = isListening()/stop()/handleRequest() が
+    // 生きた server にのみ触る不変条件を保つ。
+    this.server = server;
     const addr = server.address();
     const boundPort = typeof addr === 'object' && addr !== null ? addr.port : this.opts.port;
     return { port: boundPort };
@@ -883,8 +898,23 @@ export class FugueHttpServer {
 
         // 成功経路 (equipped or already_equipped): SkillRef 組み立て + reply 返送。
         // toSkillRefs を再利用して単一 SkillRef を作る (重複実装を避ける、判断 E の consult / equip 対称性)。
+        // `[0]` の型は `noUncheckedIndexedAccess` 未設定のため `SkillRef` に narrow されるが、
+        // これは「toSkillRefs が `[item].slice(0, limit).map(...)` で必ず 1 件返す」という
+        // 呼び出し関数の実装依存の暗黙仮定。将来 toSkillRefs にフィルタ機構が入って空返却しうる形に
+        // なると `undefined` が `FugueEquipReply.skill: SkillRef` (non-null 必須) に代入される
+        // silent 破綻を招く。fail-fast + 明示 assertion で contract を型と実装両面で守る
+        // (type-design-analyzer 指摘、PR #135 review 提案 8)。
         const env = readListEnv();
-        const skill = toSkillRefs([item], env.shelfOwner, env.shelfRepo, new Set([skill_id]))[0];
+        const skills = toSkillRefs([item], env.shelfOwner, env.shelfRepo, new Set([skill_id]));
+        const skill = skills[0];
+        if (!skill) {
+          // ここに到達するのは toSkillRefs が壊れた場合 (例: フィルタで空返却)。実装契約違反として
+          // throw = 上位の withBiblioActionSpan / withFugueEntrySpan の catch が捕捉して 200 error
+          // 応答経路 (AD の本義) に倒すため silent failure は生まない。
+          throw new Error(
+            `toSkillRefs unexpectedly returned empty array for equip skill_id=${skill_id} (contract violation)`,
+          );
+        }
         const status: 'equipped' | 'already_equipped' = inserted ? 'equipped' : 'already_equipped';
 
         span.setAttribute('biblio.outcome', 'success');

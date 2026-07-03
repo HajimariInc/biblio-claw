@@ -16,15 +16,20 @@ import { FugueHttpServer } from './fugue-http.js';
 const DEFAULT_PORT = 8080;
 
 /**
- * S3 対応: FUGUE_HTTP_PORT の値検証。非数値 (`abc`) / range 外 (`70000`) / 小数 (`8080.5`) は
- * default に fallback + warn ログを出す (silent に `NaN` → `http.listen` 低レベル例外に落とすと
- * 「設定ミス」であることが一目で分からない、`config-validation.ts:validateValueForKey` パターン)。
- * 空文字 (env 未設定) は default 8080 に倒すが warn は出さない (=想定内)。
+ * S3 対応: FUGUE_HTTP_PORT の値検証。非数値 (`abc`) / range 外 (`70000`) / 小数 (`8080.5`) /
+ * `0` (silent-failure-hunter 指摘: OS ランダムポート bind に倒すと GKE 側の Service :8080 決め打ちと
+ * 食い違い、遠回りな障害になる = production 設定として無効化) は default に fallback + warn ログを出す
+ * (silent に `NaN` → `http.listen` 低レベル例外に落とすと「設定ミス」であることが一目で分からない、
+ * `config-validation.ts:validateValueForKey` パターン)。空文字 (env 未設定) は default 8080 に倒すが
+ * warn は出さない (=想定内)。
+ *
+ * テスト時に ephemeral port 割当を使いたい場合は `FugueHttpServerOptions.port` を直接 0 で渡す
+ * (`fugue.test.ts` の `resolveFuguePort` は経由しない経路)。env 経由の invalid 化はここに閉じる。
  */
 function resolveFuguePort(raw: string | undefined): number {
   if (!raw) return DEFAULT_PORT;
   const parsed = Number(raw);
-  if (Number.isInteger(parsed) && parsed >= 0 && parsed <= 65535) return parsed;
+  if (Number.isInteger(parsed) && parsed > 0 && parsed <= 65535) return parsed;
   log.warn('Fugue FUGUE_HTTP_PORT invalid, falling back to default', {
     event: 'fugue.config.invalid_port',
     channel: 'fugue',
