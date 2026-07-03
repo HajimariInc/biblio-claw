@@ -2398,6 +2398,30 @@ terraform destroy
     port: 3307` を追加 (Phase 5 の commit `c0de0dc` で対応済)。修正後の consult
     `processing_time_ms`: 30007ms → 374ms (80x speedup)。
 
+    **hardening 反映 (issue #128、2026-07-03)**: 本罠の応急対処 (`0.0.0.0/0 :443/:5432/:3307` の
+    broad rule) を目的別 2 rule に分離:
+    - Cloud SQL Auth Proxy 用: `<CLOUD_SQL_CIDR> :3307` (VPC peering CIDR + Admin API tunnel のみ)
+    - 外部 HTTPS 用: `0.0.0.0/0 except metadata :443` (Vertex/GitHub/Cloud Trace/Secret Manager が相乗り)
+    - `:5432` は cloud-sql-proxy の localhost listen 用のため Pod 外 dial 対象外 = rule から除去。
+      apply 時に (1) cloud-sql-proxy log で `Ready for new connections` 継続 + (2) OneCLI DB 接続
+      維持 + (3) consult `processing_time_ms` < 1000ms を実機確認する (issue #128 実装計画の Step 3
+      5 assertion 参照)。
+
+    **教訓**: silent failure 再発の教訓として、新 port を egress 許可する際は「Pod 外 dial か /
+    localhost listen か」を必ず区別する。localhost listen port (cloud-sql-proxy の :5432) は
+    NetworkPolicy 対象外のため rule に追加すると dead code = 意図せぬ許可の温床になる。
+
+    **Cloud SQL private IP CIDR の runtime 特定**: `<CLOUD_SQL_CIDR>` は repo 内に declare が
+    ない (Terraform module にも定義なし)。apply 前に以下で確定する:
+    ```bash
+    gcloud sql instances describe biblio-pgsql \
+      --project=hajimari-ai-hackathon-2026 \
+      --format='value(ipAddresses[].ipAddress)'
+    gcloud compute addresses list \
+      --filter="purpose:VPC_PEERING AND project:hajimari-ai-hackathon-2026" \
+      --format='table(name,address,prefixLength,subnetwork)'
+    ```
+
 13. **Cert Active 化には Ingress apply (Load Balancer authorization) が必要 = Terraform apply 直後の cert 待ちは無意味**:
     Google-managed cert (`google_compute_managed_ssl_certificate`) は Domain Validation (DV)
     方式で、**Load Balancer が cert を serve できる状態を Google Cert Authority が検証する**。
