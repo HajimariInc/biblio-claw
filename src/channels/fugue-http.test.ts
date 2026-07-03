@@ -1,13 +1,25 @@
 /**
- * Fugue HTTP server unit tests (M4-E Phase 2)。
+ * Fugue HTTP server unit tests (M4-E Phase 2/3/5 継承)。
  *
- * ephemeral port (`port: 0`) を bind して実 HTTP request を fetch で叩き、
- * lifecycle + auth 4 分岐 + path routing + Zod validation + body edge cases +
- * consult full spec (成功 / not_found / SkillRef shape / mode / query 境界 /
- * context_hint 受理 + PII 非ログ / 部分失敗 4 分類 / top10 truncate warning /
- * unknown category 除外 warning) + security invariant (auth-before-routing) +
- * OS port release probe の合計 24 ケースを検証する。
+ * ephemeral port (`port: 0`) を bind して実 HTTP request を fetch で叩く構成。
  * `port: 0` を bind すると Node が空き port を自動で割り当てる = test 間の衝突なし。
+ *
+ * 検証カテゴリ (件数は増減する = 列挙をやめて陳腐化を構造的に回避、実件数は
+ * `pnpm test src/channels/fugue-http.test.ts` の Tests 出力を正本とする):
+ *
+ *   - Phase 1 骨格: lifecycle (start/stop 冪等) + Bearer auth 3 分岐 (no_header /
+ *     bad_scheme / bad_token) + 404 unknown path + Zod validation 400 + body edge cases
+ *     (JSON parse 失敗 / body too large) + security invariant (auth-before-routing = 未認証
+ *     クライアントに path 存在漏洩しない不変条件)
+ *   - Phase 2 consult full spec: query match 200 / not_found 200 / SkillRef shape /
+ *     mode (4 enum) / query 境界 (max 500 char) / context_hint (optional + nullable、PII 非ログ) /
+ *     部分失敗 4 分類 (env_missing / github_http / marketplace_parse / other) / top 10 truncate
+ *     warning / unknown category 除外 warning
+ *   - Phase 3 equip full spec: 4 status 応答 (equipped / already_equipped / not_found / error) /
+ *     BIBLIO_NAME_RE guard / HITL defensive path / 部分失敗 (listBiblio throw / DB write throw) /
+ *     consult 側 equipped flag 継承
+ *   - Phase 5 health check: `/healthz` の 3 case (auth check の前で 200 "ok" / malformed
+ *     Authorization で 200 = auth bypass 証拠 / POST /healthz で 200 = method 非依存)
  */
 import http from 'node:http';
 

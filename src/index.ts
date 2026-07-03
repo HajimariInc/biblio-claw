@@ -124,9 +124,10 @@ async function main(): Promise<void> {
   // StatefulSet の startupProbe は host-ready (下記) を待つが、boot-complete は
   // 「migration が終わった」時点の checkpoint として debug 用に残す。synchronous write =
   // log と一貫した書き込み順序を保証。/tmp は Pod tmpfs = 再起動で消えるが、boot ごとの
-  // 再作成が期待挙動。
+  // 再作成が期待挙動。log には構造化 context (`sentinel` + `path`) を付与 = trace 相関
+  // 経路 / BQ sink 集計での grep が可能 (PR #126 review W1 対応)。
   writeFileSync('/tmp/boot-complete', new Date().toISOString());
-  log.info('sentinel:boot-complete written');
+  log.info('sentinel written', { event: 'sentinel.boot_complete.written', sentinel: 'boot-complete', path: '/tmp/boot-complete' });
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
@@ -263,11 +264,13 @@ async function main(): Promise<void> {
   log.info('NanoClaw running');
 
   // Phase 5: 全 subsystem (initChannelAdapters + delivery polls + host sweep + ca-secret-sync
-  // + cli server) 起動完了の signal。StatefulSet の startupProbe (`test -f /tmp/host-ready`)
-  // が読み、Pod ready 判定 = LB backend healthy になる境界。writeFileSync が throw する場合
-  // (permission denied 等) は main() が crash → Pod 再起動 → 再試行の Kubernetes 経路で対処。
+  // + cli server) 起動完了の signal。StatefulSet の startupProbe/readinessProbe/livenessProbe
+  // が exec `test -f /tmp/host-ready` で読み、Pod ready 判定 = LB backend healthy になる境界。
+  // writeFileSync が throw する場合 (permission denied 等) は main() が crash → Pod 再起動 →
+  // 再試行の Kubernetes 経路で対処。log には構造化 context (`sentinel` + `path`) を付与
+  // (PR #126 review W1 対応、boot-complete と対称)。
   writeFileSync('/tmp/host-ready', new Date().toISOString());
-  log.info('sentinel:host-ready written');
+  log.info('sentinel written', { event: 'sentinel.host_ready.written', sentinel: 'host-ready', path: '/tmp/host-ready' });
 }
 
 /** Graceful shutdown. */
