@@ -2473,11 +2473,14 @@ terraform destroy
     `169.254.169.254/32 :80` の専用 rule を明示追加。agent Pod の egress rule は OneCLI 経由前提
     のため metadata block を維持 (この差分は本 orchestrator Pod と agent Pod の役割違いに基づく
     正当な非対称性)。apply 後は Pod rollout restart で新 Pod が起動 → WI 経路復活 → 全 keyless
-    ADC 復旧を実機確認する:
-    - (1) `cloud-sql-proxy` log で `Ready for new connections` 継続 + `refresh error` なし
-    - (2) `onecli` gateway (`localhost:10254`) 応答成立 (500 → 200)
-    - (3) `fetch-pem` initContainer が exit 0 (Pod Ready 5/5 復活)
-    - (4) `consult processing_time_ms` < 1000ms (罠 12 復旧値 374ms 相当)
+    ADC 復旧を実機確認済 (2026-07-03):
+    - (1) `fetch-pem` initContainer exit 0 → Pod Ready 5/5 復活 (crash-loop 解消)
+    - (2) `cloud-sql-proxy` log: `Authorizing with ADC` → `Ready for new connections!` → `refresh
+      error` なし (i/o timeout 完全解消)
+    - (3) `onecli` gateway (`localhost:10254`): 500 → 200、`agents count = 6` (DB read 復活)
+    - (4) WI 直接 test (`fetch('http://metadata.google.internal/...')`): timeout → 200 応答
+    - (5) `consult processing_time_ms = 499ms` (罠 12 復旧値 374ms 相当、`listBiblio total=1`
+      で listBiblio 経路も完全復活)
 
     **教訓**: silent failure 再発の教訓として、新 port を egress 許可する際は「Pod 外 dial か /
     localhost listen か」を必ず区別する。localhost listen port (cloud-sql-proxy の :5432) は
