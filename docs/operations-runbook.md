@@ -1760,13 +1760,30 @@ WHERE trace = 'projects/<PROJECT_ID>/traces/<32-hex-trace-id>'
 ORDER BY timestamp ASC;
 ```
 
+### ESM フック判断 (Phase 5 で確定 = 2 段構造正式化)
+
+Phase 4 review C1 で「`@opentelemetry/instrumentation-http` の auto HTTP SERVER span 層が
+ESM + `--import` 構成で未発火」と実測判明した件は、Phase 5 で以下の理由から **3 段化投資を
+見送り、2 段構造 (`withFugueEntrySpan → withBiblioActionSpan`) を正式仕様として運用** する:
+
+- Node 24.15.0 で `module.register()` が DEP0205 として documentation-only 非推奨化
+  (Node 26.0.0 で runtime deprecation 予定)
+- OTel JS の推奨移行先 (issue #4933、`module.register()` ベース) が既に陳腐化中
+- `fugue-entry-span.ts:15-18` の設計により、将来 auto SERVER span 発火時は AsyncLocalStorage
+  で自動 nest されるため 3 段化への切替はコード変更ゼロ (可逆な判断)
+
+Fugue channel の trace ルート親は `fugue.consult` / `fugue.equip` = 直接 Cloud Trace の
+root span として観測される。Fugue Cloud Run 側からの分散 trace 継承は `traceparent` header
+の手動 extract (`http-propagation.ts`) で成立済 (Phase 4 test 45 case で担保、Phase 5 Task 7
+の Prod 実結線で最終確認)。
+
 ### 既知の罠 3 件
 
-1. **auto HTTP SERVER span 層が ESM + `--import` 構成で現状発火しない (Phase 4 完了時点の既知の制約、Phase 5 で判断)**:
+1. **auto HTTP SERVER span 層が ESM + `--import` 構成で現状発火しない (Phase 5 で 2 段構造正式化決定、上記 §ESM フック判断 参照)**:
    - `@opentelemetry/instrumentation-http` は `require-in-the-middle` / `import-in-the-middle` に依存し、ESM で機能させるには `--experimental-loader` や `module.register()` 等の明示的な ESM フック登録が必要 (本 repo に未整備)。実測で `getNodeAutoInstrumentations()` を `NodeSDK` に渡していても auto server span は traceparent 有無どちらでも一切生成されない状態。
    - 現状の動作: `fugue.consult` / `fugue.equip` は事実上 ROOT span となる (traceparent 不在時)、または remote span の直下に付く (traceparent 有時、Fugue 側 span の子)。runbook / JSDoc の「2 段構造」記述はこの実態を正確に反映したもの。
-   - **Phase 5 で判断**: (a) `module.register()` 追加 + real NodeSDK + HttpInstrumentation の integration test で 3 段構造成立を実測、または (b) 2 段構造を正式仕様として運用 (Slack adapter との対称性で判断)。
-   - 検知経路: `fugue-http.otel.test.ts` 冒頭 JSDoc + 各 case の「2 段」記述、および Phase 5 の Level 5 (実 orchestrator 起動 + traceparent 有無での Cloud Trace 目視) が唯一の実挙動確認手段。
+   - **Phase 5 で確定**: (b) 2 段構造を正式仕様として運用 = 上記 §ESM フック判断 参照。Node 24/26 世代の非推奨化リスクを避けて可逆な選択 (`fugue-entry-span.ts:15-18` の AsyncLocalStorage 設計により、将来 auto SERVER span 発火時は自動 nest される保険)。
+   - 検知経路: `fugue-http.otel.test.ts` 冒頭 JSDoc + 各 case の「2 段」記述、および Phase 5 Task 7 の Prod 実結線 (実 orchestrator + Fugue Cloud Run 経由の Cloud Trace 目視) が唯一の実挙動確認手段。
 
 2. **`LOG_FORMAT` env が json でないと trace 相関 field は log に載らない**:
    - 症状:Cloud Trace UI で span は見えるが Cloud Logging Trace サイドバーから log がリンクされない
@@ -1792,7 +1809,7 @@ ORDER BY timestamp ASC;
 
 ### Phase 5 に押しやる項目(scope boundary)
 
-- **ESM フック追加 or 2 段構造の正式化判断** (Phase 4 review C1、上記「既知の罠 1」): `module.register()` + real `NodeSDK` + `HttpInstrumentation` の統合 test を組み、traceparent 有無での auto server span 発火を実測 → 3 段構造を成立させる or 2 段構造を正式仕様として運用
+- ~~**ESM フック追加 or 2 段構造の正式化判断** (Phase 4 review C1)~~ → **Phase 5 で確定済 = 2 段構造正式化** (上記 §ESM フック判断 参照)
 - Cloud Trace への実 push の verify(Prod Fugue Cloud Run 接続後)
 - BQ sink での fugue event log 集計 SQL の実データ確認(上記 BQ SQL テンプレの `<PROJECT_ID>` / `<DATASET_ID>` を実値に置換 + 直近 24h の event 分布を確認)
 - GKE Ingress manifest(`k8s/25-ingress-fugue-channel.yaml`)の apply
@@ -1808,6 +1825,435 @@ ORDER BY timestamp ASC;
 - test 群: `src/observability/__tests__/{http-propagation,fugue-entry-span}.test.ts` + `src/channels/fugue-http.{otel,otel-log,ad-honji}.test.ts`
 - M4-A 継承元: 本 runbook §M4-A Phase 1-4 (OTel foundation + GenAI semconv + BQ sink)
 - Slack adapter との対称性: `src/channels/slack.ts` (channel adapter agnostic な withBiblioActionSpan 相乗り経路の pattern 源)
+
+---
+
+## M4-E Phase 5: prod-deploy (Fugue channel を GKE Ingress で外部公開 + Fugue Cloud Run 実結線)
+
+M4-E PRD の Phase 5 で、Phase 4 完成の Fugue channel adapter (`src/channels/fugue-http.ts`) を
+**GKE Autopilot `biblio-prod` cluster** に **GCE Ingress + Google-managed cert + 固定 DNS + WIF** で
+外部公開し、Fugue Cloud Run から `https://biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app`
+経由の実結線 (1 trace 串刺し + BQ sink 到達) を確認する Phase。
+
+**アプリ本体は 4 箇所のみ改修** で大半は infra 追加:
+
+- `src/channels/fugue-http.ts`: `/healthz` endpoint を auth check の前に追加 (LB probe を 401 回避)
+- `src/index.ts`: boot sentinel 2 段 (`/tmp/boot-complete` = migration 完了 / `/tmp/host-ready` = 全 subsystem 完了)
+- `scripts/fake-fugue-client.ts`: `FUGUE_URL` env で Prod URL 全体切替 (Prod 疎通 verify 経路)
+- `.env.example`: `FUGUE_URL` + `FUGUE_HTTP_HOST=0.0.0.0` GKE 記述
+
+Infra 追加 = k8s manifest 4 枚 + Terraform module 1 個:
+
+- `k8s/10-orchestrator-statefulset.yaml` (UPDATE): envFrom fugue secret + ports.fugue:8080 + FUGUE env + 3 probe
+- `k8s/25-ingress-fugue-channel.yaml` (NEW): GCE Ingress + pre-shared-cert + global-static-ip-name
+- `k8s/26-service-fugue-channel.yaml` (NEW): ClusterIP Service + `cloud.google.com/neg` 明示 + BackendConfig
+- `k8s/27-networkpolicy-fugue-channel.yaml` (NEW): LB health check IP range 許可 + egress
+- `terraform/fugue-channel/` (NEW): static IP + managed cert + DNS + Secret Manager + secret-scoped IAM binding
+
+**issue #73 (probe 配線) + Phase 4 review C1 (ESM フック判断 = 2 段構造正式化)** を同時吸収済。
+ESM 判断の詳細は上記 §M4-E Phase 4 §ESM フック判断 参照。
+
+### deploy 手順 (8 step、DEN さん実行、Cloud Endpoints DNS + Secret Manager 経路)
+
+**設計原則**: **ホスト名を静的ファイルに書かない**。Source of Truth = Secret Manager
+`fugue-domain-name`。全 Step でホスト名は `gcloud secrets versions access` で動的取得し、
+セッション先頭で 1 回 `export DOMAIN=...` すれば以降の Step は同 shell で継承。
+
+**前提**: `envsubst` (`gettext` package) がインストール済 (WSL2 AlmaLinux 9 なら
+`sudo dnf install gettext` で導入、未インストールなら Step 4 の Ingress apply で shell error)。
+
+**Step 0: Cloud Endpoints API 有効化 (初回のみ)**
+
+```bash
+gcloud services enable endpoints.googleapis.com \
+  --project=hajimari-ai-hackathon-2026
+# 既に enable 済なら no-op、初回は Terraform apply 前に必須 (罠 9 で fail-fast)
+```
+
+**Step 1: Domain 決定 + Terraform 変数投入 (セッション先頭で 1 回)**
+
+```bash
+# Service 名は自由 (例: biblio-claw-fugue = 全固有名詞を含めてシンプル)
+export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
+export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
+
+# 値の確認 (log には出さない、tmux buffer / ephemeral copy 用)
+echo "domain: $TF_VAR_domain_name"
+echo "token prefix: ${TF_VAR_fugue_shared_token:0:8}..."
+```
+
+**Step 2: Terraform apply (static IP + Cloud Endpoints Service + cert + Secret Manager 2 個 + IAM 2 個)**
+
+```bash
+cd terraform/fugue-channel
+terraform init
+terraform plan   # 期待: 8 resource create (IP + Endpoints Service + cert + secret x2 +
+                 # secret_version x2 + IAM binding x2)
+terraform apply
+terraform output # static_ip_address / cert_name / endpoints_service_name / secret 2 個の名前
+```
+
+**Step 3: DNS 反映確認 (cert Active 化は Step 4 の Ingress apply 後に待つ)**
+
+⚠️ **重要な順序修正 (Phase 5 実 deploy で判明)**: 旧 runbook では「Step 3 で cert Active 待ち → Step 4 で K8s apply」の順序だったが、**cert Active 化には Ingress apply (Load Balancer authorization) が前提条件**。Terraform apply 直後は cert が `PROVISIONING` + domain status = `FAILED_NOT_VISIBLE` になり、Ingress apply しない限り無限に stuck する。詳細は 罠 13 参照。
+
+```bash
+# Domain を Secret Manager から動的取得 (ここ以降 hardcode 参照ゼロ、セッション env で継承)
+export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
+  --project=hajimari-ai-hackathon-2026)
+echo "domain: $DOMAIN"
+
+# Cloud Endpoints Service 状態確認 (Terraform apply で ACTIVE 化済)
+gcloud endpoints services describe "$DOMAIN" \
+  --project=hajimari-ai-hackathon-2026 --format='value(state)'
+
+# DNS 反映確認 (.cloud.goog は Google 内部 DNS = 通常 5-10 分)
+while ! dig +short "$DOMAIN" | grep -q .; do
+  echo "waiting for DNS ($DOMAIN)..." && sleep 30
+done
+dig +short "$DOMAIN"
+# 期待: static IP アドレス (terraform output static_ip_address と一致)
+
+# cert 現状 (この時点では PROVISIONING + FAILED_NOT_VISIBLE の想定、Step 4 後に ACTIVE 化する)
+gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+  --global --format='value(managed.status)'
+gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+  --global --format='value(managed.domainStatus)'
+# 期待: PROVISIONING / FAILED_NOT_VISIBLE (Ingress 未 apply の証拠、Step 4 後に ACTIVE 化)
+```
+
+**Step 4: K8s Secret 作成 + StatefulSet + Service + NetworkPolicy + Ingress apply**
+
+```bash
+# 前提: DOMAIN 変数が Step 3 で export 済 (同一 shell セッション内で継承)
+
+# K8s Secret を Secret Manager から手動 sync (Phase 5 は手動、rotation 自動化は Phase 90+)
+# 罠 8 の silent fail (`$(...)` の空出力を kubectl が正常な空文字値として受け入れる) を防ぐため
+# 2 段に分けて token 空チェック → apply。
+TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
+  --project=hajimari-ai-hackathon-2026)
+[[ -n "$TOKEN" ]] || { echo 'ERROR: token fetch failed (permission / typo / propagation?)'; exit 1; }
+kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
+  --from-literal=FUGUE_SHARED_TOKEN="$TOKEN"
+
+# deploy 順序 = StatefulSet update → Service + BackendConfig → NetworkPolicy → Ingress
+# (Ingress 最後 = NEG + backend health 反映が早い、rollout 中の 502 window 最短化)
+kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+kubectl rollout status statefulset biblio-orchestrator -n biblio-claw --timeout=10m
+# → Pod 再起動時に `/tmp/host-ready` が書かれるまで startupProbe が pending
+#   (30 * 10s = 5 min 猶予)。ready 化後 LB backend に組み込まれる
+
+kubectl apply -f k8s/26-service-fugue-channel.yaml
+kubectl apply -f k8s/27-networkpolicy-fugue-channel.yaml
+
+# Ingress は envsubst で ${DOMAIN} を展開してから apply (host 値は Secret Manager が SoT)
+# 罠 10: envsubst 未インストールなら shell error、罠 11: envsubst をかけずに直 apply すると
+# `host: ${DOMAIN}` が literal で登録 = TLS SNI 不整合で全 request 404 silent failure
+envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
+
+# NEG 自動作成 + backend health 反映待ち (最大 5 分)
+kubectl describe ingress biblio-fugue-channel -n biblio-claw | grep -E 'Address|Backends'
+```
+
+**Step 4.5: Ingress apply 後の cert Active 化待ち + LB frontend rollout 待ち (順序 bug 修正で追加)**
+
+⚠️ **Ingress apply が cert Active 化の前提** (罠 13)。実測: Ingress apply → cert Active 化まで **15-30 分** (通常)、最大 60 分。cert Active 直後は LB frontend の cert rollout が更に 1-5 分必要 (罠 14)。
+
+```bash
+# cert Active 待ち (Ingress apply 後に Google Cert Authority が Load Balancer authorization を再試行)
+while true; do
+  status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+    --global --format='value(managed.status)')
+  domain_status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+    --global --format='value(managed.domainStatus)')
+  echo "[$(date +%H:%M:%S)] cert=$status domain=$domain_status"
+  if [[ "$status" == "ACTIVE" ]]; then
+    echo "CERT_ACTIVE_OK"
+    break
+  fi
+  sleep 60
+done
+
+# cert Active 直後は LB frontend rollout に追加 1-5 分。TLS handshake が成立するまで poll
+# (罠 14: curl で SSL_ERROR_ZERO_RETURN → 数分後に 200 に切り替わる)
+for i in {1..12}; do
+  sleep 30
+  RES=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "https://${DOMAIN}/healthz" 2>&1)
+  echo "[$(date +%H:%M:%S)] TLS handshake attempt $i: HTTP $RES"
+  if [[ "$RES" =~ ^[2-9] ]]; then
+    echo "LB_FRONTEND_READY"
+    break
+  fi
+done
+```
+
+**Step 5: CLI 経路で Prod URL 経由の疎通 verify (URL + Token は session env、`.env` に書かない)**
+
+```bash
+# 前提: DOMAIN + TOKEN は Step 3-4 で export 済、同一 shell セッション内で継承
+# (再取得する場合は Step 3 冒頭の gcloud secrets versions access コマンドを再実行)
+
+# 1. Health probe (Bearer なし、LB probe と同経路)
+curl -sS "https://${DOMAIN}/healthz"
+# 期待: 200 "ok"
+
+# 2. Consult 疎通 (Bearer 認証込)
+curl -sS -X POST "https://${DOMAIN}/v1/channels/fugue/consult" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"schema_version":"1","request_id":"verify-01","query":"typescript","mode":"ask-ad"}'
+# 期待: 200 応答 + status:'ok' or 'not_found' の JSON
+
+# 3. 認証 fail 確認 (Bearer なし + 不正 Bearer)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "https://${DOMAIN}/v1/channels/fugue/consult" \
+  -H "Authorization: Bearer INVALID" -H "Content-Type: application/json" -d '{}'
+# 期待: 401
+
+# 4. fake-fugue-client 経由の equip 冪等発火 (FUGUE_URL は inline、`.env` に書かない)
+FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$TOKEN" \
+  pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id skills-tdd-first
+# 期待: status:'equipped' or 'already_equipped' の JSON、processing_time_ms あり
+```
+
+**Step 6: Cloud Trace + BigQuery sink 実観測 (Phase 5 完了判定の 4 assertion の 3, 4)**
+
+```
+# Cloud Trace UI で 1 trace 串刺し確認 (直近 1 時間の trace リスト)
+# https://console.cloud.google.com/traces/list?project=hajimari-ai-hackathon-2026
+# 期待: fugue.consult (top) → biblio.list (child) の親子関係、
+#       attributes に channel='fugue' / fugue.request_id / biblio.request_id 揃う
+```
+
+```bash
+# BigQuery で channel='fugue' の event log 到達確認 (dataset ID = llm_observability、事前確認済)
+# 注: BQ sink は timestamp 列による column-based DAY partition = `_PARTITIONTIME` 疑似列
+# (ingestion-time partition 専用) は存在しないため、`timestamp` 列で filter する。
+# §M4-A Phase 3 / §M4-E Phase 4 の集計 SQL と同流儀で stdout/stderr を UNION ALL する。
+bq query --project_id=hajimari-ai-hackathon-2026 --nouse_legacy_sql --format=pretty \
+  "SELECT event, channel, COUNT(*) as cnt
+   FROM (
+     SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
+     FROM \`hajimari-ai-hackathon-2026.llm_observability.stdout\`
+     UNION ALL
+     SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
+     FROM \`hajimari-ai-hackathon-2026.llm_observability.stderr\`
+   )
+   WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+     AND channel = 'fugue'
+   GROUP BY 1, 2 ORDER BY cnt DESC LIMIT 20"
+# 期待: fugue.consult.completed / fugue.consult.invoked 等が cnt >= 1
+```
+
+**Step 7: Fugue チーム連携 (domain + token を Secret 経由で共有)**
+
+```
+Fugue チームに Slack DM or ephemeral share で共有する値 (両方とも Secret Manager から取得):
+  - DOMAIN: gcloud secrets versions access latest --secret=fugue-domain-name \
+            --project=hajimari-ai-hackathon-2026
+  - TOKEN:  gcloud secrets versions access latest --secret=fugue-shared-token \
+            --project=hajimari-ai-hackathon-2026
+
+Fugue 側 Cloud Run:
+  - Fugue 自身の Secret Manager に BIBLIO_CLAW_URL = "https://${DOMAIN}" + FUGUE_SHARED_TOKEN
+    として保管、Cloud Run env で secretRef 経由参照 (biblio 側の GSA 相当 IAM 権限は Fugue 側)
+  - Fugue 側から consult / equip を実際に発火 → 応答確認 → 1 trace 串刺し確認
+    Cloud Trace UI で Fugue 側 root span → biblio-claw の fugue.consult / fugue.equip が
+    親子関係で見える = W3C traceparent 継承成立の実証
+```
+
+**Step 8: 完了マーカー refinement (Task 8、Task 7 = Step 0-7 完了後)**
+
+- `CLAUDE.md` line 3 の `PR #XXX` を実 PR # に置換 (Phase 5 実装 PR、および fugue-domain 追加 PR)
+- `.claude/PRPs/prds/m4/m4-e-fugue-integration.prd.md` Phase 5 status を `in-progress` → `complete`
+- `.claude/PRPs/plans/phase-5-prod-deploy.plan.md` を `completed/` に archive
+
+### Phase 5 完了判定 (4 assertion)
+
+1. **Prod HTTPS で listen 成立**: Step 5 の直接 curl が 200 応答 (認証済)
+2. **Ingress backend healthy**: `kubectl describe ingress biblio-fugue-channel -n biblio-claw | grep -A1 Backends` で `HEALTHY` 状態
+3. **1 trace 串刺し**: Cloud Trace UI で `fugue.consult → biblio.list` の親子関係表示
+4. **BQ sink 到達**: Step 6 の BQ query で `channel='fugue'` の row が cnt >= 1
+
+**M4-E PRD 完了判定** = 上記 4 assertion + Fugue チーム側 verify 合同 exit 0。
+
+### 再デプロイ手順 (image 更新のみ)
+
+```bash
+# init-project-gcp Phase 4.5 image-sync で新 tag (m4e-p5-N 等) を打った後:
+kubectl set image statefulset/biblio-orchestrator -n biblio-claw \
+  orchestrator=asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4e-p5-<N>
+kubectl rollout status statefulset biblio-orchestrator -n biblio-claw --timeout=10m
+# Ingress / Service / Terraform は無変更で継続
+```
+
+### rollback 手順
+
+```bash
+# 案 1: image を Phase 4 完了時点の tag に戻す (fugue endpoint は残るが機能面 Phase 4 相当)
+kubectl set image statefulset/biblio-orchestrator -n biblio-claw \
+  orchestrator=asia-northeast1-docker.pkg.dev/.../biblio-claw:m4b-p4
+# rollout status 待ち
+
+# 案 2: Fugue endpoint 全撤去 (Ingress + Service + Fugue Secret + NetworkPolicy 削除)
+#   注: envFrom biblio-fugue-shared-token が `optional: false` のため、Secret 削除だけで
+#       StatefulSet が起動失敗する = 一時的に optional: true に変えるか StatefulSet manifest を revert
+kubectl delete -f k8s/25-ingress-fugue-channel.yaml
+kubectl delete -f k8s/27-networkpolicy-fugue-channel.yaml
+kubectl delete -f k8s/26-service-fugue-channel.yaml
+kubectl delete secret biblio-fugue-shared-token -n biblio-claw
+git checkout HEAD~1 -- k8s/10-orchestrator-statefulset.yaml   # 例、Phase 5 前へ revert
+kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+
+# 案 3: Terraform destroy (Fugue infra を完全削除、Fugue チーム連携が終わっていることが前提)
+#   順序 = k8s Ingress + Secret 削除 → terraform destroy
+#   sensitive var (`TF_VAR_domain_name` + `TF_VAR_fugue_shared_token`) は destroy 時も
+#   必須 (Terraform lifecycle 経路の要求)、dummy 値で OK
+cd terraform/fugue-channel
+export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
+export TF_VAR_fugue_shared_token='dummy-for-destroy'
+terraform destroy
+```
+
+### 既知の罠 14 件
+
+1. **Managed cert Active 化が 60 分超えるケース**:
+   Google-managed cert の provisioning は DNS record propagate 済状態で始まる = DNS 先出しの
+   順序が必須。CAA record を持つ domain / A record 未反映では cert が PROVISIONING で停止する。
+   対処: DNS 反映を dig で確認してから cert status 監視ループに入る。
+
+2. **K8s Secret sync 忘れ → StatefulSet 起動失敗**:
+   `biblio-fugue-shared-token` Secret を作らずに StatefulSet apply すると、`envFrom` で
+   `optional: false` 指定のため Pod が `CreateContainerConfigError` で立ち上がらない。
+   意図した挙動 (silent skip 撲滅) = Secret 作成を先に済ませる。
+
+3. **NEG annotation を省くと NetworkPolicy 有効時に backend unhealthy 継続**:
+   `k8s/26-service-fugue-channel.yaml` の `cloud.google.com/neg: '{"ingress": true}'` を
+   忘れると、GKE の自動 NEG 付与が NetworkPolicy 導入により条件から外れるため、Ingress
+   backend が unhealthy 継続の silent failure に落ちる。JSON 書式のダブルクォート順序に注意
+   (シングル外・ダブル内: `'{"ingress": true}'`)。
+
+4. **`FUGUE_HTTP_HOST=0.0.0.0` 忘れ → LB 到達不能**:
+   env を投入しないと `fugue.ts` factory は default `127.0.0.1` bind に落ちる = Pod IP に
+   listen せず LB からの流入を受けられない silent failure。`.env.example` の警告 +
+   StatefulSet manifest の env で 2 重に防御している。dev 経路で `127.0.0.1` にしたいときは
+   local `.env` で override する。
+
+5. **Terraform destroy 順序ミス → cert が Ingress attach 中で failed**:
+   `google_compute_managed_ssl_certificate` が Ingress に attach されたままだと destroy が
+   failed になる。上記 rollback 案 3 の順序 (Ingress delete → Secret delete → terraform destroy)
+   が必須。runbook `terraform/fugue-channel/README.md` §Teardown 参照。
+
+6. **Fugue チーム側 URL 切替タイミングずれ → old URL で 5xx 継続**:
+   Fugue Cloud Run の `BIBLIO_CLAW_URL` env 切替は biblio 側 Step 6 (BQ 到達確認) 完了後に
+   同期する。biblio 側 deploy 完了前に Fugue 側切替してしまうと、Fugue が old URL (DNS 未確定)
+   で 5xx を継続受信する。Fugue チームとの手動同期 = Slack 等で「切替 OK」の合図を確認する運用。
+
+7. **`FUGUE_SHARED_TOKEN` が「空文字値の Secret」で silent skip される**:
+   K8s Secret `biblio-fugue-shared-token` は存在するが `FUGUE_SHARED_TOKEN` key の値が空文字
+   の場合、`createFugueAdapter()` (`src/channels/fugue.ts:41`) は `null` を返し `channel:'fugue'`
+   の warn ログ 1 行のみで fugue-http server が起動しない (Slack と対称の silent skip 設計)。
+   Pod probe は全て exec `test -f /tmp/host-ready` = sentinel file のみ判定 = Pod は healthy
+   のまま LB backend に組み入れられる。しかし Fugue endpoint への request は connection
+   refused = Fugue Cloud Run 側で 5xx が上がり続ける。**検知経路**: Fugue Cloud Run 側の
+   error log (5xx) + biblio 側 host log の `channel:'fugue'` warn 検索
+   (`event:'fugue.adapter.credential_missing'` 等)。**対処**: Step 4 の Secret 作成時に
+   `TOKEN=$(gcloud secrets versions access latest ...); [[ -n "$TOKEN" ]] || exit 1` で
+   空文字を fail-fast (下記 罠 8 と対)、または `kubectl get secret biblio-fugue-shared-token
+   -n biblio-claw -o jsonpath='{.data.FUGUE_SHARED_TOKEN}' | base64 -d | wc -c` で値の長さを
+   post-deploy に確認する運用を追加。
+
+8. **`gcloud secrets versions access` の `$(...)` 失敗が silent に空 Secret を作る**:
+   Step 4 の `kubectl create secret generic biblio-fugue-shared-token
+   --from-literal=FUGUE_SHARED_TOKEN="$(gcloud secrets versions access latest --secret=...)"`
+   で、内側 `gcloud` が権限不足 / secret 名 typo / propagation 未完了で失敗しても、`$(...)`
+   の空出力を kubectl は正常な空文字値として受け入れ Secret を「正常に」作成する。結果として
+   罠 7 の crash-loop 回避経路に落ちる。**対処**: Step 4 のコマンドを 2 段に分ける
+   (Step 4 本文で明示済)。
+
+9. **Cloud Endpoints API 未有効化 → Terraform apply が `SERVICE_DISABLED` で失敗**:
+   Step 0 の `gcloud services enable endpoints.googleapis.com` を skip すると、Terraform
+   apply が `google_endpoints_service.fugue_dns` resource create で `SERVICE_DISABLED` エラーで
+   fail-fast する。初回 setup のみ必要、以降の apply は enable 済で no-op。**対処**: 罠 8 と
+   対称で Step 0 の有効化コマンドを罠として明示 = 手順書き漏れの再発を防ぐ。
+
+10. **`envsubst` 未インストール → Step 4 の Ingress apply コマンドが shell error**:
+    Step 4 の `envsubst '${DOMAIN}' < k8s/25-*.yaml | kubectl apply -f -` で `envsubst`
+    (`gettext` package の一部) が PATH にないと shell が `command not found` を返す。
+    WSL2 AlmaLinux 9 / Debian 系 / macOS 全て標準で入っていないケースあり。**対処**:
+    `sudo dnf install gettext` (AlmaLinux/RHEL) / `sudo apt install gettext-base` (Debian) /
+    `brew install gettext` (macOS) で導入。install 後、`which envsubst` で確認してから
+    Step 4 に進む。
+
+11. **`${DOMAIN}` を envsubst せずに `kubectl apply` = literal 登録で TLS SNI 不整合の silent 404**:
+    `k8s/25-ingress-fugue-channel.yaml` の `host: ${DOMAIN}` は envsubst 前提で書かれている
+    (public 化予定 repo に domain を hardcode しないため)。うっかり `kubectl apply -f
+    k8s/25-ingress-fugue-channel.yaml` を直接叩くと、Ingress rule の host に literal
+    `${DOMAIN}` が登録される。K8s 側 apply は成功、しかし LB の TLS SNI は Google-managed cert
+    の SAN (実 domain) と不整合になり、全 request が **404 not_found または 421 Misdirected
+    Request** で silent に落ちる。log からは Ingress が healthy に見える罠。**対処**: Step 4
+    の `envsubst ... | kubectl apply -f -` パイプラインを必ず使う。手動 apply する場合も
+    envsubst rendering 後の yaml を一度 file / stdout に確認してから apply する運用。
+
+12. **NetworkPolicy egress で Cloud SQL Auth Proxy `:3307` 見落とし → OneCLI proxy 死んで listBiblio 30 秒 timeout**
+    (Phase 5 実 deploy で silent-failure-hunter の指摘 [issue #128](https://github.com/HajimariInc/biblio-claw/issues/128)
+    に追加事実として判明した重要な silent failure chain):
+
+    Phase 5 で新規追加した NetworkPolicy `biblio-fugue-channel` の egress rule を `:443`
+    (外部 HTTPS) + `:5432` (Cloud SQL 直接) のみ許可すると、**orchestrator Pod 内の
+    `cloud-sql-proxy` sidecar は Cloud SQL Admin API 経路で instance に `:3307` で dial する**
+    ため、その port が block されて `dial tcp 10.191.0.3:3307: i/o timeout` を継続する。
+
+    silent failure chain (6 段):
+    1. cloud-sql-proxy が `:3307` dial timeout
+    2. OneCLI proxy (`onecli` sidecar) が Postgres query で `pool timed out while waiting
+       for an open connection`
+    3. OneCLI proxy が gh installation token の access_token 検証で agent lookup 失敗
+    4. `CONNECT rejected: internal error host=api.github.com:443 error=db error`
+    5. orchestrator の gh API 呼出 (biblio-shelf `marketplace.json` fetch) が 30 秒 timeout
+    6. Fugue consult が `reason: 'other'` で `partial_failure`、応答は HTTP 200 だが
+       `status: 'error'`
+
+    症状: Phase 5 完了判定 4 assertion (HTTPS 200 + backend HEALTHY + trace + BQ) は満たされる
+    が、内部 listBiblio 実データ通信が dead = Fugue MVP デモは成立不可の silent 状態。
+
+    **対処**: `k8s/27-networkpolicy-fugue-channel.yaml` の egress rule に `- protocol: TCP,
+    port: 3307` を追加 (Phase 5 の commit `c0de0dc` で対応済)。修正後の consult
+    `processing_time_ms`: 30007ms → 374ms (80x speedup)。
+
+13. **Cert Active 化には Ingress apply (Load Balancer authorization) が必要 = Terraform apply 直後の cert 待ちは無意味**:
+    Google-managed cert (`google_compute_managed_ssl_certificate`) は Domain Validation (DV)
+    方式で、**Load Balancer が cert を serve できる状態を Google Cert Authority が検証する**。
+    Terraform apply 直後は LB (Ingress) が存在しないため cert status は `PROVISIONING`、domain
+    status は `FAILED_NOT_VISIBLE` で無限に stuck する。旧 runbook (Phase 5 実 deploy 前) の
+    「Step 3 で cert Active 待ち → Step 4 で K8s apply」順序はここで永久 stuck する bug だった。
+
+    **正しい順序**: Terraform apply → K8s Secret + StatefulSet + Service + NetworkPolicy + Ingress
+    apply → cert が LB に attach → Google Cert Authority が Load Balancer authorization を
+    再試行 → cert Active 化 (15-30 分)。runbook Step 3 は「DNS 反映確認のみ」、Step 4.5 で
+    cert Active 化を待つ経路が正解。
+
+    **検知経路**: `gcloud compute ssl-certificates describe biblio-fugue-channel-cert
+    --global --format='value(managed.domainStatus)'` で `FAILED_NOT_VISIBLE` が継続する場合、
+    Ingress apply していない可能性を疑う (Cloud SQL 到達性 or NEG 反映は別問題)。
+
+14. **Cert Active 直後は LB frontend の cert rollout に追加 1-5 分 = curl `SSL_ERROR_ZERO_RETURN`**:
+    `gcloud compute ssl-certificates describe` の status が `ACTIVE` になった **直後** に curl
+    で HTTPS を叩くと、`OpenSSL SSL_connect: SSL_ERROR_ZERO_RETURN` = **TLS handshake が Server
+    側で close** される現象が発生する。これは cert Active になっても LB frontend への cert
+    rollout が完了していないタイミング。
+
+    実測: cert Active から **1-3 分後** に TLS handshake が成立、curl 200 応答に切り替わる。
+    最大 5 分見込み。runbook Step 4.5 の後半で TLS handshake poll ループ (12 回 x 30 秒 = 6 分)
+    を経て verify Step 5 に進む運用。
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-e-fugue-integration.prd.md` (Phase 5)
+- Source Plan (archived): `.claude/PRPs/plans/completed/phase-5-prod-deploy.plan.md`
+- Terraform module: `terraform/fugue-channel/` (README.md に apply / verify / teardown 手順)
+- k8s manifest 4 file: `k8s/{10-orchestrator-statefulset,25-ingress-fugue-channel,26-service-fugue-channel,27-networkpolicy-fugue-channel}.yaml`
+- 継承元 §M4-E Phase 4 (本 runbook 上部): 2 段 trace 構造 + AD の本義 + ESM フック判断
+- 継承元 §M4-A Phase 3 (本 runbook 上部): BQ sink 集計 SQL テンプレ (Phase 5 で `<DATASET_ID>` 置換)
 
 ---
 

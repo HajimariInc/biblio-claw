@@ -1,0 +1,93 @@
+# Fugue channel Ingress/Egress NetworkPolicy (M4-E Phase 5)。
+#
+# 構成方針:
+# - orchestrator Pod (biblio-orchestrator StatefulSet) に Fugue endpoint (:8080) を露出させる
+#   ため、GCP LB からの health check + traffic (`35.191.0.0/16` + `130.211.0.0/22`、公式 IP range)
+#   を明示許可する。
+# - Ingress を新設する = 現在 orchestrator Pod は NetworkPolicy Ingress 制限なし
+#   (all-allowed) の状態から「明示的に許可した path のみ受ける」に切り替わるため、既存の
+#   cluster 内通信 (agent Pod → OneCLI :10254/:10255) を保つよう同 namespace の Pod からの
+#   ingress も明示追加する。
+# - Egress は agent Pod (60-netpol-agent-egress.yaml) のパターンを踏襲し、DNS + 外部 HTTPS
+#   (except GCE metadata) を許可。orchestrator は Vertex / Cloud Logging / Secret Manager /
+#   Cloud SQL proxy 等の外部 API を叩くため広く許可する必要がある。metadata (169.254.169.254)
+#   は明示 block = keyless ADC は OneCLI 経由で受領する運用と整合。
+#
+# Dataplane V2 (Cilium) の制約:
+# - Pod-to-Pod は `ipBlock` で許可できない = `podSelector` / `namespaceSelector` で許可する
+# - 同 Pod localhost は NetworkPolicy 非対象 = orchestrator ↔ onecli sidecar 経路は無影響
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: biblio-fugue-channel
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: fugue-channel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: biblio-claw
+      app.kubernetes.io/component: orchestrator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # GCP LB health check + traffic の公式 IP range
+    # (docs.cloud.google.com/kubernetes-engine/docs/how-to/network-policy#limitations 参照)
+    - from:
+        - ipBlock:
+            cidr: 35.191.0.0/16
+        - ipBlock:
+            cidr: 130.211.0.0/22
+      ports:
+        - protocol: TCP
+          port: 8080
+    # 同 namespace 内 Pod (agent Pod からの OneCLI :10254/:10255 通信、
+    # CLI channel Unix socket 以外の in-cluster 通信を維持)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: biblio-claw
+  egress:
+    # GKE Autopilot NodeLocal DNS (既定 ON、agent-egress と同 pattern)
+    - to:
+        - ipBlock:
+            cidr: 169.254.20.10/32
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # kube-dns Pod 直接 (fallback)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # 外部 HTTPS (Vertex + Cloud Logging + Secret Manager + Cloud SQL private IP 等)
+    # + GCE metadata (169.254.169.254/32) は明示 block (keyless ADC は WI + OneCLI 経由)
+    # + TCP 5432 は Cloud SQL proxy (private IP) 用
+    # + TCP 3307 は **cloud-sql-proxy sidecar が Cloud SQL Admin API 経路で instance に dial**
+    #   する必須 port (Phase 5 実 deploy で判明、`:443`/`:5432` だけだと OneCLI proxy の DB
+    #   error → listBiblio 30 秒 timeout → consult partial_failure の silent failure に落ちた)。
+    #   issue #128 で egress scope の再絞り込みを追跡中。
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 3307
