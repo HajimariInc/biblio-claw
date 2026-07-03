@@ -1,9 +1,10 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-const { getAccessTokenMock, getClientMock } = vi.hoisted(() => {
+const { getAccessTokenMock, getClientMock, cachedTokenRef } = vi.hoisted(() => {
   const getAccessTokenMock = vi.fn();
   const getClientMock = vi.fn(async () => ({ getAccessToken: getAccessTokenMock }));
-  return { getAccessTokenMock, getClientMock };
+  const cachedTokenRef: { value: string | null } = { value: null };
+  return { getAccessTokenMock, getClientMock, cachedTokenRef };
 });
 
 vi.mock('google-auth-library', () => {
@@ -13,12 +14,36 @@ vi.mock('google-auth-library', () => {
   return { GoogleAuth };
 });
 
-// OTLP exporter をモックして実 export / shutdown timeout を回避
+// auth.js は partial mock — initTokenRefresh / stopTokenRefresh は本物を使い、
+// getCachedToken だけを test 側から制御可能にする (factory 経路の assertion 用)。
+// initTokenRefresh が cachedTokenRef.value を書き換えるので、test 内では
+// initTokenRefresh 後に上書き制御して factory の戻り値変化を観察する。
+vi.mock('../auth.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../auth.js')>();
+  return {
+    ...actual,
+    getCachedToken: () => cachedTokenRef.value,
+    initTokenRefresh: async () => {
+      const token = await actual.fetchAccessToken();
+      cachedTokenRef.value = token;
+      return token;
+    },
+    stopTokenRefresh: () => {
+      cachedTokenRef.value = null;
+      actual.stopTokenRefresh();
+    },
+  };
+});
+
+// OTLP exporter をモックして実 export / shutdown timeout を回避 + constructor 引数
+// (特に headers) をキャプチャして factory 経路の assertion を可能にする。
+const exporterInstances: Array<{ headersConfig: unknown }> = [];
 vi.mock('@opentelemetry/exporter-trace-otlp-http', () => {
   class OTLPTraceExporter {
-    _headers: Record<string, string> = {};
-    constructor(opts?: { headers?: Record<string, string> }) {
-      this._headers = { ...(opts?.headers ?? {}) };
+    headersConfig: unknown;
+    constructor(opts?: { headers?: unknown }) {
+      this.headersConfig = opts?.headers;
+      exporterInstances.push(this);
     }
     export(_spans: unknown[], cb: (r: { code: number }) => void) {
       cb({ code: 0 });
@@ -58,6 +83,8 @@ describe('startOtel/shutdownOtel', () => {
   beforeEach(() => {
     getAccessTokenMock.mockReset();
     getAccessTokenMock.mockResolvedValue({ token: 'tok-test' });
+    exporterInstances.length = 0;
+    cachedTokenRef.value = null;
     process.env = { ...ORIG_ENV, GOOGLE_CLOUD_PROJECT: 'test-proj' };
   });
 
@@ -88,5 +115,64 @@ describe('startOtel/shutdownOtel', () => {
 
   it('getTracer returns a Tracer regardless of start state', () => {
     expect(getTracer('x').startSpan).toBeTypeOf('function');
+  });
+});
+
+// issue #104 root cause fix (2026-07-03) — HeadersFactory 経路の behavior contract を固定する。
+// SDK バージョンアップで headers 呼出頻度が変わったり、static object へ回帰した場合に
+// 検知できるようにする。旧 _headers hack は SDK@0.219.0 で silent no-op に退化していた。
+describe('OTel exporter headers factory (issue #104 fix)', () => {
+  const ORIG_ENV = process.env;
+
+  beforeEach(() => {
+    getAccessTokenMock.mockReset();
+    exporterInstances.length = 0;
+    cachedTokenRef.value = null;
+    process.env = { ...ORIG_ENV, GOOGLE_CLOUD_PROJECT: 'test-proj' };
+  });
+
+  afterEach(async () => {
+    await shutdownOtel();
+    process.env = ORIG_ENV;
+  });
+
+  it('passes a function (HeadersFactory) to OTLPTraceExporter.headers, not a static object', async () => {
+    getAccessTokenMock.mockResolvedValue({ token: 'tok-init' });
+    await startOtel();
+
+    expect(exporterInstances).toHaveLength(1);
+    expect(typeof exporterInstances[0].headersConfig).toBe('function');
+  });
+
+  it('factory returns fresh token from getCachedToken on each call (not the init-time token)', async () => {
+    getAccessTokenMock.mockResolvedValue({ token: 'tok-init' });
+    await startOtel();
+
+    const factory = exporterInstances[0].headersConfig as () => Promise<Record<string, string>>;
+
+    cachedTokenRef.value = 'tok-A';
+    const first = await factory();
+    expect(first).toEqual({
+      Authorization: 'Bearer tok-A',
+      'x-goog-user-project': 'test-proj',
+    });
+
+    cachedTokenRef.value = 'tok-B';
+    const second = await factory();
+    expect(second.Authorization).toBe('Bearer tok-B');
+    expect(second['x-goog-user-project']).toBe('test-proj');
+  });
+
+  it('factory falls back to empty Bearer when cachedToken is null (no throw)', async () => {
+    getAccessTokenMock.mockResolvedValue({ token: 'tok-init' });
+    await startOtel();
+
+    const factory = exporterInstances[0].headersConfig as () => Promise<Record<string, string>>;
+
+    cachedTokenRef.value = null;
+    await expect(factory()).resolves.toEqual({
+      Authorization: 'Bearer ',
+      'x-goog-user-project': 'test-proj',
+    });
   });
 });
