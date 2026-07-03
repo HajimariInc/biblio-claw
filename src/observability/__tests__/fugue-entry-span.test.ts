@@ -82,6 +82,12 @@ describe('withFugueEntrySpan', () => {
     expect(spans[0].status.code).toBe(otelApi.SpanStatusCode.ERROR);
     expect(spans[0].status.message).toBe('boom');
     expect(spans[0].events.some((e) => e.name === 'exception')).toBe(true);
+    // PR #135 review 提案 6a 対応: Phase 4 review I1 (silent-failure #1) で追加された「throw 経路の
+    // fugue.outcome='error' デフォルト」の効果を直接固定化する。呼出側が成功経路で outcome を
+    // set しないまま throw されたら本 attribute が唯一の diagnostic signal になる (BQ sink /
+    // Cloud Trace ダッシュボード)。この 1 行が「Phase 4 で潰した silent failure が今後
+    // regression しない」保証。
+    expect(spans[0].attributes['fugue.outcome']).toBe('error');
   });
 
   it('non-Error throw を Error に包み recordException + ERROR status を記録する', async () => {
@@ -95,6 +101,9 @@ describe('withFugueEntrySpan', () => {
     const spans = memoryExporter.getFinishedSpans();
     expect(spans[0].status.code).toBe(otelApi.SpanStatusCode.ERROR);
     expect(spans[0].status.message).toBe('string-error');
+    // non-Error throw も同様に fugue.outcome='error' で固定化 (Error/non-Error の枝分岐で
+    // silent 差分が生じない保証)。
+    expect(spans[0].attributes['fugue.outcome']).toBe('error');
   });
 
   it('throw 経路でも finally で span end される (成功 + throw の 2 span 揃う)', async () => {

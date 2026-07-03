@@ -82,4 +82,39 @@ describe('extractTraceContextFromHttpHeaders', () => {
     const ctx = extractTraceContextFromHttpHeaders(headers);
     expect(trace.getSpan(ctx)).toBeUndefined();
   });
+
+  // PR #135 review 提案 6b 対応: Phase 4 review C1 で `base=context.active()` デフォルト引数を
+  // 導入した目的 = 将来 auto HTTP SERVER span 層が発火した際に、既存 active span を破壊せず
+  // extract を適用する契約。既存 test (`traceparent 不在時は ROOT_CONTEXT`) は active span 不在の
+  // シナリオしかカバーしていないため、`ROOT_CONTEXT` を明示 base に渡す旧実装と挙動が区別できない。
+  // pre-existing active span がある状態で本 test を追加することで、非破壊性を初めて固定化する
+  // (2 段構造 → 将来 3 段化される可逆性の保険設計の存在証明)。
+  it('traceparent 不在時に既存の active span を破壊しない (base=context.active() の非破壊契約)', () => {
+    const tracer = provider.getTracer('test-non-destructive');
+    const parentSpan = tracer.startSpan('pre-existing-active-span');
+    const ctxWithParent = trace.setSpan(context.active(), parentSpan);
+    context.with(ctxWithParent, () => {
+      const result = extractTraceContextFromHttpHeaders({});
+      // 既存 SERVER span (parentSpan) が返り値 context にそのまま保持される = 破壊しない。
+      // 旧実装 (`base = ROOT_CONTEXT`) なら trace.getSpan(result) が undefined になる。
+      expect(trace.getSpan(result)).toBe(parentSpan);
+    });
+    parentSpan.end();
+  });
+
+  it('valid traceparent header ありで既存 active span を上書きする (header 優先契約)', () => {
+    // 上記の裏返し = 非破壊性は「header 有時は上書きする」契約と両立する。
+    const tracer = provider.getTracer('test-header-priority');
+    const parentSpan = tracer.startSpan('pre-existing-active-span-2');
+    const ctxWithParent = trace.setSpan(context.active(), parentSpan);
+    const headerTraceId = '0af7651916cd43dd8448eb211c80319c';
+    context.with(ctxWithParent, () => {
+      const result = extractTraceContextFromHttpHeaders({
+        traceparent: `00-${headerTraceId}-b7ad6b7169203331-01`,
+      });
+      // header 由来の trace_id が active に = 既存 span は上書きされる。
+      expect(trace.getSpan(result)?.spanContext().traceId).toBe(headerTraceId);
+    });
+    parentSpan.end();
+  });
 });

@@ -287,4 +287,60 @@ describe('FugueHttpServer trace log correlation (Phase 4, LOG_FORMAT=json)', () 
     expect(partial!['logging.googleapis.com/trace']).toMatch(/^[0-9a-f]{32}$/);
     expect(partial!['logging.googleapis.com/spanId']).toMatch(/^[0-9a-f]{16}$/);
   });
+
+  // PR #135 review 提案 5 対応 (pr-test-analyzer #2、malformed traceparent 経路):
+  //
+  // Fugue Cloud Run 側が壊れた `traceparent` header を送ってきたときに `fugue.traceparent.malformed`
+  // event を warn として emit する経路 = Phase 4 review M3 (silent-failure #3) で「auto trace 経路が
+  // 壊れているのに Cloud Trace 側が何事もなかったかのように見える」silent 縮退を可視化するために
+  // 明示的に追加された regression 検知点。しかし本 event 自体を叩く test が unit / E2E どちらにも
+  // 存在せず「検知ガード自身が最も無防備」だった。malformed traceparent (all-zero trace_id、W3C spec
+  // §3.2 で invalid) を送信して:
+  //   (a) HTTP 応答は 200 で継続 (AD の本義: header 破損で検索を殺さない)
+  //   (b) `fugue.traceparent.malformed` event が warn 経路で 1 回だけ emit される
+  //   (c) 応答自体は fresh な (継承していない) 新 trace_id で生成される
+  // ことを固定化する。
+  it('malformed traceparent (all-zero trace_id) は fugue.traceparent.malformed を warn しつつ 200 で処理を継続する', async () => {
+    const { FugueHttpServer } = await import('./fugue-http.js');
+    const server = new FugueHttpServer({ port: 0, host: '127.0.0.1', expectedToken: TOKEN });
+    const started = await server.start();
+    const baseUrl = `http://127.0.0.1:${started.port}`;
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/channels/fugue/consult`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${TOKEN}`,
+          // W3C traceparent grammar §3.2: trace-id が all-zero は禁止。version-format としては通過
+          // するが、propagator が silently drop するため fugue-http.ts 側が明示的に warn を吐く経路。
+          traceparent: '00-00000000000000000000000000000000-0000000000000000-01',
+        },
+        body: JSON.stringify({
+          schema_version: '1',
+          request_id: 'req-log-badtp',
+          // fixture (HajimariInc--figma-reviewer, "Figma review skill.") にヒットする query。
+          // status='ok' で `fugue.consult.completed` event が emit される経路 (`x` だと not_found event になる)。
+          query: 'Figma',
+          mode: 'ask-ad',
+        }),
+      });
+      // (a) header 破損で検索を殺さない (AD の本義)。
+      expect(res.status).toBe(200);
+    } finally {
+      await server.stop();
+    }
+
+    const payloads = parseJsonWrites();
+    // (b) `fugue.traceparent.malformed` event が 1 回だけ emit されている (silent fallback の可視化)。
+    const malformed = payloads.filter((p) => p.event === 'fugue.traceparent.malformed');
+    expect(malformed.length).toBeGreaterThanOrEqual(1);
+    expect(malformed[0].channel).toBe('fugue');
+    // (c) 応答経路の completed event の trace_id は Fugue の壊れた traceparent を継承せず fresh に。
+    const completed = payloads.find((p) => p.event === 'fugue.consult.completed');
+    expect(completed, 'fugue.consult.completed payload missing').toBeDefined();
+    expect(completed!['logging.googleapis.com/trace']).toMatch(/^[0-9a-f]{32}$/);
+    // all-zero でない = 新規生成された trace_id (propagator が invalid header を drop した結果)
+    expect(completed!['logging.googleapis.com/trace']).not.toBe('00000000000000000000000000000000');
+  });
 });

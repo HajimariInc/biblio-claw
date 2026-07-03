@@ -50,6 +50,30 @@ cd "$ROOT"
 source "$(dirname "${BASH_SOURCE[0]}")/verify-m3-helpers.sh"
 
 # =============================================================================
+# 共通アサーション — Section 内で重複していた静的 grep ロジックを集約 (PR #135 review 提案 11)
+# =============================================================================
+
+# fugue-http.ts が session_equipped_biblios を参照しない実装契約を検証する共通アサーション。
+# Section 4-4 (LOCAL) と Section 9-6 (PROD) で同型の 9 行ブロックが複製されていたため関数化
+# (verify-m3-helpers.sh の info/warn/fail 集約 (M3 の 4 script → 1 file) と同じ設計判断)。
+# ラベルは呼び出し側から渡す (`4-4` / `9-6` 等) = 呼び出し文脈を fail message に保つ。
+assert_fugue_channel_separation() {
+  local label="$1"
+  local src="src/channels/fugue-http.ts"
+  # PR #132 review I1 対応: `grep -q PATTERN FILE 2>/dev/null` を `if ... then fail; fi` で使うと
+  # exit 1 (パターン不一致) と exit 2 (ファイル不在) を同一視 → ファイルがリネームされた瞬間に
+  # silent に無効化される柵。ファイル存在を先行 assert して防御する。
+  [ -f "$src" ] \
+    || fail "channel 分離チェック ($label) 対象ファイル不在: $src
+    対処: ファイルがリネーム/移動された場合は本 verify script 側のパスも追従修正すること"
+  if grep -q "session_equipped_biblios" "$src"; then
+    fail "channel 分離違反 ($label): $src が session_equipped_biblios を参照
+    対処: Fugue channel は fugue_equipped_biblios のみを touch する実装契約 (M4-E Phase 3)"
+  fi
+  info "  ($label) 静的 grep OK: fugue-http.ts は session_equipped_biblios を参照しない"
+}
+
+# =============================================================================
 # 引数 parse — bash flag mode 判定 (verify-m3.sh:49-58 pattern 踏襲)
 # =============================================================================
 MODE='both'
@@ -393,20 +417,9 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
     # cleanup で `deleteEquippedBiblioByName` (session 側削除) を正当に呼ぶため grep 対象に含めない
     # = shokyaku.ts に session_equipped_biblios の参照があっても違反ではない)。
     #
-    # PR #132 review I1 対応: `grep -q PATTERN FILE 2>/dev/null` を `if ... then fail; fi` で
-    # 使うと exit 1 (パターン不一致) と exit 2 (ファイル不在) を同一視 → ファイルがリネームされた
-    # 瞬間に silent に無効化される柵。ファイル存在を先行 assert して防御する。
     # PR #132 review I2 対応: コメント文言「2 file grep」→「1 file grep」に訂正
     # (実装は元から 1 file、コメントが実装を超えて誇張していた誤修正リスク源)。
-    FUGUE_HTTP_SRC="src/channels/fugue-http.ts"
-    [ -f "$FUGUE_HTTP_SRC" ] \
-      || fail "channel 分離チェック (4-4) 対象ファイル不在: $FUGUE_HTTP_SRC
-      対処: ファイルがリネーム/移動された場合は本 verify script 側のパスも追従修正すること"
-    if grep -q "session_equipped_biblios" "$FUGUE_HTTP_SRC"; then
-      fail "channel 分離違反 (4-4): $FUGUE_HTTP_SRC が session_equipped_biblios を参照
-      対処: Fugue channel は fugue_equipped_biblios のみを touch する実装契約 (M4-E Phase 3)"
-    fi
-    info "  (4-4) 静的 grep OK: fugue-http.ts は session_equipped_biblios を参照しない"
+    assert_fugue_channel_separation "4-4"
 fi
 
 # =============================================================================
@@ -871,17 +884,7 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   fi
 
   # (9-6) 静的 grep: fugue-http.ts が session_equipped_biblios を触らない実装契約 (Section 4-4 と対称)
-  #
-  # PR #132 review I1 対応: Section 4-4 と同流儀でファイル存在を先行 assert (exit 1 と exit 2 の同一視回避)。
-  FUGUE_HTTP_SRC="src/channels/fugue-http.ts"
-  [ -f "$FUGUE_HTTP_SRC" ] \
-    || fail "channel 分離チェック (9-6) 対象ファイル不在: $FUGUE_HTTP_SRC
-    対処: ファイルがリネーム/移動された場合は本 verify script 側のパスも追従修正すること"
-  if grep -q "session_equipped_biblios" "$FUGUE_HTTP_SRC"; then
-    fail "Prod channel 分離違反 (9-6): $FUGUE_HTTP_SRC が session_equipped_biblios を参照
-    対処: 実装契約違反 (M4-E Phase 3、fugue channel は fugue_equipped_biblios のみを touch)"
-  fi
-  info "  (9-6) 静的 grep OK: fugue-http.ts は session_equipped_biblios を参照しない"
+  assert_fugue_channel_separation "9-6"
 fi
 
 # =============================================================================

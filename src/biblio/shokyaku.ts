@@ -45,6 +45,48 @@ export interface ShokyakuOptions {
 }
 
 /**
+ * 装備ストア (session 側 / Fugue 側) から個別 biblio を削除する共通ヘルパ (提案 11、code-simplifier)。
+ *
+ * session 側 (`deleteEquippedBiblioByName`) と Fugue 側 (`deleteFugueEquippedBiblioByName`) は
+ * 呼出先 DB 関数と log message / warn 文言以外は同型の try/catch。ヘルパ化することで:
+ *   - `session -> log fixed / warn fixed` の 4 箇所を「fn + 3 string」引数化して 1 箇所に集約
+ *   - warning 文字列 (`装備リスト DB の個別削除に失敗: ...` / `Fugue 装備状態 DB の削除に失敗: ...`)
+ *     は完全に refactor 前と一致 (`shokyaku.test.ts` の cleanupWarning 内容 assert は無変更で PASS)
+ *   - 将来 3 つ目の装備ストア (仮に channel 別が増えても) が追加された時、呼出 1 行で追随可能
+ *
+ * @returns 成功 (changes=0 の no-op 含む) 時は null、失敗時は patron に伝える warning 文字列。
+ */
+function deleteFromEquipStore(
+  biblioName: string,
+  deleteFn: (name: string) => number,
+  successLogMessage: string,
+  failureLogMessage: string,
+  warnPrefix: string,
+): string | null {
+  try {
+    const changes = deleteFn(biblioName);
+    if (changes > 0) {
+      log.info(successLogMessage, {
+        event: 'biblio.shokyaku',
+        outcome: 'success',
+        biblio_name: biblioName,
+        changes,
+      });
+    }
+    return null;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(failureLogMessage, {
+      event: 'biblio.shokyaku',
+      outcome: 'failure',
+      biblio_name: biblioName,
+      err,
+    });
+    return `${warnPrefix}: ${detail}`;
+  }
+}
+
+/**
  * 装備源 dir を冪等に削除 (= force:true で不在でも no-op、try/catch + warn で続行)。
  *
  * 戻り値は失敗時の警告文 (= action handler が patron 通知に含めるため)。成功時は null。
@@ -110,51 +152,27 @@ export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Pr
   }
 
   // 全 session の装備リストから個別削除 (= equip.ts の skip warn ノイズ抑制)
-  try {
-    const changes = deleteEquippedBiblioByName(biblioName);
-    if (changes > 0) {
-      log.info('shokyaku: removed from N session equip lists', {
-        event: 'biblio.shokyaku',
-        outcome: 'success',
-        biblio_name: biblioName,
-        changes,
-      });
-    }
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shokyaku: DB delete from session_equipped_biblios failed', {
-      event: 'biblio.shokyaku',
-      outcome: 'failure',
-      biblio_name: biblioName,
-      err,
-    });
-    warnings.push(`装備リスト DB の個別削除に失敗: ${detail}`);
-  }
+  const sessionWarning = deleteFromEquipStore(
+    biblioName,
+    deleteEquippedBiblioByName,
+    'shokyaku: removed from N session equip lists',
+    'shokyaku: DB delete from session_equipped_biblios failed',
+    '装備リスト DB の個別削除に失敗',
+  );
+  if (sessionWarning) warnings.push(sessionWarning);
 
   // Fugue channel-scoped 装備状態からも除去 (M4-E Phase 3 判断 J、session 側と対称)。
   // 焼却 = 物理削除 + 全装備リストからの除去、が M3 で確立した意味論。fugue store に ghost 行が
   // 残ると、焼却→再仕入れ→再 shelve 後の equip が already_equipped を誤返答する問題を防ぐ。
   // enkin (禁書) には追加しない = 装備状態残置で再装備可の対称性 (session 側と同じ)。
-  try {
-    const changes = deleteFugueEquippedBiblioByName(biblioName);
-    if (changes > 0) {
-      log.info('shokyaku: removed from fugue equipped biblios', {
-        event: 'biblio.shokyaku',
-        outcome: 'success',
-        biblio_name: biblioName,
-        changes,
-      });
-    }
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    log.warn('shokyaku: DB delete from fugue_equipped_biblios failed', {
-      event: 'biblio.shokyaku',
-      outcome: 'failure',
-      biblio_name: biblioName,
-      err,
-    });
-    warnings.push(`Fugue 装備状態 DB の削除に失敗: ${detail}`);
-  }
+  const fugueWarning = deleteFromEquipStore(
+    biblioName,
+    deleteFugueEquippedBiblioByName,
+    'shokyaku: removed from fugue equipped biblios',
+    'shokyaku: DB delete from fugue_equipped_biblios failed',
+    'Fugue 装備状態 DB の削除に失敗',
+  );
+  if (fugueWarning) warnings.push(fugueWarning);
 
   return {
     ok: true,

@@ -861,6 +861,46 @@ describe('handleEquip (Phase 3 implementation)', () => {
     expect(body.skill).toBeNull();
   });
 
+  // PR #135 review Important 6 対応: consult 側は L272-304 で 413 / 400 分岐がテスト済だったが、
+  // equip 側は同型実装 (元は複製、`parseFugueRequest` ヘルパ化後は共通経路) にもかかわらず
+  // 分岐発火が未検証だった。`parseFugueRequest` 経由でも event 名 (`fugue.equip.body_too_large` /
+  // `fugue.equip.body_read_failed`) と応答 body は operation 依存で構築されるため、equip 経路を
+  // 独立 test で固定化する = ヘルパの operation 引数書換 regression を検知する。
+  it('413 payload_too_large when equip body exceeds MAX_BODY_SIZE_BYTES', async () => {
+    // 2 MiB の巨大 skill_id で MAX_BODY_SIZE_BYTES (1 MiB) を超過させる (BIBLIO_NAME_RE 到達前に
+    // body read で BodyTooLargeError → 413)。consult 側 `400 with detail=body is not valid JSON`
+    // (L288) と対称。
+    const bigBody = JSON.stringify({
+      schema_version: '1',
+      request_id: 'req-eq-toolarge',
+      skill_id: 'x'.repeat(2 * 1024 * 1024),
+      channel: 'fugue',
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/equip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: bigBody,
+    });
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('payload_too_large');
+  });
+
+  it('400 with detail=body is not valid JSON when equip body is malformed', async () => {
+    // 非 JSON body → 400 分岐は Zod validation 失敗とは異なる response shape (`detail` を返し
+    // `issues` を返さない)。consult 側 L288-304 と対称。
+    const res = await fetch(`http://127.0.0.1:${port}/v1/channels/fugue/equip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: '{not valid json',
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; detail?: string; issues?: unknown };
+    expect(body.error).toBe('invalid_input');
+    expect(body.detail).toBe('body is not valid JSON');
+    expect(body.issues).toBeUndefined();
+  });
+
   it('400 invalid_input when skill_id is missing (Zod issues)', async () => {
     const res = await postEquip({
       schema_version: '1',

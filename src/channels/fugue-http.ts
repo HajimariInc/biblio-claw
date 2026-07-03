@@ -60,7 +60,9 @@ import {
   FugueEquipRequest,
   type FugueConsultMode,
   type FugueConsultReply,
+  type FugueConsultRequestT,
   type FugueEquipReply,
+  type FugueEquipRequestT,
   type FugueErrorResponse,
   type FugueUnavailableReason,
   type SkillRef,
@@ -160,6 +162,78 @@ function writeJson<T>(res: http.ServerResponse, status: number, body: T): void {
  */
 function writeError(res: http.ServerResponse, status: number, body: FugueErrorResponse): void {
   writeJson(res, status, body);
+}
+
+/**
+ * Fugue endpoint (consult / equip) の request body を読み、Zod で検証し、data を返す共通ヘルパ。
+ *
+ * 目的 (PR #135 review 提案 10、code-simplifier): consult と equip の冒頭 44 行が operation 名
+ * (event log field) と schema 以外は完全に同一実装だった。手書き複製のため片方だけ直す
+ * regression の温床 (413/400 分岐が equip 側でテスト対象外だった Important 6 と根同じ)。ヘルパ化で
+ *   - 乖離リスクを構造的に消す (consult と equip の分岐は 1 箇所に集約)
+ *   - equip 側の 413/400 テストは `parseFugueRequest` に対して 1 度書けば両 endpoint をカバー
+ *   - event 名は `fugue.${operation}.body_too_large` 等の string interpolation で維持 = ランタイム
+ *     で emit される log event value は refactor 前と完全同一 (`fugue-http.otel-log.test.ts` に無影響)
+ *
+ * 応答 body / status も refactor 前と同一 (`fugue-http.test.ts` の consult 側 413/400 assertion は
+ * 無変更で PASS)。static grep test (5xx 出現数 / 200-outcome ペアリング) は 413/400 分岐にしか関係
+ * しないため無傷。
+ *
+ * @returns 検証成功時は `data` (Zod schema の output 型)、失敗時は `null` + 呼び出し側は
+ *          そのまま return する契約 (response 書き込みは本ヘルパ側で完了済)。
+ */
+async function parseFugueRequest<T>(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  schema: {
+    safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: { issues: unknown[] } };
+  },
+  operation: 'consult' | 'equip',
+): Promise<T | null> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    // BodyTooLargeError は 413 で明示分岐、それ以外は 400 に集約 (JSON.parse 失敗 / socket read
+    // error の両方)。err.code / SyntaxError で reason を区別してログに残す。
+    if (err instanceof BodyTooLargeError) {
+      log.warn(`Fugue ${operation} body too large`, {
+        event: `fugue.${operation}.body_too_large`,
+        channel: 'fugue',
+        outcome: 'reject',
+        limit: MAX_BODY_SIZE_BYTES,
+      });
+      writeError(res, 413, { error: 'payload_too_large' });
+      return null;
+    }
+    const reason = err instanceof SyntaxError ? 'invalid_json' : 'read_error';
+    const errCode = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+    log.warn(`Fugue ${operation} body read failed`, {
+      event: `fugue.${operation}.body_read_failed`,
+      channel: 'fugue',
+      outcome: 'reject',
+      reason,
+      err: err instanceof Error ? err.message : String(err),
+      err_code: errCode,
+    });
+    writeError(res, 400, {
+      error: 'invalid_input',
+      detail: reason === 'invalid_json' ? 'body is not valid JSON' : 'body read failed',
+    });
+    return null;
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    log.warn(`Fugue ${operation} schema validation failed`, {
+      event: `fugue.${operation}.schema_invalid`,
+      channel: 'fugue',
+      outcome: 'reject',
+      issues: parsed.error.issues,
+    });
+    writeError(res, 400, { error: 'invalid_input', issues: parsed.error.issues });
+    return null;
+  }
+  return parsed.data;
 }
 
 /**
@@ -459,52 +533,10 @@ export class FugueHttpServer {
     // handler 入り口 = body read 込みの全 duration。
     const startedAt = performance.now();
 
-    let body: unknown;
-    try {
-      body = await readJsonBody(req);
-    } catch (err) {
-      // readJsonBody は JSON.parse 失敗と socket read error の両方を throw する。event 名を
-      // `body_read_failed` に中立化して err.code / SyntaxError 判定でトリアージ可能に。
-      // BodyTooLargeError は 413 で明示的に分岐。
-      if (err instanceof BodyTooLargeError) {
-        log.warn('Fugue consult body too large', {
-          event: 'fugue.consult.body_too_large',
-          channel: 'fugue',
-          outcome: 'reject',
-          limit: MAX_BODY_SIZE_BYTES,
-        });
-        writeError(res, 413, { error: 'payload_too_large' });
-        return;
-      }
-      const reason = err instanceof SyntaxError ? 'invalid_json' : 'read_error';
-      const errCode = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
-      log.warn('Fugue consult body read failed', {
-        event: 'fugue.consult.body_read_failed',
-        channel: 'fugue',
-        outcome: 'reject',
-        reason,
-        err: err instanceof Error ? err.message : String(err),
-        err_code: errCode,
-      });
-      writeError(res, 400, {
-        error: 'invalid_input',
-        detail: reason === 'invalid_json' ? 'body is not valid JSON' : 'body read failed',
-      });
-      return;
-    }
-    const parsed = FugueConsultRequest.safeParse(body);
-    if (!parsed.success) {
-      log.warn('Fugue consult schema validation failed', {
-        event: 'fugue.consult.schema_invalid',
-        channel: 'fugue',
-        outcome: 'reject',
-        issues: parsed.error.issues,
-      });
-      writeError(res, 400, { error: 'invalid_input', issues: parsed.error.issues });
-      return;
-    }
-
-    const { request_id, query, mode, context_hint } = parsed.data;
+    // body 読取り + Zod 検証 + 413/400 応答は `parseFugueRequest` に集約 (提案 10、equip 側と共通)。
+    const parsed = await parseFugueRequest<FugueConsultRequestT>(req, res, FugueConsultRequest, 'consult');
+    if (!parsed) return;
+    const { request_id, query, mode, context_hint } = parsed;
 
     log.info('Fugue consult invoked', {
       event: 'fugue.consult.invoked',
@@ -687,49 +719,10 @@ export class FugueHttpServer {
     // Fugue 契約 §5.3 の FugueEquipRequest/Reply を満たす。
     const startedAt = performance.now();
 
-    let body: unknown;
-    try {
-      body = await readJsonBody(req);
-    } catch (err) {
-      // handleConsult と同一ロジック。
-      if (err instanceof BodyTooLargeError) {
-        log.warn('Fugue equip body too large', {
-          event: 'fugue.equip.body_too_large',
-          channel: 'fugue',
-          outcome: 'reject',
-          limit: MAX_BODY_SIZE_BYTES,
-        });
-        writeError(res, 413, { error: 'payload_too_large' });
-        return;
-      }
-      const reason = err instanceof SyntaxError ? 'invalid_json' : 'read_error';
-      const errCode = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
-      log.warn('Fugue equip body read failed', {
-        event: 'fugue.equip.body_read_failed',
-        channel: 'fugue',
-        outcome: 'reject',
-        reason,
-        err: err instanceof Error ? err.message : String(err),
-        err_code: errCode,
-      });
-      writeError(res, 400, {
-        error: 'invalid_input',
-        detail: reason === 'invalid_json' ? 'body is not valid JSON' : 'body read failed',
-      });
-      return;
-    }
-    const parsed = FugueEquipRequest.safeParse(body);
-    if (!parsed.success) {
-      log.warn('Fugue equip schema validation failed', {
-        event: 'fugue.equip.schema_invalid',
-        channel: 'fugue',
-        outcome: 'reject',
-        issues: parsed.error.issues,
-      });
-      writeError(res, 400, { error: 'invalid_input', issues: parsed.error.issues });
-      return;
-    }
-    const { request_id, skill_id } = parsed.data;
+    // body 読取り + Zod 検証 + 413/400 応答は `parseFugueRequest` に集約 (提案 10、consult 側と共通)。
+    const parsed = await parseFugueRequest<FugueEquipRequestT>(req, res, FugueEquipRequest, 'equip');
+    if (!parsed) return;
+    const { request_id, skill_id } = parsed;
 
     // BIBLIO_NAME_RE guard (判断 F): safeParse 通過後に fail-closed で 400 REJECT。
     // 棚 item は shelve 経路で BIBLIO_NAME_RE 適合が保証されているため正当な id は必ず通る。
