@@ -1893,7 +1893,9 @@ terraform apply
 terraform output # static_ip_address / cert_name / endpoints_service_name / secret 2 個の名前
 ```
 
-**Step 3: DNS 反映 + Managed cert Active 待ち (並列化で時間ロス最小化)**
+**Step 3: DNS 反映確認 (cert Active 化は Step 4 の Ingress apply 後に待つ)**
+
+⚠️ **重要な順序修正 (Phase 5 実 deploy で判明)**: 旧 runbook では「Step 3 で cert Active 待ち → Step 4 で K8s apply」の順序だったが、**cert Active 化には Ingress apply (Load Balancer authorization) が前提条件**。Terraform apply 直後は cert が `PROVISIONING` + domain status = `FAILED_NOT_VISIBLE` になり、Ingress apply しない限り無限に stuck する。詳細は 罠 13 参照。
 
 ```bash
 # Domain を Secret Manager から動的取得 (ここ以降 hardcode 参照ゼロ、セッション env で継承)
@@ -1901,10 +1903,9 @@ export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name
   --project=hajimari-ai-hackathon-2026)
 echo "domain: $DOMAIN"
 
-# Cloud Endpoints Service 状態確認 (state=ACTIVE = DNS record 有効化済)
+# Cloud Endpoints Service 状態確認 (Terraform apply で ACTIVE 化済)
 gcloud endpoints services describe "$DOMAIN" \
   --project=hajimari-ai-hackathon-2026 --format='value(state)'
-# 期待: ACTIVE
 
 # DNS 反映確認 (.cloud.goog は Google 内部 DNS = 通常 5-10 分)
 while ! dig +short "$DOMAIN" | grep -q .; do
@@ -1913,14 +1914,12 @@ done
 dig +short "$DOMAIN"
 # 期待: static IP アドレス (terraform output static_ip_address と一致)
 
-# Cert Active 待ち (最大 60 分、通常 15-30 分。DNS 反映後に開始 = DNS 先出しが最短化)
-while true; do
-  status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
-    --global --format='value(managed.status)')
-  echo "cert status: $status"
-  [[ "$status" == "ACTIVE" ]] && break
-  sleep 60
-done
+# cert 現状 (この時点では PROVISIONING + FAILED_NOT_VISIBLE の想定、Step 4 後に ACTIVE 化する)
+gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+  --global --format='value(managed.status)'
+gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+  --global --format='value(managed.domainStatus)'
+# 期待: PROVISIONING / FAILED_NOT_VISIBLE (Ingress 未 apply の証拠、Step 4 後に ACTIVE 化)
 ```
 
 **Step 4: K8s Secret 作成 + StatefulSet + Service + NetworkPolicy + Ingress apply**
@@ -1954,6 +1953,38 @@ envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
 
 # NEG 自動作成 + backend health 反映待ち (最大 5 分)
 kubectl describe ingress biblio-fugue-channel -n biblio-claw | grep -E 'Address|Backends'
+```
+
+**Step 4.5: Ingress apply 後の cert Active 化待ち + LB frontend rollout 待ち (順序 bug 修正で追加)**
+
+⚠️ **Ingress apply が cert Active 化の前提** (罠 13)。実測: Ingress apply → cert Active 化まで **15-30 分** (通常)、最大 60 分。cert Active 直後は LB frontend の cert rollout が更に 1-5 分必要 (罠 14)。
+
+```bash
+# cert Active 待ち (Ingress apply 後に Google Cert Authority が Load Balancer authorization を再試行)
+while true; do
+  status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+    --global --format='value(managed.status)')
+  domain_status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
+    --global --format='value(managed.domainStatus)')
+  echo "[$(date +%H:%M:%S)] cert=$status domain=$domain_status"
+  if [[ "$status" == "ACTIVE" ]]; then
+    echo "CERT_ACTIVE_OK"
+    break
+  fi
+  sleep 60
+done
+
+# cert Active 直後は LB frontend rollout に追加 1-5 分。TLS handshake が成立するまで poll
+# (罠 14: curl で SSL_ERROR_ZERO_RETURN → 数分後に 200 に切り替わる)
+for i in {1..12}; do
+  sleep 30
+  RES=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "https://${DOMAIN}/healthz" 2>&1)
+  echo "[$(date +%H:%M:%S)] TLS handshake attempt $i: HTTP $RES"
+  if [[ "$RES" =~ ^[2-9] ]]; then
+    echo "LB_FRONTEND_READY"
+    break
+  fi
+done
 ```
 
 **Step 5: CLI 経路で Prod URL 経由の疎通 verify (URL + Token は session env、`.env` に書かない)**
@@ -2083,7 +2114,7 @@ export TF_VAR_fugue_shared_token='dummy-for-destroy'
 terraform destroy
 ```
 
-### 既知の罠 11 件
+### 既知の罠 14 件
 
 1. **Managed cert Active 化が 60 分超えるケース**:
    Google-managed cert の provisioning は DNS record propagate 済状態で始まる = DNS 先出しの
@@ -2162,6 +2193,58 @@ terraform destroy
     Request** で silent に落ちる。log からは Ingress が healthy に見える罠。**対処**: Step 4
     の `envsubst ... | kubectl apply -f -` パイプラインを必ず使う。手動 apply する場合も
     envsubst rendering 後の yaml を一度 file / stdout に確認してから apply する運用。
+
+12. **NetworkPolicy egress で Cloud SQL Auth Proxy `:3307` 見落とし → OneCLI proxy 死んで listBiblio 30 秒 timeout**
+    (Phase 5 実 deploy で silent-failure-hunter の指摘 [issue #128](https://github.com/HajimariInc/biblio-claw/issues/128)
+    に追加事実として判明した重要な silent failure chain):
+
+    Phase 5 で新規追加した NetworkPolicy `biblio-fugue-channel` の egress rule を `:443`
+    (外部 HTTPS) + `:5432` (Cloud SQL 直接) のみ許可すると、**orchestrator Pod 内の
+    `cloud-sql-proxy` sidecar は Cloud SQL Admin API 経路で instance に `:3307` で dial する**
+    ため、その port が block されて `dial tcp 10.191.0.3:3307: i/o timeout` を継続する。
+
+    silent failure chain (6 段):
+    1. cloud-sql-proxy が `:3307` dial timeout
+    2. OneCLI proxy (`onecli` sidecar) が Postgres query で `pool timed out while waiting
+       for an open connection`
+    3. OneCLI proxy が gh installation token の access_token 検証で agent lookup 失敗
+    4. `CONNECT rejected: internal error host=api.github.com:443 error=db error`
+    5. orchestrator の gh API 呼出 (biblio-shelf `marketplace.json` fetch) が 30 秒 timeout
+    6. Fugue consult が `reason: 'other'` で `partial_failure`、応答は HTTP 200 だが
+       `status: 'error'`
+
+    症状: Phase 5 完了判定 4 assertion (HTTPS 200 + backend HEALTHY + trace + BQ) は満たされる
+    が、内部 listBiblio 実データ通信が dead = Fugue MVP デモは成立不可の silent 状態。
+
+    **対処**: `k8s/27-networkpolicy-fugue-channel.yaml` の egress rule に `- protocol: TCP,
+    port: 3307` を追加 (Phase 5 の commit `c0de0dc` で対応済)。修正後の consult
+    `processing_time_ms`: 30007ms → 374ms (80x speedup)。
+
+13. **Cert Active 化には Ingress apply (Load Balancer authorization) が必要 = Terraform apply 直後の cert 待ちは無意味**:
+    Google-managed cert (`google_compute_managed_ssl_certificate`) は Domain Validation (DV)
+    方式で、**Load Balancer が cert を serve できる状態を Google Cert Authority が検証する**。
+    Terraform apply 直後は LB (Ingress) が存在しないため cert status は `PROVISIONING`、domain
+    status は `FAILED_NOT_VISIBLE` で無限に stuck する。旧 runbook (Phase 5 実 deploy 前) の
+    「Step 3 で cert Active 待ち → Step 4 で K8s apply」順序はここで永久 stuck する bug だった。
+
+    **正しい順序**: Terraform apply → K8s Secret + StatefulSet + Service + NetworkPolicy + Ingress
+    apply → cert が LB に attach → Google Cert Authority が Load Balancer authorization を
+    再試行 → cert Active 化 (15-30 分)。runbook Step 3 は「DNS 反映確認のみ」、Step 4.5 で
+    cert Active 化を待つ経路が正解。
+
+    **検知経路**: `gcloud compute ssl-certificates describe biblio-fugue-channel-cert
+    --global --format='value(managed.domainStatus)'` で `FAILED_NOT_VISIBLE` が継続する場合、
+    Ingress apply していない可能性を疑う (Cloud SQL 到達性 or NEG 反映は別問題)。
+
+14. **Cert Active 直後は LB frontend の cert rollout に追加 1-5 分 = curl `SSL_ERROR_ZERO_RETURN`**:
+    `gcloud compute ssl-certificates describe` の status が `ACTIVE` になった **直後** に curl
+    で HTTPS を叩くと、`OpenSSL SSL_connect: SSL_ERROR_ZERO_RETURN` = **TLS handshake が Server
+    側で close** される現象が発生する。これは cert Active になっても LB frontend への cert
+    rollout が完了していないタイミング。
+
+    実測: cert Active から **1-3 分後** に TLS handshake が成立、curl 200 応答に切り替わる。
+    最大 5 分見込み。runbook Step 4.5 の後半で TLS handshake poll ループ (12 回 x 30 秒 = 6 分)
+    を経て verify Step 5 に進む運用。
 
 ### 関連
 

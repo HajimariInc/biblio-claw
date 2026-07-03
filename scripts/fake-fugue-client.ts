@@ -69,7 +69,27 @@ async function main(): Promise<number> {
   }
   const traceparent = parseOption(argv, 'traceparent');
 
-  const env = readEnvFile(['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST', 'FUGUE_URL']);
+  // shell env (process.env) を .env より優先する resolver。CLAUDE.md 公開ポリシーに従い
+  // `.env` に Prod の domain / token を hardcode しない運用のため、Prod verify 時に
+  // `FUGUE_URL=... FUGUE_SHARED_TOKEN=... pnpm exec tsx ...` で shell env が `.env` の
+  // local dev token を override できることが必須 (PR #126 Task 7 実行で判明した設計 bug 修正)。
+  //
+  // readEnvFile は `.env` 優先 + `process.env` fallback の設計 (`src/env.ts:22-67`) で、
+  // Slack token 等の常時保管系には向くが、Prod verify のような ad-hoc override には不向き。
+  // 本 CLI harness は Prod verify tool なので shell env を SoT にする逆順の resolver を採用。
+  const envKeys = ['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST', 'FUGUE_URL'] as const;
+  const envFileValues = readEnvFile(envKeys as unknown as string[]);
+  const env: Record<(typeof envKeys)[number], string | undefined> = {
+    FUGUE_SHARED_TOKEN: undefined,
+    FUGUE_HTTP_PORT: undefined,
+    FUGUE_HTTP_HOST: undefined,
+    FUGUE_URL: undefined,
+  };
+  for (const key of envKeys) {
+    // shell env が set + non-empty ならそちら優先、それ以外は `.env` fallback
+    const shellValue = process.env[key];
+    env[key] = shellValue && shellValue.length > 0 ? shellValue : envFileValues[key];
+  }
   // --bad-token 指定時は auth 分岐 `bad_token` を発火させるため、意図的に不正 token を送る
   // (`no_header` は別の CLI パスで扱う想定 — 今は `--bad-token` の 1 パターンだけ提供)。
   const realToken = env.FUGUE_SHARED_TOKEN ?? '';
