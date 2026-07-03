@@ -304,6 +304,31 @@ describe('FugueHttpServer', () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body).toEqual({ error: 'unauthorized' });
   });
+
+  // Phase 5: /healthz は auth check の前で 200 "ok" を返す。LB health check が Bearer を
+  // 持たないため 401 で backend unhealthy になるのを防ぐ + method 分岐なし = HEAD probe も allow。
+  it('200 "ok" on GET /healthz without Authorization (LB health check path)', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/plain');
+    expect(await res.text()).toBe('ok');
+  });
+
+  it('200 "ok" on /healthz with malformed Authorization (auth check bypassed)', async () => {
+    // auth check の前で return する不変条件を固定化。malformed Authorization を投げても
+    // 401 に落ちず 200 が返るなら「healthz は auth の前」が守られている証拠。
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`, {
+      headers: { Authorization: 'not-a-bearer-scheme' },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
+
+  it('200 "ok" on POST /healthz (method-agnostic, LB may HEAD probe)', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('ok');
+  });
 });
 
 describe('handleConsult (Phase 2 implementation)', () => {

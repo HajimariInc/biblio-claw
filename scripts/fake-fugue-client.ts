@@ -69,14 +69,22 @@ async function main(): Promise<number> {
   }
   const traceparent = parseOption(argv, 'traceparent');
 
-  const env = readEnvFile(['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST']);
+  const env = readEnvFile(['FUGUE_SHARED_TOKEN', 'FUGUE_HTTP_PORT', 'FUGUE_HTTP_HOST', 'FUGUE_URL']);
   // --bad-token 指定時は auth 分岐 `bad_token` を発火させるため、意図的に不正 token を送る
   // (`no_header` は別の CLI パスで扱う想定 — 今は `--bad-token` の 1 パターンだけ提供)。
   const realToken = env.FUGUE_SHARED_TOKEN ?? '';
   const token = badToken ? 'wrong-token' : realToken;
-  const port = parseInt(env.FUGUE_HTTP_PORT || '8080', 10);
-  const host = env.FUGUE_HTTP_HOST || '127.0.0.1';
-  const url = `http://${host}:${port}/v1/channels/fugue/${subcommand}`;
+  // Phase 5: `FUGUE_URL` 指定時は Prod HTTPS 経路 (Prod Ingress URL 全体を渡す = scheme/host/port
+  // を一括切替)。未指定時は local docker compose 経路 (`FUGUE_HTTP_HOST` + `FUGUE_HTTP_PORT` の
+  // 既存挙動を保持)。末尾 `/` は事故防止で強制 strip。
+  let url: string;
+  if (env.FUGUE_URL) {
+    url = `${env.FUGUE_URL.replace(/\/+$/, '')}/v1/channels/fugue/${subcommand}`;
+  } else {
+    const port = parseInt(env.FUGUE_HTTP_PORT || '8080', 10);
+    const host = env.FUGUE_HTTP_HOST || '127.0.0.1';
+    url = `http://${host}:${port}/v1/channels/fugue/${subcommand}`;
+  }
 
   const startedAt = Date.now();
 

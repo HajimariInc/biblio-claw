@@ -207,17 +207,68 @@ spec:
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: deployment.environment=gke }
             # Phase 2: GenAI semconv (Development) の受容を明示。
             - { name: OTEL_SEMCONV_STABILITY_OPT_IN, value: gen_ai_latest_experimental }
+            # === Fugue channel (M4-E Phase 5) ===
+            # 0.0.0.0 bind = Pod IP に listen し LB からの流入を受ける。127.0.0.1 だと
+            # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
+            - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
+            - { name: FUGUE_HTTP_PORT, value: '8080' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
             - secretRef:
                 name: biblio-slack-tokens
                 optional: true
+            # Fugue channel の Bearer 認証 token (M4-E Phase 5)。
+            # `optional: false` = 未投入時に Pod 起動失敗 = Prod で silent skip を防ぐ
+            # (fugue.ts factory が null 返却で adapter 起動しない silent 経路の撲滅)。
+            # Secret 中身は `FUGUE_SHARED_TOKEN` key 単一。Secret Manager からの投入手順は
+            # docs/operations-runbook.md §M4-E Phase 5 参照。
+            - secretRef:
+                name: biblio-fugue-shared-token
+                optional: false
+          ports:
+            # Fugue HTTP endpoint (M4-E Phase 5)。GCE Ingress の Service targetPort が
+            # name 参照 (`fugue`) で解決するため named port。protocol は TCP のみ。
+            - name: fugue
+              containerPort: 8080
+              protocol: TCP
           volumeMounts:
             - { name: data, mountPath: /data }
             # OneCLI sidecar が生成する CA bundle を共有 emptyDir 経由で readOnly mount。
             # ca-secret-sync が `/etc/ssl/certs/onecli/ca.pem` を読んで K8s Secret に upsert する。
             - { name: onecli-ca, mountPath: /etc/ssl/certs/onecli, readOnly: true }
+          # ===========================================================================
+          # Probes (M4-E Phase 5、issue #73 吸収): 2 段 sentinel + 3 probe パターン。
+          # - startupProbe: /tmp/host-ready (index.ts で全 subsystem 起動完了時に書く)
+          #   まで readiness/liveness は評価されない = K8s 保証。5 min 猶予で長時間 boot
+          #   (migration + backfill + initChannelAdapters + adapters + CLI server) を吸収。
+          # - readinessProbe: /healthz httpGet で Pod を LB backend に組み入れる判定。
+          #   Bearer auth の前で 200 "ok" を返すため未認証で通る (fugue-http.ts:HEALTHZ_PATH)。
+          # - livenessProbe: 同 endpoint、false positive で kill するリスクを下げるため
+          #   periodSeconds を長め + failureThreshold で緩和 (90s 応答なしで restart)。
+          # 起動失敗経路: `initChannelAdapters` で throw → sentinel が書かれず crash loop
+          #   = 意図した挙動 (FUGUE_SHARED_TOKEN 欠落 silent skip の撲滅)。
+          # ===========================================================================
+          startupProbe:
+            exec:
+              command: ['test', '-f', '/tmp/host-ready']
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: fugue
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: fugue
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 3
           resources:
             # GKE Autopilot 用に requests のみ指定 (Autopilot が limits を同値に補完)
             requests:

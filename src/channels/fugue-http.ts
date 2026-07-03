@@ -69,6 +69,13 @@ import {
 const CONSULT_PATH = '/v1/channels/fugue/consult';
 const EQUIP_PATH = '/v1/channels/fugue/equip';
 /**
+ * LB health check / K8s readiness / liveness 用の unauthenticated endpoint (Phase 5)。
+ * auth check の前で 200 "ok" を返す = LB は Bearer を持たないため 401 で backend unhealthy に
+ * なるのを防ぐ。応答内容は `"ok"` のみで attack surface は無視できる (path 存在漏洩は
+ * health check として業界標準運用)。method 分岐なし = LB からの HEAD probe も allow。
+ */
+const HEALTHZ_PATH = '/healthz';
+/**
  * Request body の最大バイト数 (1 MiB)。Phase 2 の consult payload は小さい (query 500 char +
  * context_hint dict) ため余裕。TODO(M4-E Phase 5+): 実運用サイズが判明したら見直す。
  * 上限超過は 413 Payload Too Large + log.warn。
@@ -310,6 +317,15 @@ export class FugueHttpServer {
         err: err instanceof Error ? err.message : String(err),
       });
       writeError(res, 400, { error: 'invalid_url' });
+      return;
+    }
+
+    // Phase 5: LB health check / K8s probe 用の unauthenticated endpoint。auth check + log.info
+    // より前に返す = (1) Bearer なしの LB probe が 401 で backend unhealthy になるのを防ぐ、
+    // (2) 5 秒周期の probe で log を汚さない、(3) URL parse 済 = 診断可能な状態。method 分岐なし。
+    if (pathname === HEALTHZ_PATH) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
       return;
     }
 

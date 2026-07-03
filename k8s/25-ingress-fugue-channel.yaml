@@ -1,0 +1,52 @@
+# Fugue channel GCE Ingress (M4-E Phase 5)。
+#
+# 構成方針:
+# - GCE Ingress + `pre-shared-cert` annotation パターン (Gateway API は Google-managed cert の
+#   自動発行に非対応、主要判断 3)
+# - `kubernetes.io/ingress.global-static-ip-name` で Terraform で create した static IP を引く
+# - `ingress.gcp.kubernetes.io/pre-shared-cert` で Terraform で create した Google-managed cert
+#   を引く
+# - `kubernetes.io/ingress.allow-http: "false"` = HTTP を殺して HTTPS のみ受ける
+# - path prefix `/v1/channels/fugue` + `/healthz` の 2 rule
+#
+# Apply 順序 (docs/operations-runbook.md §M4-E Phase 5):
+#   1. Terraform apply (static IP + cert + DNS + Secret Manager)
+#   2. cert の Active 化待ち (最大 60 分)
+#   3. K8s Secret 手動 sync (biblio-fugue-shared-token)
+#   4. StatefulSet update (envFrom + probe + ports) → rolling restart
+#   5. Service + BackendConfig apply (k8s/26)
+#   6. NetworkPolicy apply (k8s/27)
+#   7. Ingress apply (本 file) ← NEG + backend health 反映は最大 5 分
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: biblio-fugue-channel
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: fugue-channel
+  annotations:
+    kubernetes.io/ingress.class: 'gce'
+    kubernetes.io/ingress.global-static-ip-name: 'biblio-fugue-channel-ip'
+    ingress.gcp.kubernetes.io/pre-shared-cert: 'biblio-fugue-channel-cert'
+    # HTTP を殺して HTTPS のみ受ける (LB backend で自動 redirect ではなく 404 返却)
+    kubernetes.io/ingress.allow-http: 'false'
+spec:
+  rules:
+    - host: biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app
+      http:
+        paths:
+          - path: /v1/channels/fugue
+            pathType: Prefix
+            backend:
+              service:
+                name: biblio-fugue-channel
+                port:
+                  number: 443
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: biblio-fugue-channel
+                port:
+                  number: 443
