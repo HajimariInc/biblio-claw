@@ -76,15 +76,15 @@ spec:
           port: 53
     # Cloud SQL Auth Proxy 経由の DB 接続 (cloud-sql-proxy sidecar → Cloud SQL private IP)
     # - :3307 = Cloud SQL Admin API tunnel (必須、Phase 5 実 deploy で判明。runbook §罠 12 参照)
-    # - CIDR = VPC peering allocated range (`gcloud compute addresses list --filter=purpose:VPC_PEERING`
-    #   で特定、実 instance IP を含む range を apply 前に確定)
+    # - CIDR `10.191.0.0/16` = VPC peering allocation range (`gcloud compute addresses list
+    #   --filter=purpose:VPC_PEERING` で特定、実 instance IP `10.191.0.3` を含む range を issue #128
+    #   実装時に確定)。Cloud SQL の region 移設や peering 再割当で変わる可能性あり = その際は
+    #   再検証 + 本行更新が必要 (runbook §罠 12 の CIDR runtime 特定手順参照)。
     # 注: :5432 は cloud-sql-proxy の localhost listen 用であり Pod 外 dial 対象外のため rule から
-    #     除去 (issue #128、削除後の動作は Step 3 の 5 assertion で実機立証)。
-    # 注: `<CLOUD_SQL_CIDR>` は apply 前に実 CIDR (例: 10.191.0.0/16) へ置換必須。placeholder のまま
-    #     apply すると `Invalid CIDR` で reject される (= silent failure ではなく fail-fast、意図通り)。
+    #     除去 (issue #128、削除後の動作は 5 assertion で実機立証)。
     - to:
         - ipBlock:
-            cidr: <CLOUD_SQL_CIDR>
+            cidr: 10.191.0.0/16
       ports:
         - protocol: TCP
           port: 3307

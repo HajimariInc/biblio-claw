@@ -2400,7 +2400,8 @@ terraform destroy
 
     **hardening 反映 (issue #128、2026-07-03)**: 本罠の応急対処 (`0.0.0.0/0 :443/:5432/:3307` の
     broad rule) を目的別 2 rule に分離:
-    - Cloud SQL Auth Proxy 用: `<CLOUD_SQL_CIDR> :3307` (VPC peering CIDR + Admin API tunnel のみ)
+    - Cloud SQL Auth Proxy 用: `10.191.0.0/16 :3307` (VPC peering CIDR + Admin API tunnel のみ、
+      issue #128 実装時に確定)
     - 外部 HTTPS 用: `0.0.0.0/0 except metadata :443` (Vertex/GitHub/Cloud Trace/Secret Manager が相乗り)
     - `:5432` は cloud-sql-proxy の localhost listen 用のため Pod 外 dial 対象外 = rule から除去。
       apply 時に (1) cloud-sql-proxy log で `Ready for new connections` 継続 + (2) OneCLI DB 接続
@@ -2411,8 +2412,9 @@ terraform destroy
     localhost listen か」を必ず区別する。localhost listen port (cloud-sql-proxy の :5432) は
     NetworkPolicy 対象外のため rule に追加すると dead code = 意図せぬ許可の温床になる。
 
-    **Cloud SQL private IP CIDR の runtime 特定**: `<CLOUD_SQL_CIDR>` は repo 内に declare が
-    ない (Terraform module にも定義なし)。apply 前に以下で確定する:
+    **Cloud SQL private IP CIDR の再検証手順**: `10.191.0.0/16` は repo 内に IaC declare が
+    ない (Terraform module にも定義なし) = manifest 側に hardcode。Cloud SQL の region 移設や
+    peering 再割当があった場合は以下で再検証 + `k8s/27-networkpolicy-fugue-channel.yaml` を更新する:
     ```bash
     gcloud sql instances describe biblio-pgsql \
       --project=hajimari-ai-hackathon-2026 \
