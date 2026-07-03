@@ -75,6 +75,10 @@ spec:
     # 外部 HTTPS (Vertex + Cloud Logging + Secret Manager + Cloud SQL private IP 等)
     # + GCE metadata (169.254.169.254/32) は明示 block (keyless ADC は WI + OneCLI 経由)
     # + TCP 5432 は Cloud SQL proxy (private IP) 用
+    # + TCP 3307 は **cloud-sql-proxy sidecar が Cloud SQL Admin API 経路で instance に dial**
+    #   する必須 port (Phase 5 実 deploy で判明、`:443`/`:5432` だけだと OneCLI proxy の DB
+    #   error → listBiblio 30 秒 timeout → consult partial_failure の silent failure に落ちた)。
+    #   issue #128 で egress scope の再絞り込みを追跡中。
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -85,3 +89,5 @@ spec:
           port: 443
         - protocol: TCP
           port: 5432
+        - protocol: TCP
+          port: 3307
