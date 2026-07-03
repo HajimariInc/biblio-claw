@@ -239,15 +239,31 @@ spec:
             - { name: onecli-ca, mountPath: /etc/ssl/certs/onecli, readOnly: true }
           # ===========================================================================
           # Probes (M4-E Phase 5、issue #73 吸収): 2 段 sentinel + 3 probe パターン。
-          # - startupProbe: /tmp/host-ready (index.ts で全 subsystem 起動完了時に書く)
-          #   まで readiness/liveness は評価されない = K8s 保証。5 min 猶予で長時間 boot
-          #   (migration + backfill + initChannelAdapters + adapters + CLI server) を吸収。
-          # - readinessProbe: /healthz httpGet で Pod を LB backend に組み入れる判定。
-          #   Bearer auth の前で 200 "ok" を返すため未認証で通る (fugue-http.ts:HEALTHZ_PATH)。
-          # - livenessProbe: 同 endpoint、false positive で kill するリスクを下げるため
-          #   periodSeconds を長め + failureThreshold で緩和 (90s 応答なしで restart)。
-          # 起動失敗経路: `initChannelAdapters` で throw → sentinel が書かれず crash loop
-          #   = 意図した挙動 (FUGUE_SHARED_TOKEN 欠落 silent skip の撲滅)。
+          # 3 probe いずれも `/tmp/host-ready` sentinel の存在で判定する exec probe を採用。
+          #
+          # 設計判断 (PR #126 レビュー C1+C2+C3 対応): 初期 plan は readiness/liveness を
+          # httpGet /healthz にする案だったが、以下 3 点の silent failure を撲滅するため
+          # 全 probe を exec に統一する:
+          #   (C1) NetworkPolicy Ingress rule に kubelet probe 送信元を allow する必要が
+          #        あり、Dataplane V2 (Cilium) の内部トラフィックを policy engine に通す =
+          #        90 秒後に Pod (replicas=1) crash loop リスク。exec probe は Pod 内で
+          #        コマンド実行 = ネットワーク非経由 = NetworkPolicy 対象外で回避。
+          #   (C2) `FUGUE_SHARED_TOKEN` が空文字時、`createFugueAdapter()` (fugue.ts:41) は
+          #        null 返却 (Slack と対称の silent skip 設計) → fugue-http server が起動しない。
+          #        httpGet /healthz は :8080 に connection refused で fail し、Slack/CLI/ADK
+          #        まで巻き込む crash loop に転化する。exec probe は sentinel file だけを見る
+          #        = Fugue endpoint の状態を Pod liveness に紐付けない = Fugue silent skip
+          #        設計を保持しつつ crash loop を撲滅。
+          #   (C3) 旧コメント「`initChannelAdapters` throw → sentinel 未書込 → crash loop」は
+          #        実装 (channel-registry.ts:57-60 の per-adapter catch) と矛盾していた。
+          #        現在は「main() で throw する経路 (writeFileSync 失敗 / DB migration 失敗
+          #        等) のみが Pod 再起動を招き、per-adapter の credential 欠落は silent skip」
+          #        という実装通りの契約に修正。
+          #
+          # Fugue endpoint への外部 request が失敗した場合の可視化は Fugue Cloud Run 側で
+          # connection refused / 5xx として明示的に観測される (silent failure ではない)。
+          # fugue-http server が起動後に死んだ場合の自動 restart は本設計では効かない
+          # (現状の Slack 等他 channel も同じ = 対称性維持)、Prod で問題化したら別 issue で対応。
           # ===========================================================================
           startupProbe:
             exec:
@@ -256,16 +272,14 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
           readinessProbe:
-            httpGet:
-              path: /healthz
-              port: fugue
+            exec:
+              command: ['test', '-f', '/tmp/host-ready']
             periodSeconds: 10
             failureThreshold: 3
             timeoutSeconds: 3
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: fugue
+            exec:
+              command: ['test', '-f', '/tmp/host-ready']
             periodSeconds: 30
             failureThreshold: 3
             timeoutSeconds: 3

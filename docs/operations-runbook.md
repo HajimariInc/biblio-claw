@@ -2024,7 +2024,7 @@ kubectl apply -f k8s/10-orchestrator-statefulset.yaml
 cd terraform/fugue-channel && terraform destroy
 ```
 
-### 既知の罠 6 件
+### 既知の罠 8 件
 
 1. **Managed cert Active 化が 60 分超えるケース**:
    Google-managed cert の provisioning は DNS record propagate 済状態で始まる = DNS 先出しの
@@ -2057,6 +2057,34 @@ cd terraform/fugue-channel && terraform destroy
    Fugue Cloud Run の `BIBLIO_CLAW_URL` env 切替は biblio 側 Step 6 (BQ 到達確認) 完了後に
    同期する。biblio 側 deploy 完了前に Fugue 側切替してしまうと、Fugue が old URL (DNS 未確定)
    で 5xx を継続受信する。Fugue チームとの手動同期 = Slack 等で「切替 OK」の合図を確認する運用。
+
+7. **`FUGUE_SHARED_TOKEN` が「空文字値の Secret」で silent skip される**:
+   K8s Secret `biblio-fugue-shared-token` は存在するが `FUGUE_SHARED_TOKEN` key の値が空文字
+   の場合、`createFugueAdapter()` (`src/channels/fugue.ts:41`) は `null` を返し `channel:'fugue'`
+   の warn ログ 1 行のみで fugue-http server が起動しない (Slack と対称の silent skip 設計)。
+   Pod probe は全て exec `test -f /tmp/host-ready` = sentinel file のみ判定 = Pod は healthy
+   のまま LB backend に組み入れられる。しかし Fugue endpoint への request は connection
+   refused = Fugue Cloud Run 側で 5xx が上がり続ける。**検知経路**: Fugue Cloud Run 側の
+   error log (5xx) + biblio 側 host log の `channel:'fugue'` warn 検索
+   (`event:'fugue.adapter.credential_missing'` 等)。**対処**: Step 4 の Secret 作成時に
+   `TOKEN=$(gcloud secrets versions access latest ...); [[ -n "$TOKEN" ]] || exit 1` で
+   空文字を fail-fast (下記 罠 8 と対)、または `kubectl get secret biblio-fugue-shared-token
+   -n biblio-claw -o jsonpath='{.data.FUGUE_SHARED_TOKEN}' | base64 -d | wc -c` で値の長さを
+   post-deploy に確認する運用を追加。
+
+8. **`gcloud secrets versions access` の `$(...)` 失敗が silent に空 Secret を作る**:
+   Step 4 の `kubectl create secret generic biblio-fugue-shared-token
+   --from-literal=FUGUE_SHARED_TOKEN="$(gcloud secrets versions access latest --secret=...)"`
+   で、内側 `gcloud` が権限不足 / secret 名 typo / propagation 未完了で失敗しても、`$(...)`
+   の空出力を kubectl は正常な空文字値として受け入れ Secret を「正常に」作成する。結果として
+   罠 7 の crash-loop 回避経路に落ちる。**対処**: Step 4 のコマンドを 2 段に分ける:
+   ```bash
+   TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
+     --project=hajimari-ai-hackathon-2026)
+   [[ -n "$TOKEN" ]] || { echo 'ERROR: token fetch failed (permission / typo / propagation?)'; exit 1; }
+   kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
+     --from-literal=FUGUE_SHARED_TOKEN="$TOKEN"
+   ```
 
 ### 関連
 
