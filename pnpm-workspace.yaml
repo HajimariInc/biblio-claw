@@ -17,3 +17,12 @@ overrides:
   # global singleton による runtime 害は元々ないが、tree clarity (= 単一 version で
   # 解決を強制) のために pnpm overrides で 1.9.1 に統一する (M4-B Phase 0 追加)。
   '@opentelemetry/api': '1.9.1'
+  # `@opentelemetry/core` の W3C Baggage propagation に unbounded memory alloc の
+  # CVE-2026-54285 (medium) がある。biblio-claw src/ で Baggage は不使用
+  # (`grep -rn Baggage src/` で 0 件) だが、public 化前 supply-chain 衛生 +
+  # GitHub Dependabot alert #17 の clear のために、fix version である 2.8.0 に
+  # exact 統一する。従来 `@google/adk@1.3.0` の transitive で 2.1.0 と 2.8.0 の
+  # 2 系統を引き込んでいたが、single version に強制収束させることで、alert #17
+  # が close (fixed) になる。exact pin なのは `@opentelemetry/api: '1.9.1'` の
+  # 既存 pattern と一貫させるため (issue #113 対応で追加)。
+  '@opentelemetry/core': '2.8.0'
