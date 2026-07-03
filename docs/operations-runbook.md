@@ -2250,7 +2250,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "https://${DOMAIN}/v1/channels
 
 # 4. fake-fugue-client 経由の equip 冪等発火 (FUGUE_URL は inline、`.env` に書かない)
 FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$TOKEN" \
-  pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id skills-tdd-first
+  pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id example-org--test-biblio-minimal
 # 期待: status:'equipped' or 'already_equipped' の JSON、processing_time_ms あり
 ```
 
@@ -2314,6 +2314,11 @@ Fugue 側 Cloud Run:
 4. **BQ sink 到達**: Step 6 の BQ query で `channel='fugue'` の row が cnt >= 1
 
 **M4-E PRD 完了判定** = 上記 4 assertion + Fugue チーム側 verify 合同 exit 0。
+
+> **Phase 6 で自動化済** (2026-07-03): 上記 4 assertion は `scripts/verify-fugue-channel.sh --prod`
+> の Section 5-8 に組み込まれ、1 command で pass/fail 判定できるようになった。今後は手動で
+> `curl` / `kubectl describe` / `bq query` を叩き直す代わりに verify script 実行を推奨。
+> 詳細は §M4-E Phase 6 (下記) 参照。
 
 ### 再デプロイ手順 (image 更新のみ)
 
@@ -2550,6 +2555,129 @@ terraform destroy
 - k8s manifest 4 file: `k8s/{10-orchestrator-statefulset,25-ingress-fugue-channel,26-service-fugue-channel,27-networkpolicy-fugue-channel}.yaml`
 - 継承元 §M4-E Phase 4 (本 runbook 上部): 2 段 trace 構造 + AD の本義 + ESM フック判断
 - 継承元 §M4-A Phase 3 (本 runbook 上部): BQ sink 集計 SQL テンプレ (Phase 5 で `<DATASET_ID>` 置換)
+
+---
+
+## M4-E Phase 6: verify-fugue-channel.sh (Fugue channel MVP 完成判定 5 軸 assertion)
+
+Phase 5 実 apply で確定した「4 assertion」 (Prod HTTPS 200 / Ingress backend HEALTHY /
+Cloud Trace `fugue.consult → biblio.list` 親子 / BQ sink `channel='fugue'` row >= 1) を
+`scripts/verify-fugue-channel.sh` で E2E assertion 化。5 軸 (疎通 / 認証 / HITL 簡略化 /
+channel 分離 / keyless) × 2 環境 (local docker compose / Prod GKE) を 1 command で
+pass/fail 判定できる状態にした。
+
+### 概要
+
+**verify-fugue-channel.sh の Section 分割 (全 10 section)**:
+
+- Section 1: Preflight (共通、全 mode 発火) — .env / 必須 CLI / kubectl context / Secret Manager Token/Domain 取得 / 罠 2/4/7/8 の pre-detect
+- Section 2: LOCAL 疎通 + 認証 — 127.0.0.1:8080 curl /healthz + consult 200 + equip 200 + auth-fail 401
+- Section 3: LOCAL HITL 簡略化 — 3 point AND (reply not hitl_required + host log 不在 + local SQLite pending_approvals 0 件)
+- Section 4: LOCAL channel 分離 — SQLite 2 table 独立性 (fugue_equipped_biblios + session_equipped_biblios 存在 + row 追加 + session 無影響 + 静的 grep)
+- Section 5: PROD 疎通 + 認証 — Prod HTTPS /healthz + consult 200 + auth-fail 401 (罠 12 detect: consult error 応答)
+- Section 6: PROD Ingress backend HEALTHY — NEG annotation + backend-services 名動的解決 + get-health 全 HEALTHY
+- Section 7: PROD Cloud Trace 親子関係 — 決定的 trace_id 生成 + consult 発火 + REST v1 retry 30×3s + 親子 assert + channel='fugue' label assert
+- Section 8: PROD BigQuery sink — stdout/stderr で `jsonPayload.channel = 'fugue'` の row cnt >= 1 (retry 6×10s + 3 連続 fail early abort)
+- Section 9: PROD HITL 簡略化 + channel 分離 — Prod GKE 上で equip 発火 + 3 point AND (Pod ログ + Prod SQLite) + channel 分離 SQLite 2 assertion
+- Section 10: PROD keyless 3 段 — KSA annotation + GSA IAM workloadIdentityUser binding + no USER_MANAGED key
+
+### 実行手順
+
+```bash
+# --- 1. local mode (docker compose + host orchestrator 起動時) ---
+docker compose up -d --wait
+pnpm run dev &   # host orchestrator 起動 (別 terminal 推奨)
+
+bash scripts/verify-fugue-channel.sh --local
+# 期待: M4-E PASS (local) + exit 0
+
+# --- 2. Prod mode (Phase 5 実 apply 済) ---
+# 前提: gcloud auth application-default login 済、kubectl context=biblio-prod、GCP_PROJECT_ID / BQ_DATASET_ID 設定済
+
+bash scripts/verify-fugue-channel.sh --prod
+# 期待: M4-E PASS (prod) + exit 0
+
+# --- 3. both mode (両環境揃うとき) ---
+bash scripts/verify-fugue-channel.sh
+# 期待: M4-E PASS (both) + exit 0
+
+# --- 4. 2 連続実行で冪等性確認 ---
+bash scripts/verify-fugue-channel.sh --prod && bash scripts/verify-fugue-channel.sh --prod
+# 期待: 両方 exit 0 (trap cleanup が fugue_equipped_biblios verify 用 row を DELETE、次回も 200 経路が動く)
+```
+
+**Expected Output (stdout 末尾)**:
+
+```
+[INFO]   all assertions passed
+M4-E PASS (prod)
+```
+
+### M4 統合 verify (verify-m4.sh)
+
+M4-A + M4-B + M4-E の chain を 1 command で回す統合 verify:
+
+```bash
+bash scripts/verify-m4.sh
+# 期待: M4 PARTIAL PASS (A+B+E) + exit 0
+# 所要時間: ~10-20 min (verify-m4-a ~5min + verify-m4-b ~5-10min + verify-fugue-channel --prod ~3-5min)
+```
+
+M4-C (reporting) / M4-D (presentation-ui) は未実装のため verify chain には含まれない
+(M4 milestone 完成時に verify-m4.sh に追加)。
+
+### 罠 14 件との対応 (verify で pre-detect する 6 件)
+
+verify script で事前 detect する対象は下記に限定 (残り 8 件は deploy 手順側の責務):
+
+- **罠 2 (K8s Secret 不在)**: Section 1 preflight で `kubectl get secret biblio-fugue-shared-token` チェック
+- **罠 3 (NEG annotation)**: Section 6 で `svc annotations.cloud.google.com/neg` チェック
+- **罠 4 (`FUGUE_HTTP_HOST=0.0.0.0` 忘れ)**: Section 1 preflight で `kubectl exec ... printenv FUGUE_HTTP_HOST` == `0.0.0.0` チェック
+- **罠 7 (`FUGUE_SHARED_TOKEN` 空文字 silent skip)**: Section 1 preflight で Secret 値の base64 decode 後の長さ >= 32 チェック
+- **罠 8 (`gcloud secrets versions access` silent 空応答)**: Section 1 preflight で `[[ -n "$DOMAIN" ]]` + `[[ -n "$PROD_TOKEN" ]]` チェック
+- **罠 12 (NetworkPolicy egress `:3307` 欠落 → consult partial_failure)**: Section 5 の consult 応答で `status:'ok'` を assert (`partial_failure` = `status:'error'` になるため異常検知)
+
+### Fugue チーム合同 verify (separate step)
+
+本 script は biblio 側 exit 0 まで担当。合同 verify (Fugue Cloud Run から実発火 + biblio 側
+Cloud Trace で trace 串刺し + `verify-biblio-integration.sh` 相互確認) は次の手順で実施:
+
+```bash
+# 1. biblio 側 exit 0 確認
+bash scripts/verify-fugue-channel.sh --prod
+# → M4-E PASS (prod) 確認
+
+# 2. DOMAIN + TOKEN を Fugue チームに通知
+DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
+  --project=hajimari-ai-hackathon-2026)
+TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
+  --project=hajimari-ai-hackathon-2026)
+echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
+# → Slack DM (ephemeral share 推奨) で full token + DOMAIN を共有
+
+# 3. Fugue チーム側 verify-biblio-integration.sh 実行 (Fugue repo)
+# 4. 両側 exit 0 確認 → M4-E PRD 完了判定成立
+
+# 5. シナリオ 1 (Figma) 10 分デモを Fugue チームと合同で実施
+```
+
+**M4-E PRD 完了判定成立の条件**:
+
+| PRD 成功シグナル | 本 Phase での対応 |
+|---|---|
+| `bash scripts/verify-fugue-channel.sh --local` exit 0 | verify script 実装で担保 |
+| `bash scripts/verify-fugue-channel.sh --prod` exit 0 | verify script 実装で担保 |
+| Fugue 側 `verify-biblio-integration.sh` との相互確認 = 両側 exit 0 | separate step (上記手順で運用) |
+| シナリオ 1 (Figma) 10 分デモが本番 GKE 上で通る | separate step (Fugue チームと合同実施) |
+
+上 2 件は本 script の直接的 deliverable、下 2 件は本節の運用手順 + DEN さん HITL 実行。
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-e-fugue-integration.prd.md` (Phase 6)
+- Source Plan (archived): `.claude/PRPs/plans/completed/phase-6-verify-fugue-channel.plan.md`
+- verify script: `scripts/verify-fugue-channel.sh` (Section 1-10) + `scripts/verify-m4.sh` (統合 chain)
+- 継承元 §M4-E Phase 5 (本 runbook 上部): 罠 14 件 + Prod deploy 手順 + 4 assertion 手動確認
 
 ---
 
