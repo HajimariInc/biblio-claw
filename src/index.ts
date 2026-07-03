@@ -127,7 +127,11 @@ async function main(): Promise<void> {
   // 再作成が期待挙動。log には構造化 context (`sentinel` + `path`) を付与 = trace 相関
   // 経路 / BQ sink 集計での grep が可能 (PR #126 review W1 対応)。
   writeFileSync('/tmp/boot-complete', new Date().toISOString());
-  log.info('sentinel written', { event: 'sentinel.boot_complete.written', sentinel: 'boot-complete', path: '/tmp/boot-complete' });
+  log.info('sentinel written', {
+    event: 'sentinel.boot_complete.written',
+    sentinel: 'boot-complete',
+    path: '/tmp/boot-complete',
+  });
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
@@ -270,7 +274,11 @@ async function main(): Promise<void> {
   // 再試行の Kubernetes 経路で対処。log には構造化 context (`sentinel` + `path`) を付与
   // (PR #126 review W1 対応、boot-complete と対称)。
   writeFileSync('/tmp/host-ready', new Date().toISOString());
-  log.info('sentinel written', { event: 'sentinel.host_ready.written', sentinel: 'host-ready', path: '/tmp/host-ready' });
+  log.info('sentinel written', {
+    event: 'sentinel.host_ready.written',
+    sentinel: 'host-ready',
+    path: '/tmp/host-ready',
+  });
 }
 
 /** Graceful shutdown. */

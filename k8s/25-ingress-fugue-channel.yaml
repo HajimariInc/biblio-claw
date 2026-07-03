@@ -2,7 +2,7 @@
 #
 # 構成方針:
 # - GCE Ingress + `pre-shared-cert` annotation パターン (Gateway API は Google-managed cert の
-#   自動発行に非対応、主要判断 3)
+#   自動発行に非対応 = docs.cloud.google.com/kubernetes-engine/docs/how-to/deploying-gateways 参照)
 # - `kubernetes.io/ingress.global-static-ip-name` で Terraform で create した static IP を引く
 # - `ingress.gcp.kubernetes.io/pre-shared-cert` で Terraform で create した Google-managed cert
 #   を引く

@@ -3,9 +3,11 @@
 # 構成方針:
 # - Ingress backend として使う ClusterIP Service。既存 `11-orchestrator-service.yaml` は
 #   Headless (`clusterIP: None`) で Ingress backend に使えないため、Fugue 用に別 Service を新設。
-# - `cloud.google.com/neg: '{"ingress": true}'` を明示指定 (M4-E Phase 5 主要判断 4):
+# - `cloud.google.com/neg: '{"ingress": true}'` を明示指定:
 #   NetworkPolicy を導入すると GKE の自動 NEG annotation 付与条件から外れるため、
-#   明示しないと Ingress backend が unhealthy 継続の silent failure に落ちる。
+#   明示しないと Ingress backend が unhealthy 継続の silent failure に落ちる
+#   (docs.cloud.google.com/kubernetes-engine/docs/concepts/container-native-load-balancing
+#   の Automatic NEG conditions 節参照)。
 # - `cloud.google.com/backend-config` で `/healthz` path + checkIntervalSec 短縮を指定
 #   (readiness probe implicit 依存より疎結合、rollout 中の 502 window 最短化)。
 # - port 443 (LB TLS 終端後) → targetPort `fugue` (StatefulSet の containerPort 名参照、
