@@ -6,7 +6,9 @@
 #   2. keyless 4 面アサート (GAC empty / ADC type / SA key 不在 / TF state に key resource なし)
 #   3. emit-test-span.ts 実行 → TRACE_ID / REQUEST_ID 抽出
 #   4. Cloud Trace API ポーリング (sleep 3 × 30 回 = 90s timeout、span >= 1 で break)
+#   4.5. CLI 経由 biblio activity pre-invoke (issue #97 対応、Section 5 の deterministic 化)
 #   5. BigQuery ポーリング (sleep 10 × 30 回 = 5 min timeout、stdout_* / stderr_* UNION)
+#   5.5. BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡)
 #   6. summary SQL 実行 → hit_count >= 1 + marker = 'M4A_OK'
 #   7. ネガティブ対照 (random trace_id で BQ 0 行 + sink filter 静的 grep)
 #
@@ -377,6 +379,65 @@ if [ "$bq_found" -ne 1 ]; then
           (3) sink writer_identity に roles/bigquery.dataEditor 付与済か /
           (4) sink filter (k8s_container + namespace_name=biblio-claw) が biblio-claw Pod にマッチしているか /
           (5) Cloud Logging → BQ export lag (通常数秒-30s、稀に 1-2min) の可能性、少し待って再実行"
+fi
+
+# =============================================================================
+# Section 5.5: BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡)
+# =============================================================================
+# Cloud Logging Console UI "View trace" リンクの直接自動化は困難だが、BQ sink 上で
+# top-level `trace` 列が resource name 形式 (= projects/<PROJECT_ID>/traces/<32-hex>)
+# に昇格していれば、Fluent Bit / Cloud Logging 取り込み層の projectId 自動補完が成立
+# している証跡として、"View trace" 遷移動作を間接担保できる (issue #81 実機検証 2026-07-03)。
+# 将来 Cloud Logging 側の仕様変更で補完が壊れた場合、この assertion で早期検知する。
+info '=== [5.5/7] BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡) ==='
+
+# Section 5 で動的発見済の $TABLES (実在するテーブルのみ = stdout / stderr のうち生成
+# 済の方) + $SINK_PROBE_WHERE (biblio.% / adk.tool.%.invoke event filter) を再利用して
+# UNION ALL を組み立てる。これにより:
+#   1. stderr 未生成の環境 (M4-A Phase 3 sink apply 直後の典型) で "Not found: Table"
+#      に落ちて sentinel 経路で誤診断される問題を回避 (silent-failure-hunter 論点 2)
+#   2. Section 5 と Section 5.5 の filter を単一定義 ($SINK_PROBE_WHERE) に集約する
+#      ことで、filter 退行 (biblio.% 単独への巻き戻し等) を Section 7 の grep 静的反証が
+#      両方同時に検知できるようにする (Section 7 の pin 対象は $SINK_PROBE_WHERE 定義行
+#      で、両 Section が同じ変数を参照するため片方だけドリフトする経路が存在しない、
+#      code-reviewer + silent-failure-hunter 論点 1)
+TRACE_SHAPE_UNION=""
+for T in $TABLES; do
+  PART="SELECT trace FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` ${SINK_PROBE_WHERE} AND trace IS NOT NULL"
+  TRACE_SHAPE_UNION="${TRACE_SHAPE_UNION:+$TRACE_SHAPE_UNION UNION ALL }$PART"
+done
+TRACE_SHAPE_QUERY="$TRACE_SHAPE_UNION LIMIT 1"
+
+# BQ query 失敗 (auth 切れ / network / SQL 型エラー) を 0 件ヒットと区別するため sentinel
+# `BQ_SHAPE_QUERY_FAIL` を使う (同ファイル Section 5 の `|| echo BQ_QUERY_FAIL` sentinel
+# pattern を踏襲、PR #75 で 1 度直したバグクラス。行番号ではなく grep 可能な pattern
+# として参照 = merge で行が drift しても意味を保つ)。
+TRACE_SHAPE="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
+  "$TRACE_SHAPE_QUERY" 2>"$STDERR_DIR/bq-shape.stderr" | tail -n1 || echo BQ_SHAPE_QUERY_FAIL)"
+
+if [ "$TRACE_SHAPE" = 'BQ_SHAPE_QUERY_FAIL' ]; then
+  # BQ query 自体の失敗 = 「0 件不在」と区別して警告する (回避可能な silent 化を防ぐ)。
+  # fail 化はしない (design 判断 = M4-A PASS 全体を守る early warning のみ)、cause の
+  # 明示化のみ改善。
+  warn "  BQ query 自体が失敗 (0 件不在ではなく auth 切れ / network / SQL 型エラーの可能性)"
+  [ -s "$STDERR_DIR/bq-shape.stderr" ] && warn "  stderr: $(tail -c 200 "$STDERR_DIR/bq-shape.stderr" | tr '\n' ' ')"
+elif [ -z "$TRACE_SHAPE" ] || [ "$TRACE_SHAPE" = 'trace' ]; then
+  # CSV header 行のみ (or 空) = 過去 1h に trace 付き biblio.* event が届いていない。
+  # withBiblioActionSpan wrap 外の path (= HTTP 到達なしの early return 等) だけの場合に発生。
+  # fail ではなく warn (regression 検知の early warning、M4-A PASS 全体は温存)。
+  warn "  BQ 上の trace 付き biblio.* event が過去 1h 不在 (issue #81 実機検証の後段証跡スキップ)"
+elif [[ "$TRACE_SHAPE" =~ ^projects/${GCP_PROJECT_ID}/traces/[0-9a-f]{32}$ ]]; then
+  info "  ✓ trace 列 shape OK: $TRACE_SHAPE"
+  info "    → Fluent Bit / Cloud Logging 取り込み層が bare 32-hex → resource name 形式に自動補完"
+  info "    → 'View trace' UI 遷移動作の間接担保 (詳細 docs/operations-runbook.md §M4-A Phase 2)"
+else
+  # shape が想定外 (bare 32-hex のまま or 別形式) = 自動補完が壊れた可能性。fail ではなく
+  # warn で残す (現状の biblio-claw 運用では trace 列不使用の SQL クエリが多数、即 fail は
+  # 不要。Option G 適用検討の signal として出す)。warn 側は「なぜ警告するか」の文脈説明
+  # として issue #81 実機検証済の前提記載を温存する (comment-analyzer 判断)。
+  warn "  ⚠ trace 列 shape 想定外: '$TRACE_SHAPE'"
+  warn "    → issue #81 実機検証済の前提 (= 自動補完成立) が崩れている可能性"
+  warn "    → docs/operations-runbook.md §M4-A Phase 2 log↔trace 連携 の Option G 適用検討"
 fi
 
 # =============================================================================
