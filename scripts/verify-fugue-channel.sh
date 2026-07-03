@@ -526,29 +526,49 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   info "  (6-2) backend-service 名解決 OK: $BS_NAME"
 
   # (6-3) health 確認: 全 backend HEALTHY
+  #
+  # PR #132 Prod E2E で判明した gcloud output schema mismatch fix:
+  # gcloud compute backend-services get-health --format=json の実出力は
+  #   [
+  #     { "backend": "https://.../zones/asia-northeast1-a/networkEndpointGroups/...",
+  #       "status": { "kind": "compute#backendServiceGroupHealth" } },       ← Pod 不在 zone
+  #     { "backend": "https://.../zones/asia-northeast1-b/networkEndpointGroups/...",
+  #       "status": {
+  #         "healthStatus": [ { "healthState": "HEALTHY", ... } ],           ← Pod がある zone
+  #         "kind": "compute#backendServiceGroupHealth" } },
+  #     ...
+  #   ]
+  # となる。GKE Ingress は zonal NEG を全ての zone に生成し、Pod がない zone は
+  # `.status.healthStatus` フィールド自体を持たない (Autopilot 1 replica では正常挙動)。
+  # 初版の jq クエリ `.[] | .healthStatus // []` は `.status.` を挟まずに探していたため
+  # 0 件と判定して常に fail していた。`.status.healthStatus` に正しく降りて集計する。
   BS_HEALTH_JSON="$(gcloud compute backend-services get-health "$BS_NAME" \
     --global --format=json \
     --project="$GCP_PROJECT_ID" \
     2>"$STDERR_DIR/prod-bs-health.stderr" || echo '[]')"
 
-  # healthStatus が空 (= backend 未存在) を fail に落とす
+  # HEALTHY endpoint 総数 (Pod がある zone 分だけ返る、Autopilot 1 replica なら 1 で正常)
   BS_HEALTH_COUNT="$(printf '%s' "$BS_HEALTH_JSON" \
-    | jq '[.[] | .healthStatus // []] | add | length' 2>/dev/null || echo 0)"
+    | jq '[.[] | .status.healthStatus // []] | add | length' 2>/dev/null || echo 0)"
   if ! [[ "$BS_HEALTH_COUNT" =~ ^[0-9]+$ ]] || [ "$BS_HEALTH_COUNT" -lt 1 ]; then
     LAST_HARNESS_STDERR="$STDERR_DIR/prod-bs-health.stderr"
-    fail "backend-service '$BS_NAME' の healthStatus が空 (backend 未存在の可能性)"
+    fail "backend-service '$BS_NAME' に HEALTHY endpoint が 0 件 (backend 未存在 or 全 zone Pod 不在)
+    対処: (1) kubectl get pods -n $NAMESPACE で orchestrator Pod の Running 状態確認 /
+          (2) StatefulSet replicas >= 1 か / (3) BackendConfig healthCheck path=/healthz が通っているか"
   fi
 
+  # UNHEALTHY endpoint が 1 つでもあれば fail (Pod 不在 zone は healthStatus フィールドがないため
+  # ここで数えられない = false positive しない、Pod がある zone のみが判定対象)
   UNHEALTHY="$(printf '%s' "$BS_HEALTH_JSON" \
-    | jq '[.[] | .healthStatus // [] | .[] | select(.healthState != "HEALTHY")] | length' 2>/dev/null || echo -1)"
+    | jq '[.[] | .status.healthStatus // [] | .[] | select(.healthState != "HEALTHY")] | length' 2>/dev/null || echo -1)"
   if ! [[ "$UNHEALTHY" =~ ^[0-9]+$ ]] || [ "$UNHEALTHY" -ne 0 ]; then
     LAST_HARNESS_STDERR="$STDERR_DIR/prod-bs-health.stderr"
-    fail "backend '$BS_NAME' に UNHEALTHY backend が $UNHEALTHY 件存在 (全 HEALTHY 期待)
+    fail "backend '$BS_NAME' に UNHEALTHY endpoint が $UNHEALTHY 件存在 (全 HEALTHY 期待)
     対処: (1) StatefulSet readinessProbe が exec test -f /tmp/host-ready で通っているか /
           (2) BackendConfig CRD の healthCheck path=/healthz が Pod で 200 返しているか /
           (3) NetworkPolicy が LB health check IP range (35.191/16, 130.211/22) を許可しているか"
   fi
-  info "  (6-3) backend-service $BS_NAME 全 backend HEALTHY (count=$BS_HEALTH_COUNT)"
+  info "  (6-3) backend-service $BS_NAME 全 HEALTHY endpoint OK (count=$BS_HEALTH_COUNT)"
 fi
 
 # =============================================================================
