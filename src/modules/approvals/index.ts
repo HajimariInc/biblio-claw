@@ -20,6 +20,7 @@ import { onDeliveryAdapterReady } from '../../delivery.js';
 import { registerResponseHandler, onShutdown } from '../../response-registry.js';
 import { handleApprovalsResponse } from './response-handler.js';
 import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-approvals.js';
+import { startAdkApprovalHandler, stopAdkApprovalHandler } from './adk-approvals.js';
 
 // Public API re-exports so consumers import from the module root.
 export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';
@@ -29,8 +30,12 @@ registerResponseHandler(handleApprovalsResponse);
 
 onDeliveryAdapterReady((adapter) => {
   startOneCLIApprovalHandler(adapter);
+  // issue #106: ADK HITL 承認の expiry timer + 起動時 sweep hook。同 adapter 経由で
+  // Slack card edit + patron 通知を行う (= expiry / sweep 経路が使う adapter を保持)。
+  startAdkApprovalHandler(adapter);
 });
 
 onShutdown(() => {
   stopOneCLIApprovalHandler();
+  stopAdkApprovalHandler();
 });
