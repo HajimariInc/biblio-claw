@@ -52,7 +52,8 @@ fi
 : "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)。.env.example の §M4-A observability 参照}"
 
 # 必要 CLI が PATH 上にいるか fail-fast。
-for cmd in gcloud bq jq node; do
+# `kubectl` は Section 4.5 (CLI 経由 pre-invoke = issue #97 対応で新設) が依存する。
+for cmd in gcloud bq jq node kubectl; do
   command -v "$cmd" >/dev/null 2>&1 || fail "必須 CLI が見つかりません: $cmd"
 done
 
@@ -210,14 +211,22 @@ info '=== [4.5/7] CLI 経由 biblio activity pre-invoke (Section 5 の determini
 # `VERIFY_M4B_NAMESPACE` env と対称)。default = 'biblio-claw' は k8s/00-namespace.yaml の値。
 PREINVOKE_NAMESPACE="${VERIFY_M4A_NAMESPACE:-biblio-claw}"
 
-# POD 特定: verify-m4-b.sh Section 3 と同経路 (l=app=biblio-orchestrator)。
-# 本 script は verify-m4-a 単独実行を想定しているため Section 3 に依存せず自前で取得する。
-POD_PREINVOKE="$(kubectl get pods -n "$PREINVOKE_NAMESPACE" -l app=biblio-orchestrator -o jsonpath='{.items[0].metadata.name}' 2>"$STDERR_DIR/pod-get-45.stderr" || echo '')"
-if [ -z "$POD_PREINVOKE" ]; then
+# POD 特定: verify-m4-b.sh と同 pattern = StatefulSet の pod 名決定則
+# (`<sts-name>-<ordinal>` = `biblio-orchestrator-0`) を利用して env で直接指定。
+# 素の `app=biblio-orchestrator` label は k8s/*.yaml に存在しない
+# (正は `app.kubernetes.io/name=biblio-claw` + `app.kubernetes.io/component=orchestrator`
+# だが、verify-m4-b.sh は簡潔さを優先して pod 名直指定 pattern を採用しているため対称に揃える)。
+POD_PREINVOKE="${VERIFY_M4A_ORCHESTRATOR_POD:-biblio-orchestrator-0}"
+
+# Pod 存在確認 (verify-m4-a 単独実行時の fail-fast、Section 5 で BQ 疎通確認する前に
+# kubectl 経路の実効性を早期に判定する)。
+if ! kubectl get pod "$POD_PREINVOKE" -n "$PREINVOKE_NAMESPACE" \
+     -o jsonpath='{.status.phase}' 2>"$STDERR_DIR/pod-get-45.stderr" | grep -q '^Running$'; then
   LAST_HARNESS_STDERR="$STDERR_DIR/pod-get-45.stderr"
-  fail "Section 4.5 pre-invoke: orchestrator Pod が見つからない (namespace=$PREINVOKE_NAMESPACE)
-    対処: kubectl get pods -n $PREINVOKE_NAMESPACE で StatefulSet が稼働しているか確認
-          (別 namespace なら VERIFY_M4A_NAMESPACE env で上書き)"
+  fail "Section 4.5 pre-invoke: orchestrator Pod '$POD_PREINVOKE' が Running 状態ではない (namespace=$PREINVOKE_NAMESPACE)
+    対処: kubectl get pod $POD_PREINVOKE -n $PREINVOKE_NAMESPACE で状態確認
+          (StatefulSet の pod 名は `<sts-name>-<ordinal>` = default 'biblio-orchestrator-0'、
+           別 pod 名 / 別 namespace なら VERIFY_M4A_ORCHESTRATOR_POD / VERIFY_M4A_NAMESPACE env で上書き)"
 fi
 
 TMP_PREINVOKE_OUT="$STDERR_DIR/preinvoke.stdout"
