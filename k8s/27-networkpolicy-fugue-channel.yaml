@@ -8,12 +8,15 @@
 #   (all-allowed) の状態から「明示的に許可した path のみ受ける」に切り替わるため、既存の
 #   cluster 内通信 (agent Pod → OneCLI :10254/:10255) を保つよう同 namespace の Pod からの
 #   ingress も明示追加する。
-# - Egress は目的別に 3 rule 分離 (issue #128 の hardening 済):
+# - Egress は目的別に 4 rule 分離 (issue #128 の hardening 済):
 #   (1) DNS: NodeLocal DNS (169.254.20.10/32) + kube-dns podSelector
 #   (2) Cloud SQL Auth Proxy: VPC peering CIDR + :3307 (cloud-sql-proxy sidecar 専用)
-#   (3) 外部 HTTPS: 0.0.0.0/0 except metadata + :443 (Vertex/GitHub/Cloud Trace/Secret Manager)
-#   詳細は各 rule 直上のコメント参照。metadata (169.254.169.254) は明示 block =
-#   keyless ADC は WI + OneCLI 経由で受領する運用と整合。
+#   (3) GCE metadata: 169.254.169.254 + :80 (WI 経路、orchestrator の keyless ADC 3 経路が要求)
+#   (4) 外部 HTTPS: 0.0.0.0/0 + :443 (Vertex/GitHub/Cloud Trace/Secret Manager)
+#   詳細は各 rule 直上のコメント参照。metadata (169.254.169.254) は agent Pod と違い
+#   本 orchestrator Pod では WI (Workload Identity) 経路で必須 (fetch-pem gcloud auth /
+#   cloud-sql-proxy sqladmin token / OneCLI Prisma IAM DB auth の 3 経路が要求、
+#   block すると全 keyless ADC が silent に死ぬ = PR #126 直後の broken state の cause)。
 #
 # Dataplane V2 (Cilium) の制約:
 # - Pod-to-Pod は `ipBlock` で許可できない = `podSelector` / `namespaceSelector` で許可する
@@ -88,18 +91,28 @@ spec:
       ports:
         - protocol: TCP
           port: 3307
+    # GCE metadata server (WI proxy 経路、iptables で kube-system/gke-metadata-server にリダイレクト)
+    # - fetch-pem initContainer (gcloud secrets versions access) が WI で ADC 解決
+    # - cloud-sql-proxy sidecar が sqladmin API token を取得 (instance metadata refresh)
+    # - OneCLI Prisma が IAM DB auth token を取得 (biblio-orchestrator@...iam)
+    # agent Pod (60-netpol-agent-egress.yaml) は OneCLI 経由前提のため block できたが、
+    # orchestrator は WI 直接使うため許可必須 (issue #128 実装時に WI 死のため block 解除、
+    # PR #126 で agent egress pattern から継承した設計ミスの是正、runbook §罠 12 参照)。
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
     # 外部 HTTPS (Vertex + GitHub + Cloud Trace + Cloud Logging + Secret Manager)
     # - Vertex (aiplatform.googleapis.com:443) = OneCLI MITM 経由 (同 Pod localhost 通過後 Pod 外発信)
     # - GitHub API (api.github.com:443) = OneCLI MITM 経由 + gh-token-rotator sidecar 直接発信
     # - Cloud Trace/Logging (telemetry.googleapis.com:443) = NO_PROXY で OneCLI 迂回、orchestrator
     #   本体から直接発信 (src/observability/no-proxy.ts 参照)
-    # - Secret Manager (secretmanager.googleapis.com:443) = Terraform module + WI 経由
-    # + GCE metadata (169.254.169.254/32) は明示 block (keyless ADC は WI + OneCLI 経由で解決)
+    # - Secret Manager (secretmanager.googleapis.com:443) = fetch-pem initContainer (gcloud) + WI 経由
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except:
-              - 169.254.169.254/32
       ports:
         - protocol: TCP
           port: 443

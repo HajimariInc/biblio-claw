@@ -2442,14 +2442,42 @@ terraform destroy
     `processing_time_ms`: 30007ms → 374ms (80x speedup)。
 
     **hardening 反映 (issue #128、2026-07-03)**: 本罠の応急対処 (`0.0.0.0/0 :443/:5432/:3307` の
-    broad rule) を目的別 2 rule に分離:
+    broad rule) を目的別 3 rule + metadata 明示許可に分離:
     - Cloud SQL Auth Proxy 用: `10.191.0.0/16 :3307` (VPC peering CIDR + Admin API tunnel のみ、
       issue #128 実装時に確定)
-    - 外部 HTTPS 用: `0.0.0.0/0 except metadata :443` (Vertex/GitHub/Cloud Trace/Secret Manager が相乗り)
+    - GCE metadata (WI 経路) 用: `169.254.169.254/32 :80` (**PR #126 直後の追加発見**、下記 hardening
+      Wave 2 参照)
+    - 外部 HTTPS 用: `0.0.0.0/0 :443` (Vertex/GitHub/Cloud Trace/Secret Manager が相乗り)
     - `:5432` は cloud-sql-proxy の localhost listen 用のため Pod 外 dial 対象外 = rule から除去。
-      apply 時に (1) cloud-sql-proxy log で `Ready for new connections` 継続 + (2) OneCLI DB 接続
-      維持 + (3) consult `processing_time_ms` < 1000ms を実機確認する (issue #128 実装計画の Step 3
-      5 assertion 参照)。
+
+    **hardening Wave 2 (issue #128 実装中に発見した既存 broken の是正、2026-07-03)**: PR #126 で
+    新設した本 NetworkPolicy は agent Pod の `k8s/60-netpol-agent-egress.yaml` の設計を継承した
+    ため、egress rule に `except 169.254.169.254/32` (GCE metadata block) を含んでいた。しかし
+    orchestrator Pod は agent Pod と違い、以下 3 経路が **Workload Identity 経由の metadata
+    token を必須** とする:
+    - `fetch-pem` initContainer: `gcloud secrets versions access` で ADC 解決 (WI 経由 GSA
+      impersonation)
+    - `cloud-sql-proxy` sidecar: sqladmin API token 取得 → instance metadata refresh → :3307 dial
+    - `onecli` sidecar (Prisma): IAM DB auth token (`biblio-orchestrator@...iam@127.0.0.1:5432`)
+
+    NetworkPolicy で `169.254.169.254` を block すると WI 経路が silent に死亡し、上記 3 経路が
+    全て機能停止する。**Phase 5 実 deploy 直後 (罠 12 の 374ms 復旧観測時) は token cache
+    (数時間有効) が生きていたため動いていた**が、数時間経過後は cache 期限切れで silent broken に
+    移行 = Fugue MVP 完全機能停止。
+
+    **確認方法**: `kubectl exec biblio-orchestrator-0 -c fetch-pem -- gcloud config list` で
+    active account が空 = broken。`kubectl exec ... -c orchestrator -- node -e
+    "fetch('http://metadata.google.internal/...')"` が 5 秒 timeout も broken の signature。
+
+    **対処**: 本 hardening (issue #128) で `except 169.254.169.254/32` を削除し、代わりに
+    `169.254.169.254/32 :80` の専用 rule を明示追加。agent Pod の egress rule は OneCLI 経由前提
+    のため metadata block を維持 (この差分は本 orchestrator Pod と agent Pod の役割違いに基づく
+    正当な非対称性)。apply 後は Pod rollout restart で新 Pod が起動 → WI 経路復活 → 全 keyless
+    ADC 復旧を実機確認する:
+    - (1) `cloud-sql-proxy` log で `Ready for new connections` 継続 + `refresh error` なし
+    - (2) `onecli` gateway (`localhost:10254`) 応答成立 (500 → 200)
+    - (3) `fetch-pem` initContainer が exit 0 (Pod Ready 5/5 復活)
+    - (4) `consult processing_time_ms` < 1000ms (罠 12 復旧値 374ms 相当)
 
     **教訓**: silent failure 再発の教訓として、新 port を egress 許可する際は「Pod 外 dial か /
     localhost listen か」を必ず区別する。localhost listen port (cloud-sql-proxy の :5432) は
