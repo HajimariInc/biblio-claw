@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4b-p4
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4e-p5-2
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4b-p4,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4e-p5-2,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -207,17 +207,82 @@ spec:
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: deployment.environment=gke }
             # Phase 2: GenAI semconv (Development) の受容を明示。
             - { name: OTEL_SEMCONV_STABILITY_OPT_IN, value: gen_ai_latest_experimental }
+            # === Fugue channel (M4-E Phase 5) ===
+            # 0.0.0.0 bind = Pod IP に listen し LB からの流入を受ける。127.0.0.1 だと
+            # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
+            - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
+            - { name: FUGUE_HTTP_PORT, value: '8080' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
             - secretRef:
                 name: biblio-slack-tokens
                 optional: true
+            # Fugue channel の Bearer 認証 token (M4-E Phase 5)。
+            # `optional: false` = 未投入時に Pod 起動失敗 = Prod で silent skip を防ぐ
+            # (fugue.ts factory が null 返却で adapter 起動しない silent 経路の撲滅)。
+            # Secret 中身は `FUGUE_SHARED_TOKEN` key 単一。Secret Manager からの投入手順は
+            # docs/operations-runbook.md §M4-E Phase 5 参照。
+            - secretRef:
+                name: biblio-fugue-shared-token
+                optional: false
+          ports:
+            # Fugue HTTP endpoint (M4-E Phase 5)。GCE Ingress の Service targetPort が
+            # name 参照 (`fugue`) で解決するため named port。protocol は TCP のみ。
+            - name: fugue
+              containerPort: 8080
+              protocol: TCP
           volumeMounts:
             - { name: data, mountPath: /data }
             # OneCLI sidecar が生成する CA bundle を共有 emptyDir 経由で readOnly mount。
             # ca-secret-sync が `/etc/ssl/certs/onecli/ca.pem` を読んで K8s Secret に upsert する。
             - { name: onecli-ca, mountPath: /etc/ssl/certs/onecli, readOnly: true }
+          # ===========================================================================
+          # Probes (M4-E Phase 5、issue #73 吸収): 2 段 sentinel + 3 probe パターン。
+          # 3 probe いずれも `/tmp/host-ready` sentinel の存在で判定する exec probe を採用。
+          #
+          # 設計判断 (PR #126 レビュー C1+C2+C3 対応): 初期 plan は readiness/liveness を
+          # httpGet /healthz にする案だったが、以下 3 点の silent failure を撲滅するため
+          # 全 probe を exec に統一する:
+          #   (C1) NetworkPolicy Ingress rule に kubelet probe 送信元を allow する必要が
+          #        あり、Dataplane V2 (Cilium) の内部トラフィックを policy engine に通す =
+          #        90 秒後に Pod (replicas=1) crash loop リスク。exec probe は Pod 内で
+          #        コマンド実行 = ネットワーク非経由 = NetworkPolicy 対象外で回避。
+          #   (C2) `FUGUE_SHARED_TOKEN` が空文字時、`createFugueAdapter()` (fugue.ts:41) は
+          #        null 返却 (Slack と対称の silent skip 設計) → fugue-http server が起動しない。
+          #        httpGet /healthz は :8080 に connection refused で fail し、Slack/CLI/ADK
+          #        まで巻き込む crash loop に転化する。exec probe は sentinel file だけを見る
+          #        = Fugue endpoint の状態を Pod liveness に紐付けない = Fugue silent skip
+          #        設計を保持しつつ crash loop を撲滅。
+          #   (C3) 旧コメント「`initChannelAdapters` throw → sentinel 未書込 → crash loop」は
+          #        実装 (channel-registry.ts:57-60 の per-adapter catch) と矛盾していた。
+          #        現在は「main() で throw する経路 (writeFileSync 失敗 / DB migration 失敗
+          #        等) のみが Pod 再起動を招き、per-adapter の credential 欠落は silent skip」
+          #        という実装通りの契約に修正。
+          #
+          # Fugue endpoint への外部 request が失敗した場合の可視化は Fugue Cloud Run 側で
+          # connection refused / 5xx として明示的に観測される (silent failure ではない)。
+          # fugue-http server が起動後に死んだ場合の自動 restart は本設計では効かない
+          # (現状の Slack 等他 channel も同じ = 対称性維持)、Prod で問題化したら別 issue で対応。
+          # ===========================================================================
+          startupProbe:
+            exec:
+              command: ['test', '-f', '/tmp/host-ready']
+            failureThreshold: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ['test', '-f', '/tmp/host-ready']
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ['test', '-f', '/tmp/host-ready']
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 3
           resources:
             # GKE Autopilot 用に requests のみ指定 (Autopilot が limits を同値に補完)
             requests:
@@ -228,7 +293,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4b-p4
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4e-p5-2
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -274,7 +339,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4b-p4
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4e-p5-2
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }

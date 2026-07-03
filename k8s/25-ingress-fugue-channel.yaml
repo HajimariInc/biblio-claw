@@ -1,0 +1,67 @@
+# Fugue channel GCE Ingress (M4-E Phase 5)。
+#
+# 構成方針:
+# - GCE Ingress + `pre-shared-cert` annotation パターン (Gateway API は Google-managed cert の
+#   自動発行に非対応 = docs.cloud.google.com/kubernetes-engine/docs/how-to/deploying-gateways 参照)
+# - `kubernetes.io/ingress.global-static-ip-name` で Terraform で create した static IP を引く
+# - `ingress.gcp.kubernetes.io/pre-shared-cert` で Terraform で create した Google-managed cert
+#   を引く
+# - `kubernetes.io/ingress.allow-http: "false"` = HTTP を殺して HTTPS のみ受ける
+# - path prefix `/v1/channels/fugue` + `/healthz` の 2 rule
+# - `host: ${DOMAIN}` は **envsubst で展開してから apply** (public 化予定の repo に domain を
+#   hardcode しない、Source of Truth = Secret Manager `fugue-domain-name`)
+#
+# Apply コマンド (envsubst で `${DOMAIN}` を展開してから kubectl apply、他 manifest と対称):
+#   export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
+#     --project=hajimari-ai-hackathon-2026)
+#   envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
+#
+# 前提: `envsubst` (`gettext` package) がインストール済。WSL2 AlmaLinux 9 では
+#   `sudo dnf install gettext` で導入 (未インストールなら sh error で気付ける)。
+#
+# Apply 順序 (docs/operations-runbook.md §M4-E Phase 5、Phase 5 実 deploy で罠 13 判明後の確定順序):
+#   1. Terraform apply (static IP + Endpoints Service + cert + Secret Manager 2 個)
+#   2. Cloud Endpoints DNS 反映待ち (.cloud.goog = 通常 5-10 分)
+#   3. K8s Secret 手動 sync (biblio-fugue-shared-token)
+#   4. StatefulSet update (envFrom + probe + ports) → rolling restart
+#   5. Service + BackendConfig apply (k8s/26)
+#   6. NetworkPolicy apply (k8s/27)
+#   7. Ingress apply (本 file、envsubst 経由) ← NEG + backend health 反映は最大 5 分
+#   8. Cert Active 化待ち (Ingress apply 後の 15-30 分、最大 60 分) ← Ingress apply が
+#      **cert Active の前提条件** (LB backend authorization 経由)、Step 7 より前に待つと
+#      `PROVISIONING` + `FAILED_NOT_VISIBLE` で無限 stuck (runbook §罠 13)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: biblio-fugue-channel
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: fugue-channel
+  annotations:
+    kubernetes.io/ingress.class: 'gce'
+    kubernetes.io/ingress.global-static-ip-name: 'biblio-fugue-channel-ip'
+    ingress.gcp.kubernetes.io/pre-shared-cert: 'biblio-fugue-channel-cert'
+    # HTTP を殺して HTTPS のみ受ける (LB backend で自動 redirect ではなく 404 返却)
+    kubernetes.io/ingress.allow-http: 'false'
+spec:
+  rules:
+    # `${DOMAIN}` は envsubst で展開する必須 placeholder。展開せずに直 apply すると
+    # `host: ${DOMAIN}` が literal で登録され TLS SNI 不整合で全 request が 404 に落ちる silent failure。
+    - host: ${DOMAIN}
+      http:
+        paths:
+          - path: /v1/channels/fugue
+            pathType: Prefix
+            backend:
+              service:
+                name: biblio-fugue-channel
+                port:
+                  number: 443
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: biblio-fugue-channel
+                port:
+                  number: 443

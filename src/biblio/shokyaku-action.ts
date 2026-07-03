@@ -67,9 +67,13 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
       if (result.ok) {
         // cleanup 成否で通知文言を切替 (= 「物理削除しました」と無条件通知で焼却の意味を誤認させない、
         // PR #15 silent-failure-hunter HIGH 2 対応)。
+        // cleanupWarning は複数系統の cleanup (装備源 dir 物理削除 / session_equipped_biblios /
+        // fugue_equipped_biblios) の失敗を ' / ' 連結で運ぶため、ヘッドラインを理由非依存にする
+        // (= 特定系統に限定した誤ミスリード防止、PR #117 review silent-failure-hunter HIGH)。
+        // 是正指示も「詳細を確認して該当箇所を個別に対処」に一般化。
         const cleanupLine = result.cleanupWarning
-          ? `${biblioName} を棚から除去する draft PR を立てましたが、**装備源の物理削除に失敗しました** ` +
-            `(ログ確認要): ${result.cleanupWarning}。手動 merge + 装備源 dir の手動削除をお願いします。`
+          ? `${biblioName} を棚から除去する draft PR を立てましたが、**装備状態のクリーンアップに一部失敗しました** ` +
+            `(ログ確認要): ${result.cleanupWarning}。手動 merge + 上記詳細の該当箇所 (装備源 dir / 装備リスト DB / Fugue 装備状態 DB) を個別に対処してください。`
           : `${biblioName} を棚から除去する draft PR を立て、装備源を物理削除しました (= 再装備不可)。手動 merge をお願いします。`;
         safeNotify(notify, `焼却完了: PR URL = ${result.prUrl} (branch: \`${result.branchName}\`)\n${cleanupLine}`, {
           action: APPROVAL_ACTION,

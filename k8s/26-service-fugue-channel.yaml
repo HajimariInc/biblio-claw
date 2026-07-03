@@ -1,0 +1,61 @@
+# Fugue channel Service + BackendConfig (M4-E Phase 5)。
+#
+# 構成方針:
+# - Ingress backend として使う ClusterIP Service。既存 `11-orchestrator-service.yaml` は
+#   Headless (`clusterIP: None`) で Ingress backend に使えないため、Fugue 用に別 Service を新設。
+# - `cloud.google.com/neg: '{"ingress": true}'` を明示指定:
+#   NetworkPolicy を導入すると GKE の自動 NEG annotation 付与条件から外れるため、
+#   明示しないと Ingress backend が unhealthy 継続の silent failure に落ちる
+#   (docs.cloud.google.com/kubernetes-engine/docs/concepts/container-native-load-balancing
+#   の Automatic NEG conditions 節参照)。
+# - `cloud.google.com/backend-config` で `/healthz` path + checkIntervalSec 短縮を指定
+#   (readiness probe implicit 依存より疎結合、rollout 中の 502 window 最短化)。
+# - port 443 (LB TLS 終端後) → targetPort `fugue` (StatefulSet の containerPort 名参照、
+#   `10-orchestrator-statefulset.yaml` の ports.fugue:8080 と 1:1 対応)。
+# - selector は既存 StatefulSet Pod template の labels に合わせる。
+apiVersion: v1
+kind: Service
+metadata:
+  name: biblio-fugue-channel
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: fugue-channel
+  annotations:
+    # NetworkPolicy 導入時に自動 NEG 付与条件から外れるため明示指定。
+    # ドキュメント: docs.cloud.google.com/kubernetes-engine/docs/concepts/container-native-load-balancing
+    cloud.google.com/neg: '{"ingress": true}'
+    # BackendConfig で /healthz path + 短縮 checkIntervalSec + rollout 中 502 window 縮小。
+    cloud.google.com/backend-config: '{"default": "biblio-fugue-backend"}'
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: orchestrator
+  ports:
+    - name: https
+      port: 443
+      # LB で TLS 終端後、backend NEG 経由で Pod の named port `fugue` (= 8080) に転送。
+      # `fugue-http.ts` は plain HTTP を listen する = TLS は LB で終端。
+      targetPort: fugue
+      protocol: TCP
+---
+# BackendConfig CRD (GKE 固有): ロードバランサ側の health check 挙動を細かく指定する。
+# `checkIntervalSec: 5` は GKE 上限 (30) / 下限 (5) の下限値 = rollout 中の 502 window 最短化。
+# `timeoutSec: 60` は consult response 最悪ケース (Vertex 呼出込) を吸収する overall timeout。
+# ドキュメント: docs.cloud.google.com/kubernetes-engine/docs/how-to/ingress-configuration
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: biblio-fugue-backend
+  namespace: biblio-claw
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /healthz
+    port: 8080
+    checkIntervalSec: 5
+    timeoutSec: 3
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+  timeoutSec: 60
