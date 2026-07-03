@@ -572,9 +572,15 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
     2>"$LAST_HARNESS_STDERR" | extract_result || true)"
   [ -n "$trace_result" ] || fail "Prod consult (traceparent) が RESULT を出さなかった"
 
+  # PR #132 review S2 対応: used_traceparent は fake-fugue-client.ts:180 で `traceparent ?? null`
+  # = CLI 入力エコー。この assert は「client 側で例外なく traceparent header を送出したこと」の
+  # sanity check であり、biblio-claw サーバ側の traceparent 継承 (extractTraceContextFromHttpHeaders)
+  # は Section 7-4 の親子関係 assert で完結する二段構造。削除せずコメントで明示することで
+  # trace の client → server 経路の各段が「どこで検証されているか」を後段で追跡可能に。
   used_traceparent="$(json_field "$trace_result" 'used_traceparent')"
   [ "$used_traceparent" = "$TRACEPARENT" ] \
-    || fail "used_traceparent != TRACEPARENT: got='$used_traceparent' expected='$TRACEPARENT'"
+    || fail "used_traceparent != TRACEPARENT: got='$used_traceparent' expected='$TRACEPARENT'
+    (これは client 側 sanity check、fetch() が traceparent header を送出したことの確認)"
   trace_reply="$(json_field "$trace_result" 'response_body.status')"
   [[ "$trace_reply" =~ ^(ok|not_found)$ ]] \
     || fail "Prod consult (traceparent) reply != ok/not_found (got '$trace_reply')"
@@ -895,8 +901,14 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
     2>/dev/null || echo 0)"
   if ! [[ "$WI_HAS_MEMBER" =~ ^[0-9]+$ ]] || [ "$WI_HAS_MEMBER" -lt 1 ]; then
     LAST_HARNESS_STDERR="$STDERR_DIR/gsa-policy.stderr"
+    # PR #132 review S1 対応: workloadIdentityUser binding は M1/M2 phase で `init-project-gcp` skill
+    # or 手動 gcloud で管理されており、terraform/fugue-channel/ 配下には該当 resource なし
+    # (grep -rn "workloadIdentityUser" terraform/ で 0 hit)。主従を入れ替えて基盤 IAM を先に提示、
+    # terraform/ を fallback に落として operator 誤誘導を防ぐ。
     fail "keyless (b) 違反: GSA '$GSA_EMAIL' の roles/iam.workloadIdentityUser bindings に '$WI_MEMBER' 不在
-    対処: terraform/fugue-channel/main.tf の workloadIdentityUser binding を確認 (or Phase 5 前段の base infra 側で管理)"
+    対処: (1) M1/M2 phase で設定された基盤 IAM を確認 (gcloud iam service-accounts add-iam-policy-binding、
+              init-project-gcp skill で管理、terraform/ 配下には該当 binding なし = 一次情報) /
+          (2) fallback: terraform/fugue-channel/main.tf を念のため grep (通常はここにはない)"
   fi
   info "  (10-b) GSA IAM workloadIdentityUser binding OK: $WI_MEMBER"
 
