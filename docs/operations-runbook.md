@@ -2250,7 +2250,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST "https://${DOMAIN}/v1/channels
 
 # 4. fake-fugue-client 経由の equip 冪等発火 (FUGUE_URL は inline、`.env` に書かない)
 FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$TOKEN" \
-  pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id skills-tdd-first
+  pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id example-org--test-biblio-minimal
 # 期待: status:'equipped' or 'already_equipped' の JSON、processing_time_ms あり
 ```
 
