@@ -1,0 +1,16 @@
+# biblio-claw issue template config
+#
+# GitHub Issue 作成画面での挙動を制御する:
+# - blank_issues_enabled: false = 「Open a blank issue」リンクを消す = 必ず bug / investigation /
+#   feature のいずれかを選ばせる (受け入れ条件セクションを持たない issue の混入を防ぐ)
+# - contact_links = 種類選択画面の下部に表示するリンク (issue にすべきでない案件を誘導する)
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: 運用早見表 (docs/operations-runbook.md)
+    url: https://github.com/HajimariInc/biblio-claw/blob/main/docs/operations-runbook.md
+    about: 「対処手順を知りたい」「罠にはまった」場合は先に runbook を参照してください (issue 起票不要のケースが多い)
+  - name: PR で対応する場合
+    url: https://github.com/HajimariInc/biblio-claw/blob/main/.github/PULL_REQUEST_TEMPLATE.md
+    about: 変更を直接送りたい (バグ修正 / 機能追加) 場合は issue ではなく PR を作成してください
