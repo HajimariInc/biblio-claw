@@ -6,6 +6,7 @@
 #   2. keyless 4 面アサート (GAC empty / ADC type / SA key 不在 / TF state に key resource なし)
 #   3. emit-test-span.ts 実行 → TRACE_ID / REQUEST_ID 抽出
 #   4. Cloud Trace API ポーリング (sleep 3 × 30 回 = 90s timeout、span >= 1 で break)
+#   4.5. CLI 経由 biblio activity pre-invoke (issue #97 対応、Section 5 の deterministic 化)
 #   5. BigQuery ポーリング (sleep 10 × 30 回 = 5 min timeout、stdout_* / stderr_* UNION)
 #   5.5. BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡)
 #   6. summary SQL 実行 → hit_count >= 1 + marker = 'M4A_OK'
@@ -390,25 +391,27 @@ fi
 # 将来 Cloud Logging 側の仕様変更で補完が壊れた場合、この assertion で早期検知する。
 info '=== [5.5/7] BQ sink 上の top-level trace 列 shape 確認 (issue #81 実機検証の後段証跡) ==='
 
-# stdout + stderr の両テーブルを UNION ALL (Section 5 の TABLES ループと同じ対象範囲、
-# silent-failure-hunter MEDIUM 指摘 = biblio action の warn/error 系 event が stderr 側
-# のみに載る場合に false-negative 化するのを防ぐ)。両テーブルとも summary.sql 冒頭
-# コメント通り jsonPayload.event / component は STRING 型で存在確認済 (2026-06-28)。
-TRACE_SHAPE_QUERY="SELECT trace FROM (
-     SELECT trace, timestamp, jsonPayload.event AS event
-       FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.stdout\`
-     UNION ALL
-     SELECT trace, timestamp, jsonPayload.event AS event
-       FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.stderr\`
-   )
-   WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-     AND (event LIKE 'biblio.%' OR event LIKE 'adk.tool.%.invoke')
-     AND trace IS NOT NULL
-   LIMIT 1"
+# Section 5 で動的発見済の $TABLES (実在するテーブルのみ = stdout / stderr のうち生成
+# 済の方) + $SINK_PROBE_WHERE (biblio.% / adk.tool.%.invoke event filter) を再利用して
+# UNION ALL を組み立てる。これにより:
+#   1. stderr 未生成の環境 (M4-A Phase 3 sink apply 直後の典型) で "Not found: Table"
+#      に落ちて sentinel 経路で誤診断される問題を回避 (silent-failure-hunter 論点 2)
+#   2. Section 5 と Section 5.5 の filter を単一定義 ($SINK_PROBE_WHERE) に集約する
+#      ことで、filter 退行 (biblio.% 単独への巻き戻し等) を Section 7 の grep 静的反証が
+#      両方同時に検知できるようにする (Section 7 の pin 対象は $SINK_PROBE_WHERE 定義行
+#      で、両 Section が同じ変数を参照するため片方だけドリフトする経路が存在しない、
+#      code-reviewer + silent-failure-hunter 論点 1)
+TRACE_SHAPE_UNION=""
+for T in $TABLES; do
+  PART="SELECT trace FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` ${SINK_PROBE_WHERE} AND trace IS NOT NULL"
+  TRACE_SHAPE_UNION="${TRACE_SHAPE_UNION:+$TRACE_SHAPE_UNION UNION ALL }$PART"
+done
+TRACE_SHAPE_QUERY="$TRACE_SHAPE_UNION LIMIT 1"
 
 # BQ query 失敗 (auth 切れ / network / SQL 型エラー) を 0 件ヒットと区別するため sentinel
-# `BQ_SHAPE_QUERY_FAIL` を使う (silent-failure-hunter HIGH 指摘 = 同ファイル Section 5 の
-# L253 `|| echo BQ_QUERY_FAIL` pattern を踏襲、PR #75 で 1 度直したバグクラス)。
+# `BQ_SHAPE_QUERY_FAIL` を使う (同ファイル Section 5 の `|| echo BQ_QUERY_FAIL` sentinel
+# pattern を踏襲、PR #75 で 1 度直したバグクラス。行番号ではなく grep 可能な pattern
+# として参照 = merge で行が drift しても意味を保つ)。
 TRACE_SHAPE="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
   "$TRACE_SHAPE_QUERY" 2>"$STDERR_DIR/bq-shape.stderr" | tail -n1 || echo BQ_SHAPE_QUERY_FAIL)"
 
