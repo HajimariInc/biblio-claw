@@ -6,10 +6,15 @@ import { BatchSpanProcessor, ParentBasedSampler, AlwaysOnSampler } from '@opente
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { trace, diag, DiagConsoleLogger, DiagLogLevel, type Tracer } from '@opentelemetry/api';
 import { initTokenRefresh, getCachedToken, stopTokenRefresh } from './auth.js';
+import { log } from '../log.js';
 
 const OTLP_ENDPOINT = 'https://telemetry.googleapis.com/v1/traces';
 
 let sdkInstance: NodeSDK | null = null;
+// factory 内で cachedToken null を検知した際、1 回だけ warn を出すための flag。
+// abnormal 状態を無音で流さないための最終防衛線 (auth.ts refresh 経路の bug / shutdown
+// 順序 regression 等)。shutdownOtel でリセットしてプロセス再起動時に再警告可能に。
+let cachedTokenNullWarned = false;
 
 export async function startOtel(): Promise<NodeSDK> {
   if (sdkInstance) return sdkInstance;
@@ -40,10 +45,20 @@ export async function startOtel(): Promise<NodeSDK> {
     // @opentelemetry/otlp-exporter-base@0.219.0 で `_headers` が消えたため silent no-op に退化し、
     // 起動時 Bearer で ~1h 稼働後に全 span が 401 で無音 drop していた (issue #104)。
     // static object に revert しないこと。
-    headers: async () => ({
-      Authorization: `Bearer ${getCachedToken() ?? ''}`,
-      'x-goog-user-project': projectId,
-    }),
+    headers: async () => {
+      const token = getCachedToken();
+      if (!token && !cachedTokenNullWarned) {
+        log.warn('OTel headers factory: cachedToken is null, sending empty Bearer', {
+          event: 'otel.headers.cached_token_null',
+          outcome: 'degraded',
+        });
+        cachedTokenNullWarned = true;
+      }
+      return {
+        Authorization: `Bearer ${token ?? ''}`,
+        'x-goog-user-project': projectId,
+      };
+    },
     timeoutMillis: 30_000,
   });
 
@@ -78,10 +93,19 @@ export async function startOtel(): Promise<NodeSDK> {
 }
 
 export async function shutdownOtel(): Promise<void> {
-  stopTokenRefresh();
-  if (!sdkInstance) return;
+  // 順序が重要 — stopTokenRefresh() を先に呼ぶと cachedToken = null に落ち、
+  // BatchSpanProcessor._flushAll() の最終 flush 中に headers factory が空 Bearer を返して
+  // 401 → 直近 span (max maxQueueSize=256 件) が silent drop する。sdkInstance.shutdown() で
+  // pending span を flush してから token を破棄する。issue #104 review Wave 1 で発見。
+  if (!sdkInstance) {
+    stopTokenRefresh();
+    cachedTokenNullWarned = false;
+    return;
+  }
   await sdkInstance.shutdown();
   sdkInstance = null;
+  stopTokenRefresh();
+  cachedTokenNullWarned = false;
 }
 
 export function getTracer(name = 'biblio-claw'): Tracer {

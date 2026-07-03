@@ -17,6 +17,9 @@ import { log } from '../log.js';
 const OTLP_ENDPOINT = 'https://telemetry.googleapis.com/v1/traces';
 
 let provider: BasicTracerProvider | null = null;
+// factory 内で cachedToken null を検知した際、1 回だけ warn を出すための flag。
+// abnormal 状態を無音で流さないための最終防衛線 (host / agent 対称)。
+let cachedTokenNullWarned = false;
 
 export async function startOtel(): Promise<BasicTracerProvider> {
   if (provider) return provider;
@@ -39,10 +42,20 @@ export async function startOtel(): Promise<BasicTracerProvider> {
     // SDK 内部の HttpExporterTransport.send が毎リクエスト await headers() で評価する。
     // static object に戻すと _headers hack が silent no-op に退化し 1h 経過後に全 span drop する
     // (issue #104 の root cause)。host / agent 対称のためロジックは一致させる (auth.ts §「対のファイル」)。
-    headers: async () => ({
-      Authorization: `Bearer ${getCachedToken() ?? ''}`,
-      'x-goog-user-project': projectId,
-    }),
+    headers: async () => {
+      const token = getCachedToken();
+      if (!token && !cachedTokenNullWarned) {
+        log.warn('OTel headers factory: cachedToken is null, sending empty Bearer', {
+          event: 'otel.headers.cached_token_null',
+          outcome: 'degraded',
+        });
+        cachedTokenNullWarned = true;
+      }
+      return {
+        Authorization: `Bearer ${token ?? ''}`,
+        'x-goog-user-project': projectId,
+      };
+    },
     timeoutMillis: 30_000,
   });
 
@@ -71,10 +84,19 @@ export async function startOtel(): Promise<BasicTracerProvider> {
 }
 
 export async function shutdownOtel(): Promise<void> {
-  stopTokenRefresh();
-  if (!provider) return;
+  // 順序が重要 — stopTokenRefresh() を先に呼ぶと cachedToken = null に落ち、
+  // BatchSpanProcessor._flushAll() の最終 flush 中に headers factory が空 Bearer を返して
+  // 401 → 直近 span (max maxQueueSize=256 件) が silent drop する。provider.shutdown() で
+  // pending span を flush してから token を破棄する。issue #104 review Wave 1 で発見。
+  if (!provider) {
+    stopTokenRefresh();
+    cachedTokenNullWarned = false;
+    return;
+  }
   await provider.shutdown();
   provider = null;
+  stopTokenRefresh();
+  cachedTokenNullWarned = false;
 }
 
 export function getTracer(name = 'biblio-claw-agent'): Tracer {

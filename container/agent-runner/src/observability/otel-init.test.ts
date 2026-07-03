@@ -7,6 +7,19 @@ import { mock, describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 const exporterInstances: Array<{ headersConfig: unknown }> = [];
 let cachedTokenValue: string | null = null;
+const logWarnCalls: Array<[string, Record<string, unknown> | undefined]> = [];
+
+mock.module('../log.js', () => ({
+  log: {
+    debug: () => {},
+    info: () => {},
+    warn: (msg: string, ctx?: Record<string, unknown>) => {
+      logWarnCalls.push([msg, ctx]);
+    },
+    error: () => {},
+    fatal: () => {},
+  },
+}));
 
 mock.module('google-auth-library', () => ({
   GoogleAuth: class {
@@ -54,6 +67,7 @@ describe('OTel exporter headers factory (agent, issue #104 fix)', () => {
     await shutdownOtel();
     exporterInstances.length = 0;
     cachedTokenValue = null;
+    logWarnCalls.length = 0;
   });
 
   afterEach(async () => {
@@ -102,5 +116,62 @@ describe('OTel exporter headers factory (agent, issue #104 fix)', () => {
       Authorization: 'Bearer ',
       'x-goog-user-project': 'test-proj',
     });
+  });
+});
+
+// issue #104 review Wave 1 対応 — cachedToken null 時の警告経路 (host 側 test と対称)。
+// shutdown 順序 regression は host 側 (`src/observability/__tests__/otel.test.ts`) で
+// NodeSDK.onShutdown hook 経由で検証済 = 実装が host / agent 対称のため drift 検知に十分。
+describe('OTel headers factory null cachedToken warn (agent, issue #104 review)', () => {
+  beforeEach(async () => {
+    const { shutdownOtel } = await import('./otel-init.js');
+    await shutdownOtel();
+    exporterInstances.length = 0;
+    cachedTokenValue = null;
+    logWarnCalls.length = 0;
+  });
+
+  afterEach(async () => {
+    const { shutdownOtel } = await import('./otel-init.js');
+    await shutdownOtel();
+  });
+
+  it('warns exactly once when cachedToken is null across multiple factory calls', async () => {
+    const { startOtel } = await import('./otel-init.js');
+    await startOtel();
+
+    const last = exporterInstances[exporterInstances.length - 1];
+    const factory = last.headersConfig as () => Promise<Record<string, string>>;
+
+    cachedTokenValue = null;
+    await factory();
+    await factory();
+    await factory();
+
+    const nullWarnCalls = logWarnCalls.filter(
+      ([msg]) => msg === 'OTel headers factory: cachedToken is null, sending empty Bearer',
+    );
+    expect(nullWarnCalls).toHaveLength(1);
+    expect(nullWarnCalls[0][1]).toMatchObject({
+      event: 'otel.headers.cached_token_null',
+      outcome: 'degraded',
+    });
+  });
+
+  it('does not warn when cachedToken is non-null', async () => {
+    const { startOtel } = await import('./otel-init.js');
+    await startOtel();
+
+    const last = exporterInstances[exporterInstances.length - 1];
+    const factory = last.headersConfig as () => Promise<Record<string, string>>;
+
+    cachedTokenValue = 'tok-valid';
+    await factory();
+    await factory();
+
+    const nullWarnCalls = logWarnCalls.filter(
+      ([msg]) => msg === 'OTel headers factory: cachedToken is null, sending empty Bearer',
+    );
+    expect(nullWarnCalls).toHaveLength(0);
   });
 });

@@ -1,10 +1,11 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-const { getAccessTokenMock, getClientMock, cachedTokenRef } = vi.hoisted(() => {
+const { getAccessTokenMock, getClientMock, cachedTokenRef, logWarnMock } = vi.hoisted(() => {
   const getAccessTokenMock = vi.fn();
   const getClientMock = vi.fn(async () => ({ getAccessToken: getAccessTokenMock }));
   const cachedTokenRef: { value: string | null } = { value: null };
-  return { getAccessTokenMock, getClientMock, cachedTokenRef };
+  const logWarnMock = vi.fn();
+  return { getAccessTokenMock, getClientMock, cachedTokenRef, logWarnMock };
 });
 
 vi.mock('google-auth-library', () => {
@@ -58,11 +59,16 @@ vi.mock('@opentelemetry/exporter-trace-otlp-http', () => {
 // で数秒〜10s+ かかるためテスト不向き。Plan の Task 17 要件は「start/shutdown が
 // 例外 throw しない / 2 回 start で同一 instance」までで、実 SDK 挙動の検証は
 // Level 4 smoke-test の責務)
+// NodeSDK.shutdown() の onShutdown hook は shutdownOtel の順序 regression test 用。
+// BatchSpanProcessor._flushAll() 中に headers factory が呼ばれる状況を simulate する。
 vi.mock('@opentelemetry/sdk-node', () => {
   class NodeSDK {
+    onShutdown?: () => void | Promise<void>;
     constructor(_opts: unknown) {}
     start() {}
-    async shutdown() {}
+    async shutdown() {
+      if (this.onShutdown) await this.onShutdown();
+    }
   }
   return { NodeSDK };
 });
@@ -72,7 +78,7 @@ vi.mock('@opentelemetry/auto-instrumentations-node', () => ({
 }));
 
 vi.mock('../../log.js', () => ({
-  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+  log: { debug: vi.fn(), info: vi.fn(), warn: logWarnMock, error: vi.fn(), fatal: vi.fn() },
 }));
 
 import { startOtel, shutdownOtel, getTracer } from '../otel.js';
@@ -126,6 +132,7 @@ describe('OTel exporter headers factory (issue #104 fix)', () => {
 
   beforeEach(() => {
     getAccessTokenMock.mockReset();
+    logWarnMock.mockClear();
     exporterInstances.length = 0;
     cachedTokenRef.value = null;
     process.env = { ...ORIG_ENV, GOOGLE_CLOUD_PROJECT: 'test-proj' };
@@ -174,5 +181,102 @@ describe('OTel exporter headers factory (issue #104 fix)', () => {
       Authorization: 'Bearer ',
       'x-goog-user-project': 'test-proj',
     });
+  });
+});
+
+// issue #104 review Wave 1 対応 — shutdownOtel の呼び出し順序 regression 検知。
+// stopTokenRefresh() を sdkInstance.shutdown() より先に呼ぶと、BatchSpanProcessor._flushAll()
+// の最終 flush 中に headers factory が空 Bearer を返して 401 → 直近 span が silent drop する。
+describe('OTel shutdown flush order (issue #104 review)', () => {
+  const ORIG_ENV = process.env;
+
+  beforeEach(() => {
+    getAccessTokenMock.mockReset();
+    logWarnMock.mockClear();
+    exporterInstances.length = 0;
+    cachedTokenRef.value = null;
+    process.env = { ...ORIG_ENV, GOOGLE_CLOUD_PROJECT: 'test-proj' };
+  });
+
+  afterEach(async () => {
+    await shutdownOtel();
+    process.env = ORIG_ENV;
+  });
+
+  it('preserves valid token during final BatchSpanProcessor flush (regression test)', async () => {
+    getAccessTokenMock.mockResolvedValue({ token: 'tok-init' });
+    const sdk = await startOtel();
+    const factory = exporterInstances[0].headersConfig as () => Promise<Record<string, string>>;
+
+    // sdk.shutdown() 中 (= _flushAll → exporter.export → headers() 相当) に factory を呼び、
+    // その時点の Authorization をキャプチャする。実装が
+    //   `stopTokenRefresh(); await sdkInstance.shutdown();` の順だと cachedToken は null になっているので
+    // Authorization が空 Bearer になる = test 失敗。
+    let flushHeaders: Record<string, string> | null = null;
+    (sdk as unknown as { onShutdown: () => Promise<void> }).onShutdown = async () => {
+      flushHeaders = await factory();
+    };
+
+    await shutdownOtel();
+
+    expect(flushHeaders).not.toBeNull();
+    expect(flushHeaders!.Authorization).not.toBe('Bearer ');
+    expect(flushHeaders!.Authorization).toBe('Bearer tok-init');
+  });
+});
+
+// issue #104 review Wave 1 対応 — cachedToken null 時の警告経路。
+// 旧 _headers hack と同じ「無音で 401 drop」を再現する経路になり得るため、
+// factory が空 Bearer を返す条件で 1 回だけ warn を発火する最終防衛線。
+describe('OTel headers factory null cachedToken warn (issue #104 review)', () => {
+  const ORIG_ENV = process.env;
+
+  beforeEach(() => {
+    getAccessTokenMock.mockReset();
+    logWarnMock.mockClear();
+    exporterInstances.length = 0;
+    cachedTokenRef.value = null;
+    process.env = { ...ORIG_ENV, GOOGLE_CLOUD_PROJECT: 'test-proj' };
+  });
+
+  afterEach(async () => {
+    await shutdownOtel();
+    process.env = ORIG_ENV;
+  });
+
+  it('warns exactly once when cachedToken is null across multiple factory calls', async () => {
+    getAccessTokenMock.mockResolvedValue({ token: 'tok-init' });
+    await startOtel();
+    const factory = exporterInstances[0].headersConfig as () => Promise<Record<string, string>>;
+
+    // null に強制 → factory を 3 回呼出 → warn は 1 回のみ発火
+    cachedTokenRef.value = null;
+    await factory();
+    await factory();
+    await factory();
+
+    const nullWarnCalls = logWarnMock.mock.calls.filter(
+      (call) => call[0] === 'OTel headers factory: cachedToken is null, sending empty Bearer',
+    );
+    expect(nullWarnCalls).toHaveLength(1);
+    expect(nullWarnCalls[0][1]).toMatchObject({
+      event: 'otel.headers.cached_token_null',
+      outcome: 'degraded',
+    });
+  });
+
+  it('does not warn when cachedToken is non-null', async () => {
+    getAccessTokenMock.mockResolvedValue({ token: 'tok-init' });
+    await startOtel();
+    const factory = exporterInstances[0].headersConfig as () => Promise<Record<string, string>>;
+
+    cachedTokenRef.value = 'tok-valid';
+    await factory();
+    await factory();
+
+    const nullWarnCalls = logWarnMock.mock.calls.filter(
+      (call) => call[0] === 'OTel headers factory: cachedToken is null, sending empty Bearer',
+    );
+    expect(nullWarnCalls).toHaveLength(0);
   });
 });
