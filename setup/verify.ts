@@ -134,6 +134,16 @@ export async function run(_args: string[]): Promise<void> {
     // Docker not running
   }
 
+  // 2.5. Check terraform CLI (optional — only needed for GKE 経路 Phase 3+ terraform apply,
+  // not required for local install). Install path: docs/operations-runbook.md §M4-A Phase 3 §前提 (issue #70).
+  let terraform: 'installed' | 'missing' = 'missing';
+  try {
+    execSync('terraform version', { stdio: 'ignore' });
+    terraform = 'installed';
+  } catch {
+    // terraform not installed
+  }
+
   // 3. Check credentials
   let credentials = 'missing';
   const envFile = path.join(projectRoot, '.env');
@@ -230,6 +240,7 @@ export async function run(_args: string[]): Promise<void> {
   emitStatus('VERIFY', {
     SERVICE: service,
     CONTAINER_RUNTIME: containerRuntime,
+    TERRAFORM: terraform,
     CREDENTIALS: credentials,
     CONFIGURED_CHANNELS: configuredChannels.join(','),
     CHANNEL_AUTH: JSON.stringify(channelAuth),
