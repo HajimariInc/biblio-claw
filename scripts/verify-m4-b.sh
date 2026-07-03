@@ -505,6 +505,27 @@ else
           (4) dispatcher の pending 経路検知ロジックの regression"
   fi
 
+  # issue #106 Layer 1 追加 assertion: expires_at が NULL でない (= admin 未応答時の
+  # タイムアウト経路が発火可能な状態で row が作られている)。Layer 2 (実 timer 発火) と
+  # Layer 3 (Pod 再起動 sweep) は runbook §issue #106 の実機検証手順 で確認する
+  # (verify script では副作用大 & 実行時間長のため未組込)。
+  EXPIRES_NULL_COUNT="$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
+    pnpm exec tsx scripts/q.ts /data/v2.db \
+    "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%' AND expires_at IS NULL" \
+    2>"$STDERR_DIR/expires-check.stderr" \
+    | tail -n1 || echo '')"
+  if ! [[ "$EXPIRES_NULL_COUNT" =~ ^[0-9]+$ ]]; then
+    LAST_HARNESS_STDERR="$STDERR_DIR/expires-check.stderr"
+    fail "pending_approvals.expires_at 読み取り失敗 (COUNT 抽出不能、EXPIRES_NULL_COUNT='$EXPIRES_NULL_COUNT')"
+  fi
+  if [ "$EXPIRES_NULL_COUNT" -ne 0 ]; then
+    fail "issue #106 Layer 1 regression: adk_confirm row の expires_at が NULL (count=$EXPIRES_NULL_COUNT)
+    対処: adk-approvals.ts:requestAdkApproval の createPendingApproval 呼出で expires_at が
+          渡されていない可能性 (= Layer 1 の Set が壊れた regression)。
+          src/modules/approvals/adk-approvals.ts の 'const expiresAt' 周辺を確認。"
+  fi
+  info "  HITL Layer 1 smoke: 全 adk_confirm row の expires_at が設定済 (NULL count=0)"
+
   # Cleanup: dummy pending row を削除 (次回 verify 実行時のノイズ抑制 + 2 連続冪等性)
   # skip 経路でも 3-attempt 経路でも payload に dummy 名を含む row は全消し。冪等 DELETE のため
   # 対象 row 0 件でも副作用なし。

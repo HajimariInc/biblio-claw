@@ -1461,17 +1461,25 @@ bash scripts/verify-m4-b.sh  # 2 回目 = 同 PASS
 **必須 env**: `GCP_PROJECT_ID` / `BQ_DATASET_ID` (Phase 3 と同じ)。
 **任意 env**: `VERIFY_M4B_BIBLIO` (acquire 対象 repo)、`VERIFY_M4B_INCLUDE_REGRESSION=1` (Section 7 有効化)。
 
-### Pod 再起動時の対処
+### Pod 再起動 / admin 未応答時の対処 (issue #106 で自動化)
 
 `InMemorySessionService` は Pod 内メモリ保持のため、**Pod 再起動時に pause 中の全 ADK session が消失**する。既に Slack DM に配信済の pending_approvals row から admin が承認カードを押下しても、`resolveAdkApproval` が `sessionService.getSession(...)` で `undefined` を検知して patron に「Pod 再起動により承認セッションが失効しました。もう一度 tool 呼出をお願いします。」通知を deliver する (= silent 失敗しない)。
 
-**stale pending_approvals row の cleanup** (= 手動 or 起動時 sweep):
+**通常の admin 未応答 (無反応で放置) 時のタイムアウト** も issue #106 で自動化済:
+
+- **Layer 1 (expires_at 設定)**: `pending_approvals.expires_at = now + 30 min` を書き込む (`src/modules/approvals/adk-approvals.ts` の Layer 1)。env `ADK_APPROVAL_TIMEOUT_MS` (単位 ms) で override 可能 (= 短縮 verify や運用短縮に活用)
+- **Layer 2 (setTimeout expiry)**: 呼出時に `setTimeout` で expiry timer を仕込み、時間切れで `expireAdkApproval` が「row status='expired' + Slack card 'Expired (no response)' 化 + patron に「承認がタイムアウトしました」通知 + `sessionService.deleteSession` (session leak 解消) + row 削除」を実行
+- **Layer 3 (起動時 sweep)**: `startAdkApprovalHandler` が `onDeliveryAdapterReady` で発火し、Pod 再起動で残った stale row を「Expired (host restarted)」で edit + patron 通知 + row 削除で cleanup (= sessionService は Pod 再起動後空なので `deleteSession` は skip)
+
+Admin が timer 発火直前に応答したケースは `response-handler.ts:adk_confirm` 分岐冒頭で `clearAdkApprovalTimer(approvalId)` を呼び、二重処理を防ぐ。
+
+通常は手動介入不要。**緊急時のフォールバック** (sweep 失敗 / hook 未配線での起動失敗 / stale row の手動確認) として下記の手動 SQL 手順を保持する:
 
 ```bash
-# 起動時に停留している adk_confirm row の一覧 (= Pod 再起動前の pending)
+# 停留している adk_confirm row の一覧
 kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
   pnpm exec tsx scripts/q.ts /data/v2.db \
-  "SELECT approval_id, agent_group_id, title, created_at FROM pending_approvals WHERE action='adk_confirm' AND status='pending'"
+  "SELECT approval_id, agent_group_id, title, created_at, expires_at, status FROM pending_approvals WHERE action='adk_confirm'"
 
 # 全削除 (= Pod 再起動後は resume できないため無効化)
 kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
@@ -1479,7 +1487,146 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
   "DELETE FROM pending_approvals WHERE action='adk_confirm' AND status='pending'"
 ```
 
-将来 `sweepStaleAdkApprovals` を起動時 hook で自動化する (onecli-approvals.ts の `sweepStaleApprovals` パターン踏襲) 案は Phase 90 送り (= runbook §Phase 4 で扱わない論点)。
+**タイムアウト値の短縮 (verify / demo 用)**:
+
+```bash
+# StatefulSet env で override (30 秒に短縮する例)
+kubectl set env statefulset/biblio-orchestrator -n biblio-claw ADK_APPROVAL_TIMEOUT_MS=30000
+# 元に戻す (= env 削除で default 30 min)
+kubectl set env statefulset/biblio-orchestrator -n biblio-claw ADK_APPROVAL_TIMEOUT_MS-
+```
+
+### issue #106 の実機検証手順 (DEN さん実施)
+
+Layer 1 (`expires_at` Set) は `scripts/verify-m4-b.sh` Section 6.5 の追加 assertion (`expires_at IS NULL` の count=0 を要求) で自動確認できるため、GKE 経路の re-deploy 後に `bash scripts/verify-m4-b.sh` を回せば実装の生死は即判定される。**Layer 2 (実 timer 発火) と Layer 3 (Pod 再起動 sweep) は実 HITL 操作 + Pod ライフサイクル操作を伴うため verify script に組み込まず、以下の 4 case を手動で確認する**。
+
+#### Case L2-Local: Local docker compose で timer expire → patron タイムアウト通知
+
+**目的**: Layer 2 (`setTimeout` + `expireAdkApproval`) が local docker compose 経路で成立することを確認。
+
+**前提**: `docker compose up -d --wait` が済んでいる + `.env` に Slack workspace (biblio-local) の bot token 投入済 + admin ユーザ (DEN さんの biblio-local user) の Slack DM 経路が wire 済。
+
+**操作**:
+
+1. **`.env` に `ADK_APPROVAL_TIMEOUT_MS=30000` (= 30 秒) を追加**:
+   ```bash
+   grep -q '^ADK_APPROVAL_TIMEOUT_MS=' .env && sed -i.bak 's/^ADK_APPROVAL_TIMEOUT_MS=.*/ADK_APPROVAL_TIMEOUT_MS=30000/' .env && rm -f .env.bak || echo 'ADK_APPROVAL_TIMEOUT_MS=30000' >> .env
+   ```
+2. **host を再起動して env を反映**:
+   ```bash
+   # macOS
+   launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+   # Linux
+   # systemctl --user restart nanoclaw
+   ```
+3. **Slack biblio-local workspace の biblio bot に DM で `@bot 禁書 wf/dummy-nonexistent-biblio biblio-dev` を送る**。
+4. **Slack DM (admin=DEN さんの biblio-local user) にカード配信されるので、あえて何も押さず 40 秒待つ**。
+
+**期待結果**:
+- Slack カード本文が **"Expired (no response)"** に自動 edit される (~30 秒後)
+- 元 patron (Slack 発話元) に **「承認がタイムアウトしました。もう一度お試しください。」** の日本語通知が届く
+- host ログ (`logs/nanoclaw.log`) に `"event":"adk.approval.expired","approval_id":...,"reason":"no response"` の 1 行が出る
+- DB row 消滅を SQL で確認:
+  ```bash
+  pnpm exec tsx scripts/q.ts data/v2.db \
+    "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'"
+  # 期待: 0
+  ```
+
+**判定**: 上記 4 point すべて OK → **Layer 2 (local) PASS**。1 つでも欠けたら fail。
+
+**cleanup**: `.env` から `ADK_APPROVAL_TIMEOUT_MS=30000` 行を削除 (or `=1800000` にリセット) → host 再起動で default 30 min に戻す。
+
+#### Case L1-Local: Local docker compose で admin が Approve → 正常 resume + patron に応答
+
+**目的**: race 防止の要 = `clearAdkApprovalTimer` の boolean 経路で「admin 応答が timer より先勝ちすると 1 通のみ届く」ことを確認 (二重通知 regression 防止)。
+
+**前提**: 上記 Case L2-Local と同じ。ただし `ADK_APPROVAL_TIMEOUT_MS=180000` (= 3 分) に緩めておくと押しやすい。
+
+**操作**:
+
+1. `.env` の `ADK_APPROVAL_TIMEOUT_MS=180000` に切替 + host 再起動。
+2. Slack DM で `@bot 禁書 wf/dummy-nonexistent-biblio biblio-dev` (or **実在の dummy 用 biblio 名で試すなら要注意** = 本番 shelf の PR が作られる)。
+3. **タイムアウトより十分前 (= 数秒以内) に Slack カードで Approve を押す**。
+
+**期待結果**:
+- patron に **1 通のみ** 応答が届く (= 実 resume の結果 = 「(実装成功時) 禁書処理が完了しました」or「(dummy biblio のため) 該当 skill が存在しません」等の 1 メッセージ)
+- 「承認がタイムアウトしました」通知は **届かない**
+- host ログに `"event":"adk.approval.resolve"` は出るが `"event":"adk.approval.expired"` は出ない
+- pending_approvals の該当 row が消滅
+
+**判定**: 「1 通のみ」+ 「expired event 不在」+ 「row 消滅」の 3 point → **Layer 1 (race 防止) PASS**。
+
+#### Case L3-GKE: GKE Pod 再起動 sweep → patron に「Pod 再起動で失効しました」通知
+
+**目的**: Layer 3 (`sweepStaleAdkApprovals`) が Pod 再起動時に stale row を自動 cleanup することを確認。
+
+**前提**: `kubectl` auth + `biblio-orchestrator-0` Pod 生存 + Slack biblio-slack-app workspace 経由の admin DM 経路 wire 済 + 本 PR の image が deploy 済。
+
+**操作**:
+
+1. **短時間 timeout で pending row を作る** (これは動作担保のため + 短時間で再起動する必要がある):
+   ```bash
+   kubectl set env statefulset/biblio-orchestrator -n biblio-claw ADK_APPROVAL_TIMEOUT_MS=1800000  # 30 min にしておく (= sweep 前に timer 発火させないため)
+   kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=5m
+   ```
+2. **Slack biblio-slack-app workspace で `@bot 禁書 wf/dummy-nonexistent-biblio biblio-dev` を送る** → admin カード配信されるので押さずに放置。
+3. **pending row が作られたことを確認**:
+   ```bash
+   kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+     pnpm exec tsx scripts/q.ts /data/v2.db \
+     "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'"
+   # 期待: 1 (or それ以上)
+   ```
+4. **Pod を強制再起動**:
+   ```bash
+   kubectl delete pod biblio-orchestrator-0 -n biblio-claw
+   kubectl wait --for=condition=ready pod/biblio-orchestrator-0 -n biblio-claw --timeout=5m
+   ```
+5. **起動完了後、以下の 3 point を確認**:
+   ```bash
+   # (a) orchestrator log に sweep event が出ている
+   kubectl logs biblio-orchestrator-0 -c orchestrator -n biblio-claw --since=5m \
+     | grep -E '"event":"adk\.approval\.(sweep_start|sweep_done|expired)"'
+   # 期待:
+   #   "event":"adk.approval.sweep_start","count":1
+   #   "event":"adk.approval.expired","reason":"host restarted"
+   #   "event":"adk.approval.sweep_done","count":1,"failed":0
+
+   # (b) row 消滅
+   kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+     pnpm exec tsx scripts/q.ts /data/v2.db \
+     "SELECT COUNT(*) FROM pending_approvals WHERE action='adk_confirm' AND payload LIKE '%dummy-nonexistent%'"
+   # 期待: 0
+   ```
+6. **Slack で確認**:
+   - **admin DM のカードが "Expired (host restarted)" に自動 edit されている**
+   - **patron (元発話者) に「エラー: Pod 再起動により承認セッションが失効しました。もう一度 tool 呼出をお願いします。」通知が届いている**
+
+**判定**: 上記 (a)/(b) の 2 SQL/log point + Slack 2 UI point = **合計 4 point** OK → **Layer 3 (GKE sweep) PASS**。
+
+#### Case V-GKE: `verify-m4-b.sh` Section 6.5 で Layer 1 regression 確認 + 冪等性
+
+**目的**: 本 PR で追加した Section 6.5 の `expires_at IS NOT NULL` assertion が pass することを確認 (= Layer 1 の自動 regression 網)。
+
+**前提**: 本 PR の image が deploy 済 + `GCP_PROJECT_ID` / `BQ_DATASET_ID` env 設定済。
+
+**操作**:
+
+```bash
+bash scripts/verify-m4-b.sh
+# 期待: 全 9 section 通過 + 末尾 "M4-B PASS" + exit 0
+# 特に Section 6.5 の以下 info line が出ること:
+#   "HITL Layer 1 smoke: 全 adk_confirm row の expires_at が設定済 (NULL count=0)"
+
+# 冪等性確認
+bash scripts/verify-m4-b.sh
+# 期待: 2 回目も PASS (Section 6.5 の cleanup DELETE が効いている)
+```
+
+**判定**: 2 連続 `M4-B PASS` + Layer 1 smoke line 出現 → **Section 6.5 regression 網 PASS**。
+
+**上記 4 case を全て PASS で issue #106 の real-world 動作担保が完了する**。プレゼン前に最小限で確認するなら Case L2-Local + Case V-GKE の 2 件で「30 秒後に patron 通知が届く経路 + 自動 regression 網」の担保になる (Case L1-Local と L3-GKE は「動作の別 branch を追加確認」の意味)。
 
 ### 既知の罠 / gotcha
 
