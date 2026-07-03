@@ -278,12 +278,19 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   # log ファイル不在 = dev モードで stdout 直行 or launchd/systemd の journal に流れているケース =
   # log 経由の検知は skip して warn 継続 (Point 1 + 3 で AND 条件は担保できる、log 依存 point は
   # 保険的位置付け)。
+  #
+  # PR #132 review C1 対応: grep pattern を text/json 両対応化。
+  # `src/log.ts:31,41-48` により LOG_FORMAT 未設定時は text 形式 (`event="fugue.equip.hitl_required"`
+  # = `=` 区切り、colon なし) がデフォルトで、`.env.example:187` も text をローカル推奨とする。
+  # 元の JSON 前提の grep pattern `'"event":"..."'` (colon 区切り) は text 形式に一切マッチせず
+  # false-negative canary になっていた (matrix 逆転が起きても常に PASS)。両形式を包含する
+  # extended regex に変更して text/json どちらでも検知可能に。
   if [ -f logs/nanoclaw.log ]; then
-    if grep -q '"event":"fugue\.equip\.hitl_required"' logs/nanoclaw.log 2>/dev/null; then
+    if grep -qE '"event":"fugue\.equip\.hitl_required"|event="fugue\.equip\.hitl_required"' logs/nanoclaw.log 2>/dev/null; then
       fail "HITL 簡略化違反 Point 2: logs/nanoclaw.log に 'fugue.equip.hitl_required' event 発火痕跡あり
       対処: matrix 逆転の canary、requiresApproval matrix を確認"
     fi
-    info "  Point 2 OK: logs/nanoclaw.log に fugue.equip.hitl_required event 不在"
+    info "  Point 2 OK: logs/nanoclaw.log に fugue.equip.hitl_required event 不在 (text/json 両対応)"
   else
     warn "  Point 2 skip: logs/nanoclaw.log 不在 (dev mode で journal 経路の可能性、Point 1+3 で担保)"
   fi
@@ -328,12 +335,19 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
     info "  (4-1) 2 table 存在 OK: fugue_equipped_biblios + session_equipped_biblios"
 
     # (4-2) Section 2 の equip 発火で fugue 側 row が >= 1 (equip reply が not_found 以外の場合のみ)
+    #
+    # PR #132 review C2 対応 (一貫性のため揃える): sentinel を `|| echo 0` → `|| echo ''` に統一。
+    # 4-2 は閾値 `-lt 1` (>= 1 必須) のため `|| echo 0` でも偶然フェイルセーフ (0 は fail 判定) だが、
+    # 4-3 (下記) との内部一貫性のため空文字 sentinel に揃える (Section 3 Point 3 と同流儀)。
     if [ "${equip_reply:-}" != 'not_found' ]; then
       LAST_HARNESS_STDERR="$STDERR_DIR/local-fugue-row.stderr"
       fugue_row="$(pnpm exec tsx scripts/q.ts data/v2.db \
         "SELECT COUNT(*) FROM fugue_equipped_biblios WHERE biblio_name='${SKILL_ID}'" \
-        2>"$LAST_HARNESS_STDERR" | tail -n1 || echo 0)"
-      if ! [[ "$fugue_row" =~ ^[0-9]+$ ]] || [ "$fugue_row" -lt 1 ]; then
+        2>"$LAST_HARNESS_STDERR" | tail -n1 || echo '')"
+      if ! [[ "$fugue_row" =~ ^[0-9]+$ ]]; then
+        fail "local fugue_equipped_biblios COUNT 取得失敗 ('$fugue_row')"
+      fi
+      if [ "$fugue_row" -lt 1 ]; then
         fail "local channel 分離違反 (4-2): fugue_equipped_biblios に skill_id='$SKILL_ID' row 不在 (count=$fugue_row)"
       fi
       info "  (4-2) fugue 側 row 追加 OK: fugue_equipped_biblios[$SKILL_ID] count=$fugue_row"
@@ -342,10 +356,15 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
     fi
 
     # (4-3) session 側は無影響 = 同 SKILL_ID の session_equipped_biblios row が 0 件
+    #
+    # PR #132 review C2 対応: `|| echo 0` sentinel は「クエリ失敗」と「正常な 0 件」を
+    # 区別できず、DB ロック / migration 未適用 / tsx crash が silent PASS に化ける経路だった。
+    # `|| echo ''` に変更することで正規表現 `^[0-9]+$` が「クエリ失敗」を空文字として捕捉、
+    # fail() 経路に誘導する (Section 3 Point 3 pending_count と同流儀)。
     LAST_HARNESS_STDERR="$STDERR_DIR/local-session-row.stderr"
     session_row="$(pnpm exec tsx scripts/q.ts data/v2.db \
       "SELECT COUNT(*) FROM session_equipped_biblios WHERE biblio_name='${SKILL_ID}'" \
-      2>"$LAST_HARNESS_STDERR" | tail -n1 || echo 0)"
+      2>"$LAST_HARNESS_STDERR" | tail -n1 || echo '')"
     if ! [[ "$session_row" =~ ^[0-9]+$ ]]; then
       fail "local session_equipped_biblios COUNT 取得失敗 ('$session_row')"
     fi
@@ -690,14 +709,26 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   info "  (9-2) Point 1 OK: Prod equip reply に hitl_required なし"
 
   # (9-3) HITL Point 2: Pod ログに fugue.equip.hitl_required event 不在 (直近 2min)
-  POD_LOGS="$(kubectl logs "$POD" -c orchestrator -n "$NAMESPACE" --since=2m \
-    2>"$STDERR_DIR/prod-pod-logs.stderr" || true)"
-  if printf '%s' "$POD_LOGS" | grep -q '"event":"fugue\.equip\.hitl_required"'; then
+  #
+  # PR #132 review C3 対応: `kubectl logs ... || true` は RBAC 拒否 / Pod 再起動 / GKE API 5xx で
+  # `POD_LOGS=''` 化 → `grep -q` は必ず miss → 常に「Point 2 OK」の silent PASS 経路。
+  # `if ! cmd > out 2> err; then fail; fi` idiom (verify-m4-b.sh:205-213 pattern) に置き換えて
+  # ログ取得自体の失敗を明示的に fail() に導く。Local 側 (Section 3 Point 2) との対称性も回復。
+  if ! kubectl logs "$POD" -c orchestrator -n "$NAMESPACE" --since=2m \
+       > "$STDERR_DIR/prod-pod-logs.out" 2> "$STDERR_DIR/prod-pod-logs.stderr"; then
     LAST_HARNESS_STDERR="$STDERR_DIR/prod-pod-logs.stderr"
+    fail "Prod Pod ログ取得失敗 (kubectl logs が非 0 終了) — HITL Point 2 を検証できない
+    対処: (1) RBAC 拒否 (kubectl auth can-i get pods/log -n $NAMESPACE) /
+          (2) Pod 再起動直後で --since=2m のウィンドウが空振り /
+          (3) GKE API 一時 5xx (再試行)"
+  fi
+  # LOG_FORMAT はここでも念のため text/json 両対応 (Section 3 Point 2 と同流儀、grep pattern を統一)。
+  if grep -qE '"event":"fugue\.equip\.hitl_required"|event="fugue\.equip\.hitl_required"' "$STDERR_DIR/prod-pod-logs.out"; then
+    LAST_HARNESS_STDERR="$STDERR_DIR/prod-pod-logs.out"
     fail "Prod HITL 簡略化違反 Point 2: Pod ログに 'fugue.equip.hitl_required' event 発火痕跡あり
     対処: requiresApproval matrix が変更された可能性 (src/biblio/hitl-policy.ts:65-75)"
   fi
-  info "  (9-3) Point 2 OK: Pod ログに fugue.equip.hitl_required event 不在"
+  info "  (9-3) Point 2 OK: Pod ログに fugue.equip.hitl_required event 不在 (text/json 両対応)"
 
   # (9-4) HITL Point 3: Prod SQLite の pending_approvals に該当 payload の row が 0 件
   LAST_HARNESS_STDERR="$STDERR_DIR/prod-pending.stderr"
@@ -714,13 +745,19 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   info "  (9-4) Point 3 OK: Prod pending_approvals count=0"
 
   # (9-5) channel 分離: fugue 側 row が >= 1 (equip reply が not_found 以外の場合)
+  #
+  # PR #132 review C2 対応 (一貫性のため揃える): sentinel を `|| echo 0` → `|| echo ''` に統一
+  # (Section 4-2 / 4-3 と同流儀、query 失敗と正当な 0 件を区別可能に)。
   if [ "$prod_equip_reply" != 'not_found' ]; then
     LAST_HARNESS_STDERR="$STDERR_DIR/prod-fugue-row.stderr"
     prod_fugue_row="$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
       pnpm exec tsx scripts/q.ts /data/v2.db \
       "SELECT COUNT(*) FROM fugue_equipped_biblios WHERE biblio_name='${SKILL_ID}'" \
-      2>"$LAST_HARNESS_STDERR" | tail -n1 || echo 0)"
-    if ! [[ "$prod_fugue_row" =~ ^[0-9]+$ ]] || [ "$prod_fugue_row" -lt 1 ]; then
+      2>"$LAST_HARNESS_STDERR" | tail -n1 || echo '')"
+    if ! [[ "$prod_fugue_row" =~ ^[0-9]+$ ]]; then
+      fail "Prod fugue_equipped_biblios COUNT 取得失敗 ('$prod_fugue_row')"
+    fi
+    if [ "$prod_fugue_row" -lt 1 ]; then
       fail "Prod channel 分離違反: fugue_equipped_biblios[$SKILL_ID] row 不在 (count=$prod_fugue_row)"
     fi
     info "  (9-5) channel 分離 OK: Prod fugue_equipped_biblios[$SKILL_ID] count=$prod_fugue_row"
