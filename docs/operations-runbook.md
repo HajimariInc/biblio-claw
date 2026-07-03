@@ -935,7 +935,7 @@ biblio-claw の構造化ログ (GKE Fluent Bit 経由で Cloud Logging に到達
   brew tap hashicorp/tap && brew install hashicorp/tap/terraform
   ```
 
-  Install 済確認: `terraform version` が v1.5 以上を返せば OK。不在時は `pnpm run setup verify` の `TERRAFORM: missing` で気付ける (fail はしない = optional guard)。M4-E Phase 5 (`terraform/fugue-channel/`) など今後追加される module も本 §前提 を install 経路の source of truth として参照する。
+  Install 済確認: `terraform version` が v1.5 以上を返せば OK。不在時は `pnpm exec tsx setup/index.ts --step verify` の `TERRAFORM: missing` で気付ける (fail はしない = optional guard)。M4-E Phase 5 (`terraform/fugue-channel/`) など今後追加される module も本 §前提 を install 経路の source of truth として参照する。
 
 ### Apply
 
