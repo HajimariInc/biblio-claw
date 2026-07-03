@@ -70,9 +70,17 @@ const CONSULT_PATH = '/v1/channels/fugue/consult';
 const EQUIP_PATH = '/v1/channels/fugue/equip';
 /**
  * LB health check / K8s readiness / liveness 用の unauthenticated endpoint (Phase 5)。
- * auth check の前で 200 "ok" を返す = LB は Bearer を持たないため 401 で backend unhealthy に
- * なるのを防ぐ。応答内容は `"ok"` のみで attack surface は無視できる (path 存在漏洩は
- * health check として業界標準運用)。method 分岐なし = LB からの HEAD probe も allow。
+ *
+ * 設計判断:
+ * - auth check の前で 200 "ok" を返す = LB は Bearer を持たないため 401 で backend
+ *   unhealthy になるのを防ぐ (`handleRequest` 冒頭 URL parse 直後で return する不変条件、
+ *   `fugue-http.test.ts` の 3 case で固定化)。
+ * - method 分岐なし = LB からの HEAD probe も allow。
+ * - attack surface: 応答内容は `"ok"` のみ、path 存在漏洩は health check として業界標準運用。
+ * - PR #126 review 対応 (C1+C2+C3): 本 endpoint は GCE LB backend health check 経由 (35.191.0.0/16
+ *   + 130.211.0.0/22 から到達) でのみ叩かれる。K8s の readiness/livenessProbe は
+ *   `k8s/10-orchestrator-statefulset.yaml` で exec `test -f /tmp/host-ready` に統一済 =
+ *   本 endpoint に到達しない (Fugue silent skip 経路の crash loop 転化を防ぐため)。
  */
 const HEALTHZ_PATH = '/healthz';
 /**
@@ -320,12 +328,29 @@ export class FugueHttpServer {
       return;
     }
 
-    // Phase 5: LB health check / K8s probe 用の unauthenticated endpoint。auth check + log.info
-    // より前に返す = (1) Bearer なしの LB probe が 401 で backend unhealthy になるのを防ぐ、
-    // (2) 5 秒周期の probe で log を汚さない、(3) URL parse 済 = 診断可能な状態。method 分岐なし。
+    // /healthz は auth check + log.info より前に返す (詳細は `HEALTHZ_PATH` の JSDoc)。
+    // try/catch で包む理由 (PR #126 review I3): `writeHead`/`end` 失敗時に
+    // `unhandledRejection` 経由の汎用ログ (`channel:'fugue'` タグなし) に落ちるのを防ぐ。
+    // 応答済 (`headersSent`) なら silent に閉じる (実害なし、他 catch 経路と対称)。
     if (pathname === HEALTHZ_PATH) {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('ok');
+      try {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+      } catch (err) {
+        log.warn('Fugue healthz response failed', {
+          event: 'fugue.healthz.write_failed',
+          channel: 'fugue',
+          outcome: 'failure',
+          err: err instanceof Error ? err.message : String(err),
+        });
+        if (!res.headersSent) {
+          try {
+            res.end();
+          } catch {
+            // 二重 end 失敗は無視 (socket 既に破棄済み等)
+          }
+        }
+      }
       return;
     }
 

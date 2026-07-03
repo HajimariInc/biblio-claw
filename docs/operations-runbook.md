@@ -1899,9 +1899,13 @@ done
 
 ```bash
 # K8s Secret を Secret Manager から手動 sync (Phase 5 では手動、rotation 自動化は Phase 90+)
+# 罠 8 の silent fail (`$(...)` の空出力を kubectl が正常な空文字値として受け入れる) を防ぐため
+# 2 段に分けて token 空チェック → apply。
+TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
+  --project=hajimari-ai-hackathon-2026)
+[[ -n "$TOKEN" ]] || { echo 'ERROR: token fetch failed (permission / typo / propagation?)'; exit 1; }
 kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
-  --from-literal=FUGUE_SHARED_TOKEN="$(gcloud secrets versions access latest \
-    --secret=fugue-shared-token --project=hajimari-ai-hackathon-2026)"
+  --from-literal=FUGUE_SHARED_TOKEN="$TOKEN"
 
 # deploy 順序 = StatefulSet update → Service + BackendConfig → NetworkPolicy → Ingress
 # (Ingress 最後 = NEG + backend health 反映が早い、rollout 中の 502 window 最短化)
@@ -1958,11 +1962,20 @@ FUGUE_SHARED_TOKEN="$TOKEN" \
 
 ```bash
 # BigQuery で channel='fugue' の event log 到達確認
+# 注: BQ sink は timestamp 列による column-based DAY partition = `_PARTITIONTIME` 疑似列
+# (ingestion-time partition 専用) は存在しないため、`timestamp` 列で filter する。
+# §M4-A Phase 3 / §M4-E Phase 4 の集計 SQL と同流儀で stdout/stderr を UNION ALL する。
 bq query --project_id=hajimari-ai-hackathon-2026 --nouse_legacy_sql --format=pretty \
-  "SELECT jsonPayload.event, jsonPayload.channel, COUNT(*) as cnt
-   FROM \`hajimari-ai-hackathon-2026.<DATASET_ID>.stdout\`
-   WHERE _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-     AND jsonPayload.channel = 'fugue'
+  "SELECT event, channel, COUNT(*) as cnt
+   FROM (
+     SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
+     FROM \`hajimari-ai-hackathon-2026.<DATASET_ID>.stdout\`
+     UNION ALL
+     SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
+     FROM \`hajimari-ai-hackathon-2026.<DATASET_ID>.stderr\`
+   )
+   WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+     AND channel = 'fugue'
    GROUP BY 1, 2 ORDER BY cnt DESC LIMIT 20"
 # 期待: fugue.consult.completed / fugue.consult.invoked 等が cnt >= 1
 ```
