@@ -2054,7 +2054,8 @@ ESM 判断の詳細は上記 §M4-E Phase 4 §ESM フック判断 参照。
 `fugue-domain-name`。全 Step でホスト名は `gcloud secrets versions access` で動的取得し、
 セッション先頭で 1 回 `export DOMAIN=...` すれば以降の Step は同 shell で継承。
 
-**前提**: `envsubst` (`gettext` package) がインストール済 (WSL2 AlmaLinux 9 なら
+**前提**: terraform CLI (v1.5+ 推奨、install 手順は上記 §M4-A Phase 3 §前提 参照) +
+`envsubst` (`gettext` package) がインストール済 (WSL2 AlmaLinux 9 なら
 `sudo dnf install gettext` で導入、未インストールなら Step 4 の Ingress apply で shell error)。
 
 **Step 0: Cloud Endpoints API 有効化 (初回のみ)**
