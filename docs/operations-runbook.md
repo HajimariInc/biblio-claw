@@ -919,6 +919,23 @@ biblio-claw の構造化ログ (GKE Fluent Bit 経由で Cloud Logging に到達
 - DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済 (memory `gcp_iam_secret_manager_pattern` 参照)
 - GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中 (= Phase 1+2 完了)
 - keyless: `gcloud auth application-default login` 済 (ADC)、SA key を使わない
+- **terraform CLI (v1.5+ 推奨)** — biblio-claw が管理する 2 module (`terraform/m4-a-observability/` + `terraform/fugue-channel/`) の apply に必要。本 §前提 が repo 内の terraform CLI install 経路の集約点 (issue #70)。OS 別 install 手順:
+
+  ```bash
+  # AlmaLinux / RHEL / Rocky Linux (DEN さん環境実績: v1.15.7)
+  sudo dnf config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+  sudo dnf install -y terraform
+
+  # Ubuntu / Debian (WSL2 Ubuntu も同じ)
+  wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+  sudo apt update && sudo apt install -y terraform
+
+  # macOS
+  brew tap hashicorp/tap && brew install hashicorp/tap/terraform
+  ```
+
+  Install 済確認: `terraform version` が v1.5 以上を返せば OK。不在時は `pnpm run setup verify` の `TERRAFORM: missing` で気付ける (fail はしない = optional guard)。M4-E Phase 5 (`terraform/fugue-channel/`) など今後追加される module も本 §前提 を install 経路の source of truth として参照する。
 
 ### Apply
 
