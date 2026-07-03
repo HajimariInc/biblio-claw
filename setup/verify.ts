@@ -134,14 +134,14 @@ export async function run(_args: string[]): Promise<void> {
     // Docker not running
   }
 
-  // 2.5. Check terraform CLI (optional — only needed for GCP Phase 3+ Terraform apply).
-  // Install path: docs/operations-runbook.md §M4-A Phase 3 §前提 (issue #70).
+  // 2.5. Check terraform CLI (optional — only needed for GKE 経路 Phase 3+ terraform apply,
+  // not required for local install). Install path: docs/operations-runbook.md §M4-A Phase 3 §前提 (issue #70).
   let terraform: 'installed' | 'missing' = 'missing';
   try {
     execSync('terraform version', { stdio: 'ignore' });
     terraform = 'installed';
   } catch {
-    // terraform not installed — biblio-claw の local 起動には不要、GKE Phase 3+ で必要
+    // terraform not installed
   }
 
   // 3. Check credentials
