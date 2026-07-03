@@ -1853,39 +1853,67 @@ Infra 追加 = k8s manifest 4 枚 + Terraform module 1 個:
 **issue #73 (probe 配線) + Phase 4 review C1 (ESM フック判断 = 2 段構造正式化)** を同時吸収済。
 ESM 判断の詳細は上記 §M4-E Phase 4 §ESM フック判断 参照。
 
-### deploy 手順 (7 step、DEN さん実行)
+### deploy 手順 (8 step、DEN さん実行、Cloud Endpoints DNS + Secret Manager 経路)
 
-**Step 1: Cloud DNS zone 事前確認**
+**設計原則**: **ホスト名を静的ファイルに書かない**。Source of Truth = Secret Manager
+`fugue-domain-name`。全 Step でホスト名は `gcloud secrets versions access` で動的取得し、
+セッション先頭で 1 回 `export DOMAIN=...` すれば以降の Step は同 shell で継承。
+
+**前提**: `envsubst` (`gettext` package) がインストール済 (WSL2 AlmaLinux 9 なら
+`sudo dnf install gettext` で導入、未インストールなら Step 4 の Ingress apply で shell error)。
+
+**Step 0: Cloud Endpoints API 有効化 (初回のみ)**
 
 ```bash
-gcloud dns managed-zones list --project=hajimari-ai-hackathon-2026
-# zone name を確認。不在なら Terraform apply 前に `gcloud dns managed-zones create` で作成
-# (別プロジェクト管理の可能性あり = DEN さん判断で切替)
+gcloud services enable endpoints.googleapis.com \
+  --project=hajimari-ai-hackathon-2026
+# 既に enable 済なら no-op、初回は Terraform apply 前に必須 (罠 9 で fail-fast)
 ```
 
-**Step 2: Terraform apply (static IP + cert + DNS + Secret Manager + IAM)**
+**Step 1: Domain 決定 + Terraform 変数投入 (セッション先頭で 1 回)**
+
+```bash
+# Service 名は自由 (例: biblio-claw-fugue = 全固有名詞を含めてシンプル)
+export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
+export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
+
+# 値の確認 (log には出さない、tmux buffer / ephemeral copy 用)
+echo "domain: $TF_VAR_domain_name"
+echo "token prefix: ${TF_VAR_fugue_shared_token:0:8}..."
+```
+
+**Step 2: Terraform apply (static IP + Cloud Endpoints Service + cert + Secret Manager 2 個 + IAM 2 個)**
 
 ```bash
 cd terraform/fugue-channel
-export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
-export TF_VAR_dns_zone_name=<Step 1 で確認した zone name>
-echo "$TF_VAR_fugue_shared_token" > /tmp/fugue-token-backup   # Fugue 側と共有用 (後で消す)
-
 terraform init
-terraform plan   # 6 resource + 1 data source が create 予定
+terraform plan   # 期待: 8 resource create (IP + Endpoints Service + cert + secret x2 +
+                 # secret_version x2 + IAM binding x2)
 terraform apply
-terraform output # static_ip_address, cert_name 等 5 output を確認
+terraform output # static_ip_address / cert_name / endpoints_service_name / secret 2 個の名前
 ```
 
 **Step 3: DNS 反映 + Managed cert Active 待ち (並列化で時間ロス最小化)**
 
 ```bash
-# DNS 反映確認 (数分〜数時間、外部 DNS 伝播依存)
-while ! dig +short biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app | grep -q .; do
-  echo "waiting for DNS..." && sleep 60
-done
+# Domain を Secret Manager から動的取得 (ここ以降 hardcode 参照ゼロ、セッション env で継承)
+export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
+  --project=hajimari-ai-hackathon-2026)
+echo "domain: $DOMAIN"
 
-# Cert Active 待ち (最大 60 分、DNS 伝播後に開始される。DNS 先出しの順序が最短化)
+# Cloud Endpoints Service 状態確認 (state=ACTIVE = DNS record 有効化済)
+gcloud endpoints services describe "$DOMAIN" \
+  --project=hajimari-ai-hackathon-2026 --format='value(state)'
+# 期待: ACTIVE
+
+# DNS 反映確認 (.cloud.goog は Google 内部 DNS = 通常 5-10 分)
+while ! dig +short "$DOMAIN" | grep -q .; do
+  echo "waiting for DNS ($DOMAIN)..." && sleep 30
+done
+dig +short "$DOMAIN"
+# 期待: static IP アドレス (terraform output static_ip_address と一致)
+
+# Cert Active 待ち (最大 60 分、通常 15-30 分。DNS 反映後に開始 = DNS 先出しが最短化)
 while true; do
   status=$(gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
     --global --format='value(managed.status)')
@@ -1898,7 +1926,9 @@ done
 **Step 4: K8s Secret 作成 + StatefulSet + Service + NetworkPolicy + Ingress apply**
 
 ```bash
-# K8s Secret を Secret Manager から手動 sync (Phase 5 では手動、rotation 自動化は Phase 90+)
+# 前提: DOMAIN 変数が Step 3 で export 済 (同一 shell セッション内で継承)
+
+# K8s Secret を Secret Manager から手動 sync (Phase 5 は手動、rotation 自動化は Phase 90+)
 # 罠 8 の silent fail (`$(...)` の空出力を kubectl が正常な空文字値として受け入れる) を防ぐため
 # 2 段に分けて token 空チェック → apply。
 TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
@@ -1911,42 +1941,45 @@ kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
 # (Ingress 最後 = NEG + backend health 反映が早い、rollout 中の 502 window 最短化)
 kubectl apply -f k8s/10-orchestrator-statefulset.yaml
 kubectl rollout status statefulset biblio-orchestrator -n biblio-claw --timeout=10m
-# → Pod 再起動時に `/tmp/host-ready` が書かれるまで readinessProbe が pending
+# → Pod 再起動時に `/tmp/host-ready` が書かれるまで startupProbe が pending
 #   (30 * 10s = 5 min 猶予)。ready 化後 LB backend に組み込まれる
 
 kubectl apply -f k8s/26-service-fugue-channel.yaml
 kubectl apply -f k8s/27-networkpolicy-fugue-channel.yaml
-kubectl apply -f k8s/25-ingress-fugue-channel.yaml
+
+# Ingress は envsubst で ${DOMAIN} を展開してから apply (host 値は Secret Manager が SoT)
+# 罠 10: envsubst 未インストールなら shell error、罠 11: envsubst をかけずに直 apply すると
+# `host: ${DOMAIN}` が literal で登録 = TLS SNI 不整合で全 request 404 silent failure
+envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
 
 # NEG 自動作成 + backend health 反映待ち (最大 5 分)
 kubectl describe ingress biblio-fugue-channel -n biblio-claw | grep -E 'Address|Backends'
 ```
 
-**Step 5: CLI 経路で Prod URL 経由の疎通 verify**
+**Step 5: CLI 経路で Prod URL 経由の疎通 verify (URL + Token は session env、`.env` に書かない)**
 
 ```bash
-# 直接 curl で疎通確認 (Bearer 認証込)
-TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
-  --project=hajimari-ai-hackathon-2026)
-curl -sS -X POST "https://biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app/v1/channels/fugue/consult" \
+# 前提: DOMAIN + TOKEN は Step 3-4 で export 済、同一 shell セッション内で継承
+# (再取得する場合は Step 3 冒頭の gcloud secrets versions access コマンドを再実行)
+
+# 1. Health probe (Bearer なし、LB probe と同経路)
+curl -sS "https://${DOMAIN}/healthz"
+# 期待: 200 "ok"
+
+# 2. Consult 疎通 (Bearer 認証込)
+curl -sS -X POST "https://${DOMAIN}/v1/channels/fugue/consult" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"schema_version":"1","request_id":"verify-01","query":"typescript","mode":"ask-ad"}'
 # 期待: 200 応答 + status:'ok' or 'not_found' の JSON
 
-# 認証 fail 確認 (Bearer なし + 不正 Bearer)
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
-  "https://biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app/v1/channels/fugue/consult" \
+# 3. 認証 fail 確認 (Bearer なし + 不正 Bearer)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "https://${DOMAIN}/v1/channels/fugue/consult" \
   -H "Authorization: Bearer INVALID" -H "Content-Type: application/json" -d '{}'
 # 期待: 401
 
-# health probe 疎通 (Bearer なし)
-curl -sS "https://biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app/healthz"
-# 期待: 200 "ok"
-
-# fake-fugue-client 経由の equip 冪等発火
-FUGUE_URL="https://biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app" \
-FUGUE_SHARED_TOKEN="$TOKEN" \
+# 4. fake-fugue-client 経由の equip 冪等発火 (FUGUE_URL は inline、`.env` に書かない)
+FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$TOKEN" \
   pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id skills-tdd-first
 # 期待: status:'equipped' or 'already_equipped' の JSON、processing_time_ms あり
 ```
@@ -1961,7 +1994,7 @@ FUGUE_SHARED_TOKEN="$TOKEN" \
 ```
 
 ```bash
-# BigQuery で channel='fugue' の event log 到達確認
+# BigQuery で channel='fugue' の event log 到達確認 (dataset ID = llm_observability、事前確認済)
 # 注: BQ sink は timestamp 列による column-based DAY partition = `_PARTITIONTIME` 疑似列
 # (ingestion-time partition 専用) は存在しないため、`timestamp` 列で filter する。
 # §M4-A Phase 3 / §M4-E Phase 4 の集計 SQL と同流儀で stdout/stderr を UNION ALL する。
@@ -1969,10 +2002,10 @@ bq query --project_id=hajimari-ai-hackathon-2026 --nouse_legacy_sql --format=pre
   "SELECT event, channel, COUNT(*) as cnt
    FROM (
      SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
-     FROM \`hajimari-ai-hackathon-2026.<DATASET_ID>.stdout\`
+     FROM \`hajimari-ai-hackathon-2026.llm_observability.stdout\`
      UNION ALL
      SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
-     FROM \`hajimari-ai-hackathon-2026.<DATASET_ID>.stderr\`
+     FROM \`hajimari-ai-hackathon-2026.llm_observability.stderr\`
    )
    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
      AND channel = 'fugue'
@@ -1980,20 +2013,28 @@ bq query --project_id=hajimari-ai-hackathon-2026 --nouse_legacy_sql --format=pre
 # 期待: fugue.consult.completed / fugue.consult.invoked 等が cnt >= 1
 ```
 
-**Step 7: Fugue チーム連携 (実結線最終確認)**
+**Step 7: Fugue チーム連携 (domain + token を Secret 経由で共有)**
 
 ```
-Fugue 側で BIBLIO_CLAW_URL を切替:
-  BIBLIO_CLAW_URL=https://biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app
-  FUGUE_SHARED_TOKEN=<Step 2 で /tmp/fugue-token-backup に保存した値>
+Fugue チームに Slack DM or ephemeral share で共有する値 (両方とも Secret Manager から取得):
+  - DOMAIN: gcloud secrets versions access latest --secret=fugue-domain-name \
+            --project=hajimari-ai-hackathon-2026
+  - TOKEN:  gcloud secrets versions access latest --secret=fugue-shared-token \
+            --project=hajimari-ai-hackathon-2026
 
-Fugue 側から consult / equip を実際に発火 → 応答確認 → 1 trace 串刺し確認
-  Cloud Trace UI で Fugue 側 root span → biblio-claw の fugue.consult / fugue.equip が
-  親子関係で見える = W3C traceparent 継承成立の実証
-
-/tmp/fugue-token-backup は共有後 削除:
-  shred -u /tmp/fugue-token-backup
+Fugue 側 Cloud Run:
+  - Fugue 自身の Secret Manager に BIBLIO_CLAW_URL = "https://${DOMAIN}" + FUGUE_SHARED_TOKEN
+    として保管、Cloud Run env で secretRef 経由参照 (biblio 側の GSA 相当 IAM 権限は Fugue 側)
+  - Fugue 側から consult / equip を実際に発火 → 応答確認 → 1 trace 串刺し確認
+    Cloud Trace UI で Fugue 側 root span → biblio-claw の fugue.consult / fugue.equip が
+    親子関係で見える = W3C traceparent 継承成立の実証
 ```
+
+**Step 8: 完了マーカー refinement (Task 8、Task 7 = Step 0-7 完了後)**
+
+- `CLAUDE.md` line 3 の `PR #XXX` を実 PR # に置換 (Phase 5 実装 PR、および fugue-domain 追加 PR)
+- `.claude/PRPs/prds/m4/m4-e-fugue-integration.prd.md` Phase 5 status を `in-progress` → `complete`
+- `.claude/PRPs/plans/phase-5-prod-deploy.plan.md` を `completed/` に archive
 
 ### Phase 5 完了判定 (4 assertion)
 
@@ -2034,10 +2075,15 @@ kubectl apply -f k8s/10-orchestrator-statefulset.yaml
 
 # 案 3: Terraform destroy (Fugue infra を完全削除、Fugue チーム連携が終わっていることが前提)
 #   順序 = k8s Ingress + Secret 削除 → terraform destroy
-cd terraform/fugue-channel && terraform destroy
+#   sensitive var (`TF_VAR_domain_name` + `TF_VAR_fugue_shared_token`) は destroy 時も
+#   必須 (Terraform lifecycle 経路の要求)、dummy 値で OK
+cd terraform/fugue-channel
+export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
+export TF_VAR_fugue_shared_token='dummy-for-destroy'
+terraform destroy
 ```
 
-### 既知の罠 8 件
+### 既知の罠 11 件
 
 1. **Managed cert Active 化が 60 分超えるケース**:
    Google-managed cert の provisioning は DNS record propagate 済状態で始まる = DNS 先出しの
@@ -2090,14 +2136,32 @@ cd terraform/fugue-channel && terraform destroy
    --from-literal=FUGUE_SHARED_TOKEN="$(gcloud secrets versions access latest --secret=...)"`
    で、内側 `gcloud` が権限不足 / secret 名 typo / propagation 未完了で失敗しても、`$(...)`
    の空出力を kubectl は正常な空文字値として受け入れ Secret を「正常に」作成する。結果として
-   罠 7 の crash-loop 回避経路に落ちる。**対処**: Step 4 のコマンドを 2 段に分ける:
-   ```bash
-   TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
-     --project=hajimari-ai-hackathon-2026)
-   [[ -n "$TOKEN" ]] || { echo 'ERROR: token fetch failed (permission / typo / propagation?)'; exit 1; }
-   kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
-     --from-literal=FUGUE_SHARED_TOKEN="$TOKEN"
-   ```
+   罠 7 の crash-loop 回避経路に落ちる。**対処**: Step 4 のコマンドを 2 段に分ける
+   (Step 4 本文で明示済)。
+
+9. **Cloud Endpoints API 未有効化 → Terraform apply が `SERVICE_DISABLED` で失敗**:
+   Step 0 の `gcloud services enable endpoints.googleapis.com` を skip すると、Terraform
+   apply が `google_endpoints_service.fugue_dns` resource create で `SERVICE_DISABLED` エラーで
+   fail-fast する。初回 setup のみ必要、以降の apply は enable 済で no-op。**対処**: 罠 8 と
+   対称で Step 0 の有効化コマンドを罠として明示 = 手順書き漏れの再発を防ぐ。
+
+10. **`envsubst` 未インストール → Step 4 の Ingress apply コマンドが shell error**:
+    Step 4 の `envsubst '${DOMAIN}' < k8s/25-*.yaml | kubectl apply -f -` で `envsubst`
+    (`gettext` package の一部) が PATH にないと shell が `command not found` を返す。
+    WSL2 AlmaLinux 9 / Debian 系 / macOS 全て標準で入っていないケースあり。**対処**:
+    `sudo dnf install gettext` (AlmaLinux/RHEL) / `sudo apt install gettext-base` (Debian) /
+    `brew install gettext` (macOS) で導入。install 後、`which envsubst` で確認してから
+    Step 4 に進む。
+
+11. **`${DOMAIN}` を envsubst せずに `kubectl apply` = literal 登録で TLS SNI 不整合の silent 404**:
+    `k8s/25-ingress-fugue-channel.yaml` の `host: ${DOMAIN}` は envsubst 前提で書かれている
+    (public 化予定 repo に domain を hardcode しないため)。うっかり `kubectl apply -f
+    k8s/25-ingress-fugue-channel.yaml` を直接叩くと、Ingress rule の host に literal
+    `${DOMAIN}` が登録される。K8s 側 apply は成功、しかし LB の TLS SNI は Google-managed cert
+    の SAN (実 domain) と不整合になり、全 request が **404 not_found または 421 Misdirected
+    Request** で silent に落ちる。log からは Ingress が healthy に見える罠。**対処**: Step 4
+    の `envsubst ... | kubectl apply -f -` パイプラインを必ず使う。手動 apply する場合も
+    envsubst rendering 後の yaml を一度 file / stdout に確認してから apply する運用。
 
 ### 関連
 

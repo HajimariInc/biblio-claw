@@ -8,15 +8,25 @@
 #   を引く
 # - `kubernetes.io/ingress.allow-http: "false"` = HTTP を殺して HTTPS のみ受ける
 # - path prefix `/v1/channels/fugue` + `/healthz` の 2 rule
+# - `host: ${DOMAIN}` は **envsubst で展開してから apply** (public 化予定の repo に domain を
+#   hardcode しない、Source of Truth = Secret Manager `fugue-domain-name`)
+#
+# Apply コマンド (envsubst で `${DOMAIN}` を展開してから kubectl apply、他 manifest と対称):
+#   export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
+#     --project=hajimari-ai-hackathon-2026)
+#   envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
+#
+# 前提: `envsubst` (`gettext` package) がインストール済。WSL2 AlmaLinux 9 では
+#   `sudo dnf install gettext` で導入 (未インストールなら sh error で気付ける)。
 #
 # Apply 順序 (docs/operations-runbook.md §M4-E Phase 5):
-#   1. Terraform apply (static IP + cert + DNS + Secret Manager)
-#   2. cert の Active 化待ち (最大 60 分)
+#   1. Terraform apply (static IP + Endpoints Service + cert + Secret Manager 2 個)
+#   2. Cloud Endpoints DNS 反映 + cert の Active 化待ち (最大 60 分)
 #   3. K8s Secret 手動 sync (biblio-fugue-shared-token)
 #   4. StatefulSet update (envFrom + probe + ports) → rolling restart
 #   5. Service + BackendConfig apply (k8s/26)
 #   6. NetworkPolicy apply (k8s/27)
-#   7. Ingress apply (本 file) ← NEG + backend health 反映は最大 5 分
+#   7. Ingress apply (本 file、envsubst 経由) ← NEG + backend health 反映は最大 5 分
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -33,7 +43,9 @@ metadata:
     kubernetes.io/ingress.allow-http: 'false'
 spec:
   rules:
-    - host: biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app
+    # `${DOMAIN}` は envsubst で展開する必須 placeholder。展開せずに直 apply すると
+    # `host: ${DOMAIN}` が literal で登録され TLS SNI 不整合で全 request が 404 に落ちる silent failure。
+    - host: ${DOMAIN}
       http:
         paths:
           - path: /v1/channels/fugue

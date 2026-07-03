@@ -5,20 +5,20 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "GCP region (regional resources 用)。global cert / global IP は region 非依存"
+  description = "GCP region (regional resources 用)。global cert / global IP / Endpoints Service は region 非依存"
   type        = string
   default     = "asia-northeast1"
 }
 
 variable "domain_name" {
-  description = "Fugue channel 公開ドメイン (Google-managed cert の SAN + DNS A record)"
+  description = <<-EOT
+    Fugue channel 公開ドメイン。Cloud Endpoints で払い出す `.cloud.goog` sub-domain を指定
+    (例: `biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog`)。
+    default 値なし = **apply 時に `TF_VAR_domain_name` env で明示指定を強制** し、Source of Truth を
+    Secret Manager `fugue-domain-name` に一元化する (公開ポリシー: 静的ファイルにホスト名を出さない)。
+  EOT
   type        = string
-  default     = "biblio-claw.fugue-channel.hajimari-ai-hackathon-2026.app"
-}
-
-variable "dns_zone_name" {
-  description = "Cloud DNS zone name (data source で参照する既存 zone)。事前に `gcloud dns managed-zones list` で確認"
-  type        = string
+  # default 値なし = 必須化
 }
 
 variable "orchestrator_gsa_email" {
