@@ -52,7 +52,8 @@ fi
 : "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)。.env.example の §M4-A observability 参照}"
 
 # 必要 CLI が PATH 上にいるか fail-fast。
-for cmd in gcloud bq jq node; do
+# `kubectl` は Section 4.5 (CLI 経由 pre-invoke = issue #97 対応で新設) が依存する。
+for cmd in gcloud bq jq node kubectl; do
   command -v "$cmd" >/dev/null 2>&1 || fail "必須 CLI が見つかりません: $cmd"
 done
 
@@ -192,19 +193,80 @@ labels_test_fixture="$(printf '%s' "$TRACE_BODY" | jq -r '.spans[0].labels["bibl
 info '  → root span = biblio.acquire + 属性一致 OK'
 
 # =============================================================================
-# Section 5: BigQuery sink 疎通確認 (= 過去 1h に biblio.* event log が >= 1 件)
+# Section 4.5: CLI 経由 biblio activity pre-invoke (Section 5 の deterministic 化)
+# =============================================================================
+# Section 5 は「過去 1h に biblio.* / adk.tool.*.invoke event log >= 1 件 BQ 到達」を
+# 条件にする time-window 型 assert。実運用で直近 1h に biblio action が無いと fail
+# するため、CLI channel + provider='adk' 経路 (M4-B Phase 3 で本番化) で 1 件を
+# deterministic に発火して Section 5 に食わせる。
+#
+# pattern は verify-m4-b.sh:190-217 (Section 4) 踏襲 = `kubectl exec $POD -c orchestrator
+# -n $NAMESPACE -- sh -c "cd /app && pnpm run chat \"@bot ...\""`。
+# `@bot 蔵書` は list_biblio 経由で read-only、副作用ゼロ (棚に書き込まない)。
+# tool 呼出時 `event: 'adk.tool.list.invoke'` が発火するため BQ 側 filter (Step 1 で拡張済)
+# の `adk.tool.%.invoke` にマッチして Section 5 の hit 条件を deterministic に満たす。
+info '=== [4.5/7] CLI 経由 biblio activity pre-invoke (Section 5 の deterministic 化) ==='
+
+# NAMESPACE 確定 (verify-m4-a 単独実行を想定した defensive default、verify-m4-b の
+# `VERIFY_M4B_NAMESPACE` env と対称)。default = 'biblio-claw' は k8s/00-namespace.yaml の値。
+PREINVOKE_NAMESPACE="${VERIFY_M4A_NAMESPACE:-biblio-claw}"
+
+# POD 特定: verify-m4-b.sh と同 pattern = StatefulSet の pod 名決定則
+# (`<sts-name>-<ordinal>` = `biblio-orchestrator-0`) を利用して env で直接指定。
+# 素の `app=biblio-orchestrator` label は k8s/*.yaml に存在しない
+# (正は `app.kubernetes.io/name=biblio-claw` + `app.kubernetes.io/component=orchestrator`
+# だが、verify-m4-b.sh は簡潔さを優先して pod 名直指定 pattern を採用しているため対称に揃える)。
+POD_PREINVOKE="${VERIFY_M4A_ORCHESTRATOR_POD:-biblio-orchestrator-0}"
+
+# Pod 存在確認 (verify-m4-a 単独実行時の fail-fast、Section 5 で BQ 疎通確認する前に
+# kubectl 経路の実効性を早期に判定する)。
+if ! kubectl get pod "$POD_PREINVOKE" -n "$PREINVOKE_NAMESPACE" \
+     -o jsonpath='{.status.phase}' 2>"$STDERR_DIR/pod-get-45.stderr" | grep -q '^Running$'; then
+  LAST_HARNESS_STDERR="$STDERR_DIR/pod-get-45.stderr"
+  fail "Section 4.5 pre-invoke: orchestrator Pod '$POD_PREINVOKE' が Running 状態ではない (namespace=$PREINVOKE_NAMESPACE)
+    対処: kubectl get pod $POD_PREINVOKE -n $PREINVOKE_NAMESPACE で状態確認
+          (StatefulSet の pod 名は `<sts-name>-<ordinal>` = default 'biblio-orchestrator-0'、
+           別 pod 名 / 別 namespace なら VERIFY_M4A_ORCHESTRATOR_POD / VERIFY_M4A_NAMESPACE env で上書き)"
+fi
+
+TMP_PREINVOKE_OUT="$STDERR_DIR/preinvoke.stdout"
+TMP_PREINVOKE_ERR="$STDERR_DIR/preinvoke.stderr"
+
+info "  Pod 内で pnpm run chat 実行 (list_biblio = read-only、副作用ゼロ):"
+info "    PATRON: @bot 蔵書"
+if ! kubectl exec "$POD_PREINVOKE" -c orchestrator -n "$PREINVOKE_NAMESPACE" -- \
+     sh -c "cd /app && pnpm run chat \"@bot 蔵書\"" \
+     > "$TMP_PREINVOKE_OUT" 2> "$TMP_PREINVOKE_ERR"; then
+  LAST_HARNESS_STDERR="$TMP_PREINVOKE_ERR"
+  # pre-invoke 失敗は Section 5 fail の前段情報として warn 経路。Section 5 側で
+  # 「BQ に 1 件も到達していない」判定になった時にここが原因か切り分けられる。
+  warn "  pre-invoke chat 実行が exit != 0 (Section 5 の BQ 疎通確認に必要な event 発火が起きない可能性)
+    stdout: $(head -c 300 "$TMP_PREINVOKE_OUT" | tr '\n' ' ')
+    対処: (1) ADK agent group が central DB に存在するか (verify-m4-b.sh Section 3 参照) /
+          (2) LLM 応答遅延 (Vertex 負荷) / (3) chat タイムアウト (120s)"
+else
+  info "  pre-invoke OK (adk.tool.list.invoke event が発火した想定、BQ 到達まで数秒-10s)"
+  # BQ export lag に応じて短い buffer sleep。Section 5 側で 10s × 6 = 60s の polling が
+  # あるため、buffer sleep は 3s に抑える (無駄な wall clock を増やさない)。
+  sleep 3
+fi
+
+# =============================================================================
+# Section 5: BigQuery sink 疎通確認 (= 過去 1h に biblio.* / adk.tool.%.invoke event log が >= 1 件)
 # =============================================================================
 # 案 C 設計 (PR #75 実機 verify で判明した plan 欠陥への対応):
 # - 元設計: emit-test-span の TRACE_ID と BQ row を個別マッチ
 # - 真因: emit-test-span は host (Crane WSL) で動き、host stdout は Cloud Logging に
 #   流れない (= WSL に logging agent なし)。sink filter は `k8s_container` 専用
 #   = host log は永久に届かない (= 元設計は test fixture が host 実行前提で plan 欠陥)
-# - 案 C: TRACE_ID 個別マッチを諦め、「sink 疎通 = 過去 1h に GKE 起源の biblio.* event
-#   log が >= 1 件 BQ 到達」だけ assert。M4-A Phase 3 deliverable (sink) の動作確認として
-#   value 十分、本番副作用なし、TRACE_ID 個別マッチは Section 4 (Cloud Trace) で完結済
+# - 案 C: TRACE_ID 個別マッチを諦め、「sink 疎通 = 過去 1h に GKE 起源の biblio.* /
+#   adk.tool.*.invoke event log が >= 1 件 BQ 到達」だけ assert。M4-A Phase 3 deliverable
+#   (sink) の動作確認として value 十分、本番副作用なし、TRACE_ID 個別マッチは
+#   Section 4 (Cloud Trace) で完結済
+# - Section 4.5 で CLI 経由 pre-invoke により event 発火を deterministic 化 (issue #97 対応)
 # - 完全 E2E (test fixture を GKE 内で動かす case A、Slack 経由 read-only action case B)
 #   は将来 phase で別途検討
-info '=== [5/7] BigQuery sink 疎通確認 (= 過去 1h に biblio.* event log が >= 1 件) ==='
+info '=== [5/7] BigQuery sink 疎通確認 (= 過去 1h に biblio.* / adk.tool.%.invoke event log が >= 1 件) ==='
 
 # Cloud Logging → BQ sink は `use_partitioned_tables = true` (= terraform/m4-a-observability/main.tf:39)
 # で `stdout` / `stderr` 単独形 + `timestamp` 列 DAY partition で生成される (= bq ls 実測:
@@ -225,11 +287,18 @@ info "  対象テーブル: $(printf '%s' "$TABLES" | tr '\n' ' ')"
 
 # WHERE 句:
 # - `timestamp >= ... INTERVAL 1 HOUR`: partition pruning (cost + 性能担保)
-# - `jsonPayload.event LIKE 'biblio.%'`: biblio action 由来 (= biblio-claw の構造化ログ
-#   経路が動いている証跡)。jsonPayload は STRUCT (RECORD) のためドット記法でアクセス
+# - `event LIKE 'biblio.%' OR event LIKE 'adk.tool.%.invoke'`:
+#   両 namespace を biblio 活動痕跡として等価に扱う。M4-B Phase 3 (2026-07-01) で
+#   `router.ts:442` の provider='adk' 分岐が新設され `*-action.ts` (`biblio.*` event の
+#   唯一の発火点) を bypass するようになった。ADK tool は独自 namespace で
+#   `event: 'adk.tool.<action>.invoke'` を出す (`src/adk/tools/acquire-tool.ts:65-70` 等)
+#   ため、BQ query 側で両方を「biblio 活動痕跡」として拾う。
+#   `LIKE 'adk.tool.%.invoke'` の `.invoke` suffix は tool entry event に絞り
+#   `.unexpected_error` 等の error branch を除外 (sink 疎通の証跡としては entry で十分)。
+#   jsonPayload は STRUCT (RECORD) のためドット記法でアクセス
 #   (= 旧 SQL の `JSON_VALUE(jsonPayload, '$.event')` は型エラーで全 query fail していた、
 #   bq show --schema --format=prettyjson stdout で実測判明)
-SINK_PROBE_WHERE="WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND jsonPayload.event LIKE 'biblio.%'"
+SINK_PROBE_WHERE="WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND (jsonPayload.event LIKE 'biblio.%' OR jsonPayload.event LIKE 'adk.tool.%.invoke')"
 
 # 軽い retry (10s × 6 = 1 min)。biblio action が直近 1h で 1 件以上動いていれば即 hit。
 BQ_TOTAL=0
@@ -302,11 +371,12 @@ if [ "$bq_found" -ne 1 ]; then
     fi
   done
   LAST_HARNESS_STDERR="$STDERR_DIR/bq-poll-${LAST_BQ_ATTEMPT}-$(printf '%s' "$TABLES" | head -n1).stderr"
-  fail "BQ sink 疎通確認 fail: 過去 1h に biblio.* event log が 1 件も到達していない
-    対処: (1) 直近 1h で biblio action (Slack で @bot 蔵書 等) を 1 件以上実行 /
+  fail "BQ sink 疎通確認 fail: 過去 1h に biblio.* / adk.tool.*.invoke event log が 1 件も到達していない
+    対処: (1) Section 4.5 pre-invoke が exit != 0 だった可能性 (上の warn 履歴を確認) /
           (2) GKE orchestrator Pod が稼働中か (kubectl get pods -n biblio-claw) /
           (3) sink writer_identity に roles/bigquery.dataEditor 付与済か /
-          (4) sink filter (k8s_container + namespace_name=biblio-claw) が biblio-claw Pod にマッチしているか"
+          (4) sink filter (k8s_container + namespace_name=biblio-claw) が biblio-claw Pod にマッチしているか /
+          (5) Cloud Logging → BQ export lag (通常数秒-30s、稀に 1-2min) の可能性、少し待って再実行"
 fi
 
 # =============================================================================
@@ -349,6 +419,19 @@ grep -q 'namespace_name=' terraform/m4-a-observability/main.tf \
   || fail "sink filter から namespace 縛りが消失 (terraform/m4-a-observability/main.tf)"
 
 info '  → sink filter 静的反証 OK (k8s_container + namespace 縛り保持)'
+
+# BQ query filter が biblio.% / adk.tool.%.invoke 両方を含んでいることを静的 grep で pin
+# (= 将来 Section 5 の filter を誰かが単独 namespace に戻したときの回帰検知)。
+# M4-A Phase 4 → M4-B Phase 3 (2026-06-28 → 2026-07-01) で発生した Phase 間ドリフト
+# (delivery action handler `biblio.*` 発火経路が ADK 経路で bypass された) の再発を防ぐ
+# (issue #97 対応)。$0 は同 script 自己参照。
+if ! grep -q "jsonPayload.event LIKE 'biblio.%'" "$0"; then
+  fail "Section 5 BQ query filter に 'biblio.%' が含まれない (= 意味的整合性の regression)"
+fi
+if ! grep -q "jsonPayload.event LIKE 'adk.tool.%.invoke'" "$0"; then
+  fail "Section 5 BQ query filter に 'adk.tool.%.invoke' が含まれない (= M4-B ADK bypass 経路のカバレッジ低下)"
+fi
+info '  → BQ query filter に biblio.% + adk.tool.%.invoke 両方が pin されている OK'
 
 # host / agent-runner の dual-copy drift 検知 (PR #78 review-agents S3)。
 # env-propagation.ts / trace-fields.ts は byte-for-byte 同一維持が前提だが、コメントの規約

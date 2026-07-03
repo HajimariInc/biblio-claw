@@ -1039,18 +1039,20 @@ bash scripts/verify-m4-a.sh
 Phase 4 当初は「emit-test-span の TRACE_ID と BQ row を個別マッチ」設計だったが、PR #75 実機 verify で **host stdout は Cloud Logging に流れない = BQ sink に永久に届かない** plan 欠陥が判明 (= host = WSL 上に logging agent なし、sink filter は `k8s_container` 専用)。案 A (kubectl exec で orchestrator Pod 内で fixture 実行) / 案 B (Slack 経由 read-only action) は将来 phase で別途検討、Phase 4 では:
 
 - **Section 4 (Cloud Trace)**: emit-test-span は host → 直接 OTLP HTTP export → Cloud Trace に到達するため **TRACE_ID 個別マッチを assert** (元設計通り)
-- **Section 5-6 (BQ sink)**: TRACE_ID 個別マッチを諦め、**「過去 1h に GKE 起源の biblio.* event log が >= 1 件 BQ 到達」だけ assert** (= sink 疎通の証跡、M4-A Phase 3 deliverable の動作確認として value 十分、本番副作用なし)
-- **Section 7 (静的反証)**: 動的ネガティブ対照は TRACE_ID 個別マッチ前提のため案 C ではスコープ外、sink filter の `k8s_container` + `namespace` 縛り保持の静的 grep のみ
+- **Section 4.5 (CLI 経由 pre-invoke、issue #97 対応)**: `kubectl exec $POD -c orchestrator -- pnpm run chat "@bot 蔵書"` で ADK 経路の list_biblio (read-only) を deterministic に発火。M4-B Phase 3 で `provider='adk'` 分岐が delivery action handler (`biblio.*` event の唯一の発火点) を bypass するようになったため、time-window 型 assert である Section 5 を「直近 1h に Slack で誰かが叩いたかどうか」に依存させないための pre-invoke ステージ
+- **Section 5-6 (BQ sink)**: TRACE_ID 個別マッチを諦め、**「過去 1h に GKE 起源の `biblio.%` / `adk.tool.%.invoke` event log が >= 1 件 BQ 到達」だけ assert** (= sink 疎通の証跡、M4-A Phase 3 deliverable の動作確認として value 十分、本番副作用なし)。ADK tool 側の event namespace 追加は issue #97 対応
+- **Section 7 (静的反証)**: 動的ネガティブ対照は TRACE_ID 個別マッチ前提のため案 C ではスコープ外、sink filter の `k8s_container` + `namespace` 縛り保持の静的 grep + Section 5 BQ query filter に `biblio.%` / `adk.tool.%.invoke` 両方が pin されているかの静的 grep (Phase 間ドリフト再発防止、issue #97 対応)
 
-### 内部フロー (7 セクション)
+### 内部フロー (7 セクション + Section 4.5 pre-invoke)
 
 1. **preflight** — `.env` 読み + 必須 env (`GCP_PROJECT_ID` / `BQ_DATASET_ID`) + CLI 存在 (gcloud / bq / jq / node)
 2. **keyless 4 面** — `GOOGLE_APPLICATION_CREDENTIALS` 未設定 / ADC type が authorized_user|external_account|impersonated_service_account / repo 内に SA key json 不在 / TF に `google_service_account_key` resource 不在
 3. **emit-test-span** — `OTEL_DIAG=true pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts` 実行、stdout から `TRACE_ID` / `REQUEST_ID` / `SESSION_ID` 抽出 (`--import` は NodeSDK を main より前にロードする唯一の経路、`OTEL_DIAG=true` は OTLP export 失敗を stderr に流すための強制 diag)
 4. **Cloud Trace poll** — `https://cloudtrace.googleapis.com/v1/projects/.../traces/<TRACE_ID>` を sleep 3 × 30 (90s) ポーリング、span >= 1 で break、root span 名 = `biblio.acquire` + `labels[biblio.request_id]` 一致を assert (= TRACE_ID 個別マッチ)
-5. **BQ sink 疎通確認** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND jsonPayload.event LIKE 'biblio.%'` で sleep 10 × 6 (1 min) ポーリング、count >= 1 で break (= 過去 1h に biblio action 由来 log が sink 到達している証跡)
+4.5. **CLI 経由 biblio activity pre-invoke** (issue #97 対応) — `kubectl exec $POD_PREINVOKE -c orchestrator -n $PREINVOKE_NAMESPACE -- pnpm run chat "@bot 蔵書"` で ADK 経路の list_biblio を発火 (read-only、副作用ゼロ)。`event: 'adk.tool.list.invoke'` が Cloud Logging に流れることで Section 5 の time-window 型 assert を deterministic 化する。pre-invoke 失敗は warn (fail ではない、Section 5 polling でリカバリ猶予)。Pod 名は verify-m4-b.sh の `VERIFY_M4B_ORCHESTRATOR_POD` と対称の `VERIFY_M4A_ORCHESTRATOR_POD` env で上書き可 (default = `biblio-orchestrator-0`、StatefulSet の pod 名決定則 `<sts-name>-<ordinal>`)、namespace は `VERIFY_M4A_NAMESPACE` env (default = `biblio-claw`)
+5. **BQ sink 疎通確認** — `stdout` / `stderr` テーブル (= sink の `use_partitioned_tables=true` で生成される単独形、`timestamp` 列で DAY partition) を `bq ls` で動的列挙、各テーブルに `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) AND (jsonPayload.event LIKE 'biblio.%' OR jsonPayload.event LIKE 'adk.tool.%.invoke')` で sleep 10 × 6 (1 min) ポーリング、count >= 1 で break (= 過去 1h に biblio action 由来 log が sink 到達している証跡、ADK 経路の event namespace は issue #97 対応で追加)
 6. **summary SQL** — `sed` で `<PROJECT_ID>` / `<DATASET_ID>` を置換した `terraform/m4-a-observability/sql/summary.sql` を実行、`hit_count >= 1` + `marker = 'M4A_OK'` を assert
-7. **静的反証** — `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを grep で確認 (= sink の責任範囲縛りが消失していないことの証跡)
+7. **静的反証** — `main.tf` の sink filter に `k8s_container` / `namespace_name=` の両方が残っていることを grep で確認 (= sink の責任範囲縛りが消失していないことの証跡) + Section 5 BQ query filter に `biblio.%` / `adk.tool.%.invoke` が両方 pin されているかを `$0` 自己参照 grep で確認 (Phase 間ドリフト再発防止、issue #97 対応)
 
 ### 既知の罠 / 解釈
 
@@ -1058,9 +1060,10 @@ Phase 4 当初は「emit-test-span の TRACE_ID と BQ row を個別マッチ」
   1. **`roles/cloudtrace.user` 不足** — 30 回 retry でほぼ全て 403 を返す。Section 4 の poll ループは attempt 3 で warn を 1 度出す設計
   2. **OTLP export 失敗** — `BatchSpanProcessor` が export エラーを内部 catch して `shutdownOtel()` が resolve する OTel SDK 仕様の限界。verify は `OTEL_DIAG=true` を emit-test-span に渡して export エラーを stderr に流し、`LAST_HARNESS_STDERR` 経由で fail 時に展開する
   3. それ以外: ネットワーク不調 / `BatchSpanProcessor` flush 遅延 — 再実行で多くは解決
-- **Section 5 で「過去 1h に biblio.* event 0 件」fail** — 多くは下記 2 つ:
-  1. **GKE で直近 1h に biblio action が動いていない** — Slack で `@bot 蔵書` 等 read-only action を 1 件発射すれば即解決
+- **Section 5 で「過去 1h に biblio.* / adk.tool.*.invoke event 0 件」fail** — 多くは下記 3 つ:
+  1. **Section 4.5 pre-invoke が exit != 0 だった** — verify 出力の上流 warn を確認。ADK agent group 未初期化 (`kubectl exec $POD -c orchestrator -- pnpm exec tsx scripts/init-adk-agent.ts`) が典型
   2. **GKE orchestrator Pod が停止中** — `kubectl get pods -n biblio-claw` で確認
+  3. **Cloud Logging → BQ export lag** (通常数秒-30s、稀に 1-2min) — 少し待って再実行 (`sleep 60 && bash scripts/verify-m4-a.sh`)
 - **BQ poll の auth-fail early abort** — outer 反復 3 連続で全テーブル query 失敗時 (= persistent な auth 切れ / 権限不足 / SQL 型エラー / network 障害) は 1 min 待たず 30s で fail する設計。fail メッセージで `gcloud auth application-default print-access-token` と `roles/bigquery.dataViewer` 付与 + SQL 型エラーの可能性を案内
 - **BQ poll の partition pruning** — verify は `WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)` で過去 1h に絞った partition のみ scan する設計 (sink の `use_partitioned_tables=true` で生成される DAY partition を効かせ、cost + 性能を担保)
 - **`stdout` / `stderr` テーブル不在** — Phase 3 sink がまだ初動していない可能性。biblio action を 1 回実行して 5 分待ってから再実行 (= テーブルは sink が最初の log 流入時に自動生成、`terraform apply` 単独では作られない)
@@ -1119,7 +1122,7 @@ bash scripts/verify-phase-2-adk-gke.sh
 # (b) 既存 GKE wiring regression (= 9 assertion)
 bash scripts/verify-phase-2-wiring.sh
 
-# (c) M4-A 観測経路 regression (= 7 セクション、Section 5 BQ sink は直近 1h biblio activity 依存)
+# (c) M4-A 観測経路 regression (= 7 セクション + Section 4.5 pre-invoke で BQ sink 疎通を deterministic に確認)
 bash scripts/verify-m4-a.sh
 
 # (d) ローカル経路 regression (= M2 / M3 完成判定)
