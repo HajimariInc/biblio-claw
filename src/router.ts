@@ -314,12 +314,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         utterance: messageText,
         // audit 側 channel enum は 'slack' | 'cli' | 'fugue' の 3 値、それ以外は 'slack' に丸める
         // (暫定、Phase 3+ で拡張)
-        channel:
-          event.channelType === 'slack'
-            ? 'slack'
-            : event.channelType === 'cli'
-              ? 'cli'
-              : 'slack',
+        channel: event.channelType === 'slack' ? 'slack' : event.channelType === 'cli' ? 'cli' : 'slack',
         channelType: event.channelType,
         userId,
       });
@@ -541,8 +536,7 @@ async function deliverToAgent(
   if (gateResult) {
     const isAdk = providerName === 'adk';
     const shouldSkip =
-      (gateResult.classification === 'biblio-adk' && !isAdk) ||
-      (gateResult.classification === 'biblio-other' && isAdk);
+      (gateResult.classification === 'biblio-adk' && !isAdk) || (gateResult.classification === 'biblio-other' && isAdk);
     if (shouldSkip) {
       log.debug('gate skip: classification-provider mismatch', {
         event: 'gate.skip.mismatch',
