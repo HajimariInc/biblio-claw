@@ -109,7 +109,7 @@ export async function withGateSpan<T>(text: string, fn: (span: Span) => Promise<
         const errorRecord = err instanceof Error ? err : new Error(String(err));
         span.recordException(errorRecord);
         span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
-        // Phase 4 review I1 の silent-failure 撲滅原則を継承
+        // M4-E Phase 4 review I1 の silent-failure 撲滅原則を継承 (fugue-entry-span.ts と同流儀)
         span.setAttribute('gate.outcome', 'error');
         throw err;
       } finally {

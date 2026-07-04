@@ -2,7 +2,7 @@
  * M4-F Phase 2 gate audit log。
  *
  * gate 判定の結果を「Cloud Logging structured log」+「local `.jsonl` fallback」の 2 経路で
- * 記録する。GCP は既存 M4-A Phase 3 sink (`biblio-otel-logs`) が Cloud Logging → BQ に自動
+ * 記録する。GCP は既存 M4-A Phase 3 sink (`biblio-claw-to-bq`、`terraform/m4-a-observability/`) が Cloud Logging → BQ に自動
  * export、local docker (Cloud Logging 経路不在) は `.jsonl` にファイル追記で「残せる」。
  *
  * payload shape は既存 `src/log.ts:emitJson` の Cloud Logging reserved fields
