@@ -142,11 +142,13 @@ info "==== Phase 4.5 image-sync (tag=$TAG, dry-run=$DRY_RUN) ===="
 # === Block 1: pre-flight =============================================================
 info '=== Block 1: pre-flight ==='
 
-# 必須 cmd
-for c in docker kubectl gcloud sed; do
-  command -v "$c" >/dev/null 2>&1 || fail "必須コマンドが見つかりません: $c"
+# 必須 cmd (envsubst は Block 5 の Ingress ${DOMAIN} 展開に必要 = 罠 10 対応、
+# M4-F Phase 1 revival-core で `kubectl apply -f k8s/` が envsubst 未処理で Ingress
+# `${DOMAIN}` literal 登録 invalid で FAIL した実測に基づき preflight に追加)。
+for c in docker kubectl gcloud sed envsubst; do
+  command -v "$c" >/dev/null 2>&1 || fail "必須コマンドが見つかりません: $c (envsubst 未インストールなら sudo apt install gettext / brew install gettext)"
 done
-ok '[cmd] docker / kubectl / gcloud / sed 揃い'
+ok '[cmd] docker / kubectl / gcloud / sed / envsubst 揃い'
 
 # cluster context gate (= 別 cluster での誤実行防止、verify-phase-2-wiring.sh:32-36 と同パターン)
 ctx="$(kubectl config current-context 2>/dev/null || echo '<none>')"
@@ -291,8 +293,36 @@ info '=== Block 5: kubectl apply + rollout 待ち ==='
 if "$NO_APPLY"; then
   info '[apply] --no-apply 指定、skip'
 else
-  info '[apply] kubectl apply -f k8s/'
-  run kubectl apply -f "$ROOT/k8s/"
+  # k8s/25-ingress-fugue-channel.yaml の `host: ${DOMAIN}` は envsubst で展開してから
+  # apply する必要がある (M4-E Phase 5 罠 10/11 = envsubst 未処理で literal 登録 invalid)。
+  # DOMAIN は env で明示、あるいは Secret Manager `fugue-domain-name` から動的取得
+  # (host 名を静的ファイルに露出させない設計、runbook §M4-E Phase 5 §Step 3 参照)。
+  info '[apply] envsubst ${DOMAIN} + kubectl apply (tmpdir 経由)'
+  if [ -z "${DOMAIN:-}" ]; then
+    # `--project` は image build/push の GAR と同一プロジェクト前提。
+    DOMAIN="$(gcloud secrets versions access latest --secret=fugue-domain-name \
+      --project=hajimari-ai-hackathon-2026 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  [ -n "${DOMAIN:-}" ] || \
+    fail "[apply] DOMAIN 未解決 (env 未設定 + Secret Manager fugue-domain-name 空 or gcloud 権限不足)。DOMAIN=<host> を env で明示 or gcloud secrets versions access で単独確認"
+  export DOMAIN
+  # tmpdir で render (Ingress のみ envsubst、他 manifest は cp で pass-through)。
+  # ${DOMAIN} を含む file を grep で判定 = 将来 別 manifest に env 変数が増えた場合も自動追随。
+  apply_tmp="$(mktemp -d -t biblio-p4-5-apply-XXXXXX)"
+  # top-level script なので trap EXIT で cleanup (関数 scope の RETURN は使わない)
+  trap 'rm -rf "$apply_tmp"' EXIT
+  substituted_count=0
+  for f in "$ROOT/k8s"/*.yaml; do
+    base="$(basename "$f")"
+    if grep -q '${DOMAIN}' "$f" 2>/dev/null; then
+      envsubst '${DOMAIN}' < "$f" > "$apply_tmp/$base"
+      substituted_count=$((substituted_count + 1))
+    else
+      cp "$f" "$apply_tmp/$base"
+    fi
+  done
+  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN} を実値 ($DOMAIN) に展開"
+  run kubectl apply -f "$apply_tmp/"
   ok '[apply] kubectl apply done'
 
   # rollout-restart オプション (= 同 tag 上書き push の場合の明示再起動)

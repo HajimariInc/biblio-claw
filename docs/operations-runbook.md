@@ -2685,9 +2685,11 @@ echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
 
 **目的**: M4-B Phase 4 完了以降 DB 行不在で休眠していた agent-container 経路 (spawn / M3 装備機構 / container skill 8 種 / container 側 MCP 9 tool) を、既存 ADK 経路 (9 tool + HITL) と **Fugue channel (Prod GKE)** を無傷に保ったまま復活させる。**コード変更はほぼゼロ** (実装 = seed script のみ)、`agent_groups` に claude fallback provider の 2 行目を追加すれば `src/router.ts` の provider !== 'adk' 分岐が既存の agent-container 経路 (`src/container-runner.ts:107-243` + K8s Job) に素通り復活する構造。
 
-### deploy 手順 (Phase 1 = image 変更なし、seed script 実行のみ)
+### deploy 手順 (Phase 1 = host image tag bump + seed script 実行の 2 段)
 
-> **重要**: 本手順の各 step は **必ず対話的に実行**すること (バックグラウンド起動・stdout/stderr の破棄・CI からの自動化は禁止)。seed script (`init-hybrid-agent.ts`) は `console.error` + `process.exit(1)` の fail-fast 経路が唯一のエラー可視化手段のため、出力を目視できない環境で実行すると失敗を silent に取りこぼす。
+> **重要 1**: 本手順の各 step は **必ず対話的に実行**すること (バックグラウンド起動・stdout/stderr の破棄・CI からの自動化は禁止)。seed script (`init-hybrid-agent.ts`) は `console.error` + `process.exit(1)` の fail-fast 経路が唯一のエラー可視化手段のため、出力を目視できない環境で実行すると失敗を silent に取りこぼす。
+
+> **重要 2 (2026-07-04 実測で判明した見落とし訂正)**: Phase 1 起案時は「seed script 実行のみ、image 変更なし」の想定だったが、実行時に `scripts/init-hybrid-agent.ts` が **既存 image (`m4e-p5-2`) に含まれず** `ERR_MODULE_NOT_FOUND` で fail することが判明。host image に新 script が焼き込まれる必要があるため、**host image tag bump が Phase 1 の隠れ deliverable として必須**。agent 用 image tag (spawn 側の `nanoclaw-agent`) は流用可 (Phase 1 では変更なし) だが、image-sync script は 4 image (orchestrator + agent + gh-sidecar + vertex-sidecar) を一括 bump する仕様のため 4 image とも新 tag が push される (実害なし)。
 
 1. **Preflight**
    - `kubectl config current-context` が `gke_*_biblio-prod` を含むこと
@@ -2695,7 +2697,25 @@ echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
    - `HYBRID_USER_ID` (`slack:U...` 形式) + `HYBRID_SLACK_DM_CHANNEL_ID` (raw `D...`) が env or `.env` に投入済
    - baseline regression 取得: `bash scripts/verify-m4-b.sh` (= `M4-B PASS`) + `bash scripts/verify-fugue-channel.sh --prod` (= `M4-E PASS (prod)`) が exit 0
 
-2. **Seed 実行**
+2. **Host image tag bump (M4-F Phase 1 の隠れ deliverable、image-sync 経由)**
+
+   ```bash
+   # 例: m4f-p1-1 tag で 4 image を build + push + manifest sed + rollout
+   bash scripts/init-project-gcp-image-sync.sh --tag m4f-p1-1 --confirm
+   ```
+
+   完了確認: `kubectl get statefulset biblio-orchestrator -n biblio-claw -o jsonpath='{.spec.template.spec.containers[?(@.name=="orchestrator")].image}'` が `biblio-claw:m4f-p1-1` を返す + Pod 5/5 Ready。
+
+   Pod 内に新 script が焼かれていることの assert:
+
+   ```bash
+   kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+     ls -la /app/scripts/init-hybrid-agent.ts /app/scripts/init-hybrid-agent-gke.sh
+   ```
+
+   > **GOTCHA (2026-07-04 実測)**: image-sync の Block 5 で `kubectl apply -f k8s/` する際、`k8s/25-ingress-fugue-channel.yaml` の `host: ${DOMAIN}` が envsubst 未処理で `Invalid value: "${DOMAIN}"` reject される既知の罠 (罠 10/11 と同源)。**2026-07-04 に image-sync script に envsubst 経路を追加して恒久解消済** (`init-project-gcp-image-sync.sh` の Block 5 で tmpdir + envsubst 展開後 apply)。手動 apply する場合は `envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -` で対応。
+
+3. **Seed 実行**
 
    ```bash
    HYBRID_USER_ID='slack:U...' \
@@ -2705,7 +2725,7 @@ echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
 
    最終行に `SEED_RESULT=` の JSON が出る (`agent_group_id` + `is_new_group` + `slack_dm_wired`)。
 
-3. **DB 反映確認** (GKE では PVC mount で `DATA_DIR=/data`、`k8s/10-orchestrator-statefulset.yaml:156` 参照。§M4-B Phase 3 「GKE 実機 verify で判明した罠」でも同項目が既知の罠として明記済、**必ず絶対パス `/data/v2.db` で叩く**)
+4. **DB 反映確認** (GKE では PVC mount で `DATA_DIR=/data`、`k8s/10-orchestrator-statefulset.yaml:156` 参照。§M4-B Phase 3 「GKE 実機 verify で判明した罠」でも同項目が既知の罠として明記済、**必ず絶対パス `/data/v2.db` で叩く**)
 
    ```bash
    kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
@@ -2719,9 +2739,14 @@ echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
 
    期待: `agent_groups` 2 行 (`adk-biblio-shisho` + `hybrid-biblio-shisho`) + `container_configs` 2 行 (`provider='adk', model='claude-sonnet-4-6'` + `provider=null, model='claude-sonnet-4-6'`)。
 
-4. **Slack DM 発話** (DEN さん HITL): DEN さん Slack DM で任意対話発話 → `kubectl get jobs -n biblio-claw -w` で K8s Job spawn → 応答が DM に返る (2-3 分目安)。
+5. **Slack DM 発話** (DEN さん HITL): DEN さん Slack DM で任意対話発話 → `kubectl get jobs -n biblio-claw -w` で K8s Job spawn → 応答が DM に返る (2-3 分目安、image cache warm 時は 15-20 秒で応答が返る = 2026-07-04 実測)。
 
-5. **regression 再確認**: `bash scripts/verify-m4-b.sh` + `bash scripts/verify-fugue-channel.sh --prod` が seed 前後で exit 0 継続。
+   > **重要 (fan-out 二重発火の事前対処)**: 対象 Slack DM channel が既に他 agent group (例: ADK) に wire されている場合、`init-hybrid-agent.ts:wireSlackDm` の fan-out fail-fast が発火して seed が exit 1。回避策は次の 3 択:
+   > - **(A) 既存 wire を一時削除**: `kubectl exec ... -- node -e "... DELETE FROM messaging_group_agents WHERE id='<wire_id>'"` で既存 wire を BACKUP + DELETE → hybrid seed → verify → BACKUP から INSERT で復帰。Phase 1 verify 実測ではこの手順で 5-10 min の ADK 経路不可視 window を挟んだ。
+   > - **(B) hybrid をそのまま維持 (Phase 2 まで)**: verify 後 wire 復帰せず、hybrid のみ Slack DM に届く状態を Phase 2 gate routing 完成まで維持。ADK 経路は CLI (`cli/local`) 経由のみで動作、`verify-m4-b.sh` は無傷継続。DEN さんの Slack DM 発話は常に hybrid に流れる (= 2026-07-04 Phase 1 verify 完了後の運用選択)。
+   > - **(C) 別 DM channel を用意**: 別 bot user 経由で新 DM channel を開通、hybrid だけをそちらに wire (= 現状ワークスペース上は現実的でない、通常 (B) を選ぶ)。
+
+6. **regression 再確認**: `bash scripts/verify-m4-b.sh` + `bash scripts/verify-fugue-channel.sh --prod` が seed 前後で exit 0 継続。
 
 ### 装備確認 (M3 経路の生存) — Task 5 実測後埋め戻し
 
