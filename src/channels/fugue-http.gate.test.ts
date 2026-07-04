@@ -54,6 +54,10 @@ vi.mock('../modules/approvals/notify-admin.js', () => ({
   notifyAdmin: vi.fn().mockResolvedValue('sent'),
 }));
 
+vi.mock('../log.js', () => ({
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+}));
+
 const FIXTURE_RESULT: ListBiblioResult = {
   ok: true,
   items: [
@@ -237,8 +241,12 @@ describe('Fugue gate - GATE_ENABLED=true + in-secure → 200 + status:error + wa
 
   it('consult: gate throw → fail-open (通常 listBiblio 経路継続、status=ok or not_found のどちらも許容)', async () => {
     const gateModule = await import('../gate/gate.js');
+    const logModule = await import('../log.js');
+    const auditModule = await import('../gate/audit-log.js');
     vi.mocked(gateModule.isGateEnabled).mockReturnValue(true);
     vi.mocked(gateModule.evaluateGate).mockRejectedValue(new Error('gate down'));
+    vi.mocked(logModule.log.warn).mockReset();
+    vi.mocked(auditModule.appendGateAuditLog).mockReset();
     // FIXTURE_RESULT の item と substring match するために 'figma' を使う (ok を確定)
     const res = await postConsult('figma');
     expect(res.status).toBe(200);
@@ -247,6 +255,40 @@ describe('Fugue gate - GATE_ENABLED=true + in-secure → 200 + status:error + wa
     expect(body.status).not.toBe('error');
     expect(body.warnings).not.toContain('input rejected by input gate');
     expect(body.status).toBe('ok');
+
+    // silent-failure-hunter S4 + I5 対応: fail-open が behavior だけでなく observability contract
+    // を守っていることも assert (log.warn + audit error 両方発火)
+    expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('gate unexpected throw'),
+      expect.objectContaining({ event: 'fugue.consult.gate_unexpected_throw' }),
+    );
+    expect(vi.mocked(auditModule.appendGateAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'error', reason: 'gate down' }),
+    );
+  });
+
+  it('equip: gate throw → fail-open + observability contract (log.warn + audit error 発火)', async () => {
+    const gateModule = await import('../gate/gate.js');
+    const logModule = await import('../log.js');
+    const auditModule = await import('../gate/audit-log.js');
+    vi.mocked(gateModule.isGateEnabled).mockReturnValue(true);
+    vi.mocked(gateModule.evaluateGate).mockRejectedValue(new Error('gate infra fail'));
+    vi.mocked(logModule.log.warn).mockReset();
+    vi.mocked(auditModule.appendGateAuditLog).mockReset();
+
+    const res = await postEquip('HajimariInc--figma-reviewer');
+    expect(res.status).toBe(200);
+    // fail-open で listBiblio 経路が動く (equipped or already_equipped)
+    const body = (await res.json()) as { status: string };
+    expect(['equipped', 'already_equipped']).toContain(body.status);
+
+    expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('gate unexpected throw'),
+      expect.objectContaining({ event: 'fugue.equip.gate_unexpected_throw' }),
+    );
+    expect(vi.mocked(auditModule.appendGateAuditLog)).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'error', reason: 'gate infra fail' }),
+    );
   });
 });
 
