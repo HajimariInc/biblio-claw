@@ -31,9 +31,7 @@ vi.mock('./config.js', async () => {
 vi.mock('./gate/gate.js', () => ({
   isGateEnabled: vi.fn(),
   evaluateGate: vi.fn(),
-  withGateSpan: vi.fn(async (_text: string, fn: (span: unknown) => Promise<unknown>) =>
-    fn({ setAttribute: vi.fn() }),
-  ),
+  withGateSpan: vi.fn(async (_text: string, fn: (span: unknown) => Promise<unknown>) => fn({ setAttribute: vi.fn() })),
 }));
 
 vi.mock('./gate/audit-log.js', () => ({
