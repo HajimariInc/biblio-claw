@@ -567,7 +567,7 @@ export class FugueHttpServer {
       // + warnings + raw.reason: 'in_secure' で応答 (AD の本義 契約: 5xx は認可 / 上限超過 /
       // biblio-claw 自体の応答不能に限定)。gate 未有効時は skip = 従来経路継続。
       if (isGateEnabled()) {
-        let gateResult: GateResult;
+        let gateResult: GateResult | null = null;
         try {
           gateResult = await withGateSpan(query, async (gateSpan) => {
             const result = await evaluateGate(query);
@@ -580,15 +580,15 @@ export class FugueHttpServer {
             return result;
           });
         } catch (err) {
-          // gate 自体の unexpected throw は fail-open (現状経路継続)。
+          // gate 自体の unexpected throw は fail-open (現状経路継続、gateResult=null のまま fall
+          // through)。router.ts の gate 挿入と同流儀 (plain `GateResult | null` optional で
+          // `as unknown as` cast を避ける、S3 review 対応)。
           log.warn('Fugue consult gate unexpected throw, falling back to open', {
             event: 'fugue.consult.gate_unexpected_throw',
             channel: 'fugue',
             request_id,
             err: err instanceof Error ? err.message : String(err),
           });
-          // fall through — 通常経路 (listBiblio) に進む
-          gateResult = null as unknown as GateResult;
         }
         if (gateResult) {
           appendGateAuditLog({
@@ -636,7 +636,7 @@ export class FugueHttpServer {
               status: 'error',
               summary: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。',
               skills_found: [],
-              raw: { reason: 'in_secure' as FugueUnavailableReason, query, mode },
+              raw: { reason: 'in_secure', query, mode },
               processing_time_ms,
               warnings: ['input rejected by input gate'],
             };
@@ -855,7 +855,7 @@ export class FugueHttpServer {
       // exfiltration URL 等 (path traversal を超えた) 追加防御を担う。in-secure 応答経路は
       // consult と対称に 200 + status:'error' + warnings で運ぶ (AD の本義)。
       if (isGateEnabled()) {
-        let gateResult: GateResult;
+        let gateResult: GateResult | null = null;
         try {
           gateResult = await withGateSpan(skill_id, async (gateSpan) => {
             const result = await evaluateGate(skill_id);
@@ -868,13 +868,14 @@ export class FugueHttpServer {
             return result;
           });
         } catch (err) {
+          // consult 側と対称の fail-open (`GateResult | null` で `as unknown as` cast 回避、
+          // S3 review 対応)。
           log.warn('Fugue equip gate unexpected throw, falling back to open', {
             event: 'fugue.equip.gate_unexpected_throw',
             channel: 'fugue',
             request_id,
             err: err instanceof Error ? err.message : String(err),
           });
-          gateResult = null as unknown as GateResult;
         }
         if (gateResult) {
           appendGateAuditLog({

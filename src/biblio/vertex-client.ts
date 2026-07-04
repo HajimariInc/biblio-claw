@@ -547,7 +547,9 @@ export interface VertexJsonCallArgs {
   responseSchema: Record<string, unknown>;
   /**
    * ハードタイムアウト (ms)。gate 判定は fast path なので既定 3000ms
-   * (fugue/patron 体感悪化を招かないため)。`GATE_TIMEOUT_MS` env が env 側で読まれる。
+   * (fugue/patron 体感悪化を招かないため)。**`GATE_TIMEOUT_MS` env の解決は呼出元
+   * (`src/gate/layer4-evaluator.ts:readGateTimeoutMs`) の責務**、本関数は解決済の値を
+   * 受け取るのみで env を直接読まない。
    */
   timeoutMs?: number;
   /** 既定は `.env` の `GATE_MODEL` (fallback `gemini-3.1-flash-lite`)。差し替え用 (テストなど)。 */

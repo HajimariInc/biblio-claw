@@ -10,7 +10,7 @@
  */
 
 /**
- * Vertex Gemini responseSchema (Task 6) と一致させる closed union。
+ * Vertex Gemini responseSchema (`layer4-evaluator.ts:RESPONSE_SCHEMA`) と一致させる closed union。
  *
  * - `biblio-adk`: biblio 9 tool の**確定的操作** (仕入れ / 検品 / カテゴライズ /
  *   陳列 / 蔵書一覧 / 設定変更 / 禁書 / 焼却 / 複数陳列)。ADK dispatcher へ routing。

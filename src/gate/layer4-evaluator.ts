@@ -24,7 +24,7 @@ import { wrapUntrustedInput } from './layer3-xml.js';
 /**
  * Vertex Gemini responseSchema (JSON Schema、type UPPERCASE)。
  *
- * `enum` は `Classification` union と一致させる (Task 1 の `CLASSIFICATIONS` `as const`
+ * `enum` は `Classification` union と一致させる (`types.ts:CLASSIFICATIONS` `as const`
  * から literal 列挙)。`reason` は 100 文字以内目安 (日本語 or 英語混在許容)。
  */
 const RESPONSE_SCHEMA: Record<string, unknown> = {

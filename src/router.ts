@@ -278,12 +278,11 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
 
-  // M4-F Phase 2: gate 判定 (`GATE_ENABLED=true` 時のみ発火)。
-  //   - biblio-adk / biblio-other → gateResult を fan-out loop に渡し、deliverToAgent 冒頭で
-  //     provider mismatch skip
-  //   - in-secure → 3 点セット (admin DM 通知 + audit log + patron 定型文返信) 発火 + 早期 return
-  //   - gate 自体の unexpected throw は fail-open (gateResult=null) で従来経路継続
-  //     (Layer 4 内部の Vertex/Zod fallback は既に biblio-other に倒れるため throw は稀ケース)
+  // M4-F Phase 2: gate 判定 (`GATE_ENABLED=true` 時のみ発火)。詳細な分岐 (in-secure /
+  // provider mismatch skip / fail-open) は各処理点のコメントで説明する。
+  //
+  // gate 自体の unexpected throw は fail-open (gateResult=null) で従来経路継続。Layer 4 内部の
+  // Vertex/Zod fallback は既に biblio-other に倒れるため throw は本来稀ケース = catch は保険。
   let gateResult: GateResult | null = null;
   if (isGateEnabled()) {
     try {
@@ -318,7 +317,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         channelType: event.channelType,
         userId,
       });
-      // in-secure 早期 return + 3 点セット発火
       if (gateResult.classification === 'in-secure') {
         // (1) admin DM 通知 (notify-only、承認カードではない)
         void notifyAdmin({

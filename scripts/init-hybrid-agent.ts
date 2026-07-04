@@ -214,8 +214,6 @@ Resolve either by:
   (c) Set GATE_ENABLED=true before running (Phase 2 gate + routing lifts this constraint by
       routing on classifier output; both wires will coexist and fan-out is suppressed by the
       classification-provider mismatch skip in router.ts:deliverToAgent).
-
-Phase 2 (gate + routing) will lift this constraint by routing on classifier output.
 `.trim(),
         );
         process.exit(1);
