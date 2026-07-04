@@ -43,7 +43,7 @@ import {
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { addMember } from '../src/modules/permissions/db/agent-group-members.js';
-import { upsertUser } from '../src/modules/permissions/db/users.js';
+import { getUser, upsertUser } from '../src/modules/permissions/db/users.js';
 import { initGroupFilesystem } from '../src/group-init.js';
 import type { AgentGroup, MessagingGroup } from '../src/types.js';
 
@@ -232,8 +232,6 @@ export interface SeedResult {
   agent_group_id: string;
   folder: string;
   is_new_group: boolean;
-  provider: null;
-  model: null;
   slack_dm_wired: boolean;
   slack_dm_platform_id: string | null;
 }
@@ -247,15 +245,32 @@ export interface SeedResult {
  * `GROUPS_DIR` env を tmp dir に振り替えてから import すること。
  */
 export function seedHybridAgent(args: Args, now: string): SeedResult {
-  // 1. Owner user assert (既存 owner 前提、`INSERT OR IGNORE` 相当)。
-  //    init-first-agent.ts で先に owner 登録済の想定 = display_name は上書きしない
-  //    (upsertUser の COALESCE 挙動でも維持される)。
-  upsertUser({
-    id: args.userId,
-    kind: SLACK_CHANNEL,
-    display_name: args.displayName,
-    created_at: now,
-  });
+  // Args 相互依存 assert (I5、fail-closed): parseArgs は CLI 境界で
+  // slackDmChannelId 必須を強制するが、seedHybridAgent は export され直接
+  // 呼び出し経路 (test / 将来の script) が存在するため、契約違反を silent skip
+  // せず fail-fast。plan の「silent failure 撲滅」流儀と整合。
+  if (!args.skipSlackDm && !args.slackDmChannelId) {
+    throw new Error(
+      'seedHybridAgent: slackDmChannelId is required unless skipSlackDm=true '
+        + '(parseArgs should have caught this at the CLI boundary)',
+    );
+  }
+
+  // 1. Owner user assert (`INSERT OR IGNORE` 相当、既存 owner は無傷保護)。
+  //    upsertUser の SQL は `ON CONFLICT DO UPDATE SET display_name = COALESCE(
+  //    excluded.display_name, users.display_name)` = 渡した値が non-null なら
+  //    常に上書き。args.displayName は parseArgs 経路で default 'Patron' が入り
+  //    非 null 化するため、既存 owner (init-first-agent.ts で登録済の DEN さん)
+  //    の display_name が毎回 'Patron' に silent 上書きされる問題を getUser
+  //    guard で回避する (既存 row を触らない)。
+  if (!getUser(args.userId)) {
+    upsertUser({
+      id: args.userId,
+      kind: SLACK_CHANNEL,
+      display_name: args.displayName,
+      created_at: now,
+    });
+  }
 
   // 2. Agent group + filesystem (idempotent by folder)。
   let ag: AgentGroup | undefined = getAgentGroupByFolder(HYBRID_AGENT_FOLDER);
@@ -293,12 +308,14 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
 
   // provider=null が本 script の中核設定。router.ts:deliverToAgent で
   // provider === 'adk' 分岐が偽になり、既存 agent-container 経路 (spawn / K8s Job) に
-  // 素通りする。resolveProviderName (`src/container-runner.ts:275-297`) の
+  // 素通りする。resolveProviderName (`src/container-runner.ts:275-280`) の
   // `|| 'claude'` fallback が実際の provider 名を返す。
   //
-  // model=null は agent-runner container が読む container.json で undefined になり、
-  // container 側の DEFAULT_MODEL (= agent-runner が持つデフォルト) にフォールバック。
-  // Phase 1 では model 固定を避けて container 側の判断に委ねる。
+  // model は必ず Vertex publisher ID を明示する。null で残すと container.json 経由で
+  // agent-runner container の `--model` フラグが unset になり、claude-code SDK 内蔵
+  // デフォルトが Anthropic API alias (Vertex 未解決) を返して Vertex rawPredict が
+  // 404 化する既知障害 (M1 で実際に踏み修正済、init-first-agent.ts / init-cli-agent.ts
+  // が明示 'claude-sonnet-4-6' で回避している経路を継承)。
   //
   // **isNewGroup gate から外して毎回 assert** (I2 = PR #101 review 指摘、
   // init-adk-agent.ts:256-266 の pattern を継承):
@@ -308,9 +325,9 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
   // 方が真の意味での冪等・自己修復に近い。
   updateContainerConfigScalars(ag.id, {
     provider: null,
-    model: null,
+    model: 'claude-sonnet-4-6',
   });
-  console.log(`Ensured container_config: provider=null (claude fallback), model=null`);
+  console.log(`Ensured container_config: provider=null (claude fallback), model='claude-sonnet-4-6'`);
 
   // 3. Membership row (owner is implicit via user_roles、これは access ゲート用)。
   //    init-first-agent.ts:270-275 と同流儀の `INSERT OR IGNORE`。
@@ -337,8 +354,6 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
     agent_group_id: ag.id,
     folder: HYBRID_AGENT_FOLDER,
     is_new_group: isNewGroup,
-    provider: null,
-    model: null,
     slack_dm_wired: !args.skipSlackDm && !!args.slackDmChannelId,
     slack_dm_platform_id:
       args.slackDmChannelId ? `${SLACK_CHANNEL}:${args.slackDmChannelId}` : null,

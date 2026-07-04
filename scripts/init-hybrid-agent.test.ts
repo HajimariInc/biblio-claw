@@ -1,14 +1,17 @@
 /**
  * `scripts/init-hybrid-agent.ts` の seedHybridAgent() unit test (M4-F Phase 1)。
  *
- * 保護対象 (plan §Task 2 の 6 case + 実装で追加した fan-out fail-fast 保護):
- *   (1) 新規 seed: agent_group + container_config(provider=null) + Slack DM mg + mga
+ * 保護対象 (plan §Task 2 の 6 case + 実装で追加した fan-out fail-fast 保護
+ * + PR #139 review 対応の 2 case):
+ *   (1) 新規 seed: agent_group + container_config(provider=null, model=publisher ID) + Slack DM mg + mga
  *   (2) 冪等 assert: 2 回連続 seed で全テーブル count 不変
  *   (3) 既存 ADK agent group と並存: ADK 側 wire 無傷
  *   (4) Slack platform_id encoding: raw `D...` → `slack:D...` に encode
  *   (5) `--skip-slack-dm`: messaging_group 一切作らない (agent_group + config のみ)
- *   (6) provider allowlist: provider=null が保存され、KNOWN_PROVIDERS validation を通過
+ *   (6) container_config: provider=null (claude fallback), model='claude-sonnet-4-6' (Vertex publisher ID)
  *   (7) fan-out fail-fast: Slack DM 既存 mg が他 agent に wire 済なら process.exit(1)
+ *   (8) I5 assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw (silent skip 撲滅)
+ *   (9) C3 guard: 既存 owner user は upsertUser で display_name を上書きされない (getUser guard 動作確認)
  *
  * fixture は `session-equipped-biblios.test.ts` の initTestDb + runMigrations
  * pattern を継承。`initGroupFilesystem` (= GROUPS_DIR に依存する fs 副作用) は
@@ -43,6 +46,7 @@ import {
   getAllMessagingGroups,
   getMessagingGroupAgents,
 } from '../src/db/messaging-groups.js';
+import { getUser, upsertUser } from '../src/modules/permissions/db/users.js';
 
 import { seedHybridAgent, type Args } from './init-hybrid-agent.js';
 
@@ -80,11 +84,11 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(ags[0].id).toBe(result.agent_group_id);
     expect(result.is_new_group).toBe(true);
 
-    // container_config: provider=null (= claude fallback), model=null
+    // container_config: provider=null (= claude fallback), model=Vertex publisher ID
     const cc = getContainerConfig(result.agent_group_id);
     expect(cc).toBeDefined();
     expect(cc!.provider).toBeNull();
-    expect(cc!.model).toBeNull();
+    expect(cc!.model).toBe('claude-sonnet-4-6');
 
     // Slack DM messaging_group (encoded platform_id, is_group=0)
     const mgs = getAllMessagingGroups();
@@ -192,15 +196,17 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(result.slack_dm_platform_id).toBeNull();
   });
 
-  it('(6) provider allowlist: provider=null で保存され、KNOWN_PROVIDERS の validation を通過', () => {
+  it('(6) container_config: provider=null (claude fallback) + model=Vertex publisher ID', () => {
     const result = seedHybridAgent(baseArgs(), NOW);
 
     const cc = getContainerConfig(result.agent_group_id);
     expect(cc).toBeDefined();
     // provider=null = resolveProviderName の "claude" fallback 経路。
     expect(cc!.provider).toBeNull();
-    // model も null で container 側 DEFAULT_MODEL に委ねる。
-    expect(cc!.model).toBeNull();
+    // model は明示 Vertex publisher ID 必須 (M1 で 404 を実際に踏んだため)。
+    // null にすると agent-runner container が --model 未指定で claude-code SDK 内蔵
+    // デフォルトが Anthropic API alias を返して Vertex rawPredict が 404 化する。
+    expect(cc!.model).toBe('claude-sonnet-4-6');
   });
 
   it('(7) fan-out 二重発火 fail-fast: Slack DM 既存 mg が他 agent に wire 済なら process.exit(1)', () => {
@@ -250,5 +256,40 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     const wirings = getMessagingGroupAgents('mg-slack-existing');
     expect(wirings).toHaveLength(1);
     expect(wirings[0].agent_group_id).toBe('ag-adk-existing');
+  });
+
+  it('(8) I5 assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw', () => {
+    // parseArgs は CLI 境界で防ぐが、seedHybridAgent 直接呼出経路 (= 本 test) で
+    // silent skip されると「wire するつもりが黙って skip」= silent failure。
+    // 冒頭 assert が throw で撲滅することを保護する。
+    expect(() =>
+      seedHybridAgent(
+        baseArgs({ skipSlackDm: false, slackDmChannelId: undefined }),
+        NOW,
+      ),
+    ).toThrow('slackDmChannelId is required unless skipSlackDm=true');
+
+    // throw 経路なので DB には何も書かれていない (agent_group / mg 全て 0 件)。
+    expect(getAllAgentGroups()).toHaveLength(0);
+    expect(getAllMessagingGroups()).toHaveLength(0);
+  });
+
+  it('(9) C3 guard: 既存 owner user の display_name は upsertUser で上書きされない', () => {
+    // 既存 owner (init-first-agent.ts 経路で先に登録済) を fixture 注入。
+    // display_name は DEN さん本名相当 (Patron default とは異なる値)。
+    upsertUser({
+      id: 'slack:U7F8TRM6X',
+      kind: 'slack',
+      display_name: 'DEN (real name)',
+      created_at: NOW,
+    });
+    expect(getUser('slack:U7F8TRM6X')!.display_name).toBe('DEN (real name)');
+
+    // hybrid seed 実行 (args.displayName は parseArgs 経路 default 'Patron')。
+    seedHybridAgent(baseArgs(), NOW);
+
+    // getUser guard により既存 user 行は touch されず、display_name は保たれる。
+    // (guard を外すと upsertUser の COALESCE で 'Patron' に silent 上書きされる)
+    expect(getUser('slack:U7F8TRM6X')!.display_name).toBe('DEN (real name)');
   });
 });
