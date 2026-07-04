@@ -576,6 +576,7 @@ export class FugueHttpServer {
             gateSpan.setAttribute('gate.reason', result.reason);
             gateSpan.setAttribute('gate.latency_ms', result.latencyMs);
             if (result.model) gateSpan.setAttribute('gate.model', result.model);
+            if (result.degraded) gateSpan.setAttribute('gate.degraded', true); // I6
             gateSpan.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
             return result;
           });
@@ -583,11 +584,21 @@ export class FugueHttpServer {
           // gate 自体の unexpected throw は fail-open (現状経路継続、gateResult=null のまま fall
           // through)。router.ts の gate 挿入と同流儀 (plain `GateResult | null` optional で
           // `as unknown as` cast を避ける、S3 review 対応)。
+          const errMsg = err instanceof Error ? err.message : String(err);
           log.warn('Fugue consult gate unexpected throw, falling back to open', {
             event: 'fugue.consult.gate_unexpected_throw',
             channel: 'fugue',
             request_id,
-            err: err instanceof Error ? err.message : String(err),
+            err: errMsg,
+          });
+          // I5 対応: gate error も audit trail に載せる (BQ 集計から silent undercount 防止)
+          appendGateAuditLog({
+            outcome: 'error',
+            reason: errMsg,
+            utterance: query,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
           });
         }
         if (gateResult) {
@@ -600,6 +611,7 @@ export class FugueHttpServer {
             channel: 'fugue',
             channelType: 'fugue',
             userId: null, // Fugue には patron userId 概念なし (Bearer auth のみ)
+            degraded: gateResult.degraded,
           });
           if (gateResult.classification === 'in-secure') {
             fugueSpan.setAttribute('fugue.outcome', 'in_secure');
@@ -864,17 +876,28 @@ export class FugueHttpServer {
             gateSpan.setAttribute('gate.reason', result.reason);
             gateSpan.setAttribute('gate.latency_ms', result.latencyMs);
             if (result.model) gateSpan.setAttribute('gate.model', result.model);
+            if (result.degraded) gateSpan.setAttribute('gate.degraded', true); // I6
             gateSpan.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
             return result;
           });
         } catch (err) {
           // consult 側と対称の fail-open (`GateResult | null` で `as unknown as` cast 回避、
           // S3 review 対応)。
+          const errMsg = err instanceof Error ? err.message : String(err);
           log.warn('Fugue equip gate unexpected throw, falling back to open', {
             event: 'fugue.equip.gate_unexpected_throw',
             channel: 'fugue',
             request_id,
-            err: err instanceof Error ? err.message : String(err),
+            err: errMsg,
+          });
+          // I5 対応: gate error も audit trail に載せる
+          appendGateAuditLog({
+            outcome: 'error',
+            reason: errMsg,
+            utterance: skill_id,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
           });
         }
         if (gateResult) {
@@ -887,6 +910,7 @@ export class FugueHttpServer {
             channel: 'fugue',
             channelType: 'fugue',
             userId: null,
+            degraded: gateResult.degraded,
           });
           if (gateResult.classification === 'in-secure') {
             fugueSpan.setAttribute('fugue.outcome', 'in_secure');

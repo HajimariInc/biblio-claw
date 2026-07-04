@@ -36,10 +36,16 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
   required: ['classification', 'reason'],
 };
 
-/** 応答 JSON の Zod validator。`reason` は 300 chars 上限で truncate 経路 fallback。 */
+/**
+ * 応答 JSON の Zod validator。**`reason` は `.transform()` で 300 chars に truncate する**
+ * (comment-analyzer C5 対応: 以前は `.max(300)` で validation 失敗 → classification 含む
+ * GateResult 全体が biblio-other fallback に落ちる = **300 chars 超えの reason 単体で
+ * in-secure 判定が握りつぶされる**セキュリティ機能の穴があった)。`transform` は先に長さを
+ * 詰めてから通すため、reason が長くても classification は保持される。
+ */
 const RESPONSE_ZOD = z.object({
   classification: z.enum(CLASSIFICATIONS),
-  reason: z.string().max(300),
+  reason: z.string().transform((r) => r.slice(0, 300)),
 });
 
 /**
@@ -127,6 +133,10 @@ function readGateModel(): string {
 
 /**
  * fallback GateResult を生成する pure helper。log は呼出元で発火 (context 情報を持つため)。
+ *
+ * silent-failure-hunter I6 対応: `degraded: true` を刻んで「evaluator failed 経由の fallback」
+ * を「genuine LLM 判定の biblio-other」と structured field で区別可能にする (M4-E
+ * `fugue.degraded=true` pattern と対称、BQ 上で誤検知率 / evaluator 障害率を集計可能)。
  */
 function fallbackToBiblioOther(reason: string, latencyMs: number, model: string): GateResult {
   return {
@@ -135,6 +145,7 @@ function fallbackToBiblioOther(reason: string, latencyMs: number, model: string)
     layerHit: 'layer4',
     latencyMs,
     model,
+    degraded: true,
   };
 }
 

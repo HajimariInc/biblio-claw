@@ -29,7 +29,7 @@ beforeEach(() => {
 });
 
 describe('evaluateInput - Vertex 応答 3 分類', () => {
-  it('biblio-adk 応答をそのまま GateResult に反映', async () => {
+  it('biblio-adk 応答をそのまま GateResult に反映 (degraded=undefined)', async () => {
     callVertexGeminiJsonMock.mockResolvedValue({
       classification: 'biblio-adk',
       reason: '仕入れ操作 (URL 明示)',
@@ -41,6 +41,8 @@ describe('evaluateInput - Vertex 応答 3 分類', () => {
     expect(result.layerHit).toBe('layer4');
     expect(result.model).toMatch(/gemini-3\.1-flash-lite/);
     expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    // I6: genuine LLM 判定は degraded マーカーを持たない (BQ 上で fallback と区別可能)
+    expect(result.degraded).toBeUndefined();
   });
 
   it('biblio-other 応答をそのまま反映', async () => {
@@ -108,6 +110,32 @@ describe('evaluateInput - fallback 経路 (throw しない契約)', () => {
     const result = await evaluateInput(wrapUntrustedInput('x'));
     expect(result.classification).toBe('biblio-other');
     expect(result.reason).toMatch(/evaluator failed:.*400 Bad Request/);
+  });
+
+  it('I6: fallback biblio-other は degraded=true でマーキングされる (genuine と区別可能)', async () => {
+    callVertexGeminiJsonMock.mockRejectedValue(new Error('AbortError: timeout'));
+    const result = await evaluateInput(wrapUntrustedInput('x'));
+    expect(result.classification).toBe('biblio-other');
+    expect(result.degraded).toBe(true);
+    // 対比: 正常経路の biblio-other (別 test) では degraded=undefined
+  });
+
+  it('C5: reason が 300 文字超えても Zod validation は成功 (truncate + classification 保持)', async () => {
+    // 従来は `.max(300)` で validation 失敗 → GateResult 全体が biblio-other fallback に落ちて
+    // in-secure 判定が握りつぶされる問題があった (secutity 機能の穴)。
+    // `.transform((r) => r.slice(0, 300))` に変更したことで reason は truncate、classification は保持。
+    const longReason = 'a'.repeat(500);
+    callVertexGeminiJsonMock.mockResolvedValue({
+      classification: 'in-secure',
+      reason: longReason,
+    });
+    const result = await evaluateInput(wrapUntrustedInput('malicious'));
+    // classification は in-secure のまま保持 (握りつぶされない)
+    expect(result.classification).toBe('in-secure');
+    // reason は 300 chars に truncate
+    expect(result.reason.length).toBe(300);
+    // fallback ではないため degraded は undefined
+    expect(result.degraded).toBeUndefined();
   });
 
   it('Vertex 5xx throw → biblio-other fallback', async () => {

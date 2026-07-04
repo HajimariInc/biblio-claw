@@ -203,4 +203,69 @@ describe('notifyAdmin - failure paths (throw しない契約)', () => {
       expect.objectContaining({ event: 'notify.admin.deliver_failed' }),
     );
   });
+
+  it('I3: deliver failure 後は debounce に記録せず、次の legitimate 通知が握りつぶされない', async () => {
+    // 1 回目: deliver throw → deliver_failed (debounce に記録されない)
+    pickApproverMock.mockReturnValue(['slack:U_ADMIN']);
+    pickApprovalDeliveryMock.mockResolvedValue({
+      userId: 'slack:U_ADMIN',
+      messagingGroup: { channel_type: 'slack', platform_id: 'slack:D_DM', id: 'mg-admin' },
+    });
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient network')) // 1 回目失敗
+      .mockResolvedValueOnce('ok'); // 2 回目成功
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock });
+
+    const r1 = await notifyAdmin({
+      channelType: 'slack',
+      agentGroupId: null,
+      subject: 'gate.blocked',
+      body: 'attempt 1',
+    });
+    // 直後 (debounce window 内) に 2 回目通知 → 失敗が debounce に記録されていないため sent 到達
+    const r2 = await notifyAdmin({
+      channelType: 'slack',
+      agentGroupId: null,
+      subject: 'gate.blocked',
+      body: 'attempt 2',
+    });
+
+    expect(r1).toBe('deliver_failed');
+    expect(r2).toBe('sent');
+    expect(deliverMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('I15: pickApprover が throw → deliver_failed + unexpected_throw event 発火 (contract 実装で保証)', async () => {
+    pickApproverMock.mockImplementation(() => {
+      throw new Error('DB down');
+    });
+    const result = await notifyAdmin({
+      channelType: 'slack',
+      agentGroupId: null,
+      subject: 'gate.blocked',
+      body: 'x',
+    });
+    expect(result).toBe('deliver_failed');
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('unexpected throw'),
+      expect.objectContaining({ event: 'notify.admin.unexpected_throw' }),
+    );
+  });
+
+  it('I15: pickApprovalDelivery が reject → deliver_failed + unexpected_throw event 発火', async () => {
+    pickApproverMock.mockReturnValue(['slack:U_ADMIN']);
+    pickApprovalDeliveryMock.mockRejectedValue(new Error('openDM API failure'));
+    const result = await notifyAdmin({
+      channelType: 'slack',
+      agentGroupId: null,
+      subject: 'gate.blocked',
+      body: 'x',
+    });
+    expect(result).toBe('deliver_failed');
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('unexpected throw'),
+      expect.objectContaining({ event: 'notify.admin.unexpected_throw' }),
+    );
+  });
 });

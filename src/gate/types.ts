@@ -44,4 +44,10 @@ export interface GateResult {
   latencyMs: number;
   /** Layer 4 使用モデル。Layer 1-3 で確定した場合 undefined。 */
   model?: string;
+  /**
+   * Layer 4 evaluator が失敗し fallback として `biblio-other` を返した場合 true (M4-E `fugue.degraded=true`
+   * pattern と対称)。genuine な LLM 判定と誤検知率の集計を BQ 上で分離するための categorical signal。
+   * silent-failure-hunter I6 対応で追加、正常判定時は undefined。
+   */
+  degraded?: boolean;
 }

@@ -14,7 +14,12 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-import { appendGateAuditLog, buildGateAuditPayload, type GateAuditEvent } from './audit-log.js';
+import {
+  _resetJsonlWriteFailCounter,
+  appendGateAuditLog,
+  buildGateAuditPayload,
+  type GateAuditEvent,
+} from './audit-log.js';
 import { log } from '../log.js';
 
 let tmpDir: string;
@@ -22,6 +27,7 @@ let auditPath: string;
 const originalEnv = { ...process.env };
 
 beforeEach(() => {
+  _resetJsonlWriteFailCounter();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-audit-test-'));
   auditPath = path.join(tmpDir, 'gate-audit.jsonl');
   process.env.GATE_AUDIT_LOG_PATH = auditPath;
@@ -83,6 +89,40 @@ describe('buildGateAuditPayload - shape', () => {
     expect(digest.endsWith('...')).toBe(true);
   });
 
+  it('I5: error outcome → severity ERROR + message gate.error + layer/classification=null', () => {
+    const payload = buildGateAuditPayload({
+      outcome: 'error',
+      reason: 'gate infra failure',
+      utterance: 'anything',
+      channel: 'slack',
+      channelType: 'slack',
+      userId: 'slack:U123',
+    });
+    expect(payload.severity).toBe('ERROR');
+    expect(payload.message).toBe('gate.error');
+    expect(payload.gate_layer).toBeNull();
+    expect(payload.gate_classification).toBeNull();
+    expect(payload.gate_reason).toBe('gate infra failure');
+  });
+
+  it('I6: blocked/allowed outcome + degraded=true → payload に gate_degraded=true 反映', () => {
+    const payload = buildGateAuditPayload(
+      makeEvent({ outcome: 'allowed', classification: 'biblio-other', degraded: true }),
+    );
+    expect(payload.gate_degraded).toBe(true);
+  });
+
+  it('I6: blocked/allowed outcome + degraded=undefined → payload に gate_degraded 不在', () => {
+    const payload = buildGateAuditPayload(makeEvent()); // degraded 未指定
+    expect(payload.gate_degraded).toBeUndefined();
+  });
+
+  it('I11: channel="other" も受理 (routeInbound を通る将来 channel の防御的 fallback)', () => {
+    const payload = buildGateAuditPayload(makeEvent({ channel: 'other', channelType: 'discord' }));
+    expect(payload.gate_channel).toBe('other');
+    expect(payload.gate_channel_type).toBe('discord');
+  });
+
   it('utterance が 200 文字以下ならそのまま (truncate なし)', () => {
     const short = 'hello';
     const payload = buildGateAuditPayload(makeEvent({ utterance: short }));
@@ -108,6 +148,20 @@ describe('appendGateAuditLog - Cloud Logging 経路', () => {
     appendGateAuditLog(makeEvent({ outcome: 'allowed' }));
     expect(vi.mocked(log.info)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(log.warn)).not.toHaveBeenCalled();
+  });
+
+  it('I5: error outcome → log.error 1 回発火 (ERROR severity)', () => {
+    appendGateAuditLog({
+      outcome: 'error',
+      reason: 'gate infra fail',
+      utterance: 'x',
+      channel: 'slack',
+      channelType: 'slack',
+      userId: null,
+    });
+    expect(vi.mocked(log.error)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(log.warn)).not.toHaveBeenCalled();
+    expect(vi.mocked(log.info)).not.toHaveBeenCalled();
   });
 });
 
@@ -161,5 +215,20 @@ describe('appendGateAuditLog - `.jsonl` local fallback', () => {
         expect.objectContaining({ event: 'gate.audit.write_failed' }),
       );
     }
+  });
+
+  it('I12: 連続 write fail は 1 件目 + 100 件ごとの milestone でのみ log.error (rate limit)', () => {
+    process.env.GATE_AUDIT_LOG_PATH = '/nonexistent-root/audit.jsonl';
+    if (fs.existsSync('/nonexistent-root/audit.jsonl')) {
+      // 環境依存でこの pattern が拒否されないケースはスキップ
+      return;
+    }
+    // 5 連続失敗 → log.error は 1 回だけ (1 件目)
+    for (let i = 0; i < 5; i++) {
+      appendGateAuditLog(makeEvent());
+    }
+    expect(vi.mocked(log.error)).toHaveBeenCalledTimes(1);
+    const errCall = vi.mocked(log.error).mock.calls[0]![1] as Record<string, unknown>;
+    expect(errCall.total_failures).toBe(1);
   });
 });

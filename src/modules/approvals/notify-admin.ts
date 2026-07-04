@@ -68,40 +68,46 @@ export type NotifyAdminResult = 'sent' | 'no_approver' | 'no_delivery' | 'delive
  * @returns 状態遷移 (`'sent'` / `'no_approver'` / `'no_delivery'` / `'deliver_failed'` / `'debounced'`)
  */
 export async function notifyAdmin(opts: NotifyAdminOptions): Promise<NotifyAdminResult> {
-  const approvers = pickApprover(opts.agentGroupId);
-  if (approvers.length === 0) {
-    log.warn('notifyAdmin: no eligible approver', {
-      event: 'notify.admin.no_approver',
-      agent_group_id: opts.agentGroupId,
-      subject: opts.subject,
-    });
-    return 'no_approver';
-  }
-  const target = await pickApprovalDelivery(approvers, opts.channelType);
-  if (!target) {
-    log.warn('notifyAdmin: no DM channel for any approver', {
-      event: 'notify.admin.no_delivery',
-      agent_group_id: opts.agentGroupId,
-      subject: opts.subject,
-      approvers,
-    });
-    return 'no_delivery';
-  }
-  // debounce check (userId 単位)
-  const now = Date.now();
-  const lastSent = debounceMap.get(target.userId);
-  if (lastSent !== undefined && now - lastSent < DEBOUNCE_MS) {
-    log.debug('notifyAdmin: debounced (recent notification exists)', {
-      event: 'notify.admin.debounced',
-      user_id: target.userId,
-      subject: opts.subject,
-      last_sent_ms_ago: now - lastSent,
-      debounce_ms: DEBOUNCE_MS,
-    });
-    return 'debounced';
-  }
-  debounceMap.set(target.userId, now);
+  // I15 対応: `pickApprover` (DB クエリ) + `pickApprovalDelivery` (ensureUserDm → openDM API
+  // 呼出) は元々 try/catch の外にあり、DB error / network 障害で throw していた。
+  // 「throw しない契約」を実装で成立させるため全体を包む (呼出側 router / fugue-http の
+  // `void ... .catch(...)` は保険として残るが、本関数側で contract を先に完成させる)。
   try {
+    const approvers = pickApprover(opts.agentGroupId);
+    if (approvers.length === 0) {
+      log.warn('notifyAdmin: no eligible approver', {
+        event: 'notify.admin.no_approver',
+        agent_group_id: opts.agentGroupId,
+        subject: opts.subject,
+      });
+      return 'no_approver';
+    }
+    const target = await pickApprovalDelivery(approvers, opts.channelType);
+    if (!target) {
+      log.warn('notifyAdmin: no DM channel for any approver', {
+        event: 'notify.admin.no_delivery',
+        agent_group_id: opts.agentGroupId,
+        subject: opts.subject,
+        approvers,
+      });
+      return 'no_delivery';
+    }
+    // debounce check (userId 単位)
+    const now = Date.now();
+    const lastSent = debounceMap.get(target.userId);
+    if (lastSent !== undefined && now - lastSent < DEBOUNCE_MS) {
+      log.debug('notifyAdmin: debounced (recent notification exists)', {
+        event: 'notify.admin.debounced',
+        user_id: target.userId,
+        subject: opts.subject,
+        last_sent_ms_ago: now - lastSent,
+        debounce_ms: DEBOUNCE_MS,
+      });
+      return 'debounced';
+    }
+    // I3 対応: debounceMap.set はここでは呼ばず、配信成功後 (`return 'sent'` 直前) に移動。
+    // 実配信の前に「送信済」と記録すると、no_adapter / deliver throw で失敗しても
+    // 後続 window 内の legitimate 通知が silent に握りつぶされる問題があった。
     const adapter = getChannelAdapter(target.messagingGroup.channel_type);
     if (!adapter) {
       log.warn('notifyAdmin: no channel adapter for target channel_type', {
@@ -110,10 +116,23 @@ export async function notifyAdmin(opts: NotifyAdminOptions): Promise<NotifyAdmin
       });
       return 'deliver_failed';
     }
-    await adapter.deliver(target.messagingGroup.platform_id, null, {
-      kind: 'chat',
-      content: { text: `[${opts.subject}]\n${opts.body}` },
-    });
+    try {
+      await adapter.deliver(target.messagingGroup.platform_id, null, {
+        kind: 'chat',
+        content: { text: `[${opts.subject}]\n${opts.body}` },
+      });
+    } catch (err) {
+      log.warn('notifyAdmin: deliver failed', {
+        event: 'notify.admin.deliver_failed',
+        user_id: target.userId,
+        channel_type: target.messagingGroup.channel_type,
+        subject: opts.subject,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return 'deliver_failed';
+    }
+    // 配信が成功した時点で初めて debounce を記録 (I3)
+    debounceMap.set(target.userId, now);
     log.info('notifyAdmin: sent', {
       event: 'notify.admin.sent',
       user_id: target.userId,
@@ -122,10 +141,12 @@ export async function notifyAdmin(opts: NotifyAdminOptions): Promise<NotifyAdmin
     });
     return 'sent';
   } catch (err) {
-    log.warn('notifyAdmin: deliver failed', {
-      event: 'notify.admin.deliver_failed',
-      user_id: target.userId,
-      channel_type: target.messagingGroup.channel_type,
+    // I15: pickApprover / pickApprovalDelivery が throw した稀ケース (DB down / network 障害 /
+    // openDM API failure 等)。log で観測しつつ 'deliver_failed' として呼出側に伝える
+    // (呼出側は結果値を見て observability を追加できる)。
+    log.warn('notifyAdmin: unexpected throw in approver resolution', {
+      event: 'notify.admin.unexpected_throw',
+      agent_group_id: opts.agentGroupId,
       subject: opts.subject,
       err: err instanceof Error ? err.message : String(err),
     });
