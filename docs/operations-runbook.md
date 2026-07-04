@@ -2681,6 +2681,124 @@ echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
 
 ---
 
+## M4-F Phase 1 revival-core (agent-container 経路の復活)
+
+**目的**: M4-B Phase 4 完了以降 DB 行不在で休眠していた agent-container 経路 (spawn / M3 装備機構 / container skill 8 種 / container 側 MCP 9 tool) を、既存 ADK 経路 (9 tool + HITL) と **Fugue channel (Prod GKE)** を無傷に保ったまま復活させる。**コード変更はほぼゼロ** (実装 = seed script のみ)、`agent_groups` に claude fallback provider の 2 行目を追加すれば `src/router.ts` の provider !== 'adk' 分岐が既存の agent-container 経路 (`src/container-runner.ts:107-243` + K8s Job) に素通り復活する構造。
+
+### deploy 手順 (Phase 1 = image 変更なし、seed script 実行のみ)
+
+1. **Preflight**
+   - `kubectl config current-context` が `gke_*_biblio-prod` を含むこと
+   - `kubectl get statefulset biblio-orchestrator -n biblio-claw` の `READY 1/1`
+   - `HYBRID_USER_ID` (`slack:U...` 形式) + `HYBRID_SLACK_DM_CHANNEL_ID` (raw `D...`) が env or `.env` に投入済
+   - baseline regression 取得: `bash scripts/verify-m4-b.sh` (= `M4-B PASS`) + `bash scripts/verify-fugue-channel.sh --prod` (= `M4-E PASS (prod)`) が exit 0
+
+2. **Seed 実行**
+
+   ```bash
+   HYBRID_USER_ID='slack:U...' \
+   HYBRID_SLACK_DM_CHANNEL_ID='D...' \
+   bash scripts/init-hybrid-agent-gke.sh
+   ```
+
+   最終行に `SEED_RESULT=` の JSON が出る (`agent_group_id` + `is_new_group` + `slack_dm_wired`)。
+
+3. **DB 反映確認** (`data/v2.db`)
+
+   ```bash
+   kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+     node -e "
+   const Database = require('better-sqlite3');
+   const db = new Database('/app/data/v2.db', { readonly: true });
+   console.log('agent_groups:', db.prepare('SELECT id, name, folder FROM agent_groups').all());
+   console.log('container_configs:', db.prepare('SELECT agent_group_id, provider, model FROM container_configs').all());
+   "
+   ```
+
+   期待: `agent_groups` 2 行 (`adk-biblio-shisho` + `hybrid-biblio-shisho`) + `container_configs` 2 行 (`provider='adk'` + `provider=null`)。
+
+4. **Slack DM 発話** (DEN さん HITL): DEN さん Slack DM で任意対話発話 → `kubectl get jobs -n biblio-claw -w` で K8s Job spawn → 応答が DM に返る (2-3 分目安)。
+
+5. **regression 再確認**: `bash scripts/verify-m4-b.sh` + `bash scripts/verify-fugue-channel.sh --prod` が seed 前後で exit 0 継続。
+
+### 装備確認 (M3 経路の生存) — Task 5 実装後埋め戻し
+
+<!--
+埋め戻し内容 (実測データ):
+- 装備 0 件 (base case): install-biblios.sh 早期 exit `no biblios equipped` を `kubectl logs job/biblio-agent-<...> -c agent` で確認
+- 装備 1 件: `INSERT INTO session_equipped_biblios ...` 直後 → K8s Job spawn 時に `/workspace/biblios/<name>/` mount + install-biblios.sh 経由 install log 観測
+- local docker compose vs GKE Autopilot の subPath 変換差分 (`docs/equip-physical.md` §subPath 変換の落とし穴 の Phase 1 実測での再現有無)
+-->
+
+### container skill 8 種の生存確認 — Task 5 実装後埋め戻し
+
+<!--
+埋め戻し内容 (実測データ):
+- `kubectl exec job/biblio-agent-<...> -c agent -n biblio-claw -- ls /home/node/.claude/skills/` で 8 dir 存在:
+  - onecli-gateway / welcome / self-customize / agent-browser / slack-formatting (5 種)
+  - frontend-engineer / vercel-cli / whatsapp-formatting (追加 3 種)
+- symbolic link 先が `/app/skills/<name>/SKILL.md` に resolve
+-->
+
+### K8s Job 制御 (起動・維持・リサイクル) の観察 — Task 7 実装後埋め戻し
+
+<!--
+埋め戻し内容 (3-5 spawn cycle の実測):
+
+**起動 (spawn 遷移時間)**:
+- Job 作成 → Pod Pending → Pod Running への時間 (3-5 サンプル)
+- PVC subPath mount の初回 vs 2 回目以降の差 (初回 = subPath dir 作成、2 回目 = 既存 dir 再利用)
+- image pull cache HIT/MISS (`kubectl describe pod ... | grep 'Pulling\|Successfully pulled'`)
+
+**維持 (heartbeat + idle 判定)**:
+- `data/v2-sessions/<ag_id>/<session_id>/.heartbeat` の mtime 更新頻度
+- `AGENT_IDLE_THRESHOLD_MS` (default 5 min) 発火までの実測
+
+**リサイクル (kill-idle → 新規 Pod)**:
+- kill-idle 発火時の log (`killContainer` reason=`idle`)
+- onExit callback 経由の PVC subPath cleanup
+- 次回 DM 発話で新規 Job spawn までの latency
+
+**改善点の洗い出し** (Phase 4 progress-status or 別 PR 候補):
+- (実測後埋め戻し、最低 3 件)
+-->
+
+### 既知の罠 — Task 5-7 実装後埋め戻し
+
+<!--
+想定 3-5 件 (実測で追加/削除):
+
+**罠 1: fan-out 二重発火の再発防止**
+`init-hybrid-agent.ts:wireSlackDm` に fan-out fail-fast (既存 mg が他 agent に wire 済なら exit 1) を組んであるが、Phase 2 の gate 挿入時に本 safety を無効化する場合、routing が gate 出力に依存することを事前に確認する。
+
+**罠 2: local docker compose と GKE Autopilot の挙動差 (subPath 変換)**
+local hostPath mount 経路 (`docker.ts`) と GKE PVC subPath 経路 (`k8s.ts:363-462`) で、subPath 未定義 mount (image-layer) が local では bind mount / GKE では skip される (`k8s.ts:379-385`)。装備が local で見えても GKE で見えないケースが M3 で判明済 (`docs/equip-physical.md` §subPath 変換の落とし穴 参照)。
+
+**罠 3: kill-idle 発火時の PVC subPath 残置**
+K8s `ttlSecondsAfterFinished:120` で Job 自動 delete されるが、PVC subPath (`data/v2-sessions/<ag_id>/<session_id>/`) は残置 (M3 装備機構の設計通り = 再 spawn 時に session 復元)。
+
+**罠 4-5**: (Phase 1 実測で発見したものを追加)
+-->
+
+### Phase 2 への申し送り
+
+- **routing 挿入点**: `src/router.ts:440-501` の `provider === 'adk'` 分岐**前段** (L440 の `getContainerConfig` 直後、providerName 判定前) が gate 挿入点。Phase 1 実測で agent-container 経路が `provider !== 'adk'` で素通り生存することを Task 5-6 で確認しているため、Phase 2 の挿入点は Phase 1 実測に基づく再確認から入る
+- **wire 解決**: Phase 1 で「2 agent_group 保持 + 別 messaging_group 経由で hybrid 到達」の構造ができたため、Phase 2 の gate 3 分類 routing は `container_configs.provider` (adk / null) を見て配送先 agent_group を選ぶ実装が自然
+- **`cli/local` fan-out fail-fast の再定義判断**: Phase 2 で gate + routing 完成後、`init-adk-agent.ts:98-156` の CLI fail-fast 契約 (1 mg = 1 agent_group) を書き換え or 削除する判断。`init-hybrid-agent.ts` 側で追加した Slack DM fail-fast も同時に扱う
+- **audit log の local fallback**: Phase 1 では audit なし。Phase 2 で GCP = structured log (BQ sink 自動) / local = `.jsonl` or SQLite fallback を実装
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-f-agent-container-hybrid.prd.md` (Phase 1)
+- Source Plan (archived): `.claude/PRPs/plans/completed/phase-1-revival-core.plan.md`
+- Report: `.claude/PRPs/reports/m4/m4-f/phase-1-revival-core-report.md` (K8s Job 観察 3-5 cycle 実測 + Phase 2 申し送り)
+- seed script: `scripts/init-hybrid-agent.ts` (+ `scripts/init-hybrid-agent.test.ts` unit test 7 case + `scripts/init-hybrid-agent-gke.sh` GKE thin wrapper)
+- 継承元 §M4-B Phase 3 (本 runbook 上部): CLI/Slack dispatcher 統合、fan-out fail-fast 契約 (`wireCliChannel`)
+- 継承元 §M4-B Phase 4 (本 runbook 上部): 9 tool + HITL 統合、破壊操作の承認カード配信
+- 継承元 §M4-E Phase 5 (本 runbook 上部): Prod GKE deploy 手順 + probe 配線 pattern
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

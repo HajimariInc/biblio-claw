@@ -51,6 +51,10 @@ main (Protection)                                ← Milestone の終着点
 
 > **重要 (M1 の反省)**: 旧モデル (1 M = 1 PRD + sub PRD = Phase 単位 + Task per feature branch) を採用した M1 で **過剰分割の歪** が出た (Phase 2 plan = 68KB / Task per feature で命名揺れ多発)。M2 以降は **1 plan = 1 feature の 1:1 対応** + plan サイズ規律 (25-40KB / 300-500 行) で運用する。M1 の branch (`base/m1-p1-lib` / `base/m1-p2-prod-deploy`) は旧ルール基準で残置 (= 履歴扱い、書き換えない)。
 
+> **Phase 単位リリース型 (M4-F 初採用、2026-07-04)**: M4-F PRD 判断に従い、**M4-F 配下の Phase は base ブランチを作らず `feature/phase-<N>-<slug>` → `main` 直接 PR** で運用する。Phase ごとに local 実装 + GKE deploy 確認まで完了させ、**Phase 完了 = main 品質 (Prod 同等)** を成立させる小刻みリリース。過去 PRD で base ブランチが 40-60 commits ahead まで滞留した反省 (集約 PR の起票判断コスト増 + review 対象 diff の巨大化) を回避する狙い。gate 系の切替は必ず `<FEATURE>_ENABLED` フラグ付きで合流し、main 上で即無効化できる退路を持つ。
+>
+> **他 Milestone/PRD への波及**: 本 Phase 単位リリース型は **M4-F 固有の運用実験**。**他 PRD (M2/M3/M4-A/B/E) は従来の base/PRD → main 集約型を維持**、判断は各 PRD 起草時に PRD Solution Approach に明示する。M4-F での適用結果は Phase 5 or 別途振り返りで評価し、以降の Milestone への引き継ぎ判断材料とする。
+
 ### 例 (M2 実績)
 
 ```
