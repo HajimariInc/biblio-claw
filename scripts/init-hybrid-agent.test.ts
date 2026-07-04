@@ -258,6 +258,110 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(wirings[0].agent_group_id).toBe('ag-adk-existing');
   });
 
+  it('(7.5-M4F) GATE_ENABLED=true 時、既存 ADK wire に対して hybrid wire を並置 (fan-out fail-fast を skip)', () => {
+    // 既存 ADK 用に slack:D0B6JA2M5GA を wire (case 7 の setup と同じ)
+    createAgentGroup({
+      id: 'ag-adk-existing',
+      name: '司書 (ADK)',
+      folder: 'adk-biblio-shisho',
+      agent_provider: null,
+      created_at: NOW,
+    });
+    createMessagingGroup({
+      id: 'mg-slack-existing',
+      channel_type: 'slack',
+      platform_id: 'slack:D0B6JA2M5GA',
+      name: 'ADK DM',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      denied_at: null,
+      created_at: NOW,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-slack-adk',
+      messaging_group_id: 'mg-slack-existing',
+      agent_group_id: 'ag-adk-existing',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: NOW,
+    });
+
+    // GATE_ENABLED=true で seedHybridAgent 実行 → fail-fast せず、hybrid wire を追加する
+    const originalGateEnv = process.env.GATE_ENABLED;
+    process.env.GATE_ENABLED = 'true';
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      seedHybridAgent(baseArgs(), NOW);
+    } finally {
+      if (originalGateEnv === undefined) delete process.env.GATE_ENABLED;
+      else process.env.GATE_ENABLED = originalGateEnv;
+    }
+
+    // 両 wire 成立 = ADK + hybrid の 2 rows on mg-slack-existing
+    const wirings = getMessagingGroupAgents('mg-slack-existing');
+    expect(wirings).toHaveLength(2);
+    const providers = wirings.map((w) => w.agent_group_id).sort();
+    expect(providers).toContain('ag-adk-existing');
+    // hybrid の agent_group_id は generateId('ag') で生成される、prefix で確認
+    expect(providers.some((id) => id.startsWith('ag-'))).toBe(true);
+
+    // console.log に 'allowFanout' 系メッセージが emit されている
+    const logCalls = logSpy.mock.calls.flat().join('\n');
+    expect(logCalls).toContain('allowFanout=true');
+    expect(logCalls).toContain('gate');
+  });
+
+  it('(7.5-M4F 冪等) GATE_ENABLED=true 時、2 回目の seedHybridAgent は既存 hybrid wire を検出して重複 wire を作らない', () => {
+    createAgentGroup({
+      id: 'ag-adk-existing',
+      name: '司書 (ADK)',
+      folder: 'adk-biblio-shisho',
+      agent_provider: null,
+      created_at: NOW,
+    });
+    createMessagingGroup({
+      id: 'mg-slack-existing',
+      channel_type: 'slack',
+      platform_id: 'slack:D0B6JA2M5GA',
+      name: 'ADK DM',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      denied_at: null,
+      created_at: NOW,
+    });
+    createMessagingGroupAgent({
+      id: 'mga-slack-adk',
+      messaging_group_id: 'mg-slack-existing',
+      agent_group_id: 'ag-adk-existing',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: NOW,
+    });
+
+    const originalGateEnv = process.env.GATE_ENABLED;
+    process.env.GATE_ENABLED = 'true';
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      seedHybridAgent(baseArgs(), NOW);
+      // 2 回目実行 = 冪等 (既存 mga.id で detect して重複作成しない)
+      seedHybridAgent(baseArgs(), NOW);
+    } finally {
+      if (originalGateEnv === undefined) delete process.env.GATE_ENABLED;
+      else process.env.GATE_ENABLED = originalGateEnv;
+    }
+    // wirings は 2 のまま (ADK + hybrid = 2 rows、追加 wire なし)
+    const wirings = getMessagingGroupAgents('mg-slack-existing');
+    expect(wirings).toHaveLength(2);
+  });
+
   it('(8) I5 assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw', () => {
     // parseArgs は CLI 境界で防ぐが、seedHybridAgent 直接呼出経路 (= 本 test) で
     // silent skip されると「wire するつもりが黙って skip」= silent failure。

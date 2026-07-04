@@ -22,6 +22,9 @@ import { randomUUID } from 'node:crypto';
 import { dispatchToAdk } from './adk/dispatcher.js';
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
+import { appendGateAuditLog } from './gate/audit-log.js';
+import { evaluateGate, isGateEnabled, withGateSpan } from './gate/gate.js';
+import type { GateResult } from './gate/types.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
@@ -33,6 +36,7 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
+import { notifyAdmin } from './modules/approvals/notify-admin.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
@@ -274,6 +278,97 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
 
+  // M4-F Phase 2: gate 判定 (`GATE_ENABLED=true` 時のみ発火)。
+  //   - biblio-adk / biblio-other → gateResult を fan-out loop に渡し、deliverToAgent 冒頭で
+  //     provider mismatch skip
+  //   - in-secure → 3 点セット (admin DM 通知 + audit log + patron 定型文返信) 発火 + 早期 return
+  //   - gate 自体の unexpected throw は fail-open (gateResult=null) で従来経路継続
+  //     (Layer 4 内部の Vertex/Zod fallback は既に biblio-other に倒れるため throw は稀ケース)
+  let gateResult: GateResult | null = null;
+  if (isGateEnabled()) {
+    try {
+      gateResult = await withGateSpan(messageText, async (span) => {
+        const result = await evaluateGate(messageText);
+        span.setAttribute('gate.classification', result.classification);
+        span.setAttribute('gate.layer_hit', result.layerHit);
+        span.setAttribute('gate.reason', result.reason);
+        span.setAttribute('gate.latency_ms', result.latencyMs);
+        if (result.model) span.setAttribute('gate.model', result.model);
+        span.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
+        return result;
+      });
+      log.info('gate classified', {
+        event: 'gate.classified',
+        gate_classification: gateResult.classification,
+        gate_layer: gateResult.layerHit,
+        gate_reason: gateResult.reason,
+        gate_latency_ms: gateResult.latencyMs,
+        channel_type: event.channelType,
+        messaging_group_id: mg.id,
+      });
+      appendGateAuditLog({
+        outcome: gateResult.classification === 'in-secure' ? 'blocked' : 'allowed',
+        layer: gateResult.layerHit,
+        classification: gateResult.classification,
+        reason: gateResult.reason,
+        utterance: messageText,
+        // audit 側 channel enum は 'slack' | 'cli' | 'fugue' の 3 値、それ以外は 'slack' に丸める
+        // (暫定、Phase 3+ で拡張)
+        channel:
+          event.channelType === 'slack'
+            ? 'slack'
+            : event.channelType === 'cli'
+              ? 'cli'
+              : 'slack',
+        channelType: event.channelType,
+        userId,
+      });
+      // in-secure 早期 return + 3 点セット発火
+      if (gateResult.classification === 'in-secure') {
+        // (1) admin DM 通知 (notify-only、承認カードではない)
+        void notifyAdmin({
+          channelType: event.channelType,
+          agentGroupId: agents[0]?.agent_group_id ?? null,
+          subject: 'gate.blocked',
+          body: `Injection 疑い発話を検出しました。\nlayer: ${gateResult.layerHit}\nreason: ${gateResult.reason}\nchannel: ${event.channelType}\nuser: ${userId ?? '(unknown)'}`,
+        }).catch((err) =>
+          log.warn('gate notifyAdmin unexpected throw', {
+            event: 'gate.blocked.notify_admin_throw',
+            err: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        // (2) audit log は既に appendGateAuditLog で発火済
+        // (3) patron 定型文返信 (session 未作成のため adapter.deliver 直接呼出、ADK dispatcher
+        //     fallback (L482-497) の写経)
+        const adapter = getChannelAdapter(event.channelType);
+        if (adapter) {
+          await adapter
+            .deliver(event.platformId, event.threadId, {
+              kind: 'chat',
+              content: {
+                text: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。管理者に通知しました。',
+              },
+            })
+            .catch((deliverErr) => {
+              log.error('gate in-secure patron deliver failed', {
+                event: 'gate.blocked.patron_deliver_failed',
+                err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+              });
+            });
+        }
+        return; // fan-out loop に入らず終了 (dropped_messages 記録経路も skip)
+      }
+    } catch (err) {
+      // gate 自体の unexpected throw (Layer 4 fallback を超えた例外) は fail-open で対話継続。
+      // 「in-secure 判定は Layer 1-4 が両方 fail した稀ケース」= fallback は現状挙動継続。
+      log.warn('gate unexpected throw, falling back to open (existing wiring)', {
+        event: 'gate.unexpected_throw',
+        err: err instanceof Error ? err.message : String(err),
+      });
+      gateResult = null; // 以降の provider mismatch skip も無効化
+    }
+  }
+
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
@@ -288,7 +383,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true, gateResult);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -319,7 +414,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false, gateResult);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -406,6 +501,7 @@ async function deliverToAgent(
   userId: string | null,
   adapterSupportsThreads: boolean,
   wake: boolean,
+  gateResult: GateResult | null = null,
 ): Promise<void> {
   // Provider dispatch (M4-B Phase 3): agent_group が provider='adk' を選択している
   // 場合、agent-runner container 経路 (= session / container spawn) をスキップし、
@@ -439,6 +535,24 @@ async function deliverToAgent(
   // (現状 `ncl sessions` は read-only で該当 mutator 不在のため実害ゼロ)。
   const containerConfig = getContainerConfig(agentGroup.id);
   const providerName = (containerConfig?.provider ?? 'claude').toLowerCase();
+  // M4-F Phase 2: gate classification と provider の mismatch skip。
+  // gateResult=null (= GATE_ENABLED=false or gate unexpected throw で fail-open) 時は
+  // skip せず既存経路継続 (= gate 無効化時の main 合流退路を担保)。
+  if (gateResult) {
+    const isAdk = providerName === 'adk';
+    const shouldSkip =
+      (gateResult.classification === 'biblio-adk' && !isAdk) ||
+      (gateResult.classification === 'biblio-other' && isAdk);
+    if (shouldSkip) {
+      log.debug('gate skip: classification-provider mismatch', {
+        event: 'gate.skip.mismatch',
+        gate_classification: gateResult.classification,
+        agent_provider: providerName,
+        agent_group_id: agentGroup.id,
+      });
+      return;
+    }
+  }
   if (providerName === 'adk') {
     if (!wake) {
       log.debug('ADK path: non-wake message dropped (in-process = no session accumulation)', {

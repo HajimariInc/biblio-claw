@@ -212,6 +212,17 @@ spec:
             # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
             - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
             - { name: FUGUE_HTTP_PORT, value: '8080' }
+            # === M4-F Phase 2 gate agent (既定 OFF、GKE 有効化は別 apply で管理) ===
+            # gate 4 層 (pattern → escape → XML → LLM evaluator) は既定 OFF で
+            # main 合流可能な退路を担保 (Phase 単位リリース型 継承)。GKE 有効化は
+            # `kubectl set env statefulset/biblio-orchestrator GATE_ENABLED=true` +
+            # `messaging_group_agents` 両 wire 確立 の順 (詳細: runbook §M4-F Phase 2)。
+            - { name: GATE_ENABLED, value: 'false' }
+            - { name: GATE_MODEL, value: gemini-3.1-flash-lite }
+            # `.jsonl` local fallback は GKE では emptyDir にしか書けず永続化されない
+            # (Pod 再起動で消失)。GCP は Cloud Logging → BQ sink が主経路のため
+            # GATE_AUDIT_LOG_DISABLE=1 で `.jsonl` fallback を無効化する運用を推奨。
+            - { name: GATE_AUDIT_LOG_DISABLE, value: '1' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:

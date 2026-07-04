@@ -150,6 +150,7 @@ function wireSlackDm(
   dmChannelIdRaw: string,
   displayName: string,
   now: string,
+  allowFanout: boolean = false,
 ): void {
   // Chat SDK bridge の channelIdFromThreadId() は `slack:<channel>` を返すので、
   // messaging_groups.platform_id もこの encoded 形式で保存する (fix `4892ee5` の教訓、
@@ -173,18 +174,33 @@ function wireSlackDm(
   } else {
     console.log(`Reusing Slack DM messaging group: ${dmMg.id} (${encodedPlatformId})`);
     // fan-out 二重発火の観点で既存 wire を検査 (fail-fast)。
+    // **Phase 2 (M4-F gate + routing) で拡張**: `allowFanout=true` (env `GATE_ENABLED` 有効時
+    // にのみ true) は「gate の classification-provider mismatch skip で構造的に二重発火を防ぐ」
+    // 前提で既存 wire (= ADK) の隣に hybrid wire を追加する。gate 無効時は従来通り fail-fast。
     const existingWirings = getMessagingGroupAgents(dmMg.id);
     const otherWirings = existingWirings.filter((w) => w.agent_group_id !== ag.id);
     if (otherWirings.length > 0) {
-      // 14 個の個別 console.error 呼出 → 単一 template literal 1 回に集約 (S5)。
-      // 出力内容 (空行 + 順序) は完全等価、test 側 `errSpy.mock.calls.flat().join('\n')`
-      // の substring assert (case 7 の `already wired to 1 other agent group` /
-      // `ag-adk-existing` を含む) も維持される。
-      const wiringList = otherWirings
-        .map((w) => `  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`)
-        .join('\n');
-      console.error(
-        `
+      if (allowFanout) {
+        console.log(
+          `Phase 2 (gate + routing) allowFanout=true: proceeding to add hybrid wire alongside ${otherWirings.length} existing wire(s).`,
+        );
+        console.log(
+          `  existing wires: ${otherWirings.map((w) => w.agent_group_id).join(', ')}`,
+        );
+        console.log(
+          '  gate (router.ts:evaluateGate + deliverToAgent mismatch skip) will route on classifier output.',
+        );
+        // ここで return せず後段の createMessagingGroupAgent (追加 wire) へ流す
+      } else {
+        // 14 個の個別 console.error 呼出 → 単一 template literal 1 回に集約 (S5)。
+        // 出力内容 (空行 + 順序) は完全等価、test 側 `errSpy.mock.calls.flat().join('\n')`
+        // の substring assert (case 7 の `already wired to 1 other agent group` /
+        // `ag-adk-existing` を含む) も維持される。
+        const wiringList = otherWirings
+          .map((w) => `  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`)
+          .join('\n');
+        console.error(
+          `
 ERROR: Slack DM ${encodedPlatformId} is already wired to ${otherWirings.length} other agent group(s):
 ${wiringList}
 
@@ -195,11 +211,15 @@ Resolve either by:
   (a) Removing existing wire(s) with \`ncl wirings remove --id <mga.id>\` before re-running
       (recommended if you intend to migrate the DEN DM to hybrid = agent-container path)
   (b) Retiring the existing wire manually via SQL (advanced) after backing up the DB
+  (c) Set GATE_ENABLED=true before running (Phase 2 gate + routing lifts this constraint by
+      routing on classifier output; both wires will coexist and fan-out is suppressed by the
+      classification-provider mismatch skip in router.ts:deliverToAgent).
 
 Phase 2 (gate + routing) will lift this constraint by routing on classifier output.
 `.trim(),
-      );
-      process.exit(1);
+        );
+        process.exit(1);
+      }
     }
   }
 
@@ -337,9 +357,13 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
 
   // 4. Slack DM wire — CLI wire は意図的に**しない** (`cli/local` の既存 ADK wire に
   //    hybrid を追加すると `pnpm run chat "..."` が fan-out 二重発火する)。
-  //    Phase 2 の gate + routing で解消される前提。
+  //    **Phase 2 (M4-F gate + routing)**: `GATE_ENABLED=true` の環境下では既存 ADK wire に
+  //    hybrid を並置する両 wire を許容 (fan-out 二重発火は router.ts の gate
+  //    classification-provider mismatch skip で構造的に抑止される)。
+  const gateEnabled =
+    process.env.GATE_ENABLED === '1' || process.env.GATE_ENABLED === 'true';
   if (!args.skipSlackDm && args.slackDmChannelId) {
-    wireSlackDm(ag, args.slackDmChannelId, args.displayName, now);
+    wireSlackDm(ag, args.slackDmChannelId, args.displayName, now, gateEnabled);
   } else {
     console.log('(Slack DM wire skipped — pass --slack-dm-channel-id to enable)');
   }
