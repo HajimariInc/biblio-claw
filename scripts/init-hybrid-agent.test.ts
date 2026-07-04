@@ -48,7 +48,7 @@ import {
 } from '../src/db/messaging-groups.js';
 import { getUser, upsertUser } from '../src/modules/permissions/db/users.js';
 
-import { seedHybridAgent, type Args } from './init-hybrid-agent.js';
+import { parseArgs, seedHybridAgent, type Args } from './init-hybrid-agent.js';
 
 const NOW = '2026-07-04T12:00:00.000Z';
 
@@ -273,6 +273,120 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(getAllAgentGroups()).toHaveLength(0);
     expect(getAllMessagingGroups()).toHaveLength(0);
   });
+
+/**
+ * parseArgs() の CLI 境界 unit test (S1)。
+ *
+ * GKE wrapper (`init-hybrid-agent-gke.sh`) は env → 明示 `--flag` に変換して
+ * 渡すため env fallback 経路は実運用では通らないが、直接 `HYBRID_USER_ID=...
+ * tsx scripts/init-hybrid-agent.ts` で叩くデバッグ用途と、必須引数欠落時の
+ * fail-fast (exit 2) の regression 保護のため、CLI 境界のみを assert する。
+ */
+describe('init-hybrid-agent: parseArgs()', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    // 各 case で env を isolate (HYBRID_* を全消し、必要な case で個別 set)
+    delete process.env.HYBRID_USER_ID;
+    delete process.env.HYBRID_SLACK_DM_CHANNEL_ID;
+    delete process.env.HYBRID_SKIP_SLACK_DM;
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('(P1) 必須引数揃い: --user-id + --slack-dm-channel-id で正常 parse', () => {
+    const args = parseArgs([
+      '--user-id',
+      'slack:U7F8TRM6X',
+      '--slack-dm-channel-id',
+      'D0B6JA2M5GA',
+    ]);
+    expect(args.userId).toBe('slack:U7F8TRM6X');
+    expect(args.slackDmChannelId).toBe('D0B6JA2M5GA');
+    expect(args.displayName).toBe('Patron'); // default
+    expect(args.agentName).toBe('司書 (hybrid)'); // default
+    expect(args.skipSlackDm).toBe(false);
+  });
+
+  it('(P2) --user-id 欠落: process.exit(2) で fail-fast', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit called with ${code}`);
+    }) as never);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(() => parseArgs(['--slack-dm-channel-id', 'D0B6JA2M5GA'])).toThrow(
+      'process.exit called with 2',
+    );
+    expect(exitSpy).toHaveBeenCalledWith(2);
+    expect(errSpy.mock.calls.flat().join('\n')).toContain('Missing required arg: --user-id');
+  });
+
+  it('(P3) --slack-dm-channel-id 欠落 (skipSlackDm=false): process.exit(2) で fail-fast', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit called with ${code}`);
+    }) as never);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    expect(() => parseArgs(['--user-id', 'slack:U7F8TRM6X'])).toThrow(
+      'process.exit called with 2',
+    );
+    expect(exitSpy).toHaveBeenCalledWith(2);
+    expect(errSpy.mock.calls.flat().join('\n')).toContain(
+      'Missing required arg: --slack-dm-channel-id',
+    );
+  });
+
+  it('(P4) --skip-slack-dm 指定時は slack-dm-channel-id 欠落でも正常 parse', () => {
+    const args = parseArgs(['--user-id', 'slack:U7F8TRM6X', '--skip-slack-dm']);
+    expect(args.userId).toBe('slack:U7F8TRM6X');
+    expect(args.slackDmChannelId).toBeUndefined();
+    expect(args.skipSlackDm).toBe(true);
+  });
+
+  it('(P5) env fallback: --user-id 未指定でも HYBRID_USER_ID env で拾える', () => {
+    process.env.HYBRID_USER_ID = 'slack:UENVFALLBACK';
+    process.env.HYBRID_SLACK_DM_CHANNEL_ID = 'DENV456';
+    const args = parseArgs([]);
+    expect(args.userId).toBe('slack:UENVFALLBACK');
+    expect(args.slackDmChannelId).toBe('DENV456');
+  });
+
+  it('(P6) env fallback: HYBRID_SKIP_SLACK_DM=1 で --skip-slack-dm 未指定でも skip', () => {
+    process.env.HYBRID_USER_ID = 'slack:UENVFALLBACK';
+    process.env.HYBRID_SKIP_SLACK_DM = '1';
+    const args = parseArgs([]);
+    expect(args.skipSlackDm).toBe(true);
+    expect(args.slackDmChannelId).toBeUndefined();
+  });
+
+  it('(P7) --display-name / --agent-name の trim + default 降格', () => {
+    const args = parseArgs([
+      '--user-id',
+      'slack:U7F8TRM6X',
+      '--slack-dm-channel-id',
+      'D0B6JA2M5GA',
+      '--display-name',
+      '  Alice  ', // trim
+      '--agent-name',
+      '', // 空文字 → default 'HYBRID_DEFAULT_NAME'
+    ]);
+    expect(args.displayName).toBe('Alice');
+    expect(args.agentName).toBe('司書 (hybrid)'); // default fallback
+  });
+
+  it('(P8) CLI 明示 flag が env fallback より優先される', () => {
+    process.env.HYBRID_USER_ID = 'slack:UFROMENV';
+    const args = parseArgs([
+      '--user-id',
+      'slack:UFROMCLI',
+      '--slack-dm-channel-id',
+      'D0B6JA2M5GA',
+    ]);
+    expect(args.userId).toBe('slack:UFROMCLI'); // CLI が勝つ
+  });
+});
 
   it('(9) C3 guard: 既存 owner user の display_name は upsertUser で上書きされない', () => {
     // 既存 owner (init-first-agent.ts 経路で先に登録済) を fixture 注入。

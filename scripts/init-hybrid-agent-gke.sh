@@ -52,8 +52,15 @@ fi
 # を default にする経路もあるが、後段の accountability を明示するため fail-fast。
 : "${HYBRID_USER_ID:?missing — HYBRID_USER_ID を env or .env に投入 (例: slack:U7F8TRM6X)}"
 
-SKIP_SLACK_DM="${HYBRID_SKIP_SLACK_DM:-0}"
-if [ "$SKIP_SLACK_DM" != "1" ] && [ "$SKIP_SLACK_DM" != "true" ]; then
+# S6: `HYBRID_SKIP_SLACK_DM` の 2 値判定を `case` で 1 回集約、以降は
+# `$skip_slack_dm` boolean 変数の単純比較のみ使う (project 既存の `case` idiom
+# = verify-m3.sh 等と統一)。判定条件を変更する場合の修正箇所も 1 箇所に集約。
+case "${HYBRID_SKIP_SLACK_DM:-0}" in
+  1 | true) skip_slack_dm=true ;;
+  *) skip_slack_dm=false ;;
+esac
+
+if [ "$skip_slack_dm" = false ]; then
   : "${HYBRID_SLACK_DM_CHANNEL_ID:?missing — HYBRID_SLACK_DM_CHANNEL_ID を env or .env に投入 (raw D... 形式、例: D0B6JA2M5GA)。Slack DM wire を skip したい場合は HYBRID_SKIP_SLACK_DM=1}"
 fi
 
@@ -85,7 +92,7 @@ fi
 echo "[init-hybrid-agent-gke] AGENT_NAME=$AGENT_NAME"
 echo "[init-hybrid-agent-gke] DISPLAY_NAME=$DISPLAY_NAME"
 echo "[init-hybrid-agent-gke] USER_ID=$HYBRID_USER_ID"
-if [ "$SKIP_SLACK_DM" = "1" ] || [ "$SKIP_SLACK_DM" = "true" ]; then
+if [ "$skip_slack_dm" = true ]; then
   echo "[init-hybrid-agent-gke] SLACK_DM=skipped"
 else
   echo "[init-hybrid-agent-gke] SLACK_DM=${HYBRID_SLACK_DM_CHANNEL_ID}"
@@ -94,7 +101,7 @@ echo "[init-hybrid-agent-gke] target=$ORCH_POD -n $NAMESPACE"
 
 # kubectl exec 引数 (Slack DM 有無で分岐)。orchestrator Pod 内は working dir /app、
 # `pnpm exec tsx` は image build 済の node_modules/.bin/tsx を使う。
-if [ "$SKIP_SLACK_DM" = "1" ] || [ "$SKIP_SLACK_DM" = "true" ]; then
+if [ "$skip_slack_dm" = true ]; then
   kubectl exec -n "$NAMESPACE" "$ORCH_POD" -c orchestrator -- \
     pnpm exec tsx scripts/init-hybrid-agent.ts \
       --user-id "$HYBRID_USER_ID" \

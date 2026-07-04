@@ -29,6 +29,7 @@
  *     [--skip-slack-dm]   # test / dry-run 用 (Slack DM wire を skip)
  */
 import path from 'path';
+import { pathToFileURL } from 'node:url';
 
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
@@ -60,45 +61,48 @@ export interface Args {
   skipSlackDm: boolean;
 }
 
-function parseArgs(argv: string[]): Args {
-  let userId: string | undefined;
-  let slackDmChannelId: string | undefined;
-  let displayName: string | undefined;
-  let agentName: string | undefined;
-  let skipSlackDm = false;
+export function parseArgs(argv: string[]): Args {
+  // 既存 init-first-agent.ts:72-108 の `Partial<Args>` object 集約 pattern に統一。
+  // let で 5 変数を並べる旧実装との一貫性を回復し、宣言変数を 1 個に削減する。
+  const out: Partial<Args> = {};
 
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     const val = argv[i + 1];
     switch (key) {
       case '--user-id':
-        userId = val;
+        out.userId = val;
         i++;
         break;
       case '--slack-dm-channel-id':
-        slackDmChannelId = val;
+        out.slackDmChannelId = val;
         i++;
         break;
       case '--display-name':
-        displayName = val;
+        out.displayName = val;
         i++;
         break;
       case '--agent-name':
-        agentName = val;
+        out.agentName = val;
         i++;
         break;
       case '--skip-slack-dm':
-        skipSlackDm = true;
+        out.skipSlackDm = true;
         break;
     }
   }
 
-  // env fallback は test / GKE wrapper からの override 経路を有効化
-  userId = userId ?? process.env.HYBRID_USER_ID;
-  slackDmChannelId = slackDmChannelId ?? process.env.HYBRID_SLACK_DM_CHANNEL_ID;
-  if (!skipSlackDm && (process.env.HYBRID_SKIP_SLACK_DM === '1' || process.env.HYBRID_SKIP_SLACK_DM === 'true')) {
-    skipSlackDm = true;
-  }
+  // env fallback は test 直接起動 or 他 script からの override 経路を有効化
+  // (GKE wrapper `init-hybrid-agent-gke.sh` は明示 `--flag` に変換して渡すので
+  // この経路を通らないが、直接 `HYBRID_USER_ID=... tsx scripts/...` で叩く
+  // デバッグ用途を残す)。boolean は `||` 一発で env の "1" / "true" を評価する
+  // (no-op guard = 「skipSlackDm が既に true なら true を再代入」の冗長を撲滅)。
+  const userId = out.userId ?? process.env.HYBRID_USER_ID;
+  const slackDmChannelId = out.slackDmChannelId ?? process.env.HYBRID_SLACK_DM_CHANNEL_ID;
+  const skipSlackDm =
+    out.skipSlackDm === true
+    || process.env.HYBRID_SKIP_SLACK_DM === '1'
+    || process.env.HYBRID_SKIP_SLACK_DM === 'true';
 
   if (!userId) {
     console.error('Missing required arg: --user-id (or HYBRID_USER_ID env)');
@@ -116,8 +120,8 @@ function parseArgs(argv: string[]): Args {
   return {
     userId,
     slackDmChannelId,
-    displayName: (displayName ?? '').trim() || HYBRID_DEFAULT_DISPLAY,
-    agentName: (agentName ?? '').trim() || HYBRID_DEFAULT_NAME,
+    displayName: (out.displayName ?? '').trim() || HYBRID_DEFAULT_DISPLAY,
+    agentName: (out.agentName ?? '').trim() || HYBRID_DEFAULT_NAME,
     skipSlackDm,
   };
 }
@@ -172,36 +176,29 @@ function wireSlackDm(
     const existingWirings = getMessagingGroupAgents(dmMg.id);
     const otherWirings = existingWirings.filter((w) => w.agent_group_id !== ag.id);
     if (otherWirings.length > 0) {
-      console.error('');
+      // 14 個の個別 console.error 呼出 → 単一 template literal 1 回に集約 (S5)。
+      // 出力内容 (空行 + 順序) は完全等価、test 側 `errSpy.mock.calls.flat().join('\n')`
+      // の substring assert (case 7 の `already wired to 1 other agent group` /
+      // `ag-adk-existing` を含む) も維持される。
+      const wiringList = otherWirings
+        .map((w) => `  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`)
+        .join('\n');
       console.error(
-        `ERROR: Slack DM ${encodedPlatformId} is already wired to ${otherWirings.length} other agent group(s):`,
+        `
+ERROR: Slack DM ${encodedPlatformId} is already wired to ${otherWirings.length} other agent group(s):
+${wiringList}
+
+router.ts:routeInbound is fan-out (all wired agents engage), so a single DEN Slack DM
+would double-invoke both the existing agent(s) and the hybrid agent group.
+
+Resolve either by:
+  (a) Removing existing wire(s) with \`ncl wirings remove --id <mga.id>\` before re-running
+      (recommended if you intend to migrate the DEN DM to hybrid = agent-container path)
+  (b) Retiring the existing wire manually via SQL (advanced) after backing up the DB
+
+Phase 2 (gate + routing) will lift this constraint by routing on classifier output.
+`.trim(),
       );
-      for (const w of otherWirings) {
-        console.error(
-          `  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`,
-        );
-      }
-      console.error('');
-      console.error(
-        'router.ts:routeInbound is fan-out (all wired agents engage), so a single DEN Slack DM',
-      );
-      console.error('would double-invoke both the existing agent(s) and the hybrid agent group.');
-      console.error('');
-      console.error('Resolve either by:');
-      console.error(
-        '  (a) Removing existing wire(s) with `ncl wirings remove --id <mga.id>` before re-running',
-      );
-      console.error(
-        '      (recommended if you intend to migrate the DEN DM to hybrid = agent-container path)',
-      );
-      console.error(
-        '  (b) Retiring the existing wire manually via SQL (advanced) after backing up the DB',
-      );
-      console.error('');
-      console.error(
-        'Phase 2 (gate + routing) will lift this constraint by routing on classifier output.',
-      );
-      console.error('');
       process.exit(1);
     }
   }
@@ -383,14 +380,12 @@ export async function main(): Promise<void> {
 }
 
 // script として直接起動時のみ main() を実行 (unit test では import のみ)。
-// scripts/init-adk-agent.ts と同様の bottom-of-file 起動パターン。
-const invokedDirectly = (() => {
-  const argv1 = process.argv[1];
-  if (!argv1) return false;
-  const normalized = argv1.replace(/\\/g, '/');
-  return normalized.endsWith('/scripts/init-hybrid-agent.ts')
-    || normalized.endsWith('/scripts/init-hybrid-agent.js');
-})();
+// Node 24 + tsx の両方で `process.argv[1]` は絶対パスに解決される (実機検証済)、
+// ESM idiom の `import.meta.url === pathToFileURL(argv[1]).href` 比較で
+// ファイル名 hardcode + Windows path 手動置換の脆弱性を除去 (S4)。
+const invokedDirectly =
+  process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedDirectly) {
   main().catch((err) => {
