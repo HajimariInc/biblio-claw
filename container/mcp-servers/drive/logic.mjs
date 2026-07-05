@@ -96,9 +96,20 @@ export function formatError(err) {
   return hint ? `${withCause}\n${hint}` : withCause;
 }
 
+/**
+ * `err.cause` を安全に取り出す (存在しなければ undefined)。formatError の
+ * cause code 抽出と index.mjs の stderr 診断 dump の両方で 4 条件ガード
+ * (`err` が object かつ `cause` プロパティを持ち、それが truthy) が重複するのを
+ * 単一 helper に集約する。
+ */
+export function getCause(err) {
+  if (!err || typeof err !== 'object' || !('cause' in err) || !err.cause) return undefined;
+  return err.cause;
+}
+
 function extractCauseCode(err) {
-  if (!err || typeof err !== 'object' || !('cause' in err) || !err.cause) return null;
-  const cause = err.cause;
+  const cause = getCause(err);
+  if (!cause) return null;
   if (typeof cause === 'object' && 'code' in cause && typeof cause.code === 'string') {
     return cause.code;
   }
@@ -173,9 +184,8 @@ export async function listFiles(args) {
   // Drive query の `'<id>' in parents` は id 内の `'` で構文を壊せる。実害は「GSA が
   // 既にアクセスできる範囲」を超えないが、defensive にエスケープ。
   const folderId = folderIdRaw ? folderIdRaw.replace(/'/g, "\\'") : null;
-  let pageSize = Number.isInteger(args.page_size) ? args.page_size : DEFAULT_PAGE_SIZE;
-  if (pageSize < 1) pageSize = 1;
-  if (pageSize > MAX_PAGE_SIZE) pageSize = MAX_PAGE_SIZE;
+  const rawPageSize = Number.isInteger(args.page_size) ? args.page_size : DEFAULT_PAGE_SIZE;
+  const pageSize = Math.min(Math.max(rawPageSize, 1), MAX_PAGE_SIZE);
 
   const params = new URLSearchParams({
     pageSize: String(pageSize),

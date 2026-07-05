@@ -32,7 +32,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { TOOL_LIST, dispatch, formatError } from './logic.mjs';
+import { TOOL_LIST, dispatch, formatError, getCause } from './logic.mjs';
 
 async function main() {
   const server = new Server(
@@ -56,10 +56,10 @@ async function main() {
       // stderr に raw error + cause を残す (stdout 汚染防止で agent への応答は
       // content 経由のみ、診断は stderr に集約 = 6 ヶ月後の debug で cause 情報を
       // 追跡可能にする)。
-      const causeDiag
-        = err && typeof err === 'object' && 'cause' in err && err.cause
-          ? ` (cause: ${JSON.stringify(err.cause, Object.getOwnPropertyNames(err.cause))})`
-          : '';
+      const cause = getCause(err);
+      const causeDiag = cause
+        ? ` (cause: ${JSON.stringify(cause, Object.getOwnPropertyNames(cause))})`
+        : '';
       console.error(`[drive-mcp] ${name} failed: ${msg}${causeDiag}`);
       return {
         content: [{ type: 'text', text: msg }],
