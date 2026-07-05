@@ -5,10 +5,13 @@
  * `container_state.current_tool` を read-only で叩き、`tool-status-map` で日本語文言に
  * 変換して `updateTypingStatus(session.id, status)` を呼ぶ。
  *
- * 契約:
- *   - **本関数は throw しない** (best-effort、delivery loop を殺さない)
- *   - db open ENOENT (初回 spawn 前) は debug ログで silent 化 (frequent poll で noise になる)
- *   - db open EACCES 等の非 ENOENT は warn に倒す (I/O 障害を見える化)
+ * 契約 (PR #145 review I4 で契約と実装の乖離を修正):
+ *   - **db open (`openOutboundDb`) の失敗のみ本関数内で catch**、warn / debug に振り分ける
+ *   - **`getContainerState` / `updateTypingStatus` の予期しない throw は呼出元 (`pollActive`) の
+ *     `.catch()` に委譲**する (稀ケース、`poller.test.ts` で defensive test 済)
+ *   - db open ENOENT (or SQLITE_CANTOPEN、better-sqlite3 readonly open 特有) は初回 spawn 前 =
+ *     正常経路として debug ログで silent 化 (frequent poll で noise になる)
+ *   - db open EACCES 等の非 ENOENT / SQLITE_CANTOPEN は warn に倒す (I/O 障害を見える化)
  *   - `updateTypingStatus` は変化時のみ再送する契約 (typing/index.ts の rate limit ガード) =
  *     同じ tool 継続中に本 poller が 1s tick で呼び出されても追加 API 呼出しなし
  *   - agent group 不在 (削除済 session) は silent skip
@@ -37,12 +40,16 @@ export async function refreshProgressStatus(session: Session): Promise<void> {
     outDb = openOutboundDb(agentGroup.id, session.id);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    if (code === 'ENOENT') {
-      // 初回 spawn 前 = container_state が書かれる前。頻繁に発火するため debug 抑制。
+    // ENOENT = fs level (write-mode open path で fs 経由の open が先に失敗)
+    // SQLITE_CANTOPEN = better-sqlite3 readonly open 特有 (fs stat は通るが sqlite level
+    // で file open が失敗する = PR #145 review C3 実測、readonly=true 経路で発生)
+    // どちらも「初回 spawn 前」の正常経路として debug 抑制。
+    if (code === 'ENOENT' || code === 'SQLITE_CANTOPEN') {
       log.debug('progress-status poll: outbound.db not found (pre-spawn)', {
         event: 'progress.status.pre_spawn',
         session_id: session.id,
         agent_group_id: agentGroup.id,
+        err_code: code,
       });
     } else {
       // EACCES / EMFILE / EIO 等の I/O 障害は本番 LOG_LEVEL=info でも見える warn に倒す

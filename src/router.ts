@@ -761,15 +761,19 @@ async function deliverToAgent(
   if (wake) {
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
-    startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
-    // M4-F Phase 4: cold start ~10-15s 区間の可視化。startTypingRefresh 直後に
-    // updateTypingStatus で currentStatus を「container 起動中」に設定 = 4s refresh loop
-    // が新 status を forward し、以降 poller が container_state.current_tool を読んで
-    // 上書きする (tool 発火時点で「container 起動中」→ tool 名日本語文言に遷移)。
-    // 逸脱 note: 元 plan は container-runner.ts:196 で emitPreSpawnStatus 直呼びだったが、
-    // それは refresh loop の currentStatus=null と競合する (次 4s tick で default 文言に
-    // 上書きされる)。router 側で updateTypingStatus を使うことで refresh loop に載せる。
-    updateTypingStatus(session.id, 'container 起動中');
+    // M4-F Phase 4 (PR #145 実機で race 発見 → 修正): startTypingRefresh の immediate
+    // tick を initialStatus='container 起動中' で発火し、cold start 区間 (~10-15s) を
+    // 明示化する。以降は poller が container_state.current_tool を読んで tool 名日本語
+    // 文言に遷移する。かつて分離していた updateTypingStatus 呼出は Slack API 到達順の
+    // race (「Typing...」が後勝ち) を招くため、initialStatus 経由の 1 発集約に変更。
+    startTypingRefresh(
+      session.id,
+      session.agent_group_id,
+      event.channelType,
+      event.platformId,
+      event.threadId,
+      'container 起動中',
+    );
     const freshSession = getSession(session.id);
     if (freshSession) {
       const woke = await wakeContainer(freshSession);

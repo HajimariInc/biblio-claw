@@ -7,9 +7,14 @@
  * (`作業中 (${toolName})`) で silent 化しない (gate.ts の event 命名方針と対称)。
  *
  * MCP server 名は container/agent-runner/src/providers/claude.ts:64-66 の mcpAllowPattern が
- * `[^a-zA-Z0-9_-]` を `_` に置換するため、seedMcpServers() で登録される 3 サーバ
- * (`nanoclaw` / `tavily` / `drive`) はサニタイズ前後で同名 (英数のみ) = server 名側に
- * `_` を含めない運用を継続する。
+ * `[^a-zA-Z0-9_-]` を `_` に置換するため、以下 3 サーバはサニタイズ前後で同名 (英数のみ):
+ *   - `nanoclaw` = **container/agent-runner/src/index.ts:88-93 の built-in MCP server**
+ *     (host 側 biblio 9 tool = acquire/inspect/categorize/shelve 系)
+ *   - `tavily` / `drive` = `scripts/init-hybrid-agent.ts:seedMcpServers()` の DB seed 登録
+ *     (M4-F Phase 3 で追加、`container_config.mcp_servers` 経由で agent-runner に注入)
+ * (PR #145 review I5 で誤帰属を訂正 = 全 3 サーバを `seedMcpServers()` としていたが、
+ *  `seedMcpServers()` は tavily/drive の 2 サーバのみ扱う)
+ * 運用上、server 名側に `_` を含めない = 上記正規表現の match 前提が成立する慣習を継続。
  */
 
 /** SDK 組み込み tool (agent-runner TOOL_ALLOWLIST の主要 9 種) の日本語文言 */

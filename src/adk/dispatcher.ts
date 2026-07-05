@@ -260,7 +260,19 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       for (const part of eventParts) {
         const fc = part.functionCall;
         if (!fc?.name || fc.name === 'adk_request_confirmation') continue;
-        void emitAdkToolStatus(channelType, platformId, threadId, fc.name);
+        // PR #145 review S3: 現状 emitAdkToolStatus は内部 try/catch で保護され reject
+        // しない契約だが、将来 toolNameToStatus / getChannelAdapter に throw が入った場合の
+        // 保険として明示 `.catch()` を挿入。unhandledRejection に落ちて event 名 / request_id
+        // 欠落のログになる経路を撲滅。
+        const toolName = fc.name;
+        void emitAdkToolStatus(channelType, platformId, threadId, toolName).catch((err) => {
+          log.warn('emitAdkToolStatus unexpected throw', {
+            event: 'adk.dispatcher.emit_tool_status_failed',
+            request_id: requestId,
+            tool_name: toolName,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
       }
 
       // Phase 4: HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)

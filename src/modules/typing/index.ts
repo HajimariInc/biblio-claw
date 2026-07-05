@@ -19,6 +19,7 @@
  */
 import fs from 'fs';
 
+import { log } from '../../log.js';
 import { heartbeatPath } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -91,8 +92,18 @@ async function triggerTyping(
     // M4-F Phase 4: `status ?? undefined` で null → undefined 正規化 (vendor 側は
     // undefined を `"Typing..."` fallback、null は明示クリア相当だが vendor 実装依存)。
     await adapter?.setTyping?.(channelType, platformId, threadId, status ?? undefined);
-  } catch {
+  } catch (err) {
     // Typing is best-effort — don't let it fail delivery or routing.
+    // ただし PR #145 review C2 で判明: vendor (@chat-adapter/slack) が `logger:'silent'`
+    // で初期化されているため vendor 側の warn log も出ない = 完全不可視化。既定 4s refresh +
+    // 1s poller の高頻度呼出しなので同一 error は multiplicative に鳴りうる = log flooding
+    // 防止のため warn 発火は本来 debounce したいが、まず可視化を優先 (重要度は Slack scope 剥奪
+    // + rate limit 429 の検知 > 大量ノイズの回避)。debounce は将来 issue 化。
+    log.warn('setTyping failed (best-effort, routing continues)', {
+      event: 'progress.status.set_typing_failed',
+      channel_type: channelType,
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -112,6 +123,7 @@ export function startTypingRefresh(
   channelType: string,
   platformId: string,
   threadId: string | null,
+  initialStatus: string | null = null,
 ): void {
   const existing = typingRefreshers.get(sessionId);
   if (existing) {
@@ -123,14 +135,18 @@ export function startTypingRefresh(
     //
     // M4-F Phase 4: 直近 status を維持したまま refresh 再開 (新 inbound で status を
     // リセットしない = poller が次 tick で新しい tool 名を反映する)。
+    // initialStatus 引数は re-inbound では無視 (既存 currentStatus を優先)。
     triggerTyping(channelType, platformId, threadId, existing.currentStatus).catch(() => {});
     existing.startedAt = Date.now();
     existing.pausedUntil = 0;
     return;
   }
 
-  // Immediate tick + periodic refresh. 初回は status なし (null) で vendor default 文言。
-  triggerTyping(channelType, platformId, threadId, null).catch(() => {});
+  // Immediate tick + periodic refresh. initialStatus を渡すと最初の発火から
+  // その status で送る = 直後の updateTypingStatus 呼出との race を撲滅する
+  // (PR #145 実機で発見: startTypingRefresh(null) + updateTypingStatus('container 起動中')
+  //  の 2 発 fire-and-forget が Slack API 到達順で「Typing...」が後勝ちする経路あり)。
+  triggerTyping(channelType, platformId, threadId, initialStatus).catch(() => {});
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
@@ -161,7 +177,7 @@ export function startTypingRefresh(
     interval,
     startedAt,
     pausedUntil: 0,
-    currentStatus: null,
+    currentStatus: initialStatus,
   });
 }
 
