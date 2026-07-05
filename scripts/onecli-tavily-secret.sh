@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # biblio-claw: OneCLI Tavily secret 投入 (M4-F Phase 3、life-capabilities)
 #
-# `.env` の `TAVILY_API_KEY` を OneCLI に
+# `TAVILY_API_KEY` を OneCLI に
 #   type:generic + injectionConfig{headerName:"authorization", valueFormat:"Bearer {value}"}
 # の secret として投入し、hostPattern=api.tavily.com への request に
 # `Authorization: Bearer <TAVILY_API_KEY>` を MITM 注入させる。creds は
@@ -11,9 +11,20 @@
 # あわせて全 agent を secretMode=all に昇格する (selective モードで作られた agent
 # の 401 回避 / CLAUDE.md §シークレット gotcha)。
 #
+# ## TAVILY_API_KEY の取得順序 (env → Secret Manager → fail)
+# 1. **env 経由** (`$TAVILY_API_KEY` が設定済の場合): local dev で `.env` から
+#    set -a 経由に export されている、または shell 変数として明示 export されている経路。
+#    これが最優先 = 開発者が手元で緊急デバッグする経路を潰さない。
+# 2. **Secret Manager fallback** (env 未設定、gcloud CLI + IAM が使える場合):
+#    `gcloud secrets versions access latest --secret=$TAVILY_SM_SECRET
+#     --project=$TAVILY_SM_PROJECT` で取得。GKE 経路 (orchestrator Pod 内 gcloud + WI
+#    で orchestrator GSA を impersonate、`terraform/tavily-secret/` module が
+#    `roles/secretmanager.secretAccessor` を secret scope で付与済) の primary path。
+# 3. **両方失敗**: need() で fail-fast (loud fail、silent skip なし)。
+#
 # ## Tavily / Vertex / GH の差分
 # - Tavily = **static key** (rotate 不要、TTL 事実上無期限)。
-#   `.env` の TAVILY_API_KEY 再取得 or Tavily Dashboard で regenerate 時のみ再実行。
+#   Tavily Dashboard で key regenerate 時のみ `terraform apply` で新 version 追加 + 本 script 再実行。
 # - Vertex = ADC token (~60min TTL、40min 周期で rotator sidecar が自動再投入)。
 # - GH = installation token (~60min TTL、50min 周期で gh-token-rotator が自動再投入)。
 #
@@ -22,11 +33,13 @@
 #
 # 写経元: scripts/onecli-vertex-secret.sh (ADC 取得ロジックを TAVILY_API_KEY 読取に置換)
 #
-# 使い方 (local): docker compose up -d --wait 後に `bash scripts/onecli-tavily-secret.sh`
+# 使い方 (local): `.env` に `TAVILY_API_KEY=tvly-...` を貼って `bash scripts/onecli-tavily-secret.sh`
+#   or gcloud 経由: `TF_VAR_tavily_api_key=tvly-... terraform apply` (`terraform/tavily-secret/`) 済で
+#   `bash scripts/onecli-tavily-secret.sh` (env 未設定なら SM 経由取得)
 # 使い方 (GKE):
-#   TAVILY_API_KEY=tvly-... kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
-#     env TAVILY_API_KEY=$TAVILY_API_KEY bash /scripts/onecli-tavily-secret.sh
-#   (bootstrap 用の 1 回。Secret Manager 化 = Task 10 判断、runbook §M4-F Phase 3 参照)
+#   `terraform/tavily-secret/` apply 済の状態で
+#   `kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- sh -c "cd /app && bash scripts/onecli-tavily-secret.sh"`
+#   (env 経由不要、script が SM から取得。`gcloud` は orchestrator image に既存)
 
 set -euo pipefail
 
@@ -43,6 +56,10 @@ fi
 : "${ONECLI_URL:=http://localhost:10254}"
 : "${TAVILY_SECRET_NAME:=biblio-claw-tavily}"
 : "${TAVILY_API_HOST:=api.tavily.com}"
+# Secret Manager fallback 用: secret 名 + project ID。両方 override 可能で、default は
+# terraform/tavily-secret/ module が作成する `biblio-tavily-api-key` on `hajimari-ai-hackathon-2026`。
+: "${TAVILY_SM_SECRET:=biblio-tavily-api-key}"
+: "${TAVILY_SM_PROJECT:=${ANTHROPIC_VERTEX_PROJECT_ID:-hajimari-ai-hackathon-2026}}"
 
 ONECLI_API="${ONECLI_URL%/}/v1"
 
@@ -56,17 +73,50 @@ fi
 # shellcheck source=scripts/onecli-lib.sh
 . "${ROOT}/scripts/onecli-lib.sh"
 
-# --- 依存確認 (Tavily は gcloud 不要 = static key) ---
+# --- 依存確認 (Tavily は gcloud は SM fallback で optional、env のみで走らせる場合は不要) ---
 for c in curl jq; do
   command -v "$c" >/dev/null 2>&1 || fail "必須コマンドが見つかりません: $c"
 done
 
-# 必須 env: TAVILY_API_KEY (`.env` or process.env)。空 or 未設定は fail-fast。
+# 必須 env: TAVILY_API_KEY (env → Secret Manager fallback を通っても未取得なら fail)。
 # onecli-gh-secret.sh の need() と同流儀 (「未設定」と「空文字設定」を同一扱い)。
 need() {
   local v="$1"
   if [ -z "${!v:-}" ]; then
-    fail "必須 env が未設定または空: $v (.env に TAVILY_API_KEY=tvly-... を設定して再実行、取得は https://tavily.com/)"
+    fail "必須 env が未設定または空: $v (env / Secret Manager どちらでも未解決。local dev は .env に TAVILY_API_KEY=tvly-... を設定、GKE は 'terraform apply -var=\"tavily_api_key=tvly-...\"' で SM に投入して再実行、取得は https://tavily.com/)"
+  fi
+}
+
+# resolve_tavily_key: env → Secret Manager → (fail は need() に委任) の順で解決する。
+# 冪等 = 既に env に非空値があれば SM を叩かず即 return (無駄な gcloud call と audit log を抑制)。
+# gcloud 不在 (local で SDK 入っていない環境) は SM 経路を skip する (info で明示、silent skip 撲滅)。
+resolve_tavily_key() {
+  if [ -n "${TAVILY_API_KEY:-}" ]; then
+    info "[resolve] TAVILY_API_KEY を env 経由で取得 (local .env or shell 変数、SM 経路 skip)"
+    return 0
+  fi
+  if ! command -v gcloud >/dev/null 2>&1; then
+    info "[resolve] TAVILY_API_KEY env 未設定 + gcloud 不在 = Secret Manager fallback skip (この後 need() で fail-fast)"
+    return 0
+  fi
+  info "[resolve] TAVILY_API_KEY env 未設定 → Secret Manager から取得を試行 (secret=$TAVILY_SM_SECRET / project=$TAVILY_SM_PROJECT)"
+  # 失敗 (secret 未存在 / IAM 不足 / API 未有効化 / auth 切れ) は || true で捕捉して continue、
+  # 直後の空値 check で分岐する。gcloud の stderr は捨てない (原因追跡のため素通し)。
+  local sm_value
+  sm_value="$(gcloud secrets versions access latest \
+    --secret="$TAVILY_SM_SECRET" \
+    --project="$TAVILY_SM_PROJECT" 2>&1)" \
+    || {
+      info "[resolve] gcloud secrets versions access が失敗 (上の gcloud エラーを確認。secret 未存在 / IAM 不足 / API 未有効化 / auth 切れの可能性、env fallback もなければ need() で fail-fast)"
+      return 0
+    }
+  if [ -n "$sm_value" ]; then
+    TAVILY_API_KEY="$sm_value"
+    export TAVILY_API_KEY
+    sm_value=""; unset sm_value
+    ok "[resolve] Secret Manager から取得成功 (env fallback を経由せず SM primary path で確立)"
+  else
+    info "[resolve] Secret Manager から空値が返却 (secret 存在するが version data が空、この後 need() で fail-fast)"
   fi
 }
 
@@ -118,6 +168,7 @@ ensure_secret() {
 }
 
 main() {
+  resolve_tavily_key
   need TAVILY_API_KEY
   info "OneCLI REST=${ONECLI_API} / Tavily host=${TAVILY_API_HOST} / rotate=none (static key)"
   # stderr を捨てない: curl の接続エラーが「到達できない」だけだと debug 不能。

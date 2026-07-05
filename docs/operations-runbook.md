@@ -3007,9 +3007,9 @@ tail -10 data/gate-audit.jsonl | jq '.'
 
 | 項目 | 保管場所 | 値の source of truth |
 |:---|:---|:---|
-| `TAVILY_API_KEY` | local: `.env` / GKE: bootstrap 時に kubectl exec で orchestrator Pod に流し込み | `https://tavily.com/` Dashboard で発行 (無料枠 1,000 credits/月、DEN さんが手作業取得) |
+| Tavily API key | Secret Manager `biblio-tavily-api-key` (primary、`terraform/tavily-secret/` module 管理) / local dev の `.env` (fallback、gcloud SDK 不在時) | `https://tavily.com/` Dashboard で発行 (無料枠 1,000 credits/月、DEN さんが手作業取得 → `TF_VAR_tavily_api_key='tvly-...' terraform apply`) |
 | Drive ADC token | orchestrator Pod 内 `drive-token-rotator` sidecar が 40min 周期で自動投入 (rotate 経路) | WI 経由 `gcloud auth application-default print-access-token` (cloud-platform scope、default で Drive API 動作) |
-| OneCLI secret `biblio-claw-tavily` | OneCLI vault (hostPattern=`api.tavily.com`) | `scripts/onecli-tavily-secret.sh` |
+| OneCLI secret `biblio-claw-tavily` | OneCLI vault (hostPattern=`api.tavily.com`) | `scripts/onecli-tavily-secret.sh` (env → SM fallback の順で解決) |
 | OneCLI secret `biblio-claw-drive` | OneCLI vault (hostPattern=`www.googleapis.com`) | `scripts/onecli-drive-secret.sh` (rotator 経由 or 手動) |
 | Drive フォルダ ACL | Drive UI で対象フォルダを GSA email に「閲覧者」共有 | DEN さん手作業 (IAM ではなく ACL、Terraform 化不可) |
 
@@ -3047,19 +3047,34 @@ tail -10 data/gate-audit.jsonl | jq '.'
    kubectl get pod biblio-orchestrator-0 -n biblio-claw -o json | jq '.spec.containers[] | .name'
    # → orchestrator, gh-token-rotator, vertex-token-rotator, drive-token-rotator の 4 name
    ```
-5. **OneCLI secret 投入** (Tavily は手動 1 回、Drive は sidecar 自動 + 初回加速の手動 1 回):
+5. **Tavily API key を Secret Manager に投入 + OneCLI secret を bootstrap**:
    ```bash
-   # Tavily (bootstrap 用、以降は Tavily Dashboard で key regenerate 時のみ再実行)。
-   # orchestrator コンテナは Dockerfile 経路で /app/scripts/ に置かれるため、
-   # 絶対 /scripts/ ではなく cd /app + 相対 scripts/... で叩く (drive-token-rotator
-   # sidecar の /scripts/ とは別経路、混同禁止)。
-   TAVILY_API_KEY=tvly-... kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
-     sh -c "cd /app && TAVILY_API_KEY=$TAVILY_API_KEY bash scripts/onecli-tavily-secret.sh"
-   # Drive (初回 rotation 40min gap を避ける手動 1 回、以降は sidecar が自動)。
-   # drive-token-rotator sidecar image (Dockerfile.sidecar.vertex) は /scripts/ に
-   # onecli-drive-secret.sh を COPY 済のため、絶対パス /scripts/... で叩ける。
+   # (a) Terraform で Secret Manager リソース + IAM binding を作成 (初回のみ)。
+   #     `create_before_destroy = true` で rotation 時の `latest` alias 継続性を保証。
+   cd terraform/tavily-secret
+   TF_VAR_tavily_api_key='tvly-...' terraform init
+   TF_VAR_tavily_api_key='tvly-...' terraform apply
+   cd -
+   # 確認: gcloud で読み戻せる
+   gcloud secrets versions access latest --secret=biblio-tavily-api-key --project=hajimari-ai-hackathon-2026
+
+   # (b) OneCLI に Tavily secret を bootstrap 投入 (以降は Tavily Dashboard で key regenerate 時のみ)。
+   #     env 未設定 = script が自動で SM から取得 (orchestrator Pod 内 gcloud + WI 経由)。
+   #     orchestrator コンテナは Dockerfile 経路で /app/scripts/ に置かれるため、
+   #     絶対 /scripts/ ではなく cd /app + 相対 scripts/... で叩く (drive-token-rotator
+   #     sidecar の /scripts/ とは別経路、混同禁止)。
+   kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
+     sh -c "cd /app && bash scripts/onecli-tavily-secret.sh"
+
+   # (c) Drive (初回 rotation 40min gap を避ける手動 1 回、以降は sidecar が自動)。
+   #     drive-token-rotator sidecar image (Dockerfile.sidecar.vertex) は /scripts/ に
+   #     onecli-drive-secret.sh を COPY 済のため、絶対パス /scripts/... で叩ける。
    kubectl exec -n biblio-claw biblio-orchestrator-0 -c drive-token-rotator -- bash /scripts/onecli-drive-secret.sh
    ```
+
+   > **緊急経路** (Terraform apply 前 / SM 未有効化 / IAM 反映遅延で SM から取れない場合):
+   > `TAVILY_API_KEY='tvly-...' kubectl exec ... sh -c "cd /app && TAVILY_API_KEY=\$TAVILY_API_KEY bash scripts/onecli-tavily-secret.sh"` で env fallback (script は env 優先で解決)。
+   > Rotate は Tavily Dashboard で regenerate → `terraform apply -var="tavily_api_key=tvly-..."` → 上記 (b) 再実行の 3 step。
 6. **seed 実行 + agent Pod 再起動** (`mcp_servers` を desired state に upsert):
    ```bash
    # local:
