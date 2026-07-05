@@ -370,19 +370,23 @@ spec:
               memory: 256Mi
 
         # ---- drive-token-rotator sidecar (M4-F Phase 3、life-capabilities) ----
-        # 40min 周期で onecli-drive-secret.sh を呼んで Drive scope の ADC token を
-        # OneCLI に投入。**image は vertex-token-rotator と同一** = build 資産の
-        # 二重メンテを回避し、Dockerfile.sidecar.vertex 側で scripts/drive-rotate.sh
-        # + scripts/onecli-drive-secret.sh も焼き込む (M4-F Phase 3 の Dockerfile 更新済)。
-        # 差分は command と env のみ:
+        # 40min 周期で onecli-drive-secret.sh を呼んで drive.readonly scope 付き
+        # access token を OneCLI に投入。**image は vertex-token-rotator と同一** =
+        # build 資産の二重メンテを回避し、Dockerfile.sidecar.vertex 側で
+        # scripts/drive-rotate.sh + scripts/onecli-drive-secret.sh も焼き込む
+        # (M4-F Phase 3 の Dockerfile 更新済)。差分は command と env のみ:
         #   - command: bash /scripts/drive-rotate.sh
         #   - DRIVE_SECRET_NAME (Vertex とは別 secret)
-        # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA を impersonate。
-        # Drive API 呼出しは GSA に追加 IAM 権限を要求しない (Drive の権限は
-        # フォルダ単位 ACL、GSA email 共有が Task 12 の前提条件)。
-        # image tag: 下記 `m4f-p1-1` は Phase 1 由来の placeholder。deploy 前に必ず
-        # runbook §M4-F Phase 3 §deploy 手順 (2) で `m4f-p3-1` 等へ bump + push すること
-        # (Dockerfile.sidecar.vertex 側で drive script を焼き込む rebuild が前提)。
+        # R4 経路 (2026-07-06 恒久対応): metadata server から biblio-orchestrator@ の
+        # caller token を取得 → iamcredentials.googleapis.com/generateAccessToken で
+        # `biblio-google-drive-user@` を impersonate + scope=drive.readonly 明示 →
+        # drive.readonly scope 付き token を発行。前提として orchestrator@ が
+        # drive-user@ に対して `roles/iam.serviceAccountTokenCreator` を持つこと
+        # (`terraform/iam-drive-user/` module で宣言、ない場合 403 fail、詳細は
+        # runbook §M4-F Phase 3 罠 7)。Drive フォルダ ACL は drive-user@ にのみ共有
+        # (orchestrator@ には共有しない = 境界分離)。
+        # image tag は運用中の値をそのまま反映する形。詳細は runbook §M4-F Phase 3
+        # §deploy 手順 (image-sync 経由で bump)。
         - name: drive-token-rotator
           image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-2
           command: ['bash', '/scripts/drive-rotate.sh']

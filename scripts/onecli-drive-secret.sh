@@ -24,8 +24,8 @@
 #
 # ## 前提となる IAM binding
 # biblio-orchestrator@ が biblio-google-drive-user@ に対して
-# `roles/iam.serviceAccountTokenCreator` を持つこと (Terraform で宣言、
-# `terraform/iam-drive-user/` 予定)。ない場合 generateAccessToken が 403 で fail する。
+# `roles/iam.serviceAccountTokenCreator` を持つこと (`terraform/iam-drive-user/`
+# module で宣言済)。ない場合 generateAccessToken が 403 で fail する。
 #
 # ## Drive フォルダ ACL
 # biblio-google-drive-user@ SA email を Drive フォルダの「閲覧者」として共有すること。

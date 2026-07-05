@@ -12,11 +12,16 @@
 # 手動で叩いても動く / sidecar 経由でも動く、両経路で同じロジック)。
 #
 # 設計:
-#   - WI (workload identity) 経由で `gcloud auth application-default print-access-token`
-#     を叩く前提。orchestrator KSA (biblio-orchestrator-ksa) が `biblio-orchestrator`
-#     GSA に annotate 済で、GSA は `roles/aiplatform.user` を持つ (既存 Vertex 経路と同 GSA)。
-#     Drive API 呼出しには追加の IAM 権限は不要 (Drive の権限は IAM ではなく
-#     Drive フォルダ単位の ACL、GSA email に「閲覧者」共有が別途必要)。
+#   - `onecli-drive-secret.sh` 側で R4 経路 (SA 2 段 impersonation) を実装する
+#     (2026-07-06 恒久対応、旧 `gcloud auth application-default print-access-token
+#     --scopes=drive.readonly` 経路は GKE Autopilot の GCE account type で silent ignored、
+#     詳細は runbook §M4-F Phase 3 罠 7)。本 wrapper は worker が発行した token 経路に
+#     依存せず、exit code だけを見る = R4 経路の詳細は onecli-drive-secret.sh header 参照。
+#   - orchestrator KSA (biblio-orchestrator-ksa) が `biblio-orchestrator` GSA に annotate 済で、
+#     GSA は `biblio-google-drive-user@` に対して `roles/iam.serviceAccountTokenCreator` を
+#     持つ (`terraform/iam-drive-user/` module で宣言、R4 経路の前提)。Drive API 呼出しの
+#     権限は Drive フォルダ ACL で決まる = `biblio-google-drive-user@` の SA email に
+#     「閲覧者」共有が別途必要 (`biblio-orchestrator@` には共有しない、境界分離)。
 #   - 起動時に OneCLI gateway を待つロジックは vertex-rotate.sh と同じ
 #   - 1 周期失敗で sidecar を落とさない (log_event ERROR + retry loop 継続)
 #
