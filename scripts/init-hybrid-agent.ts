@@ -385,7 +385,30 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
       'patron の生活 + 対話 + 実行力仕事を担う。biblio 特化操作 (仕入れ / 検品 / カテゴライズ / ' +
       '陳列 / 蔵書一覧 / 装備) は M4-G で ADK 側へ吸収される予定のため、Phase 1 では ' +
       'container 側 MCP 9 tool は残置されているが積極利用しない (= ADK 経路が担当継続)。\n\n' +
-      '自己拡張は `/self-customize` skill で本 CLAUDE.local.md を追記する。\n',
+      '自己拡張は `/self-customize` skill で本 CLAUDE.local.md を追記する。\n\n' +
+      // 以下の biblio workspace 関連 instruction は PR #145 実機で発現した silent success 罠
+      // (agent が /data/quarantine/ /data/shelf/ への rm -rf を実行して exit 0 で「削除成功」
+      // と誤認識、実際は agent container の mount 対象外で空振り) への恒久対策。案 1 + 案 2 統合、
+      // 詳細は issue #149 (`cleanup_biblio_workspace` MCP tool 新設)。既存 agent group の
+      // PVC 上 CLAUDE.local.md には kubectl cp で別途反映 (`initGroupFilesystem` は初回作成時
+      // のみ seed するため、既存 group は自動更新されない、docs/operations-runbook.md §M4-F 参照)。
+      '## biblio 業務経路 (`/data/quarantine/` `/data/shelf/`) の扱い\n\n' +
+      'biblio 業務の作業ディレクトリ (`/data/quarantine/` `/data/shelf/`) は host TS 実装のみが扱う ' +
+      '(M2 PRD B 集約設計、CLAUDE.md 明記)。**agent container 内には mount されておらず、' +
+      '`ls /data` は exit 2 で "No such file or directory" を返す**。\n\n' +
+      '**絶対禁止**: `Bash rm -rf /data/quarantine/*` や `rm -rf /data/shelf/*` 等の直接操作。' +
+      'path 不在で silent success (`rm -f` / `rm -rf` は exit 0 を返す) する経路が実在し、' +
+      '「削除成功」と誤認識する (PR #145 実機で発現、DEN さん HITL 手動対処 2026-07-06)。\n\n' +
+      '**cleanup が必要になった場合の正規経路**:\n' +
+      '- 棚上 skill (陳列成功済) の削除: `mcp__nanoclaw__shokyaku_biblio` ' +
+      '(HITL 承認 + GitHub PR + fs.rmSync + DB clean を atomic に実行)\n' +
+      '- shelve 失敗の retry のため未陳列の quarantine / shelf 準備区の残骸を cleanup: ' +
+      '**現状は正規経路なし** = DEN さんに手動 cleanup 依頼 (kubectl exec) が必要。' +
+      '将来的に `mcp__nanoclaw__cleanup_biblio_workspace` MCP tool が追加される予定 (issue #149)\n\n' +
+      '**rm 全般の silent success 防御**: `Bash rm` 実行後は必ず `ls` or `stat` で削除確認する。' +
+      '`-f` / `-rf` オプションは path 不在でも exit 0 を返すため、「rm 成功 = 削除完了」と早合点しない。' +
+      'path 不在で success した場合は「そもそも path が見えていない = mount 対象外の可能性」を疑い、' +
+      'host TS の MCP tool 経路への切替を検討する。\n',
   });
 
   // provider=null が本 script の中核設定。router.ts:deliverToAgent で
