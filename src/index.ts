@@ -242,9 +242,17 @@ async function main(): Promise<void> {
       }
       return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
     },
-    async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
+    async setTyping(
+      channelType: string,
+      platformId: string,
+      threadId: string | null,
+      status?: string | null,
+    ): Promise<void> {
+      // M4-F Phase 4: `status` を forward しないと updateTypingStatus 経由の
+      // 「container 起動中」+ tool 名遷移が silent drop する (TS の余剰引数無視で
+      // 型検査を素通りする経路。PR #145 review C1 で発見)。
       const adapter = getChannelAdapter(channelType);
-      await adapter?.setTyping?.(platformId, threadId);
+      await adapter?.setTyping?.(platformId, threadId, status);
     },
   };
   setDeliveryAdapter(deliveryAdapter);
