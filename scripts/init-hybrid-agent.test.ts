@@ -510,4 +510,72 @@ describe('init-hybrid-agent: parseArgs()', () => {
     // (guard を外すと upsertUser の COALESCE で 'Patron' に silent 上書きされる)
     expect(getUser('slack:U7F8TRM6X')!.display_name).toBe('DEN (real name)');
   });
+
+  // --- M4-F Phase 3: seedMcpServers (Task 2/3) --------------------------------
+  it('(P3-1) seedMcpServers: 空 DB から seed で tavily + drive の 2 key を assert', () => {
+    const result = seedHybridAgent(baseArgs(), NOW);
+    const cc = getContainerConfig(result.agent_group_id);
+    expect(cc).toBeDefined();
+
+    const servers = JSON.parse(cc!.mcp_servers) as Record<string, unknown>;
+    expect(Object.keys(servers).sort()).toEqual(['drive', 'tavily']);
+
+    const tavily = servers.tavily as {
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      instructions: string;
+    };
+    expect(tavily.command).toBe('tavily-mcp');
+    expect(tavily.args).toEqual([]);
+    expect(tavily.env).toEqual({ TAVILY_API_KEY: 'placeholder' });
+    expect(tavily.instructions).toContain('tavily_search');
+    expect(tavily.instructions).toContain('1,000');
+
+    const drive = servers.drive as {
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      instructions: string;
+    };
+    expect(drive.command).toBe('node');
+    expect(drive.args).toEqual(['/opt/mcp-servers/drive/index.mjs']);
+    expect(drive.env).toEqual({});
+    expect(drive.instructions).toContain('drive_list_files');
+    expect(drive.instructions).toContain('drive_get_file');
+    expect(drive.instructions).toContain(
+      'biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com',
+    );
+  });
+
+  it('(P3-2) seedMcpServers: 2 回連続 seed で mcp_servers が同一 (idempotent)', () => {
+    const r1 = seedHybridAgent(baseArgs(), NOW);
+    const before = getContainerConfig(r1.agent_group_id)!.mcp_servers;
+
+    const r2 = seedHybridAgent(baseArgs(), NOW);
+    const after = getContainerConfig(r2.agent_group_id)!.mcp_servers;
+
+    expect(r1.agent_group_id).toBe(r2.agent_group_id);
+    // JSON literal そのものが完全一致 = updateContainerConfigJson の overwrite で
+    // 同 desired state を書き直しても中身が動かないことを保証。
+    expect(after).toBe(before);
+  });
+
+  it('(P3-3) seedMcpServers: env に実 Tavily key 形式 (tvly-...) が混入していない', () => {
+    // 命題 2 の静的 grep 保護 = ソース中に実 API key リテラルが書かれていないことを
+    // 実行時 assert する (実装で誤って `TAVILY_API_KEY: process.env.TAVILY_API_KEY`
+    // に書き換えると本 test は落ちるが、そもそも env 値を DB に埋めてはならない
+    // 契約 = 命題 2)。
+    process.env.TAVILY_API_KEY = 'tvly-realsecret1234567890abcdef';
+    try {
+      const result = seedHybridAgent(baseArgs(), NOW);
+      const cc = getContainerConfig(result.agent_group_id)!;
+      // 実 key 形式 (`tvly-` 16 文字以上) が JSON 内に一切現れない
+      expect(cc.mcp_servers).not.toMatch(/tvly-[A-Za-z0-9]{16,}/);
+      // placeholder は残る
+      expect(cc.mcp_servers).toContain('"TAVILY_API_KEY":"placeholder"');
+    } finally {
+      delete process.env.TAVILY_API_KEY;
+    }
+  });
 });

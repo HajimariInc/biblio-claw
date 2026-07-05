@@ -2999,6 +2999,139 @@ tail -10 data/gate-audit.jsonl | jq '.'
 
 ---
 
+## M4-F Phase 3: life-capabilities (Web 検索 + Google Drive = agent-container 経路の実行力拡張)
+
+**目的**: Phase 1 で復活した hybrid 経路と Phase 2 の gate 4 層 + 3 分類 routing の上に、**patron が「今日から欲しい」生活機能** (Web 検索 + Drive アクセス) を **agent-container 経由の MCP server として開通**する。全ての外部 HTTPS は **stdio MCP server = 独立 Node 22 子プロセス** に集約 (agent-runner の Bun で fetch しない、`oven-sh/bun#30381` 回避)。**退路** = `container_configs.mcp_servers` を空 `{}` に戻せば全 tool が即失効 (self-mod / ncl / seed の 3 経路とも DB 上書きで足りる、コード変更なしで無効化可能)。
+
+### env / secret 一覧 (Phase 3 で追加)
+
+| 項目 | 保管場所 | 値の source of truth |
+|:---|:---|:---|
+| `TAVILY_API_KEY` | local: `.env` / GKE: bootstrap 時に kubectl exec で orchestrator Pod に流し込み | `https://tavily.com/` Dashboard で発行 (無料枠 1,000 credits/月、DEN さんが手作業取得) |
+| Drive ADC token | orchestrator Pod 内 `drive-token-rotator` sidecar が 40min 周期で自動投入 (rotate 経路) | WI 経由 `gcloud auth application-default print-access-token` (cloud-platform scope、default で Drive API 動作) |
+| OneCLI secret `biblio-claw-tavily` | OneCLI vault (hostPattern=`api.tavily.com`) | `scripts/onecli-tavily-secret.sh` |
+| OneCLI secret `biblio-claw-drive` | OneCLI vault (hostPattern=`www.googleapis.com`) | `scripts/onecli-drive-secret.sh` (rotator 経由 or 手動) |
+| Drive フォルダ ACL | Drive UI で対象フォルダを GSA email に「閲覧者」共有 | DEN さん手作業 (IAM ではなく ACL、Terraform 化不可) |
+
+**agent-container 内 env は placeholder のみ**:
+
+- `container_configs.mcp_servers.tavily.env.TAVILY_API_KEY = 'placeholder'` (実 key は wire 上で OneCLI が置換)
+- `container_configs.mcp_servers.drive.env = {}` (Drive MCP server が `Bearer placeholder` を送るだけ)
+- Bash 復活後の agent で `env | grep TAVILY` を実行しても `placeholder` しか見えない (= 命題 2: secret は wire 上でだけ実体を持つ)
+
+### deploy 手順 (Phase 単位リリース型、`mcp_servers` 空で main 合流 → seed で有効化)
+
+> **重要**: Phase 3 の各 step も対話的に実行 (fail-fast の可視化が唯一のエラー検知手段)。有効化順序は **必ず (1)(2)(3)(4)(5) の後に (6)** = 「image build → sidecar rotator 起動 → OneCLI secret 投入 → Drive 共有 → seed → agent Pod 再起動」の順 (逆にすると mcp_servers 未反映のまま agent が spawn される silent failure)。
+
+1. **agent image を build + AR push** (`tavily-mcp` global pin + Drive server COPY を含む):
+   ```bash
+   ./container/build.sh m4f-p3-1
+   docker tag nanoclaw-agent:m4f-p3-1 asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p3-1
+   docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p3-1
+   ```
+2. **sidecar image を build + AR push** (`drive-rotate.sh` + `onecli-drive-secret.sh` を含む、Vertex と兼用 image):
+   ```bash
+   docker build -f Dockerfile.sidecar.vertex -t biblio-sidecar-vertex:m4f-p3-1 .
+   docker tag biblio-sidecar-vertex:m4f-p3-1 asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
+   docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
+   ```
+3. **Drive API 有効化 (1 回のみ、Terraform 化は保留)**:
+   ```bash
+   gcloud services enable drive.googleapis.com --project=hajimari-ai-hackathon-2026
+   ```
+4. **k8s manifest 更新 + rollout** (`10-orchestrator-statefulset.yaml` の 2 sidecar image tag + `nanoclaw-agent` image tag を bump):
+   ```bash
+   # image tag を m4f-p3-1 に一斉更新した状態で
+   kubectl apply -f k8s/10-orchestrator-statefulset.yaml -n biblio-claw
+   kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=180s
+   kubectl get pod biblio-orchestrator-0 -n biblio-claw -o json | jq '.spec.containers[] | .name'
+   # → orchestrator, gh-token-rotator, vertex-token-rotator, drive-token-rotator の 4 name
+   ```
+5. **OneCLI secret 投入** (Tavily は手動 1 回、Drive は sidecar 自動 + 初回加速の手動 1 回):
+   ```bash
+   # Tavily (bootstrap 用、以降は Tavily Dashboard で key regenerate 時のみ再実行)
+   TAVILY_API_KEY=tvly-... kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
+     env TAVILY_API_KEY=$TAVILY_API_KEY bash /scripts/onecli-tavily-secret.sh
+   # Drive (初回 rotation 40min gap を避ける手動 1 回、以降は sidecar が自動)
+   kubectl exec -n biblio-claw biblio-orchestrator-0 -c drive-token-rotator -- bash /scripts/onecli-drive-secret.sh
+   ```
+6. **seed 実行 + agent Pod 再起動** (`mcp_servers` を desired state に upsert):
+   ```bash
+   # local:
+   pnpm exec tsx scripts/init-hybrid-agent.ts --user-id slack:U... --slack-dm-channel-id D...
+   # GKE (wrapper 経由):
+   HYBRID_USER_ID=slack:U... HYBRID_SLACK_DM_CHANNEL_ID=D... bash scripts/init-hybrid-agent-gke.sh
+   # 反映確認 (mcp_servers 列に tavily + drive の 2 key)
+   kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
+     pnpm exec tsx scripts/q.ts data/v2.db \
+     "SELECT cc.mcp_servers FROM container_configs cc JOIN agent_groups ag ON ag.id=cc.agent_group_id WHERE ag.folder='hybrid-biblio-shisho'"
+   # 既存 agent Pod がある場合のみ強制再起動 (analyst 契約 (1) の起動時 1 回キャッシュ)
+   kubectl delete pod -l app.kubernetes.io/component=agent -n biblio-claw --ignore-not-found=true
+   ```
+7. **Drive フォルダを GSA email に共有** (DEN さん手作業):
+   - Drive UI で対象フォルダを右クリック → 共有
+   - `biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` を「閲覧者」として追加
+   - 通知メールは GSA 宛だが送信不可、無視して良い
+
+### 動作確認手順
+
+**Slack DM 2 発話 pattern** (Task 12 の HITL demo、Phase 3 完了判定):
+
+- 発話 1 (Web 検索): 「Anthropic の最新モデルリリース情報を Web で調べて」
+  - 期待: gate 分類 = `biblio-other` → hybrid agent-container → `mcp__tavily__tavily_search` → OneCLI が `api.tavily.com` に Bearer 注入 → Tavily 結果を LLM が要約
+- 発話 2 (Drive): 「Drive の [共有済みフォルダ名] のドキュメントを 1 つ要約して」
+  - 期待: gate 分類 = `biblio-other` → hybrid → `mcp__drive__drive_list_files` → 1 file の id 取得 → `mcp__drive__drive_get_file` → LLM が要約
+- 観測: `docker/kubectl logs biblio-onecli | grep -E "api.tavily.com|www.googleapis.com"` で MITM 注入経路が可視化
+- 観測: Cloud Trace で `agent.spawn` span (hybrid 経路) + `rotation.ok` ログ (drive-token-rotator の 40min 周期)
+
+**rotator 動作確認**:
+
+```bash
+kubectl logs biblio-orchestrator-0 -c drive-token-rotator -n biblio-claw --tail 20
+# → rotation.ok success "Drive ADC token refreshed" が 40min 周期で出る
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  curl -s http://localhost:10254/v1/secrets | jq '.[] | {name, hostPattern}'
+# → 4 secret: biblio-claw-gh-token / biblio-claw-vertex / biblio-claw-tavily / biblio-claw-drive
+```
+
+### 既知の罠
+
+1. **Bun 1.3.x で fetch を直接呼ぶと壊れる** (`oven-sh/bun#30381`)
+   agent-runner (Bun) 内で `fetch()` / `undici` / `node:https` で HTTPS_PROXY 経由の外部到達を試みると、CONNECT トンネル確立後の応答パースが壊れる (`response.headers` に CONNECT envelope 混入 / `response.body` に生 HTTP バイト漏洩 / keep-alive 無限ハング)。**対処**: 新規 MCP server は必ず **独立 Node 22 プロセス** として spawn する (Drive server と同流儀)。Bun 内で `fetch()` を追加する誘惑は禁物、外部 HTTPS は全て MCP server に切り出す。
+
+2. **Drive フォルダの GSA 共有忘れで 403 が返る**
+   patron が「Drive を見て」と発話 → agent が `drive_list_files` を発火 → 403 → LLM が「フォルダの共有設定を確認 (GSA email に閲覧権限があるか)」と応答。**patron 誤解しやすい**が挙動としては正常 (crash なし)。**対処**: 上記 deploy 手順 (7) で verify 前に共有追加。verify 中に踏んだ場合はその場で共有追加して再発話。
+
+3. **Tavily 無料枠 1,000 credits/月の枯渇**
+   basic search = 1 credit、advanced ≥ 1 credit。同義クエリの連打で `429` になる。**対処**: `container_configs.mcp_servers.tavily.instructions` の「連打を避けよ」が LLM に効くかを Task 12 で確認。効かなければ Tavily Dashboard で使用量確認 → 有料化 or 別 account 切替判断は DEN さん。
+
+4. **mcp_servers 変更後の agent Pod 再起動忘れ**
+   `container/agent-runner/src/config.ts:25-32` の `_config` は起動時 1 回キャッシュ。seed script 実行 → 既存 agent Pod は古い mcp_servers を保持し続ける。**対処**: 上記 deploy 手順 (6) で `kubectl delete pod -l app.kubernetes.io/component=agent -n biblio-claw` を必ず実行。初回 spawn (既存 Pod 0 個) では不要。
+
+5. **`TAVILY_API_KEY=""` 空文字での silent skip**
+   `onecli-tavily-secret.sh` の `need()` は「未設定」と「空文字設定」を同じ扱いで fail するが、`.env` 経由で `TAVILY_API_KEY=""` を書くと bash の set -a 経路で export される (= 「設定済み」扱い) 罠。**対処**: `.env` に **値なしの行** (`TAVILY_API_KEY=`) を書かず、実 key を書くか、削除する。GKE bootstrap の kubectl exec 経由でも env が空だと silent skip なので、TAVILY_API_KEY を明示 export してから叩く。
+
+6. **Drive scope 不足で 401 が返る (可能性、Task 8b で実測)**
+   `gcloud auth application-default print-access-token` の default scope は `cloud-platform`。Drive API はこの scope でも動くはずだが実測前提。もし 401/403 が出たら `onecli-drive-secret.sh` の `gcloud print-access-token` に `--scopes=https://www.googleapis.com/auth/drive.readonly` を追加。**対処**: rotator sidecar のログ (`kubectl logs ... -c drive-token-rotator`) で `rotation.failed` を継続監視、GSA 共有が済んでいるのに 403 が続くなら scope 追加を試す。
+
+### Phase 4 (progress-status) への申し送り
+
+- `container_state.current_tool` に Phase 3 の tool 名 (`mcp__tavily__tavily_search` / `mcp__drive__drive_list_files` / `mcp__drive__drive_get_file`) が **自動記録される** (PreToolUse hook `container/agent-runner/src/providers/claude.ts:158-177` は MCP tool 名も一貫捕捉)。Phase 4 での日本語文言マップ追加候補:
+  - `mcp__tavily__tavily_search` → 「Web 検索中」
+  - `mcp__drive__drive_list_files` → 「Drive フォルダ一覧を取得中」
+  - `mcp__drive__drive_get_file` → 「Drive ドキュメントを読取中」
+- **trace 相関の未完成**: agent-runner 内に MCP tool 呼出しの span 計装がゼロ = Tavily / Drive tool 呼出しは `biblio.*` span と串刺しにならない。Phase 4 で `container_state.current_tool` 変化点で host 側が span を張るか、agent-runner 内で `withMcpToolSpan` 新設するか判断。Phase 3 では受容する既知リスク。
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-f-agent-container-hybrid.prd.md` (Phase 3)
+- Source Plan: `.claude/PRPs/plans/phase-3-life-capabilities.plan.md`
+- Report: `.claude/PRPs/reports/phase-3-life-capabilities-report.md`
+- 実装: `container/mcp-servers/drive/` (自作 Drive MCP server) + `scripts/onecli-{tavily,drive}-secret.sh` + `scripts/drive-rotate.sh` + `container/Dockerfile` (tavily-mcp pin + Drive COPY) + `container/agent-runner/src/mcp-env-overlay.ts` + `scripts/init-hybrid-agent.ts:seedMcpServers` + `k8s/10-orchestrator-statefulset.yaml` (drive-token-rotator sidecar) + `Dockerfile.sidecar.vertex` (Drive script 兼用化)
+- 継承元 §M4-F Phase 1/Phase 2 (本 runbook 上部): agent-container 経路の復活 + seed script pattern + gate 4 層 + 3 分類 routing
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

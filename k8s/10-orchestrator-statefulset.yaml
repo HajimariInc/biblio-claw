@@ -369,6 +369,33 @@ spec:
               cpu: 50m
               memory: 256Mi
 
+        # ---- drive-token-rotator sidecar (M4-F Phase 3、life-capabilities) ----
+        # 40min 周期で onecli-drive-secret.sh を呼んで Drive scope の ADC token を
+        # OneCLI に投入。**image は vertex-token-rotator と同一** = build 資産の
+        # 二重メンテを回避し、Dockerfile.sidecar.vertex 側で scripts/drive-rotate.sh
+        # + scripts/onecli-drive-secret.sh も焼き込む (M4-F Phase 3 の Dockerfile 更新済)。
+        # 差分は command と env のみ:
+        #   - command: bash /scripts/drive-rotate.sh
+        #   - DRIVE_SECRET_NAME (Vertex とは別 secret)
+        # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA を impersonate。
+        # Drive API 呼出しは GSA に追加 IAM 権限を要求しない (Drive の権限は
+        # フォルダ単位 ACL、GSA email 共有が Task 12 の前提条件)。
+        - name: drive-token-rotator
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p1-1
+          command: ['bash', '/scripts/drive-rotate.sh']
+          env:
+            - { name: ONECLI_URL, value: 'http://localhost:10254' }
+            - { name: DRIVE_SECRET_NAME, value: biblio-claw-drive }
+            # Vertex と同流儀: 40min 周期で ADC TTL ~60min との margin 20min を確保。
+            - { name: ROTATE_INTERVAL_SEC, value: '2400' }
+            - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: drive-token-rotator }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+
       volumes:
         # OneCLI sidecar が生成する CA bundle を本体と共有する emptyDir。
         # OneCLI 側: /app/data/gateway/{ca.pem, ca.key} を生成
