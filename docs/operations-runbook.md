@@ -3008,10 +3008,10 @@ tail -10 data/gate-audit.jsonl | jq '.'
 | 項目 | 保管場所 | 値の source of truth |
 |:---|:---|:---|
 | Tavily API key | Secret Manager `biblio-tavily-api-key` (primary、`terraform/tavily-secret/` module 管理) / local dev の `.env` (fallback、gcloud SDK 不在時) | `https://tavily.com/` Dashboard で発行 (無料枠 1,000 credits/月、DEN さんが手作業取得 → `TF_VAR_tavily_api_key='tvly-...' terraform apply`) |
-| Drive ADC token | orchestrator Pod 内 `drive-token-rotator` sidecar が 40min 周期で自動投入 (rotate 経路) | WI 経由 `gcloud auth application-default print-access-token` (cloud-platform scope、default で Drive API 動作) |
+| Drive access token (drive.readonly scope) | orchestrator Pod 内 `drive-token-rotator` sidecar が 40min 周期で自動投入 (R4 経路 = SA 2 段 impersonation) | WI で `biblio-orchestrator@` が `biblio-google-drive-user@` を `iamcredentials:generateAccessToken` で impersonate、`iam.serviceAccountTokenCreator` binding は `terraform/iam-drive-user/` module 管理 (2026-07-06 R4 経路採用、罠 7 参照) |
 | OneCLI secret `biblio-claw-tavily` | OneCLI vault (hostPattern=`api.tavily.com`) | `scripts/onecli-tavily-secret.sh` (env → SM fallback の順で解決) |
 | OneCLI secret `biblio-claw-drive` | OneCLI vault (hostPattern=`www.googleapis.com`) | `scripts/onecli-drive-secret.sh` (rotator 経由 or 手動) |
-| Drive フォルダ ACL | Drive UI で対象フォルダを GSA email に「閲覧者」共有 | DEN さん手作業 (IAM ではなく ACL、Terraform 化不可) |
+| Drive フォルダ ACL | Drive UI で対象フォルダを `biblio-google-drive-user@...` に「閲覧者」共有 (**分離 SA、orchestrator@ には共有しない = 境界分離の要**) | DEN さん手作業 (IAM ではなく ACL、Terraform 化不可) |
 
 **agent-container 内 env は placeholder のみ**:
 
@@ -3093,9 +3093,22 @@ tail -10 data/gate-audit.jsonl | jq '.'
    # container 再起動が必須)。
    kubectl delete pod -l app.kubernetes.io/component=agent -n biblio-claw --ignore-not-found=true
    ```
-7. **Drive フォルダを GSA email に共有** (DEN さん手作業):
+7. **Terraform で R4 経路の IAM binding を宣言** (`terraform/iam-drive-user/`、rotator が drive-user SA を impersonate する権限):
+   ```bash
+   cd terraform/iam-drive-user
+   terraform init
+   terraform apply
+   cd -
+   # 確認: binding が付いたか
+   gcloud iam service-accounts get-iam-policy \
+     biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com \
+     --project=hajimari-ai-hackathon-2026 --format=yaml
+   # → bindings に serviceAccount:biblio-orchestrator@... / roles/iam.serviceAccountTokenCreator が 1 個
+   ```
+8. **Drive フォルダを 分離 SA email に共有** (DEN さん手作業):
    - Drive UI で対象フォルダを右クリック → 共有
-   - `biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` を「閲覧者」として追加
+   - `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` を「閲覧者」として追加
+   - **`biblio-orchestrator@...` には共有しない** (境界分離、orchestrator 経由の誤アクセス経路を構造的に閉じる、罠 7 の R4 経路採用の帰結)
    - 通知メールは GSA 宛だが送信不可、無視して良い
 
 ### 動作確認手順
@@ -3139,8 +3152,14 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 6. **`TAVILY_API_KEY=""` 空文字での fail-fast (silent skip ではない、既に防御済)**
    `onecli-tavily-secret.sh` の `need()` は「未設定」と「空文字設定」を同じ扱いで **loud fail** する (`[FAIL] 必須 env が未設定または空: TAVILY_API_KEY` + exit 1)。`.env` に `TAVILY_API_KEY=` の値なし行を書いてもここで止まる。**注意点**: fail-fast 経路で止まっているとはいえ、GKE bootstrap 時に `TAVILY_API_KEY` が env として orchestrator Pod に届いていないと `kubectl exec ... bash scripts/onecli-tavily-secret.sh` は毎回 need() で止まる。**対処**: `.env` に実 key を書くか (local)、kubectl exec 前に `TAVILY_API_KEY=tvly-...` を明示 export してから叩く (GKE)。
 
-7. **Drive scope 不足で 403 が返る (Task 8b 実測 2026-07-05 で確定、`--scopes=drive.readonly` 明示が必須)**
-   `gcloud auth application-default print-access-token` の default (cloud-platform scope) では Drive API が **403 PERMISSION_DENIED / insufficientPermissions** を返す。`scripts/onecli-drive-secret.sh` は `--scopes=https://www.googleapis.com/auth/drive.readonly` を明示するように修正済 (M4-F Phase 3 実装後の fixup)。**GCE account type (GKE Autopilot Pod 内 WI 経由) では `WARNING: --scopes flag may not work as expected and will be ignored for account type gce` が stderr に出るが、実測では scope 明示が effective** (warning は誤り)。**対処**: 過去 image (fixup 前) の rotator sidecar が動いていた場合は image sync で最新 script を焼き込み → 40min 周期の次 rotation で新 scope token に自動更新。即時修復には port-forward + curl PATCH で secret を手動更新可能。
+7. **Drive scope 不足で 403 が返る = R4 経路 (SA 2 段 impersonation) で恒久解決** (2026-07-05 症状発現 → 2026-07-06 R4 経路採用で確定)
+   `gcloud auth application-default print-access-token` の default (cloud-platform scope) では Drive API が **403 PERMISSION_DENIED / insufficientPermissions** を返す。当初 plan の想定では `--scopes=https://www.googleapis.com/auth/drive.readonly` を明示すれば効くはずだったが (Task 8b で反映 = commit `1cf1a97`)、**GCE account type (GKE Autopilot Pod 内 WI 経由 impersonate 経路) では `WARNING: --scopes flag may not work as expected and will be ignored for account type gce` が stderr に出て、実際に silent ignored される** (2026-07-06 実測で確定、事前の「warning は誤り、実測では effective」記述は撤回)。metadata server が返す ADC は node pool 側 scope に固定されるため **client 側 override 不可** = `--scopes` 明示は GKE では効果ゼロ。
+   **恒久対処 = R4 経路採用**:
+   (a) Drive access 専用 SA `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` を分離し、Drive フォルダ ACL はこの SA だけに共有 (orchestrator@ には共有しない = 境界分離)。
+   (b) rotator (`scripts/onecli-drive-secret.sh`) は gcloud を捨てて、metadata server → `iamcredentials.googleapis.com/v1/.../generateAccessToken` (target=drive-user@, scope=drive.readonly, lifetime=3600s) で drive.readonly scope 付き token を発行、OneCLI に PATCH。
+   (c) IAM binding は `terraform/iam-drive-user/` で `roles/iam.serviceAccountTokenCreator` を宣言 (orchestrator@ が drive-user@ を impersonate 可能)。
+   (d) keyless 維持 (SA key JSON 不要、WI + `iamcredentials` API のみ)。
+   image-sync で rotator sidecar image に新 script が焼き込まれる (`m4f-p3-2` 以降)。40min 周期の次 rotation で新経路が自動発火する。即時修復には rotator container 内で `bash /scripts/onecli-drive-secret.sh` を手動発火 or curl 直叩き経路 (§Cloud SQL Bootstrap GRANT と同流儀の緊急経路)。
 
 ### Phase 4 (progress-status) への申し送り
 
@@ -3155,7 +3174,7 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 - Source PRD: `.claude/PRPs/prds/m4/m4-f-agent-container-hybrid.prd.md` (Phase 3)
 - Source Plan: `.claude/PRPs/plans/phase-3-life-capabilities.plan.md`
 - Report: `.claude/PRPs/reports/phase-3-life-capabilities-report.md`
-- 実装: `container/mcp-servers/drive/` (自作 Drive MCP server) + `scripts/onecli-{tavily,drive}-secret.sh` + `scripts/drive-rotate.sh` + `container/Dockerfile` (tavily-mcp pin + Drive COPY) + `container/agent-runner/src/mcp-env-overlay.ts` + `scripts/init-hybrid-agent.ts:seedMcpServers` + `k8s/10-orchestrator-statefulset.yaml` (drive-token-rotator sidecar) + `Dockerfile.sidecar.vertex` (Drive script 兼用化)
+- 実装: `container/mcp-servers/drive/` (自作 Drive MCP server) + `scripts/onecli-{tavily,drive}-secret.sh` + `scripts/drive-rotate.sh` + `container/Dockerfile` (tavily-mcp pin + Drive COPY) + `container/agent-runner/src/mcp-env-overlay.ts` + `scripts/init-hybrid-agent.ts:seedMcpServers` + `k8s/10-orchestrator-statefulset.yaml` (drive-token-rotator sidecar) + `Dockerfile.sidecar.vertex` (Drive script 兼用化) + `terraform/iam-drive-user/` (R4 経路の IAM binding、2026-07-06 追加) + `terraform/tavily-secret/` (Tavily key SM 管理)
 - 継承元 §M4-F Phase 1/Phase 2 (本 runbook 上部): agent-container 経路の復活 + seed script pattern + gate 4 層 + 3 分類 routing
 
 ---
