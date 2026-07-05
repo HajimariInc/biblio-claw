@@ -3136,8 +3136,8 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 5. **`TAVILY_API_KEY=""` 空文字での fail-fast (silent skip ではない、既に防御済)**
    `onecli-tavily-secret.sh` の `need()` は「未設定」と「空文字設定」を同じ扱いで **loud fail** する (`[FAIL] 必須 env が未設定または空: TAVILY_API_KEY` + exit 1)。`.env` に `TAVILY_API_KEY=` の値なし行を書いてもここで止まる。**注意点**: fail-fast 経路で止まっているとはいえ、GKE bootstrap 時に `TAVILY_API_KEY` が env として orchestrator Pod に届いていないと `kubectl exec ... bash scripts/onecli-tavily-secret.sh` は毎回 need() で止まる。**対処**: `.env` に実 key を書くか (local)、kubectl exec 前に `TAVILY_API_KEY=tvly-...` を明示 export してから叩く (GKE)。
 
-6. **Drive scope 不足で 401 が返る (可能性、Task 8b で実測)**
-   `gcloud auth application-default print-access-token` の default scope は `cloud-platform`。Drive API はこの scope でも動くはずだが実測前提。もし 401/403 が出たら `onecli-drive-secret.sh` の `gcloud print-access-token` に `--scopes=https://www.googleapis.com/auth/drive.readonly` を追加。**対処**: rotator sidecar のログ (`kubectl logs ... -c drive-token-rotator`) で `rotation.failed` を継続監視、GSA 共有が済んでいるのに 403 が続くなら scope 追加を試す。
+6. **Drive scope 不足で 403 が返る (Task 8b 実測 2026-07-05 で確定、`--scopes=drive.readonly` 明示が必須)**
+   `gcloud auth application-default print-access-token` の default (cloud-platform scope) では Drive API が **403 PERMISSION_DENIED / insufficientPermissions** を返す。`scripts/onecli-drive-secret.sh` は `--scopes=https://www.googleapis.com/auth/drive.readonly` を明示するように修正済 (M4-F Phase 3 実装後の fixup)。**GCE account type (GKE Autopilot Pod 内 WI 経由) では `WARNING: --scopes flag may not work as expected and will be ignored for account type gce` が stderr に出るが、実測では scope 明示が effective** (warning は誤り)。**対処**: 過去 image (fixup 前) の rotator sidecar が動いていた場合は image sync で最新 script を焼き込み → 40min 周期の次 rotation で新 scope token に自動更新。即時修復には port-forward + curl PATCH で secret を手動更新可能。
 
 ### Phase 4 (progress-status) への申し送り
 

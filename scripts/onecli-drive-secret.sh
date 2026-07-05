@@ -16,10 +16,13 @@
 # Drive 版では削除、hostPattern / SECRET_NAME を差し替え)。
 #
 # ## scope 判断
-# `gcloud auth application-default print-access-token` は default で
-# `cloud-platform` scope の token を返す。Drive API は cloud-platform scope でも
-# 動作する (実測は Task 8b で確定、Phase 3 実装時点)。動かない場合は
-# `--scopes=https://www.googleapis.com/auth/drive.readonly` に切替 (下記コメント参照)。
+# `gcloud auth application-default print-access-token` の default (cloud-platform scope) は
+# **Drive API で 403 PERMISSION_DENIED / insufficientPermissions** を返す (2026-07-05 実測)。
+# したがって `--scopes=https://www.googleapis.com/auth/drive.readonly` を明示する。
+# **GCE account type (= GKE Autopilot Pod 内 WI 経由 impersonate 経路) では
+# `WARNING: --scopes flag may not work as expected and will be ignored for account type gce`
+# が stderr に出るが、実測では scope 明示が effective** (warning は誤り、Google 側 auth-library の
+# 挙動と warning が不整合)。stderr は捨てて noise を抑える。
 #
 # ## Vertex / GH との差分
 # - Vertex = aiplatform.googleapis.com (region 別 host、`vertex_host()` 経由)
@@ -87,10 +90,13 @@ secret_id() {
 ensure_secret() {
   local host token id
   host="$DRIVE_API_HOST"
-  # gcloud の stderr は捨てない (credential 破損 / permission / quota の理由が見えないと debug 不能)。
-  # ADC token 自体は stdout (= "$()") 経由でシェル変数にのみ流れる。
-  token="$(gcloud auth application-default print-access-token)" \
-    || fail "ADC アクセストークン取得に失敗 (上の gcloud エラーを確認、未ログインなら gcloud auth application-default login)"
+  # Drive scope 明示 (Task 8b 実測、2026-07-05): cloud-platform default では Drive API が
+  # 403 PERMISSION_DENIED を返すため `--scopes=drive.readonly` を明示する。stderr の GCE
+  # account type warning は harmless で捨てる (script header の scope 判断節参照)。
+  # gcloud 実 error は rc != 0 で捕捉できるため stderr 捨てても debug 可能。
+  token="$(gcloud auth application-default print-access-token \
+    --scopes=https://www.googleapis.com/auth/drive.readonly 2>/dev/null)" \
+    || fail "ADC アクセストークン取得に失敗 (未ログインなら gcloud auth application-default login。詳細は 'gcloud auth application-default print-access-token --scopes=https://www.googleapis.com/auth/drive.readonly' を stderr 込みで叩いて確認)"
   [ -n "$token" ] || fail "ADC アクセストークンが空"
   id="$(secret_id)"
   if [ -z "$id" ] || [ "$id" = "null" ]; then
