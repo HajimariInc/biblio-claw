@@ -3127,16 +3127,19 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 2. **Drive フォルダの GSA 共有忘れで 403 が返る**
    patron が「Drive を見て」と発話 → agent が `drive_list_files` を発火 → 403 → LLM が「フォルダの共有設定を確認 (GSA email に閲覧権限があるか)」と応答。**patron 誤解しやすい**が挙動としては正常 (crash なし)。**対処**: 上記 deploy 手順 (7) で verify 前に共有追加。verify 中に踏んだ場合はその場で共有追加して再発話。
 
-3. **Tavily 無料枠 1,000 credits/月の枯渇**
+3. **tavily-mcp の body auth (`api_key` field) が OneCLI header injection と非互換** (2026-07-05 実測で確定)
+   `tavily-mcp` v0.2.20 の `src/index.ts:103` は Authorization header に `Bearer ${TAVILY_API_KEY}` を送るが、同時に line 612 以降で request body にも `api_key: TAVILY_API_KEY` を埋める (search/extract/crawl/map/research 全て)。OneCLI proxy は Authorization header 置換のみで body は書き換えられないため、`env={TAVILY_API_KEY:'placeholder'}` だと body に `api_key:"placeholder"` が入って **Tavily API が 401** を返す。**対処**: `env={}` にして tavily-mcp の keyless mode (`src/index.ts:110` のログ「no TAVILY_API_KEY set; running in keyless mode. Search and extract are available」) を利用する。keyless mode では body に api_key を追加しない (`...(IS_KEYLESS ? {} : { api_key: API_KEY })`) ので OneCLI Bearer 注入だけで search + extract が成立。**crawl/map/research は keyless mode 不可** = 別途 tavily-mcp fork or 自作 stdio server (別 PRD 候補)。
+
+4. **Tavily 無料枠 1,000 credits/月の枯渇**
    basic search = 1 credit、advanced ≥ 1 credit。同義クエリの連打で `429` になる。**対処**: `container_configs.mcp_servers.tavily.instructions` の「連打を避けよ」が LLM に効くかを Task 12 で確認。効かなければ Tavily Dashboard で使用量確認 → 有料化 or 別 account 切替判断は DEN さん。
 
-4. **mcp_servers 変更後の agent Pod 再起動忘れ**
+5. **mcp_servers 変更後の agent Pod 再起動忘れ**
    `container/agent-runner/src/config.ts:25-32` の `_config` は起動時 1 回キャッシュ。seed script 実行 → 既存 agent Pod は古い mcp_servers を保持し続ける。**対処**: 上記 deploy 手順 (6) で `kubectl delete pod -l app.kubernetes.io/component=agent -n biblio-claw` を必ず実行。初回 spawn (既存 Pod 0 個) では不要。
 
-5. **`TAVILY_API_KEY=""` 空文字での fail-fast (silent skip ではない、既に防御済)**
+6. **`TAVILY_API_KEY=""` 空文字での fail-fast (silent skip ではない、既に防御済)**
    `onecli-tavily-secret.sh` の `need()` は「未設定」と「空文字設定」を同じ扱いで **loud fail** する (`[FAIL] 必須 env が未設定または空: TAVILY_API_KEY` + exit 1)。`.env` に `TAVILY_API_KEY=` の値なし行を書いてもここで止まる。**注意点**: fail-fast 経路で止まっているとはいえ、GKE bootstrap 時に `TAVILY_API_KEY` が env として orchestrator Pod に届いていないと `kubectl exec ... bash scripts/onecli-tavily-secret.sh` は毎回 need() で止まる。**対処**: `.env` に実 key を書くか (local)、kubectl exec 前に `TAVILY_API_KEY=tvly-...` を明示 export してから叩く (GKE)。
 
-6. **Drive scope 不足で 403 が返る (Task 8b 実測 2026-07-05 で確定、`--scopes=drive.readonly` 明示が必須)**
+7. **Drive scope 不足で 403 が返る (Task 8b 実測 2026-07-05 で確定、`--scopes=drive.readonly` 明示が必須)**
    `gcloud auth application-default print-access-token` の default (cloud-platform scope) では Drive API が **403 PERMISSION_DENIED / insufficientPermissions** を返す。`scripts/onecli-drive-secret.sh` は `--scopes=https://www.googleapis.com/auth/drive.readonly` を明示するように修正済 (M4-F Phase 3 実装後の fixup)。**GCE account type (GKE Autopilot Pod 内 WI 経由) では `WARNING: --scopes flag may not work as expected and will be ignored for account type gce` が stderr に出るが、実測では scope 明示が effective** (warning は誤り)。**対処**: 過去 image (fixup 前) の rotator sidecar が動いていた場合は image sync で最新 script を焼き込み → 40min 周期の次 rotation で新 scope token に自動更新。即時修復には port-forward + curl PATCH で secret を手動更新可能。
 
 ### Phase 4 (progress-status) への申し送り

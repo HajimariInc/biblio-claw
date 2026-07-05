@@ -251,25 +251,39 @@ Resolve either by:
  * 契約 3 点:
  *   1. 副作用は updateContainerConfigJson の 1 回のみ。scalar assert 直後に
  *      置き、provider/model と同流儀で isNewGroup gate 外の self-healing に載せる。
- *   2. env は placeholder のみ。実 API key と ADC token は OneCLI vault が MITM で
- *      wire 上に注入する (hostPattern api.tavily.com / www.googleapis.com)。Bash
- *      復活後の agent-container 内で env 参照しても placeholder しか見えない。
+ *   2. env は空 object (Tavily も Drive も同じ)。実 API key と ADC token は OneCLI
+ *      vault が MITM で wire 上の Authorization header に注入する。Bash 復活後の
+ *      agent-container 内で env 参照しても TAVILY_API_KEY / DRIVE token は見えない。
  *   3. instructions は日本語で書き、spawn 時に claude-md-compose 経由で CLAUDE.md
  *      にインライン合成される (patron JTBD 言語と一致させて対応品質を上げる)。
  *
- * env 設計: Tavily は TAVILY_API_KEY=placeholder のまま、Drive は env なし (空
- * object) で Drive MCP server が Authorization: Bearer placeholder を送り OneCLI
- * が実 ADC token に置換する。Drive の ADC token は drive-token-rotator sidecar が
- * 40min 周期で onecli-drive-secret.sh 経由で更新する。
+ * ## env が空 object の理由 (Tavily keyless mode 発見の経緯、2026-07-05 実測)
+ * tavily-mcp v0.2.20 の src/index.ts:103 は `Authorization: Bearer ${API_KEY}` を
+ * header に送るが、同時に line 612 以降で request body にも `api_key: API_KEY` を
+ * 埋める (search/extract/crawl/map/research 全て)。OneCLI proxy は Authorization
+ * header 置換のみで body は書き換えられないため、env=`{TAVILY_API_KEY:'placeholder'}`
+ * だと body に `api_key: "placeholder"` が入って Tavily API が 401 を返す。
+ *
+ * 一方 tavily-mcp は `process.env.TAVILY_API_KEY` が未設定なら keyless mode で
+ * 起動 (src/index.ts:110 のログ「no TAVILY_API_KEY set; running in keyless mode.
+ * Search and extract are available」)。keyless mode では body に api_key を追加
+ * しない (`...(IS_KEYLESS ? {} : { api_key: API_KEY })`)。したがって env を空に
+ * すれば OneCLI Bearer 注入だけで search + extract が成立、命題 2 (secret は
+ * wire 上でだけ実体を持つ) を完全遵守できる。
+ *
+ * Drive も同流儀で env なし = Drive MCP server が Authorization: Bearer placeholder
+ * を送り OneCLI が実 ADC token に置換。ADC token は drive-token-rotator sidecar
+ * が 40min 周期で onecli-drive-secret.sh 経由で更新する。
  */
 function seedMcpServers(agentGroupId: string): void {
   const desired: Record<string, McpServerConfig> = {
     tavily: {
       command: 'tavily-mcp',
       args: [],
-      env: {
-        TAVILY_API_KEY: 'placeholder',
-      },
+      // env は空 object。tavily-mcp v0.2.20 の keyless mode を利用して body に
+      // api_key が入るのを避け、OneCLI が Bearer header に SM 由来の実 key を
+      // 注入する経路のみで認証する (詳細は本関数の JSDoc §env が空 object の理由)。
+      env: {},
       instructions:
         'Web 検索は tavily の `tavily_search` を使え。'
         + '無料枠は月 1,000 credits なので、同義クエリの連打は避け、'
