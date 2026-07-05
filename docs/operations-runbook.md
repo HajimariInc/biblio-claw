@@ -3022,6 +3022,8 @@ tail -10 data/gate-audit.jsonl | jq '.'
 ### deploy 手順 (Phase 単位リリース型、`mcp_servers` 空で main 合流 → seed で有効化)
 
 > **重要**: Phase 3 の各 step も対話的に実行 (fail-fast の可視化が唯一のエラー検知手段)。有効化順序は **必ず (1)(2)(3)(4)(5) の後に (6)** = 「image build → sidecar rotator 起動 → OneCLI secret 投入 → Drive 共有 → seed → agent Pod 再起動」の順 (逆にすると mcp_servers 未反映のまま agent が spawn される silent failure)。
+>
+> **R4 経路の追加前提** (2026-07-06 以降): Step 5(c) (OneCLI Drive secret bootstrap) は Step 7 (`terraform/iam-drive-user/` apply) + Step 8 (Drive フォルダを分離 SA に共有) の完了が前提条件。R4 経路は `generateAccessToken` 時点で `roles/iam.serviceAccountTokenCreator` binding が必須 = binding 未設定の状態で 5(c) を叩くと 403 fail する (罠 7 参照)。**新規 / DR 環境で本 runbook を上から辿る場合、Step 7 + 8 を Step 5(c) より先に実行すること**。既存環境で Step 5(c) を単独再実行する場合は Step 7/8 済が前提のため順序通りで良い。
 
 1. **agent image を build + AR push** (`tavily-mcp` global pin + Drive server COPY を含む):
    ```bash
@@ -3035,10 +3037,13 @@ tail -10 data/gate-audit.jsonl | jq '.'
    docker tag biblio-sidecar-vertex:m4f-p3-1 asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
    docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
    ```
-3. **Drive API 有効化 (1 回のみ、Terraform 化は保留)**:
+3. **Drive API + IAM Credentials API 有効化 (1 回のみ、両 API とも Terraform 化は保留 = project レベルで gcloud + 手動管理)**:
    ```bash
-   gcloud services enable drive.googleapis.com --project=hajimari-ai-hackathon-2026
+   gcloud services enable drive.googleapis.com iamcredentials.googleapis.com \
+     --project=hajimari-ai-hackathon-2026
    ```
+   - `drive.googleapis.com`: agent-container の Drive MCP server が叩く Drive REST API
+   - `iamcredentials.googleapis.com`: R4 経路の Step 5(c) rotator sidecar が `generateAccessToken` を呼ぶために必須 (2026-07-06 追加)
 4. **k8s manifest 更新 + rollout** (`10-orchestrator-statefulset.yaml` の 2 sidecar image tag + `nanoclaw-agent` image tag を bump):
    ```bash
    # image tag を m4f-p3-1 に一斉更新した状態で
@@ -3137,8 +3142,8 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 1. **Bun 1.3.x で fetch を直接呼ぶと壊れる** (`oven-sh/bun#30381`)
    agent-runner (Bun) 内で `fetch()` / `undici` / `node:https` で HTTPS_PROXY 経由の外部到達を試みると、CONNECT トンネル確立後の応答パースが壊れる (`response.headers` に CONNECT envelope 混入 / `response.body` に生 HTTP バイト漏洩 / keep-alive 無限ハング)。**対処**: 新規 MCP server は必ず **独立 Node 22 プロセス** として spawn する (Drive server と同流儀)。Bun 内で `fetch()` を追加する誘惑は禁物、外部 HTTPS は全て MCP server に切り出す。
 
-2. **Drive フォルダの GSA 共有忘れで 403 が返る**
-   patron が「Drive を見て」と発話 → agent が `drive_list_files` を発火 → 403 → LLM が「フォルダの共有設定を確認 (GSA email に閲覧権限があるか)」と応答。**patron 誤解しやすい**が挙動としては正常 (crash なし)。**対処**: 上記 deploy 手順 (7) で verify 前に共有追加。verify 中に踏んだ場合はその場で共有追加して再発話。
+2. **Drive フォルダの分離 SA 共有忘れで 403 が返る**
+   patron が「Drive を見て」と発話 → agent が `drive_list_files` を発火 → 403 → LLM が「フォルダの共有設定を確認 (`biblio-google-drive-user@...` に閲覧権限があるか)」と応答。**patron 誤解しやすい**が挙動としては正常 (crash なし)。**対処**: 上記 deploy 手順 (8) で verify 前に `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` (分離 SA、**`biblio-orchestrator@` ではない**) に閲覧者として追加。verify 中に踏んだ場合はその場で共有追加して再発話。
 
 3. **tavily-mcp の body auth (`api_key` field) が OneCLI header injection と非互換** (2026-07-05 実測で確定)
    `tavily-mcp` v0.2.20 の `src/index.ts:103` は Authorization header に `Bearer ${TAVILY_API_KEY}` を送るが、同時に line 612 以降で request body にも `api_key: TAVILY_API_KEY` を埋める (search/extract/crawl/map/research 全て)。OneCLI proxy は Authorization header 置換のみで body は書き換えられないため、`env={TAVILY_API_KEY:'placeholder'}` だと body に `api_key:"placeholder"` が入って **Tavily API が 401** を返す。**対処**: `env={}` にして tavily-mcp の keyless mode (`src/index.ts:110` のログ「no TAVILY_API_KEY set; running in keyless mode. Search and extract are available」) を利用する。keyless mode では body に api_key を追加しない (`...(IS_KEYLESS ? {} : { api_key: API_KEY })`) ので OneCLI Bearer 注入だけで search + extract が成立。**crawl/map/research は keyless mode 不可** = 別途 tavily-mcp fork or 自作 stdio server (別 PRD 候補)。
