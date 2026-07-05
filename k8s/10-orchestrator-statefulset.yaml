@@ -212,12 +212,18 @@ spec:
             # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
             - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
             - { name: FUGUE_HTTP_PORT, value: '8080' }
-            # === M4-F Phase 2 gate agent (既定 OFF、GKE 有効化は別 apply で管理) ===
-            # gate 4 層 (pattern → escape → XML → LLM evaluator) は既定 OFF で
-            # main 合流可能な退路を担保 (Phase 単位リリース型 継承)。GKE 有効化は
-            # `kubectl set env statefulset/biblio-orchestrator GATE_ENABLED=true` +
-            # `messaging_group_agents` 両 wire 確立 の順 (詳細: runbook §M4-F Phase 2)。
-            - { name: GATE_ENABLED, value: 'false' }
+            # === M4-F Phase 2 gate agent (Phase 3 以降 GKE 常時 true 運用) ===
+            # gate 4 層 (pattern → escape → XML → LLM evaluator) の 3 分類 routing
+            # (biblio-adk / biblio-other / in-secure)。**GKE Prod は Phase 3 (2026-07-05)
+            # で kubectl set env で有効化して以降、両 wire (ADK + hybrid) 前提で稼働**。
+            # PR #145 で判明した罠 (kubectl apply -f k8s/ が manifest 内容で spec を上書き
+            # → kubectl set env で入れた true が消える regression) を受けて manifest 既定
+            # を 'true' に恒久化 (2026-07-06)。**GATE_ENABLED=false は「ADK / hybrid の
+            # どちらか片方だけが wire される単一 provider 運用時のみ」で使う設定**
+            # (詳細: runbook §M4-F Phase 2 §GATE_ENABLED 運用条件)。
+            # image-sync script (init-project-gcp-image-sync.sh) は本 env を preserve/restore
+            # する二重保険を持つ (kubectl set env で override した値が deploy で消える罠を防ぐ)。
+            - { name: GATE_ENABLED, value: 'true' }
             - { name: GATE_MODEL, value: gemini-3.1-flash-lite }
             # `.jsonl` local fallback は GKE では emptyDir にしか書けず永続化されない
             # (Pod 再起動で消失)。GCP は Cloud Logging → BQ sink が主経路のため
