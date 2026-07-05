@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4f-p1-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4f-p3-1
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p1-1,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p3-1,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -304,7 +304,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4f-p1-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4f-p3-1
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -350,7 +350,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p1-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -364,6 +364,36 @@ spec:
             - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: vertex-token-rotator }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+
+        # ---- drive-token-rotator sidecar (M4-F Phase 3、life-capabilities) ----
+        # 40min 周期で onecli-drive-secret.sh を呼んで Drive scope の ADC token を
+        # OneCLI に投入。**image は vertex-token-rotator と同一** = build 資産の
+        # 二重メンテを回避し、Dockerfile.sidecar.vertex 側で scripts/drive-rotate.sh
+        # + scripts/onecli-drive-secret.sh も焼き込む (M4-F Phase 3 の Dockerfile 更新済)。
+        # 差分は command と env のみ:
+        #   - command: bash /scripts/drive-rotate.sh
+        #   - DRIVE_SECRET_NAME (Vertex とは別 secret)
+        # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA を impersonate。
+        # Drive API 呼出しは GSA に追加 IAM 権限を要求しない (Drive の権限は
+        # フォルダ単位 ACL、GSA email 共有が Task 12 の前提条件)。
+        # image tag: 下記 `m4f-p1-1` は Phase 1 由来の placeholder。deploy 前に必ず
+        # runbook §M4-F Phase 3 §deploy 手順 (2) で `m4f-p3-1` 等へ bump + push すること
+        # (Dockerfile.sidecar.vertex 側で drive script を焼き込む rebuild が前提)。
+        - name: drive-token-rotator
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
+          command: ['bash', '/scripts/drive-rotate.sh']
+          env:
+            - { name: ONECLI_URL, value: 'http://localhost:10254' }
+            - { name: DRIVE_SECRET_NAME, value: biblio-claw-drive }
+            # Vertex と同流儀: 40min 周期で ADC TTL ~60min との margin 20min を確保。
+            - { name: ROTATE_INTERVAL_SEC, value: '2400' }
+            - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: drive-token-rotator }
           resources:
             requests:
               cpu: 50m

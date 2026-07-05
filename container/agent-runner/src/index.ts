@@ -33,6 +33,7 @@ import { context } from '@opentelemetry/api';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
+import { extractProxyEnv, overlayServerEnv } from './mcp-env-overlay.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
@@ -92,8 +93,18 @@ async function mainInner(): Promise<void> {
     },
   };
 
+  // M4-F Phase 3: container の実 proxy env (K8s 経路で cluster DNS 済) を各 mcp
+  // server の env に overlay する。Claude Agent SDK 公式 troubleshooting が「stdio
+  // server の env は親プロセスから継承せず明示せよ」と明記しているため、
+  // HTTPS_PROXY / NODE_EXTRA_CA_CERTS 等を明示 pass する必要がある。
+  // serverConfig.env が優先 (= seed 時の意図的 override を破壊しない)。
+  const proxyEnv = extractProxyEnv(process.env);
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-    mcpServers[name] = serverConfig;
+    mcpServers[name] = {
+      command: serverConfig.command,
+      args: serverConfig.args ?? [],
+      env: overlayServerEnv(serverConfig, proxyEnv),
+    };
     log.info(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
 

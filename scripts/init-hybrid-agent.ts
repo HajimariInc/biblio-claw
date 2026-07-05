@@ -32,9 +32,10 @@ import path from 'path';
 import { pathToFileURL } from 'node:url';
 
 import { DATA_DIR } from '../src/config.js';
+import type { McpServerConfig } from '../src/container-config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
-import { updateContainerConfigScalars } from '../src/db/container-configs.js';
+import { updateContainerConfigJson, updateContainerConfigScalars } from '../src/db/container-configs.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -243,6 +244,72 @@ Resolve either by:
   console.log(`Wired Slack DM: ${dmMg.id} -> ${ag.id}`);
 }
 
+/**
+ * hybrid group の container_configs.mcp_servers を desired state に upsert する
+ * (M4-F Phase 3)。
+ *
+ * 契約 3 点:
+ *   1. 副作用は updateContainerConfigJson の 1 回のみ。scalar assert 直後に
+ *      置き、provider/model と同流儀で isNewGroup gate 外の self-healing に載せる。
+ *   2. env は空 object (Tavily も Drive も同じ)。実 API key と ADC token は OneCLI
+ *      vault が MITM で wire 上の Authorization header に注入する。Bash 復活後の
+ *      agent-container 内で env 参照しても TAVILY_API_KEY / DRIVE token は見えない。
+ *   3. instructions は日本語で書き、spawn 時に claude-md-compose 経由で CLAUDE.md
+ *      にインライン合成される (patron JTBD 言語と一致させて対応品質を上げる)。
+ *
+ * ## env が空 object の理由 (Tavily keyless mode 発見の経緯、2026-07-05 実測)
+ * tavily-mcp v0.2.20 の src/index.ts:103 は `Authorization: Bearer ${API_KEY}` を
+ * header に送るが、同時に line 612 以降で request body にも `api_key: API_KEY` を
+ * 埋める (search/extract/crawl/map/research 全て)。OneCLI proxy は Authorization
+ * header 置換のみで body は書き換えられないため、env=`{TAVILY_API_KEY:'placeholder'}`
+ * だと body に `api_key: "placeholder"` が入って Tavily API が 401 を返す。
+ *
+ * 一方 tavily-mcp は `process.env.TAVILY_API_KEY` が未設定なら keyless mode で
+ * 起動 (src/index.ts:110 のログ「no TAVILY_API_KEY set; running in keyless mode.
+ * Search and extract are available」)。keyless mode では body に api_key を追加
+ * しない (`...(IS_KEYLESS ? {} : { api_key: API_KEY })`)。したがって env を空に
+ * すれば OneCLI Bearer 注入だけで search + extract が成立、命題 2 (secret は
+ * wire 上でだけ実体を持つ) を完全遵守できる。
+ *
+ * Drive も同流儀で env なし = Drive MCP server が Authorization: Bearer placeholder
+ * を送り OneCLI が実 ADC token に置換。ADC token は drive-token-rotator sidecar
+ * が 40min 周期で onecli-drive-secret.sh 経由で更新する。
+ */
+function seedMcpServers(agentGroupId: string): void {
+  const desired: Record<string, McpServerConfig> = {
+    tavily: {
+      command: 'tavily-mcp',
+      args: [],
+      // env は空 object。tavily-mcp v0.2.20 の keyless mode を利用して body に
+      // api_key が入るのを避け、OneCLI が Bearer header に SM 由来の実 key を
+      // 注入する経路のみで認証する (詳細は本関数の JSDoc §env が空 object の理由)。
+      env: {},
+      instructions:
+        'Web 検索は tavily の `tavily_search` を使え。'
+        + '無料枠は月 1,000 credits なので、同義クエリの連打は避け、'
+        + '複雑な調査は 1 リクエストで済ませる形に整えろ。'
+        + '結果は多くとも 3-5 件に絞り、要約して patron に返せ。'
+        + '生の JSON をそのまま貼らない。',
+    },
+    drive: {
+      command: 'node',
+      args: ['/opt/mcp-servers/drive/index.mjs'],
+      env: {},
+      instructions:
+        'Google Drive は `drive_list_files` (フォルダ内一覧) / '
+        + '`drive_get_file` (ファイル内容取得) を使え。'
+        + 'DEN さんが GSA `biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` に'
+        + '「閲覧者」として共有した Drive フォルダのみアクセス可能。'
+        + 'それ以外は 403 が返るため、その旨を patron に明示し、共有依頼を促せ。'
+        + 'Google Docs は自動的に text 化される、Binary ファイルは 5 MiB まで。',
+    },
+  };
+  updateContainerConfigJson(agentGroupId, 'mcp_servers', desired);
+  console.log(
+    `Ensured container_config.mcp_servers: tavily (Web 検索) + drive (Google Drive、env=placeholder)`,
+  );
+}
+
 export interface SeedResult {
   agent_group_id: string;
   folder: string;
@@ -343,6 +410,12 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
     model: 'claude-sonnet-4-6',
   });
   console.log(`Ensured container_config: provider=null (claude fallback), model='claude-sonnet-4-6'`);
+
+  // M4-F Phase 3: mcp_servers を Tavily + Drive で idempotent assert。
+  // provider/model scalar と同流儀で isNewGroup gate 外 = self-healing。
+  // 実 API key / ADC token は OneCLI vault が MITM 経由で wire 上に置換するため、
+  // env は placeholder のみを持たせる (Bash 復活後の /proc/*/environ 読み取り漏洩を撲滅)。
+  seedMcpServers(ag.id);
 
   // 3. Membership row (owner is implicit via user_roles、これは access ゲート用)。
   //    init-first-agent.ts:270-275 と同流儀の `INSERT OR IGNORE`。
