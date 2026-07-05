@@ -54,6 +54,7 @@ import { isFinalResponse } from '@google/adk';
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import { log } from '../log.js';
 import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
+import { emitAdkToolStatus } from '../modules/progress-status/index.js';
 
 import { buildRootAgent } from './root-agent.js';
 import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
@@ -245,6 +246,21 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
           });
           break;
         }
+      }
+
+      // M4-F Phase 4: 通常 tool 呼出 (HITL 以外) を event.content.parts から検知し、
+      // Slack assistant status 欄を tool 名の日本語文言に書き換える。ADK は session 概念なし =
+      // adapter 直呼びで一発発射 (event 間隔は数秒 = Slack 2 分自動クリア余裕内、refresh loop 不要)。
+      //
+      // - `adk_request_confirmation` は HITL wrapper で以下の longRunningIds 分岐が処理する = skip
+      // - `fc.name` は adk-js が構築する ADK ネイティブ tool 名 (mcp__ prefix なし、biblio 9 tool)。
+      //   tool-status-map.ts の ADK_BIBLIO_STATUS 分岐で対応、未知 tool は generic fallback。
+      // - `void` fire-and-forget: event stream 消費を数百 ms 遅らせない (best-effort 契約)。
+      const eventParts = event.content?.parts ?? [];
+      for (const part of eventParts) {
+        const fc = part.functionCall;
+        if (!fc?.name || fc.name === 'adk_request_confirmation') continue;
+        void emitAdkToolStatus(channelType, platformId, threadId, fc.name);
       }
 
       // Phase 4: HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)

@@ -45,7 +45,10 @@ const HEARTBEAT_FRESH_MS = 6000;
 const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  // M4-F Phase 4: `status` 引数追加。日本語の進行ステート文言 (「Web 検索中」等) を
+  // vendor 経由で Slack `assistant.threads.setStatus` に forward する。undefined → vendor
+  // default (`"Typing..."`)、非空 string → カスタム文言、null → clear 相当。
+  setTyping?(channelType: string, platformId: string, threadId: string | null, status?: string | null): Promise<void>;
 }
 
 interface TypingTarget {
@@ -56,6 +59,12 @@ interface TypingTarget {
   interval: NodeJS.Timeout;
   startedAt: number;
   pausedUntil: number; // epoch ms; 0 = not paused
+  /**
+   * M4-F Phase 4: 現在の progress-status 文言。updateTypingStatus で書き換えられ、
+   * refresh loop の 4s tick が毎回 vendor に forward する (Slack 側 2 分自動クリア回避 +
+   * status 継続表示)。null = 未設定 (vendor 側 default 文言に fallback)。
+   */
+  currentStatus: string | null;
 }
 
 let adapter: TypingAdapter | null = null;
@@ -72,9 +81,16 @@ export function setTypingAdapter(a: TypingAdapter): void {
   adapter = a;
 }
 
-async function triggerTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
+async function triggerTyping(
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+  status: string | null,
+): Promise<void> {
   try {
-    await adapter?.setTyping?.(channelType, platformId, threadId);
+    // M4-F Phase 4: `status ?? undefined` で null → undefined 正規化 (vendor 側は
+    // undefined を `"Typing..."` fallback、null は明示クリア相当だが vendor 実装依存)。
+    await adapter?.setTyping?.(channelType, platformId, threadId, status ?? undefined);
   } catch {
     // Typing is best-effort — don't let it fail delivery or routing.
   }
@@ -104,14 +120,17 @@ export function startTypingRefresh(
     // the container-wake latency budget. Also clear any lingering
     // post-delivery pause: a new inbound means the user expects
     // typing to show immediately.
-    triggerTyping(channelType, platformId, threadId).catch(() => {});
+    //
+    // M4-F Phase 4: 直近 status を維持したまま refresh 再開 (新 inbound で status を
+    // リセットしない = poller が次 tick で新しい tool 名を反映する)。
+    triggerTyping(channelType, platformId, threadId, existing.currentStatus).catch(() => {});
     existing.startedAt = Date.now();
     existing.pausedUntil = 0;
     return;
   }
 
-  // Immediate tick + periodic refresh.
-  triggerTyping(channelType, platformId, threadId).catch(() => {});
+  // Immediate tick + periodic refresh. 初回は status なし (null) で vendor default 文言。
+  triggerTyping(channelType, platformId, threadId, null).catch(() => {});
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
@@ -124,7 +143,7 @@ export function startTypingRefresh(
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId).catch(() => {});
+      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.currentStatus).catch(() => {});
       return;
     }
 
@@ -142,7 +161,30 @@ export function startTypingRefresh(
     interval,
     startedAt,
     pausedUntil: 0,
+    currentStatus: null,
   });
+}
+
+/**
+ * M4-F Phase 4: active な typing refresh の現在 status を書き換える。
+ *
+ * refresh loop の次 4s tick が新 status を vendor に forward するが、UX 反応性のため
+ * 「変化検知点で 1 回即発火」も併用する。**同値時 no-op は rate limit ガードの主機構** =
+ * poller が 1s tick で呼び出しても、tool 未変化なら追加 API 呼出しなし。
+ *
+ * Contract:
+ *   - session が typingRefreshers に居ない場合 (未起動 / stop 済) は no-op で throw しない
+ *   - 前値と同一 status は no-op (rate limit 節約)
+ *   - null → 非 null、非 null → null、A → B の遷移は即 1 回発火
+ *   - refresh loop の 4s tick が currentStatus を毎回 forward (Slack 2 分自動クリア回避)
+ */
+export function updateTypingStatus(sessionId: string, status: string | null): void {
+  const entry = typingRefreshers.get(sessionId);
+  if (!entry) return;
+  if (entry.currentStatus === status) return;
+  entry.currentStatus = status;
+  // 即発火: 次の 4s tick を待たず変化点で 1 回送信 (UX 反応性)
+  triggerTyping(entry.channelType, entry.platformId, entry.threadId, status).catch(() => {});
 }
 
 /**

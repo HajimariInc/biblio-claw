@@ -3160,6 +3160,86 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 
 ---
 
+## M4-F Phase 4 progress-status (Slack 進行ステート表示)
+
+多段処理 (gate 分類 → container 起動 → tool 実行) の進行を、Slack `assistant.threads.setStatus` 経由で 1 つの status 欄を書き換え続ける形で patron に見せる。既存 4 秒 refresh 機構を温存したまま、`container_state.current_tool` を 1s tick で読み → tool 名を日本語文言に変換 → refresh loop の `currentStatus` を書き換えることで実現。ADK 経路 (biblio 業務) にも同一の tool-status-map で status を出す。
+
+### 動作確認手順
+
+**local docker**:
+
+```bash
+# 1. biblio-claw を local で起動 (Phase 3 のセットアップに準拠)
+docker compose up -d --wait
+bash scripts/onecli-vertex-secret.sh
+bash scripts/onecli-gh-secret.sh
+bash scripts/onecli-tavily-secret.sh
+bash scripts/onecli-drive-secret.sh
+
+# 2. Slack DM 実接続で発話 (biblio-local workspace の DEN さん DM で以下を順に発話)
+#    2a. 「@bot foo/bar を仕入れて」 → status 欄が「分類中 → 仕入れ中 → (応答で自動クリア)」
+#    2b. 「@bot Node.js の最新版を Web で調べて」 → status 欄が「分類中 → container 起動中 → Web 検索中 → (応答で自動クリア)」
+#    2c. 「@bot Drive の M4-F 資料を見て」 → status 欄が「分類中 → container 起動中 → ファイル参照中 → (応答で自動クリア)」
+```
+
+**GKE Prod**:
+
+```bash
+# 1. image tag sync + k8s apply (Phase 3 と同じ手順)
+IMAGE_TAG=m4f-p4-1 bash scripts/deploy-gke.sh
+
+# 2. Slack DM 実接続で発話 (biblio-slack-app workspace の DEN さん DM)
+#    2a-2c は local と同内容
+```
+
+**目視 assertion 6 点**:
+
+- gate 発火直前に「分類中...」が出る (~1-3s)
+- container 起動中に「container 起動中...」に切り替わる (~10-15s、cold start 時)
+- tool 実行中に日本語文言に切り替わる (「仕入れ中」「Web 検索中」「ファイル参照中」等)
+- 実応答本文が来た時点で status 欄が自動クリア
+- ADK 経路 (biblio 業務) でも status 欄が動く
+- 数十秒〜1 分待っても status が消えない (2 分自動クリア手前で refresh が効いている)
+
+### 既知の罠
+
+1. **Slack rate limit 600/min = app+team 単位の共有枠**。単独 session の 4s refresh は 15/min で余裕、同時 ~40 session で天井到達。`updateTypingStatus` の変化時 no-op が主機構 (`typing/index.ts:updateTypingStatus` の `entry.currentStatus === status` 早期 return)。**この判定を落とすと同じ status を 1s poll ごとに再送する暴走経路**になる (dblock.org 2026-03-12 全断事例と同種)。
+
+2. **2 分自動クリアの回避には 4 秒 refresh 温存が必須**。`startTypingRefresh` の 4s tick は Phase 4 で touch していない (signature 拡張のみ)。refresh 停止 (`stopTypingRefresh`) 経路は unchanged。
+
+3. **ADK 経路の event 間隔は数秒想定**。super 長時間 tool 呼出 (>2 min) が来ると Slack 2 分クリアに引っかかる → 現状の biblio 9 tool は数秒〜十数秒で完了 = 余裕あり。将来 tool 実行時間が伸びた場合は ADK 経路にも refresh loop 拡張検討 (現状 out-of-scope)。
+
+4. **container-runner.ts は Phase 4 で touch していない**。元 plan は container-runner.ts:196 で `emitPreSpawnStatus` 直呼び予定だったが、既に `startTypingRefresh` 済の状態と競合する (refresh loop の `currentStatus=null` が次 4s tick で status を上書きしてしまう) ため、代わりに `router.ts:759` の `startTypingRefresh` 直後で `updateTypingStatus(session.id, 'container 起動中')` を発射する設計に変更。**副作用**: wakeContainer signature 拡張 (5 呼出元触り) が不要になった、routing 情報の伝搬経路も追加不要 = 変更範囲最小。
+
+5. **CLI / Fugue channel は setTyping 未実装のまま**。`emitPreSpawnStatus` / `updateTypingStatus` / poller 経路は全て adapter?.setTyping で silent skip する = CLI 経路の verify (`verify-m4-b.sh`) は status 表示を assert しない。Fugue 経路は 200 同期 request-response 型で typing 概念自体が存在しない。
+
+6. **Slack App scope**: 現行 `assistant:write` で動作継続。2026-03-05 の `chat:write` 緩和は将来のクリーンアップ課題 (M4-F Phase 4 の技術スコープ外)。scope 未取得だと `assistant.threads.setStatus` が 401 を返す = adapter 側で catch されて silent skip (routing 継続)。**早期検出**: local smoke で 6 assertion のうち「分類中」が出ないなら scope 疑い。
+
+### rate limit / 障害監視
+
+Cloud Logging の下記 event を集計する:
+
+| event | 意味 | 対処 |
+| :--- | :--- | :--- |
+| `progress.status.pre_spawn` (debug) | 初回 spawn 前の poller ENOENT (正常) | 対処不要 |
+| `progress.status.db_open_failed` (warn) | outbound.db open が EACCES / EMFILE 等 | I/O 障害 = 早期検出 |
+| `progress.status.refresh_failed` (warn) | refreshProgressStatus が unexpected throw | code bug = 調査 |
+| `progress.status.pre_spawn.no_adapter` (debug) | channelType が setTyping 未実装 (CLI / Fugue) | 対処不要 |
+| `progress.status.pre_spawn.failed` (warn) | adapter.setTyping が throw (429 / 401 等) | 頻度で判断: 稀→無視、恒常→scope / rate limit 疑い |
+
+### PRD 記述との乖離
+
+- **`mcp__web_search__*` (PRD §247)** vs 実サーバ名 `tavily`: 実装は Phase 3 で `tavily` として確定 = tool-status-map は `tavily` を採用。PRD の記述は Phase 5 verify or PRD revision 時に修正候補として残置。
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-f-agent-container-hybrid.prd.md` (Phase 4)
+- Source Plan: `.claude/PRPs/plans/phase-4-progress-status.plan.md` (Phase 完了時 completed/ に move)
+- 実装: `src/modules/progress-status/` (poller / tool-status-map / pre-spawn) + `src/modules/typing/index.ts` (updateTypingStatus + currentStatus) + `src/channels/{adapter,chat-sdk-bridge}.ts` (setTyping signature 拡張) + `src/delivery.ts` (pollActive 相乗り) + `src/router.ts` (gate 前 emitPreSpawnStatus + wake 後 updateTypingStatus) + `src/adk/dispatcher.ts` (event loop に emitAdkToolStatus)
+- 継承元 §M4-F Phase 1/2/3: agent-container 経路 + gate 3 分類 + Phase 3 tool 名
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

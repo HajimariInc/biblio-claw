@@ -133,7 +133,12 @@ export interface ChannelAdapter {
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
   // Optional
-  setTyping?(platformId: string, threadId: string | null): Promise<void>;
+  //
+  // M4-F Phase 4: `status` 引数追加。undefined → vendor 側の default (`"Typing..."`)、
+  // 非空 string → assistant status 欄に表示する日本語文言 (「Web 検索中」等)、
+  // null → 明示クリア相当 (vendor 実装依存)。既存 adapter (CLI / Fugue) は本メソッド
+  // 未実装のため optional のまま変更なし = 影響ゼロ。
+  setTyping?(platformId: string, threadId: string | null, status?: string | null): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;
 

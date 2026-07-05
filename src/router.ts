@@ -34,7 +34,8 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
+import { emitPreSpawnStatus } from './modules/progress-status/index.js';
+import { startTypingRefresh, stopTypingRefresh, updateTypingStatus } from './modules/typing/index.js';
 import { log } from './log.js';
 import { notifyAdmin } from './modules/approvals/notify-admin.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
@@ -314,6 +315,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // fallback は既に biblio-other に倒れるため throw は本来稀ケース = catch は保険。
   let gateResult: GateResult | null = null;
   if (isGateEnabled() && willAnyAgentAct) {
+    // M4-F Phase 4: 分類前に「分類中」status を出す。session 未確定な pre-spawn 区間の
+    // 一発発射 (fire-and-forget、adapter 直呼び)。gate 通過後は session 確定 → 既存の
+    // startTypingRefresh + updateTypingStatus 経路 (router.ts:759 以降) に引き継がれる。
+    void emitPreSpawnStatus(event.channelType, event.platformId, event.threadId, '分類中');
     try {
       gateResult = await withGateSpan(messageText, async (span) => {
         const result = await evaluateGate(messageText);
@@ -757,6 +762,14 @@ async function deliverToAgent(
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
     startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
+    // M4-F Phase 4: cold start ~10-15s 区間の可視化。startTypingRefresh 直後に
+    // updateTypingStatus で currentStatus を「container 起動中」に設定 = 4s refresh loop
+    // が新 status を forward し、以降 poller が container_state.current_tool を読んで
+    // 上書きする (tool 発火時点で「container 起動中」→ tool 名日本語文言に遷移)。
+    // 逸脱 note: 元 plan は container-runner.ts:196 で emitPreSpawnStatus 直呼びだったが、
+    // それは refresh loop の currentStatus=null と競合する (次 4s tick で default 文言に
+    // 上書きされる)。router 側で updateTypingStatus を使うことで refresh loop に載せる。
+    updateTypingStatus(session.id, 'container 起動中');
     const freshSession = getSession(session.id);
     if (freshSession) {
       const woke = await wakeContainer(freshSession);

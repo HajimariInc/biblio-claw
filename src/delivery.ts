@@ -23,6 +23,7 @@ import {
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import { refreshProgressStatus } from './modules/progress-status/poller.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
@@ -58,7 +59,16 @@ export interface ChannelDeliveryAdapter {
     content: string,
     files?: OutboundFile[],
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  // M4-F Phase 4: `status` 引数追加。呼出元 (typing/index.ts の triggerTyping) は
+  // TypingTarget.currentStatus を forward し、chat-sdk-bridge が vendor Adapter.startTyping
+  // に転送する。undefined → vendor default (`"Typing..."`)、非空 string → assistant status
+  // 欄の日本語文言、null → clear 相当。
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    status?: string | null,
+  ): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -125,6 +135,17 @@ async function pollActive(): Promise<void> {
     const sessions = getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // M4-F Phase 4: container_state.current_tool を 1s poll で読んで typing status を更新。
+      // deliverSessionMessages と直列で問題ない (inflightDeliveries は delivery 用の別集合、
+      // refreshProgressStatus は同期実行 + updateTypingStatus の変化時 no-op で吸収)。
+      // best-effort: progress-status failure は delivery を殺さない。
+      await refreshProgressStatus(session).catch((err) => {
+        log.warn('progress-status refresh failed', {
+          event: 'progress.status.refresh_failed',
+          session_id: session.id,
+          err,
+        });
+      });
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });

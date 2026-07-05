@@ -549,9 +549,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
     },
 
-    async setTyping(platformId: string, threadId: string | null) {
+    async setTyping(platformId: string, threadId: string | null, status?: string | null) {
       const tid = threadId ?? platformId;
-      await adapter.startTyping(tid);
+      // M4-F Phase 4: vendor `Adapter.startTyping(tid, status?)` は @chat-adapter/slack@4.14.0
+      // で status 引数対応済、4.30.0 (pin) まで CHANGELOG 上変更なし。null は Slack 側の
+      // 「明示クリア」相当だが vendor はそこまで抽象化していないため、undefined に正規化して
+      // 既存 `"Typing..."` fallback 挙動を温存する。
+      await adapter.startTyping(tid, status ?? undefined);
     },
 
     async teardown() {
