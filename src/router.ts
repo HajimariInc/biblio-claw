@@ -34,8 +34,8 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { emitPreSpawnStatus } from './modules/progress-status/index.js';
-import { startTypingRefresh, stopTypingRefresh, updateTypingStatus } from './modules/typing/index.js';
+import { emitPreSpawnStatus, PIPELINE_STATUS } from './modules/progress-status/index.js';
+import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { notifyAdmin } from './modules/approvals/notify-admin.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
@@ -317,8 +317,23 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   if (isGateEnabled() && willAnyAgentAct) {
     // M4-F Phase 4: 分類前に「分類中」status を出す。session 未確定な pre-spawn 区間の
     // 一発発射 (fire-and-forget、adapter 直呼び)。gate 通過後は session 確定 → 既存の
-    // startTypingRefresh + updateTypingStatus 経路 (router.ts:759 以降) に引き継がれる。
-    void emitPreSpawnStatus(event.channelType, event.platformId, event.threadId, '分類中');
+    // startTypingRefresh の initialStatus='container 起動中' 経路 (下の deliverToAgent
+    // wake 分岐) に引き継がれる。文言は PIPELINE_STATUS に集約 (tool-status-map.ts)。
+    // silent-failure-hunter IM-5 対応: fire-and-forget の unhandledRejection を撲滅する
+    // ため明示 `.catch()` を挿入 (現状 emitPreSpawnStatus は throw しない契約だが、
+    // dispatcher.ts:emitAdkToolStatus の S3 と同流儀の防衛)。
+    void emitPreSpawnStatus(
+      event.channelType,
+      event.platformId,
+      event.threadId,
+      PIPELINE_STATUS.GATE_CLASSIFYING,
+    ).catch((err) => {
+      log.warn('emitPreSpawnStatus unexpected throw', {
+        event: 'progress.status.pre_spawn.dispatch_failed',
+        channel_type: event.channelType,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
     try {
       gateResult = await withGateSpan(messageText, async (span) => {
         const result = await evaluateGate(messageText);
@@ -766,13 +781,14 @@ async function deliverToAgent(
     // 明示化する。以降は poller が container_state.current_tool を読んで tool 名日本語
     // 文言に遷移する。かつて分離していた updateTypingStatus 呼出は Slack API 到達順の
     // race (「Typing...」が後勝ち) を招くため、initialStatus 経由の 1 発集約に変更。
+    // 文言は PIPELINE_STATUS (tool-status-map.ts) に集約。
     startTypingRefresh(
       session.id,
       session.agent_group_id,
       event.channelType,
       event.platformId,
       event.threadId,
-      'container 起動中',
+      PIPELINE_STATUS.CONTAINER_STARTING,
     );
     const freshSession = getSession(session.id);
     if (freshSession) {

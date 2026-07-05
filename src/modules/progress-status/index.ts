@@ -10,5 +10,5 @@
  * 本 module は「refresh loop が forward する currentStatus を書き換える」責務のみを担う。
  */
 export { refreshProgressStatus } from './poller.js';
-export { toolNameToStatus } from './tool-status-map.js';
-export { emitPreSpawnStatus, emitAdkToolStatus } from './pre-spawn.js';
+export { toolNameToStatus, PIPELINE_STATUS } from './tool-status-map.js';
+export { emitPreSpawnStatus, emitAdkToolStatus, clearAdkTargetStatus } from './pre-spawn.js';

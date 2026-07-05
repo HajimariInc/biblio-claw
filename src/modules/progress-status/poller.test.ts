@@ -19,13 +19,26 @@ vi.mock('../../db/session-db.js', () => ({
 }));
 vi.mock('../../session-manager.js', () => ({
   openOutboundDb: vi.fn(),
+  // isPreSpawnDbOpenError は pure 関数のため本物と同じロジックで stub (poller.ts の
+  // 分岐挙動を検証する = ここで実装を替えると本物と乖離する罠を避ける)。
+  isPreSpawnDbOpenError: (code: string | undefined) => code === 'ENOENT' || code === 'SQLITE_CANTOPEN',
 }));
 vi.mock('../typing/index.js', () => ({
   updateTypingStatus: vi.fn(),
 }));
+vi.mock('../../log.js', () => ({
+  log: {
+    debug: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    error: vi.fn(),
+    fatal: vi.fn(),
+  },
+}));
 
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerState } from '../../db/session-db.js';
+import { log } from '../../log.js';
 import { openOutboundDb } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { updateTypingStatus } from '../typing/index.js';
@@ -79,6 +92,39 @@ describe('refreshProgressStatus (M4-F Phase 4)', () => {
     });
     await expect(refreshProgressStatus(mkSession())).resolves.not.toThrow();
     expect(updateTypingStatus).not.toHaveBeenCalled();
+  });
+
+  // PR #145 review pr-test-analyzer IM-8: SQLITE_CANTOPEN (better-sqlite3 readonly
+  // open 特有) が ENOENT と同じ debug 抑制分岐に落ちる (cold start 中の意図せぬ
+  // warn を silent 化) ことを assert する。以前の test は「throw しないこと」しか
+  // 検証しておらず、debug vs warn の振り分けが未確認だった。
+  it('debug on SQLITE_CANTOPEN (better-sqlite3 readonly 特有), no warn', async () => {
+    vi.mocked(openOutboundDb).mockImplementation(() => {
+      const err = new Error('unable to open database file') as NodeJS.ErrnoException;
+      err.code = 'SQLITE_CANTOPEN';
+      throw err;
+    });
+    await refreshProgressStatus(mkSession());
+    expect(log.debug).toHaveBeenCalledWith(
+      expect.stringContaining('pre-spawn'),
+      expect.objectContaining({ err_code: 'SQLITE_CANTOPEN', event: 'progress.status.pre_spawn' }),
+    );
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(updateTypingStatus).not.toHaveBeenCalled();
+  });
+
+  it('warn on EACCES (I/O 障害) with structured event (regression: debug へ落ちない)', async () => {
+    vi.mocked(openOutboundDb).mockImplementation(() => {
+      const err = new Error('permission denied') as NodeJS.ErrnoException;
+      err.code = 'EACCES';
+      throw err;
+    });
+    await refreshProgressStatus(mkSession());
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('open failed'),
+      expect.objectContaining({ err_code: 'EACCES', event: 'progress.status.db_open_failed' }),
+    );
+    expect(log.debug).not.toHaveBeenCalled();
   });
 
   it('calls updateTypingStatus with mapped Japanese status when current_tool is set', async () => {

@@ -82,7 +82,7 @@ import './biblio/config-action.js';
 import { initHostProxy } from './biblio/host-proxy.js';
 import { setupVertexProxy } from './biblio/vertex-client.js';
 
-import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
+import type { ChannelAdapter, ChannelSetup, TypingStatus } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
 import { shutdownOtel } from './observability/index.js';
 
@@ -246,11 +246,11 @@ async function main(): Promise<void> {
       channelType: string,
       platformId: string,
       threadId: string | null,
-      status?: string | null,
+      status?: TypingStatus,
     ): Promise<void> {
       // M4-F Phase 4: `status` を forward しないと updateTypingStatus 経由の
       // 「container 起動中」+ tool 名遷移が silent drop する (TS の余剰引数無視で
-      // 型検査を素通りする経路。PR #145 review C1 で発見)。
+      // 型検査を素通りする経路。PR #145 review C1 で発見、C-3 回帰テストで防衛)。
       const adapter = getChannelAdapter(channelType);
       await adapter?.setTyping?.(platformId, threadId, status);
     },

@@ -20,7 +20,7 @@
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerState } from '../../db/session-db.js';
 import { log } from '../../log.js';
-import { openOutboundDb } from '../../session-manager.js';
+import { isPreSpawnDbOpenError, openOutboundDb } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { updateTypingStatus } from '../typing/index.js';
 
@@ -40,11 +40,10 @@ export async function refreshProgressStatus(session: Session): Promise<void> {
     outDb = openOutboundDb(agentGroup.id, session.id);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
-    // ENOENT = fs level (write-mode open path で fs 経由の open が先に失敗)
-    // SQLITE_CANTOPEN = better-sqlite3 readonly open 特有 (fs stat は通るが sqlite level
-    // で file open が失敗する = PR #145 review C3 実測、readonly=true 経路で発生)
-    // どちらも「初回 spawn 前」の正常経路として debug 抑制。
-    if (code === 'ENOENT' || code === 'SQLITE_CANTOPEN') {
+    // pre-spawn 判定は session-manager.ts の isPreSpawnDbOpenError に集約 (ENOENT +
+    // SQLITE_CANTOPEN の 2 code で「初回 spawn 前」の正常経路)。drainSession と共通化 =
+    // 将来 3 つ目の error code が見つかっても 1 箇所直せば両経路が同期する。
+    if (isPreSpawnDbOpenError(code)) {
       log.debug('progress-status poll: outbound.db not found (pre-spawn)', {
         event: 'progress.status.pre_spawn',
         session_id: session.id,

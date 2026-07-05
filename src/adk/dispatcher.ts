@@ -54,7 +54,7 @@ import { isFinalResponse } from '@google/adk';
 import { getChannelAdapter } from '../channels/channel-registry.js';
 import { log } from '../log.js';
 import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
-import { emitAdkToolStatus } from '../modules/progress-status/index.js';
+import { clearAdkTargetStatus, emitAdkToolStatus } from '../modules/progress-status/index.js';
 
 import { buildRootAgent } from './root-agent.js';
 import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
@@ -284,15 +284,18 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       // function call id。両者は別 namespace で一致しないため、`requestedToolConfirmations[id]`
       // 引き経路は使えない。`event.content.parts` を直接走査して `adk_request_confirmation`
       // function call を見つける方式に統一する。
+      //
+      // PR #145 review code-simplifier P-5 対応: 上の tool status ループが評価した
+      // `eventParts` を再利用する (元は同一 event の parts を「eventParts」と「parts」
+      // で 2 度計算していた = 別名で同じ配列を指していた)。
       const longRunningIds = event.longRunningToolIds;
       if (longRunningIds && longRunningIds.length > 0) {
         pending = true;
-        const parts = event.content?.parts ?? [];
         let dispatched = 0;
         // longRunningToolIds に対応する wrapper function call を parts から抽出。
         // 通常 1 event に 1 wrapper だが、複数破壊操作の同時 pause (issue #110) に備えて
         // for-loop で全件処理する。
-        for (const part of parts) {
+        for (const part of eventParts) {
           const fc = part.functionCall;
           if (!fc || fc.name !== 'adk_request_confirmation' || !fc.id) continue;
           // longRunningToolIds に含まれる wrapper のみ処理 (= 型上の double check、
@@ -402,6 +405,13 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     // 通常経路のみ deleteSession、pending は resume 側 (approval-dispatcher.ts) が cleanup。
     if (!pending) {
       await deleteSessionSafe();
+      // PR #145 review IM-1: emitAdkToolStatus の rate-limit ガード用の per-target
+      // 直近 status Map を明示解放。次 invocation で同 tool の初回発火が通り、
+      // Map の key 累積 (メモリリーク) も防ぐ。pending 経路は resume 時に continuous
+      // な同 invocation として扱うため clear しない (resume 側 approval-dispatcher が
+      // deleteSession と同じタイミングで別途 clear する必要はない = 同一 target 上で
+      // 別 tool の連続発火が続くだけなので guarantee が要らない)。
+      clearAdkTargetStatus(channelType, platformId, threadId);
     }
   }
 

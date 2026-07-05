@@ -26,7 +26,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelSetup, InboundMessage, TypingStatus } from './adapter.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -549,12 +549,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
     },
 
-    async setTyping(platformId: string, threadId: string | null, status?: string | null) {
+    async setTyping(platformId: string, threadId: string | null, status?: TypingStatus) {
       const tid = threadId ?? platformId;
-      // M4-F Phase 4: vendor `Adapter.startTyping(tid, status?)` は @chat-adapter/slack@4.14.0
-      // で status 引数対応済、4.30.0 (pin) まで CHANGELOG 上変更なし。null は Slack 側の
-      // 「明示クリア」相当だが vendor はそこまで抽象化していないため、undefined に正規化して
-      // 既存 `"Typing..."` fallback 挙動を温存する。
+      // vendor `Adapter.startTyping(tid, status?)` は @chat-adapter/slack@4.14.0 で
+      // status 引数対応済、4.30.0 (pin) まで CHANGELOG 上変更なし。TypingStatus
+      // (channels/adapter.ts) の内部 null (明示クリア) は undefined に正規化して
+      // vendor 側 `?? "Typing..."` fallback に載せる (vendor は null / undefined を
+      // 同一に扱う実装 = 意味区別は本境界で失われる、契約通り)。
       await adapter.startTyping(tid, status ?? undefined);
     },
 

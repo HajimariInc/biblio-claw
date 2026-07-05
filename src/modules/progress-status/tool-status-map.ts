@@ -17,7 +17,33 @@
  * 運用上、server 名側に `_` を含めない = 上記正規表現の match 前提が成立する慣習を継続。
  */
 
-/** SDK 組み込み tool (agent-runner TOOL_ALLOWLIST の主要 9 種) の日本語文言 */
+/**
+ * router.ts の pre-spawn / cold-start 段階で使う進行ステージ文言。
+ *
+ * tool 名マップ (BUILTIN_STATUS / ADK_BIBLIO_STATUS / MCP_NANOCLAW_STATUS) とは
+ * 別枠 = gate 分類中 / container 起動中は「tool」ではなく「pipeline stage」。
+ * `as const` で literal 型で export し、router.ts の呼出箇所と単一源化する
+ * (typo による表記ゆれ + runbook「既知の罠」記述の行番号 hardcode リスクを
+ * 構造的に削減、PR #145 review comment-analyzer C-2 対応)。
+ *
+ * テスト側 (typing/index.test.ts 等) はあえてこの定数を import せず独立した
+ * 文字列 literal (`'container 起動中'`) を書くこと = 本番文言が silent に変わっても
+ * テストが気づかない退化を防ぐ。
+ */
+export const PIPELINE_STATUS = {
+  GATE_CLASSIFYING: '分類中',
+  CONTAINER_STARTING: 'container 起動中',
+} as const;
+
+/**
+ * SDK 組み込み tool の日本語文言。
+ *
+ * `container/agent-runner/src/providers/claude.ts` の `TOOL_ALLOWLIST` (18 種) と対称。
+ * 当初は主要 9 種のみだったが、高頻度 tool (`TodoWrite` 等) が generic fallback に落ちて
+ * patron に「作業中 (TodoWrite)」表示されていた (PR #145 review pr-test-analyzer IM-10
+ * 実測: test 自身が `TodoWrite` を未知 tool の例として使い網羅性不足を固定化していた)。
+ * 全 18 種を明示マップし、fallback は本当に未知の tool 名だけに限定する。
+ */
 const BUILTIN_STATUS: Record<string, string> = {
   Bash: 'bash 実行中',
   Read: 'ファイル読取中',
@@ -28,6 +54,15 @@ const BUILTIN_STATUS: Record<string, string> = {
   WebSearch: 'Web 検索中',
   WebFetch: 'Web ページ取得中',
   Task: 'サブエージェント実行中',
+  TaskOutput: 'サブエージェント出力取得中',
+  TaskStop: 'サブエージェント停止中',
+  TeamCreate: 'チーム作成中',
+  TeamDelete: 'チーム削除中',
+  SendMessage: 'メッセージ送信中',
+  TodoWrite: 'タスク管理中',
+  ToolSearch: 'ツール検索中',
+  Skill: 'スキル呼出中',
+  NotebookEdit: 'ノートブック編集中',
 };
 
 /**

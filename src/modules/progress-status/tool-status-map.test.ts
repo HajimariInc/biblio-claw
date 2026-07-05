@@ -2,7 +2,7 @@
  * M4-F Phase 4: tool-status-map の unit test。
  *
  * カバー範囲:
- *   - SDK 組み込み 9 種の完全 case
+ *   - SDK 組み込み 18 種 (TOOL_ALLOWLIST 全種) の完全 case (PR #145 review IM-10)
  *   - MCP nanoclaw (biblio) 9 種の完全 case
  *   - MCP tavily + drive (M4-F Phase 3 生活機能)
  *   - ADK ネイティブ tool 名 (mcp__ prefix なし) の biblio 9 種
@@ -20,7 +20,7 @@ describe('toolNameToStatus (M4-F Phase 4)', () => {
     expect(toolNameToStatus('')).toBeNull();
   });
 
-  describe('SDK built-in tools', () => {
+  describe('SDK built-in tools (TOOL_ALLOWLIST 全 18 種)', () => {
     it.each([
       ['Bash', 'bash 実行中'],
       ['Read', 'ファイル読取中'],
@@ -31,6 +31,15 @@ describe('toolNameToStatus (M4-F Phase 4)', () => {
       ['WebSearch', 'Web 検索中'],
       ['WebFetch', 'Web ページ取得中'],
       ['Task', 'サブエージェント実行中'],
+      ['TaskOutput', 'サブエージェント出力取得中'],
+      ['TaskStop', 'サブエージェント停止中'],
+      ['TeamCreate', 'チーム作成中'],
+      ['TeamDelete', 'チーム削除中'],
+      ['SendMessage', 'メッセージ送信中'],
+      ['TodoWrite', 'タスク管理中'],
+      ['ToolSearch', 'ツール検索中'],
+      ['Skill', 'スキル呼出中'],
+      ['NotebookEdit', 'ノートブック編集中'],
     ])('maps %s -> %s', (tool, expected) => {
       expect(toolNameToStatus(tool)).toBe(expected);
     });
@@ -82,7 +91,10 @@ describe('toolNameToStatus (M4-F Phase 4)', () => {
 
   describe('generic fallback (silent 化しない)', () => {
     it('unknown SDK tool falls back to 作業中 (${name})', () => {
-      expect(toolNameToStatus('TodoWrite')).toBe('作業中 (TodoWrite)');
+      // PR #145 review IM-10: 旧 test は `TodoWrite` を「未知 tool」の例として使い
+      // 網羅性不足を固定化していたが、TOOL_ALLOWLIST 全 18 種を BUILTIN_STATUS に取り込んだ
+      // ため、真に未知の tool 名 (SDK / MCP どちらの管理下にもない) に例を差し替える。
+      expect(toolNameToStatus('FutureUnmappedTool')).toBe('作業中 (FutureUnmappedTool)');
     });
     it('unknown MCP server exposes server name', () => {
       expect(toolNameToStatus('mcp__unknown__foo')).toBe('unknown 呼出中 (foo)');
