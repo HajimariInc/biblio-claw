@@ -22,10 +22,9 @@ variable "orchestrator_gsa_email" {
 
 variable "drive_user_gsa_email" {
   description = <<-EOT
-    Drive access 専用の分離 SA email (target SA)。orchestrator SA が本 SA を impersonate して
-    drive.readonly scope 付き access token を発行する。GSA 本体は本 module では作成しない (DEN さんが
-    Console で作成済 = 手動 lifecycle) — 本 module は binding のみを管理する。
-    Drive 側 ACL 共有先はこの SA email。
+    Drive access 専用の分離 SA email (target SA、binding のみ管理 = main.tf 冒頭コメント参照)。
+    orchestrator SA が本 SA を impersonate して drive.readonly scope 付き access token を発行する。
+    Drive フォルダ ACL の共有先もこの SA email。
   EOT
   type        = string
   default     = "biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com"

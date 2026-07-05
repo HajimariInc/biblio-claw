@@ -94,7 +94,12 @@ fetch_caller_token() {
 fetch_drive_token() {
   local caller resp http body token
   caller="$(fetch_caller_token)" || fail "caller token 取得失敗 (metadata server 到達不能)"
-  [ -n "$caller" ] || fail "caller token が空 (metadata server 応答 malformed)"
+  # `jq -r .access_token` は該当 field 不在の 200 応答 (metadata API version 差異 /
+  # proxy 応答改変等) に対して文字列 "null" を出力し exit 0 = 非空チェックだけでは
+  # 素通しする。後段の generateAccessToken が `Bearer null` で 401/400 を返し、
+  # 「IAM binding 未設定」等と誤診断されるのを防ぐため、非空 + "null" 非一致で fail。
+  # (L110 の accessToken 側チェックと対称)
+  [ -n "$caller" ] && [ "$caller" != "null" ] || fail "caller token が空または malformed (metadata server 応答に access_token field なし)"
 
   resp="$(jq -n --arg scope "$DRIVE_SCOPE" --arg lifetime "$DRIVE_TOKEN_LIFETIME" \
     '{scope:[$scope], lifetime:$lifetime}' \
@@ -103,8 +108,10 @@ fetch_drive_token() {
         -H 'Content-Type: application/json' --data-binary @- \
         "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${DRIVE_USER_SA}:generateAccessToken")" \
     || fail "generateAccessToken 呼出し失敗 (network / TLS)"
-  http="$(printf '%s' "$resp" | tail -n1)"
-  body="$(printf '%s' "$resp" | sed \$d)"
+  # HTTP code / body 分割は bash parameter expansion で完結 (subprocess fork ゼロ、
+  # `onecli-lib.sh:56-57` の set_all_agents_mode_all と同 idiom で統一)。
+  http="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
   [ "$http" = "200" ] || fail "generateAccessToken HTTP=$http: $(printf '%s' "$body" | head -c 400)"
   token="$(printf '%s' "$body" | jq -r .accessToken)"
   [ -n "$token" ] && [ "$token" != "null" ] || fail "generateAccessToken response に accessToken なし"
