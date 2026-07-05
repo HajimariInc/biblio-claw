@@ -52,7 +52,11 @@ import { listBiblio } from '../biblio/list-biblio.js';
 import { GhHttpError, MarketplaceParseError, readListEnv } from '../biblio/shelf-gh.js';
 import type { ListBiblioItem, ListBiblioResult } from '../biblio/types.js';
 import { getFugueEquippedBiblioNames, insertFugueEquippedBiblio } from '../db/fugue-equipped-biblios.js';
+import { appendGateAuditLog } from '../gate/audit-log.js';
+import { evaluateGate, isGateEnabled, withGateSpan } from '../gate/gate.js';
+import type { GateResult } from '../gate/types.js';
 import { log } from '../log.js';
+import { notifyAdmin } from '../modules/approvals/notify-admin.js';
 import { extractTraceContextFromHttpHeaders, withFugueEntrySpan } from '../observability/index.js';
 
 import {
@@ -558,6 +562,102 @@ export class FugueHttpServer {
     // sessionId は Fugue に session 概念なし = 空文字 (action-helpers.ts の signature が空文字を許容)。
     await withFugueEntrySpan('consult', request_id, async (fugueSpan) => {
       fugueSpan.setAttribute('fugue.mode', mode);
+
+      // M4-F Phase 2 gate 挿入 (consult): query を 4 層評価。in-secure なら 200 + status:'error'
+      // + warnings + raw.reason: 'in_secure' で応答 (AD の本義 契約: 5xx は認可 / 上限超過 /
+      // biblio-claw 自体の応答不能に限定)。gate 未有効時は skip = 従来経路継続。
+      if (isGateEnabled()) {
+        let gateResult: GateResult | null = null;
+        try {
+          gateResult = await withGateSpan(query, async (gateSpan) => {
+            const result = await evaluateGate(query);
+            gateSpan.setAttribute('gate.classification', result.classification);
+            gateSpan.setAttribute('gate.layer_hit', result.layerHit);
+            gateSpan.setAttribute('gate.reason', result.reason);
+            gateSpan.setAttribute('gate.latency_ms', result.latencyMs);
+            if (result.model) gateSpan.setAttribute('gate.model', result.model);
+            if (result.degraded) gateSpan.setAttribute('gate.degraded', true); // I6
+            gateSpan.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
+            return result;
+          });
+        } catch (err) {
+          // gate 自体の unexpected throw は fail-open (現状経路継続、gateResult=null のまま fall
+          // through)。router.ts の gate 挿入と同流儀 (plain `GateResult | null` optional で
+          // `as unknown as` cast を避ける、S3 review 対応)。
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log.warn('Fugue consult gate unexpected throw, falling back to open', {
+            event: 'fugue.consult.gate_unexpected_throw',
+            channel: 'fugue',
+            request_id,
+            err: errMsg,
+          });
+          // I5 対応: gate error も audit trail に載せる (BQ 集計から silent undercount 防止)
+          appendGateAuditLog({
+            outcome: 'error',
+            reason: errMsg,
+            utterance: query,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
+          });
+        }
+        if (gateResult) {
+          appendGateAuditLog({
+            outcome: gateResult.classification === 'in-secure' ? 'blocked' : 'allowed',
+            layer: gateResult.layerHit,
+            classification: gateResult.classification,
+            reason: gateResult.reason,
+            utterance: query,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null, // Fugue には patron userId 概念なし (Bearer auth のみ)
+            degraded: gateResult.degraded,
+          });
+          if (gateResult.classification === 'in-secure') {
+            fugueSpan.setAttribute('fugue.outcome', 'in_secure');
+            // admin DM 通知 (Fugue には patron の Slack userId が無いため agentGroupId=null で
+            // global admin 選定、channelType='slack' 固定 = 現状 Fugue に admin 通知経路がないため
+            // Slack DM 経由でのみ届く)。
+            void notifyAdmin({
+              channelType: 'slack',
+              agentGroupId: null,
+              subject: 'gate.blocked (fugue)',
+              body: `Fugue 経由の injection 疑い発話 (consult)。\nlayer: ${gateResult.layerHit}\nreason: ${gateResult.reason}\nrequest_id: ${request_id}`,
+            }).catch((err) =>
+              log.warn('Fugue consult gate notifyAdmin unexpected throw', {
+                event: 'fugue.consult.gate_notify_admin_throw',
+                request_id,
+                err: err instanceof Error ? err.message : String(err),
+              }),
+            );
+            const processing_time_ms = Math.round(performance.now() - startedAt);
+            log.warn('Fugue consult rejected by input gate', {
+              event: 'fugue.consult.in_secure',
+              channel: 'fugue',
+              outcome: 'in_secure',
+              request_id,
+              mode,
+              gate_layer: gateResult.layerHit,
+              gate_reason: gateResult.reason,
+              processing_time_ms,
+            });
+            const reply: FugueConsultReply = {
+              schema_version: '1',
+              request_id,
+              operation: 'consult',
+              status: 'error',
+              summary: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。',
+              skills_found: [],
+              raw: { reason: 'in_secure', query, mode },
+              processing_time_ms,
+              warnings: ['input rejected by input gate'],
+            };
+            writeJson(res, 200, reply);
+            return;
+          }
+        }
+      }
+
       await withBiblioActionSpan('list', request_id, '', async (span) => {
         // try 範囲は listBiblio() 呼出だけに絞る。後続 (readListEnv / toSkillRefs /
         // summarizeConsult / writeJson) は catch 外に置くことで、Phase 2 新規ロジックのバグを
@@ -762,6 +862,97 @@ export class FugueHttpServer {
     // (a) silent に HITL bypass する応答経路の穴、および (b) Cloud Trace 上で完全不可視になる
     // telemetry の穴、の両方を明示的に閉じる。
     await withFugueEntrySpan('equip', request_id, async (fugueSpan) => {
+      // M4-F Phase 2 gate 挿入 (equip): skill_id を 4 層評価。BIBLIO_NAME_RE guard は既に
+      // 通過している (skill_id は正当な形式) が、gate は semantic 判定 (Layer 4) で
+      // exfiltration URL 等 (path traversal を超えた) 追加防御を担う。in-secure 応答経路は
+      // consult と対称に 200 + status:'error' + warnings で運ぶ (AD の本義)。
+      if (isGateEnabled()) {
+        let gateResult: GateResult | null = null;
+        try {
+          gateResult = await withGateSpan(skill_id, async (gateSpan) => {
+            const result = await evaluateGate(skill_id);
+            gateSpan.setAttribute('gate.classification', result.classification);
+            gateSpan.setAttribute('gate.layer_hit', result.layerHit);
+            gateSpan.setAttribute('gate.reason', result.reason);
+            gateSpan.setAttribute('gate.latency_ms', result.latencyMs);
+            if (result.model) gateSpan.setAttribute('gate.model', result.model);
+            if (result.degraded) gateSpan.setAttribute('gate.degraded', true); // I6
+            gateSpan.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
+            return result;
+          });
+        } catch (err) {
+          // consult 側と対称の fail-open (`GateResult | null` で `as unknown as` cast 回避、
+          // S3 review 対応)。
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log.warn('Fugue equip gate unexpected throw, falling back to open', {
+            event: 'fugue.equip.gate_unexpected_throw',
+            channel: 'fugue',
+            request_id,
+            err: errMsg,
+          });
+          // I5 対応: gate error も audit trail に載せる
+          appendGateAuditLog({
+            outcome: 'error',
+            reason: errMsg,
+            utterance: skill_id,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
+          });
+        }
+        if (gateResult) {
+          appendGateAuditLog({
+            outcome: gateResult.classification === 'in-secure' ? 'blocked' : 'allowed',
+            layer: gateResult.layerHit,
+            classification: gateResult.classification,
+            reason: gateResult.reason,
+            utterance: skill_id,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
+            degraded: gateResult.degraded,
+          });
+          if (gateResult.classification === 'in-secure') {
+            fugueSpan.setAttribute('fugue.outcome', 'in_secure');
+            void notifyAdmin({
+              channelType: 'slack',
+              agentGroupId: null,
+              subject: 'gate.blocked (fugue)',
+              body: `Fugue 経由の injection 疑い skill_id (equip)。\nlayer: ${gateResult.layerHit}\nreason: ${gateResult.reason}\nrequest_id: ${request_id}\nskill_id: ${skill_id}`,
+            }).catch((err) =>
+              log.warn('Fugue equip gate notifyAdmin unexpected throw', {
+                event: 'fugue.equip.gate_notify_admin_throw',
+                request_id,
+                err: err instanceof Error ? err.message : String(err),
+              }),
+            );
+            const processing_time_ms = Math.round(performance.now() - startedAt);
+            log.warn('Fugue equip rejected by input gate', {
+              event: 'fugue.equip.in_secure',
+              channel: 'fugue',
+              outcome: 'in_secure',
+              request_id,
+              skill_id,
+              gate_layer: gateResult.layerHit,
+              gate_reason: gateResult.reason,
+              processing_time_ms,
+            });
+            const reply: FugueEquipReply = {
+              schema_version: '1',
+              request_id,
+              operation: 'equip',
+              status: 'error',
+              summary: '入力に不審な内容が含まれる可能性があるため、この装備リクエストは処理できませんでした。',
+              skill: null,
+              processing_time_ms,
+              warnings: ['input rejected by input gate'],
+            };
+            writeJson(res, 200, reply);
+            return;
+          }
+        }
+      }
+
       if (requiresApproval('equip', 'fugue')) {
         fugueSpan.setAttribute('fugue.outcome', 'hitl_required');
         const processing_time_ms = Math.round(performance.now() - startedAt);
