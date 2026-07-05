@@ -10,8 +10,10 @@
 #
 # あわせて全 agent を secretMode=all に昇格する。
 #
-# 写経元: scripts/onecli-vertex-secret.sh (hostPattern と SECRET_NAME 差替のみ、
-# ADC 取得ロジックは同一)。
+# 写経元: scripts/onecli-vertex-secret.sh (ADC 取得ロジックの核 = `gcloud auth
+# application-default print-access-token` は同一。Vertex 固有の project/region env
+# (`ANTHROPIC_VERTEX_PROJECT_ID` / `CLOUD_ML_REGION`) と `vertex_host()` 呼出しは
+# Drive 版では削除、hostPattern / SECRET_NAME を差し替え)。
 #
 # ## scope 判断
 # `gcloud auth application-default print-access-token` は default で

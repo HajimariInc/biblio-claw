@@ -8,9 +8,12 @@
  * pass 条件:
  *   - initialize response が protocolVersion / serverInfo を返す
  *   - tools/list response の tools 配列に drive_list_files / drive_get_file の 2 tool が含まれる
- *   - 未消費 stdout に余分な行 (= console.log 汚染) が残っていない
+ *   - tools/call で存在しない tool 名を送ると isError:true 応答が返る (error-path 保護)
  *
- * fail 時は exit 1 + 診断を stderr に出す。
+ * fail 時は exit 1 + 診断を stderr に出す。stdout 汚染 (console.log 混入等) の
+ * 実行時検知は本 smoke ではせず、`node --check index.mjs` の構文検査 + logic.test.mjs
+ * の unit test で担保する (JSON-RPC パーサは非 JSON 行を console.error して continue
+ * するのみ、行数カウントベースの assert は入れない = 過剰な保護コストを避ける)。
  */
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -132,7 +135,30 @@ async function main() {
   }
   console.error(`[smoke] tools/list ok: ${names.join(', ')}`);
 
-  // 4. clean shutdown
+  // 4. tools/call unknown_tool (error-path 保護): dispatch の未知 tool throw が
+  //    isError:true + content で agent に返ることを stdio 経由で確認 (実 Drive
+  //    到達なし、logic.test.mjs の unit と対称)。
+  const errResp = await send({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'tools/call',
+    params: { name: 'unknown_tool_smoke', arguments: {} },
+  });
+  if (errResp.error) {
+    throw new Error(`tools/call unknown_tool RPC-level error: ${JSON.stringify(errResp.error)}`);
+  }
+  if (errResp.result?.isError !== true) {
+    throw new Error(
+      `tools/call unknown_tool: expected result.isError=true, got ${JSON.stringify(errResp.result)}`,
+    );
+  }
+  const errText = errResp.result?.content?.[0]?.text ?? '';
+  if (!errText.includes('Unknown tool')) {
+    throw new Error(`tools/call unknown_tool: expected content to contain "Unknown tool", got: ${errText}`);
+  }
+  console.error('[smoke] tools/call unknown_tool ok: isError:true + "Unknown tool" hint');
+
+  // 5. clean shutdown
   proc.stdin.end();
   await new Promise((resolve) => {
     proc.once('close', resolve);

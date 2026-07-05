@@ -26,9 +26,13 @@
 
 /**
  * MCP server 子プロセスに継承させる host 側 proxy 系 env のキー一覧。
- * order: HTTPS_PROXY / HTTP_PROXY を先に。CA bundle 系は Node と gcloud CLI 両方で
- * 尊重される値のみ (undici は SSL_CERT_FILE を見ないが Node 22 native fetch は見る、
- * gh CLI (Go) は SSL_CERT_FILE を尊重する = container/Dockerfile:100 で設定済)。
+ *
+ * - `HTTPS_PROXY` / `HTTP_PROXY`: Node/Go/Python 全てが尊重する universal proxy 変数。
+ * - `NODE_EXTRA_CA_CERTS`: Node 22 native fetch (undici ベース) が唯一尊重する
+ *   CA bundle 変数。**`SSL_CERT_FILE` は Node fetch には効かない** (実測で反証)、
+ *   ここに含めるのは Go 系子プロセス (gh CLI 等) が将来 MCP server として追加された
+ *   場合の備え (dead weight として残置、agent-runner 起動時の Drive/Tavily server
+ *   への注入は無害な no-op)。gh CLI 側の受入は container/Dockerfile:100 で設定済。
  */
 export const PROXY_ENV_KEYS = [
   'HTTPS_PROXY',

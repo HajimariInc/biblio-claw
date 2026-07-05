@@ -380,6 +380,9 @@ spec:
         # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA を impersonate。
         # Drive API 呼出しは GSA に追加 IAM 権限を要求しない (Drive の権限は
         # フォルダ単位 ACL、GSA email 共有が Task 12 の前提条件)。
+        # image tag: 下記 `m4f-p1-1` は Phase 1 由来の placeholder。deploy 前に必ず
+        # runbook §M4-F Phase 3 §deploy 手順 (2) で `m4f-p3-1` 等へ bump + push すること
+        # (Dockerfile.sidecar.vertex 側で drive script を焼き込む rebuild が前提)。
         - name: drive-token-rotator
           image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p1-1
           command: ['bash', '/scripts/drive-rotate.sh']

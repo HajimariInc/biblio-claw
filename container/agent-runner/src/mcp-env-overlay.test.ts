@@ -3,12 +3,19 @@
  *
  * bun test で走る (agent-runner の runtime は Bun)。
  *
- * 保護対象:
- *   (1) extractProxyEnv: host env から PROXY_ENV_KEYS のみを抽出、他 env は無視
- *   (2) extractProxyEnv: undefined / 空文字 は落とす (silent failure 撲滅)
- *   (3) overlayServerEnv: proxyEnv → serverConfig.env の spread 順で serverConfig 優先
- *   (4) overlayServerEnv: serverConfig.env が undefined でも空 object 扱いで動く
- *   (5) overlayServerEnv: proxyEnv 単独時 (server.env なし) は proxyEnv だけが返る
+ * 保護対象 (case 番号は it 内の (X) タグと対応):
+ *   (1)  extractProxyEnv: host env から PROXY_ENV_KEYS のみを抽出、他 env は無視
+ *   (2)  extractProxyEnv: undefined / 空文字 は落とす (silent failure 撲滅)
+ *   (2b) extractProxyEnv: 空 host env → 空 object
+ *   (2c) extractProxyEnv: PROXY_ENV_KEYS の完全な列挙 hard-code assert = 変更検知テスト
+ *       (canary、キー一覧が silent に変更されると Drive/Tavily server に proxy 情報が
+ *       伝わらなくなる silent failure に直結するため機械的に弾く)
+ *   (3)  overlayServerEnv: proxyEnv → serverConfig.env の spread 順で serverConfig 優先
+ *   (4)  overlayServerEnv: serverConfig.env が undefined でも空 object 扱いで動く
+ *   (5)  overlayServerEnv: proxyEnv 単独時 (server.env なし) は proxyEnv だけが返る
+ *   (6)  overlayServerEnv: proxyEnv 空 + Tavily 相当 (env に placeholder のみ) で
+ *       placeholder が生き残ることを確認 = 命題 2 (secret は wire 上でだけ実体を持つ)
+ *       の regression 保護
  */
 import { describe, expect, it } from 'bun:test';
 

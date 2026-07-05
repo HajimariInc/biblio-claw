@@ -20,7 +20,8 @@
 #   - 起動時に OneCLI gateway を待つロジックは vertex-rotate.sh と同じ
 #   - 1 周期失敗で sidecar を落とさない (log_event ERROR + retry loop 継続)
 #
-# 写経元: scripts/vertex-rotate.sh (差分: WORKER と COMPONENT_NAME のみ)
+# 写経元: scripts/vertex-rotate.sh (差分: WORKER と COMPONENT_NAME、rotation.ok の
+# ログ文言のみ。Vertex 側の loop 構造と exit code 経路は完全踏襲)
 
 set -euo pipefail
 

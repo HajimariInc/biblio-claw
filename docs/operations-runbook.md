@@ -3049,10 +3049,15 @@ tail -10 data/gate-audit.jsonl | jq '.'
    ```
 5. **OneCLI secret 投入** (Tavily は手動 1 回、Drive は sidecar 自動 + 初回加速の手動 1 回):
    ```bash
-   # Tavily (bootstrap 用、以降は Tavily Dashboard で key regenerate 時のみ再実行)
+   # Tavily (bootstrap 用、以降は Tavily Dashboard で key regenerate 時のみ再実行)。
+   # orchestrator コンテナは Dockerfile 経路で /app/scripts/ に置かれるため、
+   # 絶対 /scripts/ ではなく cd /app + 相対 scripts/... で叩く (drive-token-rotator
+   # sidecar の /scripts/ とは別経路、混同禁止)。
    TAVILY_API_KEY=tvly-... kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
-     env TAVILY_API_KEY=$TAVILY_API_KEY bash /scripts/onecli-tavily-secret.sh
-   # Drive (初回 rotation 40min gap を避ける手動 1 回、以降は sidecar が自動)
+     sh -c "cd /app && TAVILY_API_KEY=$TAVILY_API_KEY bash scripts/onecli-tavily-secret.sh"
+   # Drive (初回 rotation 40min gap を避ける手動 1 回、以降は sidecar が自動)。
+   # drive-token-rotator sidecar image (Dockerfile.sidecar.vertex) は /scripts/ に
+   # onecli-drive-secret.sh を COPY 済のため、絶対パス /scripts/... で叩ける。
    kubectl exec -n biblio-claw biblio-orchestrator-0 -c drive-token-rotator -- bash /scripts/onecli-drive-secret.sh
    ```
 6. **seed 実行 + agent Pod 再起動** (`mcp_servers` を desired state に upsert):
@@ -3061,11 +3066,16 @@ tail -10 data/gate-audit.jsonl | jq '.'
    pnpm exec tsx scripts/init-hybrid-agent.ts --user-id slack:U... --slack-dm-channel-id D...
    # GKE (wrapper 経由):
    HYBRID_USER_ID=slack:U... HYBRID_SLACK_DM_CHANNEL_ID=D... bash scripts/init-hybrid-agent-gke.sh
-   # 反映確認 (mcp_servers 列に tavily + drive の 2 key)
+   # 反映確認 (mcp_servers 列に tavily + drive の 2 key)。GKE 経路は必ず絶対パス
+   # /data/v2.db (DATA_DIR=/data で PVC mount)、相対パス data/v2.db は /app/data/v2.db
+   # (存在しない or 空の別ファイル) を見に行き silent 失敗する既知の罠 (§ローカル DB
+   # 直叩き の PVC パス罠 参照)。
    kubectl exec -n biblio-claw biblio-orchestrator-0 -c orchestrator -- \
-     pnpm exec tsx scripts/q.ts data/v2.db \
+     pnpm exec tsx scripts/q.ts /data/v2.db \
      "SELECT cc.mcp_servers FROM container_configs cc JOIN agent_groups ag ON ag.id=cc.agent_group_id WHERE ag.folder='hybrid-biblio-shisho'"
-   # 既存 agent Pod がある場合のみ強制再起動 (analyst 契約 (1) の起動時 1 回キャッシュ)
+   # 既存 agent Pod がある場合のみ強制再起動 (config 起動時 1 回キャッシュ
+   # `container/agent-runner/src/config.ts:25-32`、mcp_servers 変更を反映するには
+   # container 再起動が必須)。
    kubectl delete pod -l app.kubernetes.io/component=agent -n biblio-claw --ignore-not-found=true
    ```
 7. **Drive フォルダを GSA email に共有** (DEN さん手作業):
@@ -3108,8 +3118,8 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 4. **mcp_servers 変更後の agent Pod 再起動忘れ**
    `container/agent-runner/src/config.ts:25-32` の `_config` は起動時 1 回キャッシュ。seed script 実行 → 既存 agent Pod は古い mcp_servers を保持し続ける。**対処**: 上記 deploy 手順 (6) で `kubectl delete pod -l app.kubernetes.io/component=agent -n biblio-claw` を必ず実行。初回 spawn (既存 Pod 0 個) では不要。
 
-5. **`TAVILY_API_KEY=""` 空文字での silent skip**
-   `onecli-tavily-secret.sh` の `need()` は「未設定」と「空文字設定」を同じ扱いで fail するが、`.env` 経由で `TAVILY_API_KEY=""` を書くと bash の set -a 経路で export される (= 「設定済み」扱い) 罠。**対処**: `.env` に **値なしの行** (`TAVILY_API_KEY=`) を書かず、実 key を書くか、削除する。GKE bootstrap の kubectl exec 経由でも env が空だと silent skip なので、TAVILY_API_KEY を明示 export してから叩く。
+5. **`TAVILY_API_KEY=""` 空文字での fail-fast (silent skip ではない、既に防御済)**
+   `onecli-tavily-secret.sh` の `need()` は「未設定」と「空文字設定」を同じ扱いで **loud fail** する (`[FAIL] 必須 env が未設定または空: TAVILY_API_KEY` + exit 1)。`.env` に `TAVILY_API_KEY=` の値なし行を書いてもここで止まる。**注意点**: fail-fast 経路で止まっているとはいえ、GKE bootstrap 時に `TAVILY_API_KEY` が env として orchestrator Pod に届いていないと `kubectl exec ... bash scripts/onecli-tavily-secret.sh` は毎回 need() で止まる。**対処**: `.env` に実 key を書くか (local)、kubectl exec 前に `TAVILY_API_KEY=tvly-...` を明示 export してから叩く (GKE)。
 
 6. **Drive scope 不足で 401 が返る (可能性、Task 8b で実測)**
    `gcloud auth application-default print-access-token` の default scope は `cloud-platform`。Drive API はこの scope でも動くはずだが実測前提。もし 401/403 が出たら `onecli-drive-secret.sh` の `gcloud print-access-token` に `--scopes=https://www.googleapis.com/auth/drive.readonly` を追加。**対処**: rotator sidecar のログ (`kubectl logs ... -c drive-token-rotator`) で `rotation.failed` を継続監視、GSA 共有が済んでいるのに 403 が続くなら scope 追加を試す。

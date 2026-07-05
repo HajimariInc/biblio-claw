@@ -562,10 +562,11 @@ describe('init-hybrid-agent: parseArgs()', () => {
   });
 
   it('(P3-3) seedMcpServers: env に実 Tavily key 形式 (tvly-...) が混入していない', () => {
-    // 命題 2 の静的 grep 保護 = ソース中に実 API key リテラルが書かれていないことを
-    // 実行時 assert する (実装で誤って `TAVILY_API_KEY: process.env.TAVILY_API_KEY`
-    // に書き換えると本 test は落ちるが、そもそも env 値を DB に埋めてはならない
-    // 契約 = 命題 2)。
+    // 命題 2 の runtime 保護 (動的 assert) = process.env に実 key を仕込んだ状態で
+    // seedHybridAgent を実行し、結果の DB JSON に実 key パターンが混入していないかを
+    // 実行時に確認する (実装で誤って `TAVILY_API_KEY: process.env.TAVILY_API_KEY` に
+    // 書き換えると本 test は落ちる)。「静的 grep」= ソースファイルの text grep とは
+    // 別種の検証手段 (repo 内の他所 = verify-*.sh の静的 grep とは意味が違う)。
     process.env.TAVILY_API_KEY = 'tvly-realsecret1234567890abcdef';
     try {
       const result = seedHybridAgent(baseArgs(), NOW);
