@@ -63,12 +63,7 @@ export interface ChannelDeliveryAdapter {
   // TypingTarget.currentStatus を forward し、chat-sdk-bridge が vendor Adapter.startTyping
   // に転送する。undefined → vendor default (`"Typing..."`)、非空 string → assistant status
   // 欄の日本語文言、null → clear 相当。
-  setTyping?(
-    channelType: string,
-    platformId: string,
-    threadId: string | null,
-    status?: string | null,
-  ): Promise<void>;
+  setTyping?(channelType: string, platformId: string, threadId: string | null, status?: string | null): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
