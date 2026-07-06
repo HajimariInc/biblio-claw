@@ -130,8 +130,11 @@ describe('ncl messages send (M4-F Phase 5)', () => {
     }
   });
 
-  it('adds stub-outbound target during dispatch and removes it in finally', async () => {
-    // routeInbound の handler 内側で Set 状態を snapshot する。
+  it('adds stub-outbound target during dispatch and keeps it until Pod restart (Approach 1)', async () => {
+    // issue #155 Approach 1 対応: handler finally での removeStub を撤去し、Pod restart
+    // (in-memory Set の自動 clear) まで stub 登録を残す。理由は race condition の完全解消
+    // (handler 終了後に delivery poll が agent 応答を pull する遅延ケース対応)。
+    // 詳細は `messages.ts:292` の finally block コメント参照。
     let stubDuringDispatch: boolean | undefined;
     routeInboundMock.mockImplementation(async () => {
       stubDuringDispatch = isStubOutboundTarget(AGENT_GROUP_ID, 'slack', 'D-slack-dm');
@@ -155,8 +158,8 @@ describe('ncl messages send (M4-F Phase 5)', () => {
 
     expect(resp.ok).toBe(true);
     expect(stubDuringDispatch).toBe(true);
-    // finally で解放されている
-    expect(isStubOutboundTarget(AGENT_GROUP_ID, 'slack', 'D-slack-dm')).toBe(false);
+    // Approach 1: dispatch 終了後も stub 登録は残る (次テストが _resetStubOutboundTargetsForTest で clear)
+    expect(isStubOutboundTarget(AGENT_GROUP_ID, 'slack', 'D-slack-dm')).toBe(true);
   });
 
   it('does not touch the stub Set when stub_outbound is false', async () => {
@@ -255,7 +258,8 @@ describe('ncl messages send (M4-F Phase 5)', () => {
     );
 
     expect(stubDuringDispatch).toBe(true);
-    expect(isStubOutboundTarget(AGENT_GROUP_ID, 'slack', 'D-slack-dm')).toBe(false);
+    // Approach 1: dispatch 終了後も stub 登録は残る (前 test と同流儀)
+    expect(isStubOutboundTarget(AGENT_GROUP_ID, 'slack', 'D-slack-dm')).toBe(true);
   });
 
   // PR #154 review IM-4: --wait-ms が非数値の場合、silent に timedOut=true を返さず

@@ -25,12 +25,9 @@ import { findSessionForAgent, findSessionByAgentGroup } from '../../db/sessions.
 import { getGlobalAdmins, getOwners, getAdminsOfAgentGroup } from '../../modules/permissions/db/user-roles.js';
 import { log } from '../../log.js';
 import { type OutboundMessage } from '../../db/session-db.js';
-import {
-  addStubOutboundTarget,
-  removeStubOutboundTarget,
-  addStubDeliveryByMg,
-  removeStubDeliveryByMg,
-} from '../../delivery.js';
+// removeStub*: Approach 1 対応 (race avoidance) で削除。将来 approach 2/3 に切り替える場合は
+// removeStubOutboundTarget / removeStubDeliveryByMg を再 import し finally block に戻す。
+import { addStubOutboundTarget, addStubDeliveryByMg } from '../../delivery.js';
 import { routeInbound } from '../../router.js';
 import { isPreSpawnDbOpenError, openOutboundDb } from '../../session-manager.js';
 import type { InboundEvent } from '../../channels/adapter.js';
@@ -290,11 +287,27 @@ registerResource({
             })),
           };
         } finally {
-          if (stubOutbound) {
-            removeStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id);
-            // issue #155 案 B 対応: 2-tuple key も cleanup (汚染残置を撲滅)
-            removeStubDeliveryByMg(mg.channel_type, mg.platform_id);
-          }
+          // issue #155 Approach 1 対応: **removeStub は呼ばず、Pod restart まで Set に残す**。
+          //
+          // 従来の設計 (handler finally で removeStub 呼出) には race condition があった:
+          //   t=0s   handler が addStub → routeInbound → session 作成 → agent 走行 (cold start 30-60s)
+          //   t=??   pollOutbound が wait_ms 内に応答検出 or timeout で return
+          //   t=??   handler 終了、finally で removeStub (Set 空)
+          //   t=??   ★ delivery poll (別 loop) が agent 応答 messages_out を pull → stub check → Set 空 → 実 deliver
+          //
+          // Agent 応答が pollOutbound の wait_ms を超えて生成される場合 (kubectl exec i/o timeout や
+          // LLM 応答遅延)、handler 終了後に delivery poll が実 deliver 経路に流す。
+          //
+          // Approach 1 のトレードオフ:
+          //   - production 経路は addStub を呼ばない (verify script でしか渡さない) = Set は常に空 =
+          //     isStubXxx は false = 挙動不変 (production 完全影響ゼロ)
+          //   - verify 実行後、Pod restart までの間 Set に entry が残る (メモリリーク) = 実質無害
+          //     (verify 1 回あたり 2 entry、Pod restart で自動 clear)
+          //   - 冪等 verify (Section 9 の再帰) は Set.add が idempotent = 問題なし
+          //
+          // 将来 approach 2/3 に切り替える場合は本 finally block を復活させ、対応する
+          // delayed-clear or session-lifecycle-tied clear を追加する。
+          void stubOutbound; // reference for linter (unused-var 警告回避、Set 残置は意図的)
         }
       },
     },
