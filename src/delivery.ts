@@ -56,6 +56,64 @@ const deliveryAttempts = new Map<string, number>();
  */
 const inflightDeliveries = new Set<string>();
 
+/**
+ * M4-F Phase 5: `ncl messages send --stub-outbound` の verify 経路で
+ * 実 channel deliver を silent skip するための target set。
+ *
+ * key = `${agentGroupId}:${channelType}:${platformId}:${threadId ?? ''}` の 4-tuple。
+ * 「どの session の / どの配送先への」outbound を stub するかを 1 key で表現し、
+ * 同 MG に fan-out する別 agent group の deliver は無影響のまま残す。
+ *
+ * production 経路は Set が常に空 = `isStubOutboundTarget` は常に false = 挙動不変。
+ * verify のみ `addStubOutboundTarget` → messages send → finally で
+ * `removeStubOutboundTarget` を必ず呼び、汚染を残さない。
+ */
+const stubOutboundTargets = new Set<string>();
+
+/** stub target key を組み立てる。message 側 (channel_type/platform_id/thread_id) と
+ *  session.agent_group_id の 4-tuple で一意化する。 */
+function stubTargetKey(
+  agentGroupId: string,
+  channelType: string | null,
+  platformId: string | null,
+  threadId: string | null,
+): string {
+  return `${agentGroupId}:${channelType ?? ''}:${platformId ?? ''}:${threadId ?? ''}`;
+}
+
+export function addStubOutboundTarget(
+  agentGroupId: string,
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+): void {
+  stubOutboundTargets.add(stubTargetKey(agentGroupId, channelType, platformId, threadId));
+}
+
+export function removeStubOutboundTarget(
+  agentGroupId: string,
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+): void {
+  stubOutboundTargets.delete(stubTargetKey(agentGroupId, channelType, platformId, threadId));
+}
+
+export function isStubOutboundTarget(
+  agentGroupId: string,
+  channelType: string | null,
+  platformId: string | null,
+  threadId: string | null,
+): boolean {
+  if (stubOutboundTargets.size === 0) return false;
+  return stubOutboundTargets.has(stubTargetKey(agentGroupId, channelType, platformId, threadId));
+}
+
+/** test 用 backdoor: module state を reset する。production import path からは呼ばない。 */
+export function _resetStubOutboundTargetsForTest(): void {
+  stubOutboundTargets.clear();
+}
+
 export interface ChannelDeliveryAdapter {
   deliver(
     channelType: string,
@@ -375,6 +433,23 @@ async function deliverMessage(
   // Channel delivery
   if (!msg.channel_type || !msg.platform_id) {
     log.warn('Message missing routing fields', { id: msg.id });
+    return;
+  }
+
+  // M4-F Phase 5: verify 用 stub-outbound の skip 分岐。verify 中に `ncl messages send
+  // --stub-outbound` から key を仕込むと、この session への実 channel deliver を silent
+  // skip する (production 経路は Set 空 = 常に false = 挙動不変)。stub 対象は
+  // markDelivered だけ通り、outbox cleanup も走らせる (通常 deliver の副作用と対称)。
+  if (isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id, msg.thread_id)) {
+    log.debug('delivery skipped by stub-outbound (verify path)', {
+      event: 'delivery.stub_outbound.skipped',
+      session_id: session.id,
+      agent_group_id: session.agent_group_id,
+      channel_type: msg.channel_type,
+      platform_id: msg.platform_id,
+      message_id: msg.id,
+    });
+    clearOutbox(session.agent_group_id, session.id, msg.id);
     return;
   }
 

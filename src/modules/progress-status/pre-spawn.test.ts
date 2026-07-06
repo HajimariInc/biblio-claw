@@ -158,6 +158,93 @@ describe('emitAdkToolStatus (M4-F Phase 4 IM-1: rate-limit ガード)', () => {
   });
 });
 
+// M4-F Phase 5: `progress.status.transition` structured log emit を検証。emitPreSpawnStatus
+// の 3 outcome (no_adapter / triggered / failed) と emitAdkToolStatus の遷移時 emit + tool_name
+// 保持を assert。Phase 4 の弱点 (成功パス log 不在) を Phase 5 で補完した実装を直接テスト。
+describe('progress.status.transition emit (M4-F Phase 5)', () => {
+  beforeEach(() => {
+    _resetAdkTargetStatusForTest();
+    vi.clearAllMocks();
+  });
+
+  it('emitPreSpawnStatus: no_adapter 分岐で outcome=no_adapter を emit', async () => {
+    vi.mocked(getChannelAdapter).mockReturnValue(undefined);
+    await emitPreSpawnStatus('slack', 'U1', 'T1', '分類中');
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        source: 'emitPreSpawnStatus',
+        outcome: 'no_adapter',
+        channel_type: 'slack',
+        platform_id: 'U1',
+        thread_id: 'T1',
+        status: '分類中',
+        adapter_supports_typing: false,
+      }),
+    );
+  });
+
+  it('emitPreSpawnStatus: 成功時 outcome=triggered を emit', async () => {
+    const setTyping = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getChannelAdapter).mockReturnValue(mkAdapter({ setTyping }));
+    await emitPreSpawnStatus('slack', 'U1', 'T1', '分類中');
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        source: 'emitPreSpawnStatus',
+        outcome: 'triggered',
+        adapter_supports_typing: true,
+      }),
+    );
+  });
+
+  it('emitPreSpawnStatus: setTyping throw 時 outcome=failed を emit', async () => {
+    const setTyping = vi.fn().mockRejectedValue(new Error('rate limited'));
+    vi.mocked(getChannelAdapter).mockReturnValue(mkAdapter({ setTyping }));
+    await emitPreSpawnStatus('slack', 'U1', 'T1', '分類中');
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        source: 'emitPreSpawnStatus',
+        outcome: 'failed',
+        adapter_supports_typing: true,
+      }),
+    );
+  });
+
+  it('emitAdkToolStatus: 遷移時 source=emitAdkToolStatus + tool_name + previous_status を emit', async () => {
+    const setTyping = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getChannelAdapter).mockReturnValue(mkAdapter({ setTyping }));
+    await emitAdkToolStatus('slack', 'U1', 'T1', 'acquire_biblio');
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        source: 'emitAdkToolStatus',
+        outcome: 'transition',
+        tool_name: 'acquire_biblio',
+        status: '仕入れ中',
+        previous_status: null,
+      }),
+    );
+  });
+
+  it('emitAdkToolStatus: 同 tool 再送では source=emitAdkToolStatus emit されない (rate 抑止)', async () => {
+    const setTyping = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getChannelAdapter).mockReturnValue(mkAdapter({ setTyping }));
+    await emitAdkToolStatus('slack', 'U1', 'T1', 'acquire_biblio');
+    vi.mocked(log.info).mockClear();
+    await emitAdkToolStatus('slack', 'U1', 'T1', 'acquire_biblio');
+
+    const adkCalls = vi
+      .mocked(log.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'object' && c[1] !== null && (c[1] as { source?: string }).source === 'emitAdkToolStatus',
+      );
+    expect(adkCalls).toHaveLength(0);
+  });
+});
+
 describe('clearAdkTargetStatus (M4-F Phase 4 IM-1)', () => {
   beforeEach(() => {
     _resetAdkTargetStatusForTest();

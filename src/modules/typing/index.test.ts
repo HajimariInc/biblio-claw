@@ -276,6 +276,132 @@ describe('triggerTyping catch 見える化 (M4-F Phase 4 C2)', () => {
   });
 });
 
+// M4-F Phase 5: `progress.status.transition` structured log emit を検証。updateTypingStatus
+// の遷移点 + triggerTyping の成功/失敗両分岐で emit される契約が守られていることを assert。
+// Phase 4 の弱点 (成功パス log 不在 + vendor 握りつぶし観測不能) を Phase 5 で補完した実装を
+// 直接テストする。
+describe('progress.status.transition emit (M4-F Phase 5)', () => {
+  beforeEach(() => {
+    vi.mocked(log.info).mockClear();
+    vi.mocked(log.warn).mockClear();
+  });
+
+  it('updateTypingStatus 遷移時に source=updateTypingStatus で emit する', async () => {
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'U1', 'T1');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(log.info).mockClear();
+
+    updateTypingStatus('sess-1', 'Web 検索中');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        event: 'progress.status.transition',
+        source: 'updateTypingStatus',
+        session_id: 'sess-1',
+        agent_group_id: 'ag-1',
+        channel_type: 'slack',
+        platform_id: 'U1',
+        thread_id: 'T1',
+        status: 'Web 検索中',
+        previous_status: null,
+        adapter_supports_typing: true,
+        outcome: 'transition',
+      }),
+    );
+  });
+
+  it('updateTypingStatus 同 status 再送では emit されない (rate 抑止と同期)', async () => {
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'U1', 'T1');
+    updateTypingStatus('sess-1', 'Web 検索中');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(log.info).mockClear();
+
+    updateTypingStatus('sess-1', 'Web 検索中'); // 同値
+    await vi.advanceTimersByTimeAsync(0);
+
+    // source='updateTypingStatus' の emit は発火しない
+    const transitionCalls = vi
+      .mocked(log.info)
+      .mock.calls.filter(
+        (c) =>
+          typeof c[1] === 'object' && c[1] !== null && (c[1] as { source?: string }).source === 'updateTypingStatus',
+      );
+    expect(transitionCalls).toHaveLength(0);
+  });
+
+  it('triggerTyping 成功時 outcome=triggered で emit する', async () => {
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'U1', 'T1', 'container 起動中');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        source: 'triggerTyping',
+        session_id: 'sess-1',
+        agent_group_id: 'ag-1',
+        status: 'container 起動中',
+        outcome: 'triggered',
+      }),
+    );
+  });
+
+  it('triggerTyping 失敗時 outcome=failed で emit する (vendor throw 経路)', async () => {
+    setTypingAdapter({
+      setTyping: async () => {
+        throw new Error('rate limited');
+      },
+    });
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'U1', 'T1', 'container 起動中');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(log.info).toHaveBeenCalledWith(
+      'progress.status.transition',
+      expect.objectContaining({
+        source: 'triggerTyping',
+        session_id: 'sess-1',
+        agent_group_id: 'ag-1',
+        status: 'container 起動中',
+        outcome: 'failed',
+      }),
+    );
+  });
+
+  it('遷移 emit の payload は 9 field (event, source, session_id, agent_group_id, channel_type, platform_id, thread_id, status, previous_status, adapter_supports_typing, outcome) を持つ', async () => {
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'U1', 'T1');
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(log.info).mockClear();
+
+    updateTypingStatus('sess-1', '仕入れ中');
+    await vi.advanceTimersByTimeAsync(0);
+
+    const transitionCall = vi
+      .mocked(log.info)
+      .mock.calls.find(
+        (c) =>
+          typeof c[1] === 'object' && c[1] !== null && (c[1] as { source?: string }).source === 'updateTypingStatus',
+      );
+    expect(transitionCall).toBeDefined();
+    const payload = transitionCall![1] as Record<string, unknown>;
+    for (const key of [
+      'event',
+      'source',
+      'session_id',
+      'agent_group_id',
+      'channel_type',
+      'platform_id',
+      'thread_id',
+      'status',
+      'previous_status',
+      'adapter_supports_typing',
+      'outcome',
+    ]) {
+      expect(payload).toHaveProperty(key);
+    }
+  });
+});
+
 // PR #145 review code-reviewer IM-2 対応: updateTypingStatus が pausedUntil を
 // 尊重するように修正した race fix を検証。post-delivery pause 中に status 変化が
 // 起きても即発火せず、状態のみ更新して次 pause 明け tick が forward する。

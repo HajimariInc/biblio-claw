@@ -37,6 +37,7 @@ export async function emitPreSpawnStatus(
   status: string,
 ): Promise<void> {
   const adapter = getChannelAdapter(channelType);
+  const adapterSupportsTyping = typeof adapter?.setTyping === 'function';
   if (!adapter?.setTyping) {
     // adapter 未登録 or setTyping 未実装 (CLI / Fugue) は silent skip。
     // 呼出元 (router / dispatcher) は provider 分岐前に発火するため channelType が
@@ -45,16 +46,53 @@ export async function emitPreSpawnStatus(
       event: 'progress.status.pre_spawn.no_adapter',
       channel_type: channelType,
     });
+    // M4-F Phase 5: no_adapter 分岐も progress.status.transition に含めて集計を pipeline 化。
+    log.info('progress.status.transition', {
+      event: 'progress.status.transition',
+      source: 'emitPreSpawnStatus',
+      session_id: null,
+      agent_group_id: null,
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      status,
+      adapter_supports_typing: adapterSupportsTyping,
+      outcome: 'no_adapter',
+    });
     return;
   }
   try {
     await adapter.setTyping(platformId, threadId, status);
+    log.info('progress.status.transition', {
+      event: 'progress.status.transition',
+      source: 'emitPreSpawnStatus',
+      session_id: null,
+      agent_group_id: null,
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      status,
+      adapter_supports_typing: adapterSupportsTyping,
+      outcome: 'triggered',
+    });
   } catch (err) {
     // best-effort: pre-spawn status failure は routing / dispatch を殺さない。
     log.warn('emitPreSpawnStatus failed', {
       event: 'progress.status.pre_spawn.failed',
       channel_type: channelType,
       err,
+    });
+    log.info('progress.status.transition', {
+      event: 'progress.status.transition',
+      source: 'emitPreSpawnStatus',
+      session_id: null,
+      agent_group_id: null,
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      status,
+      adapter_supports_typing: adapterSupportsTyping,
+      outcome: 'failed',
     });
   }
 }
@@ -101,8 +139,26 @@ export async function emitAdkToolStatus(
   const status = toolNameToStatus(toolName);
   if (!status) return;
   const key = adkTargetKey(channelType, platformId, threadId);
-  if (lastAdkStatus.get(key) === status) return; // 変化時のみ = hybrid updateTypingStatus と対称
+  const previousStatus = lastAdkStatus.get(key) ?? null;
+  if (previousStatus === status) return; // 変化時のみ = hybrid updateTypingStatus と対称
   lastAdkStatus.set(key, status);
+  // M4-F Phase 5: 遷移点の観測 log (source='emitAdkToolStatus' で ADK 経路を区別)。
+  // 続く emitPreSpawnStatus の emit (source='emitPreSpawnStatus') も発火するが、本 emit のみが
+  // tool_name / previous_status を保持し、ADK 経路の運用調査に必要な情報を提供する。
+  log.info('progress.status.transition', {
+    event: 'progress.status.transition',
+    source: 'emitAdkToolStatus',
+    session_id: null,
+    agent_group_id: null,
+    channel_type: channelType,
+    platform_id: platformId,
+    thread_id: threadId,
+    status,
+    previous_status: previousStatus,
+    tool_name: toolName,
+    adapter_supports_typing: typeof getChannelAdapter(channelType)?.setTyping === 'function',
+    outcome: 'transition',
+  });
   await emitPreSpawnStatus(channelType, platformId, threadId, status);
 }
 

@@ -38,6 +38,16 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
     return err(req.id, 'unknown-command', `no command "${req.command}"`);
   }
 
+  // M4-F Phase 5: messages.send は host-only (agent caller は cli_scope に関わらず拒否)。
+  // cli_scope='group' の whitelist に messages は含まれないため既に group scope では拒否
+  // されるが、cli_scope='global' の owner agent group からも routeInbound 直呼び経路を
+  // 塞ぐため明示 guard を先頭に置く (messages resource 側 handler も同 guard を持つ
+  // 二重防御。将来 messages に read-only な list/get 系 verb が追加された場合に備え、
+  // send verb のみを対象にする)。
+  if (ctx.caller !== 'host' && cmd.resource === 'messages' && req.command === 'messages-send') {
+    return err(req.id, 'forbidden', 'messages send is host-only.');
+  }
+
   // CLI scope enforcement for agent callers
   if (ctx.caller === 'agent') {
     const configRow = getContainerConfig(ctx.agentGroupId);

@@ -551,6 +551,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     async setTyping(platformId: string, threadId: string | null, status?: TypingStatus) {
       const tid = threadId ?? platformId;
+      // M4-F Phase 5: vendor 呼出パラメータの観測 log。vendor 内部の 401 / 429 は本 code から
+      // 取れないため outcome='triggered' で「送信を試みた事実」を確定的に記録。vendor 生ログ
+      // `[chat-sdk:slack]` prefix との timestamp 突合で握りつぶし事案を運用調査時に復元する
+      // (runbook §M4-F Phase 5 罠に手順集約)。
+      log.info('progress.status.transition', {
+        event: 'progress.status.transition',
+        source: 'chat-sdk-bridge.setTyping',
+        session_id: null,
+        agent_group_id: null,
+        channel_type: 'slack',
+        platform_id: platformId,
+        thread_id: threadId,
+        vendor_thread_id: tid,
+        status: status ?? null,
+        adapter_supports_typing: true,
+        outcome: 'triggered',
+      });
       // vendor `Adapter.startTyping(tid, status?)` は @chat-adapter/slack@4.14.0 で
       // status 引数対応済、4.30.0 (pin) まで CHANGELOG 上変更なし。TypingStatus
       // (channels/adapter.ts) の内部 null (明示クリア) は undefined に正規化して

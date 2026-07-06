@@ -257,6 +257,7 @@ ncl help
 | user-dms | list | cold-DM のキャッシュ(read-only) |
 | dropped-messages | list | 未登録の sender からのメッセージ(read-only) |
 | approvals | list, get | 承認待ちリクエスト(read-only) |
+| messages | send | 発話を任意の messaging_group に注入する host-only debug 経路。`routeInbound` 直呼び + optional `stub_outbound` で実 channel deliver を silent skip。M4-F Phase 5 で新設 (verify-m4-f.sh から hybrid Slack DM MG を programmatic に発火する用途)|
 
 主要ファイル: `src/cli/dispatch.ts`(ディスパッチャ + approval ハンドラ)、`src/cli/crud.ts`(汎用 CRUD 登録)、`src/cli/resources/`(リソースごとの定義)。
 

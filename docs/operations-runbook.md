@@ -3270,6 +3270,7 @@ Cloud Logging の下記 event を集計する:
 | `progress.status.pre_spawn.failed` (warn) | pre-spawn 経由 (emitPreSpawnStatus / gate 発火直前 or ADK dispatcher) の adapter.setTyping が throw (429 / 401 等) | 頻度で判断: 稀→無視、恒常→scope / rate limit 疑い |
 | `progress.status.set_typing_failed` (warn、PR #145 C2) | refresh loop + updateTypingStatus 経由の triggerTyping catch = 「throw が伝播した」経路のみ発火する。**⚠ PR #145 review silent-failure CR-1 で判明: vendor `@chat-adapter/slack@4.30.0` の `startTyping` は Slack API 障害を内部 try/catch で吸収する仕様のため、scope 剥奪 401 / rate limit 429 は本イベントに到達しない**。実際のこれらの障害は vendor の `console.warn`/`console.error` (非構造化ログ、`[chat-sdk:slack]` prefix) に出るため、GKE Pod ログを `kubectl logs biblio-orchestrator-0 -c orchestrator \| grep chat-sdk:slack` で確認する。本イベントは「vendor が握りつぶさない稀ケース (ネットワーク失敗等)」を拾う保険として残る。既定 4s refresh + 1s poller で高頻度発火しうる = 大量ノイズの兆候はまとまった監視で判断 | 恒常発火なら Slack app scope + Cloud Logging の 429 頻度は vendor 生ログ側で確認、本イベント側は「重複発火数を絞り込む」用途 |
 | `adk.dispatcher.emit_tool_status_failed` (warn、PR #145 S3) | ADK dispatcher の event loop で emitAdkToolStatus が unexpected throw (現状は起きない、将来的防御) | code bug = 調査 |
+| `progress.status.transition` (info、Phase 5 追加) | status 遷移の成功パス observability。5 source (`updateTypingStatus` / `triggerTyping` / `emitPreSpawnStatus` / `emitAdkToolStatus` / `chat-sdk-bridge.setTyping`) から発火し、各 event に session_id / agent_group_id / channel_type / platform_id / thread_id / status / previous_status? / adapter_supports_typing / outcome (`transition` / `triggered` / `failed` / `no_adapter`) の 8-10 field を持つ。**Phase 4 の弱点補完** (成功パス log 不在 + vendor 握りつぶし観測不能) が動機、`kubectl logs biblio-orchestrator-0 \| grep 'progress.status.transition'` で status 履歴の完全復元が可能 | 対処不要、問題調査時に status 履歴を辿る。**`outcome='vendor_swallowed'` 集計** (将来 vendor patch or 自前計装で拾えるようになった時): `kubectl logs ... --since=1h \| grep '"outcome":"vendor_swallowed"' \| wc -l` (現状 emit されない前提、vendor 生ログ `[chat-sdk:slack]` prefix と timestamp 突合で握りつぶし事案を復元) |
 
 ### PRD 記述との乖離
 
@@ -3281,6 +3282,104 @@ Cloud Logging の下記 event を集計する:
 - Source Plan: `.claude/PRPs/plans/phase-4-progress-status.plan.md` (Phase 完了時 completed/ に move)
 - 実装: `src/modules/progress-status/` (poller / tool-status-map / pre-spawn) + `src/modules/typing/index.ts` (updateTypingStatus + currentStatus) + `src/channels/{adapter,chat-sdk-bridge}.ts` (setTyping signature 拡張) + `src/delivery.ts` (pollActive 相乗り) + `src/router.ts` (gate 前 emitPreSpawnStatus + wake 後 updateTypingStatus) + `src/adk/dispatcher.ts` (event loop に emitAdkToolStatus)
 - 継承元 §M4-F Phase 1/2/3: agent-container 経路 + gate 3 分類 + Phase 3 tool 名
+
+---
+
+## M4-F Phase 5: verify-m4-f (統合 E2E)
+
+Phase 5 で 7 assertion の programmatic 検証 script `scripts/verify-m4-f.sh` を新設。3 mode
+(`--local` / `--prod` / 省略 = both) で「1 コマンド再現」を成立させ、`verify-m4.sh` chain に組み込む。
+
+副産物として、成功パスの `progress.status.transition` info emit を **5 source から追加**した
+(Phase 4 の弱点 = 成功パス log 不在 + vendor 握りつぶし観測不能 の補完)。Section 5 の
+programmatic 集計はこの新 event を assert する。
+
+### verify 手順
+
+```bash
+# local mode (docker compose + host orchestrator + hybrid seed が前提)
+bash scripts/verify-m4-f.sh --local
+
+# prod mode (GKE Autopilot biblio-prod + kubectl 認証済 + gcloud ADC が前提)
+kubectl config use-context <gke_...>_biblio-prod
+bash scripts/verify-m4-f.sh --prod
+
+# 両モード (両環境が揃うとき)
+bash scripts/verify-m4-f.sh
+
+# M4 chain 全通し
+bash scripts/verify-m4.sh   # A → B → E (Fugue --prod) → F (--prod) の 4 段 chain
+```
+
+**PASS 判定**: 末尾に `M4-F PASS (${MODE})` を出力し exit 0。Section 9 で自身を再帰実行して
+「2 連続冪等」を programmatic に検証する。
+
+### 9 Section 構成
+
+| # | 名前 | mode | 内容 |
+|---|---|---|---|
+| 1 | Preflight | 共通 (+ local + prod 個別) | hybrid AG/MG/owner の SQL 解決 + 罠 pre-detect |
+| 2 | 3 分類 routing | both | 代表発話 4 種を `ncl messages send --stub-outbound` で発火 → `gate.classified` log の `gate_classification` field と期待値の 4 発話中 3 以上一致で PASS (LLM tolerance) |
+| 3 | in-secure 3 点 | both | audit log (blocked event) + patron 定型文経路 log + notify-admin 経路 log の 3 signal (audit は必須、他 2 は warn 継続) |
+| 4 | agent-container 機能 | both | Bash / 装備 / container skill / 文脈対話 の 4 発話 + session の outbound.db から `container_state.current_tool` の遷移で tool 実行痕跡 assert |
+| 5 | 進行ステート表示 | both | `progress.status.transition` event 集計 (発火数 >= 3 / source 種別 / payload 8 field 完全性) + 目視 checklist (`VERIFY_M4F_INCLUDE_VISUAL=1` 明示時のみ印字) |
+| 6 | Fugue 不変 | both | `verify-fugue-channel.sh --local` / `--prod` を chain 実行 (非 0 exit は set -e で親も fail) |
+| 7 | 1 trace 串刺し | prod のみ | Pod ログから直近発話の trace_id 抽出 → Cloud Trace REST v1 の 30×3s retry poll で gate.classify + tool span (biblio.\* / mcp__\* / Bash) の 2 種名待ち |
+| 8 | keyless | both (+prod で 3 段追加) | ADC 4 面 (GOOGLE_APPLICATION_CREDENTIALS 未設定 / ADC type authorized_user / repo に SA key JSON なし / terraform に google_service_account_key なし) + prod 用 KSA/GSA IAM 3 段 (annotation / workloadIdentityUser binding / USER_MANAGED key 不在) |
+| 9 | 2 連続冪等 + Marker | 共通 | `VERIFY_M4F_IDEMPOTENT_CHECK=1 bash "$0"` で自身再帰実行、exit 0 で PASS + `M4-F PASS (${MODE})` marker |
+
+### Assertion 4 (進行ステート表示) の設計判断
+
+Phase 4 の当初計画は「Section 5 = Slack DM 目視 checklist」だったが、Phase 5 で
+**成功パス log emit + Section 5 の programmatic 集計 + 目視 checklist の 2 段構成** に切替。
+
+**Why**: Phase 4 で判明した 2 つの弱点 (`(a)` 成功パスに structured log event なし = 運用調査は
+vendor 生ログ `[chat-sdk:slack]` prefix しか手がかりなし / `(b)` vendor が Slack API 障害を
+内部 catch で握りつぶすため `progress.status.set_typing_failed` warn が空発火 = 障害の可視化
+が failed 経路のみ) を Phase 5 で解消する動機。`progress.status.transition` info 常時発火を
+5 source に追加することで、Cloud Logging 上で status 遷移の完全履歴を復元可能に。
+
+**DB persistence out of scope**: 「サーバーログ (stdout / Cloud Logging retention 30 日) に
+残せば十分、DB 保存は行き過ぎ」の DEN さん判断 (2026-07-06)。retention / migration / index
+設計コストが log emit のメリットを上回るため。将来 status 遷移を time-series 分析したい
+要求が出れば別 PRD (M4-C reporting 相当) で検討。
+
+### 罠集 (Phase 5 で pre-detect すべきもの)
+
+1. **hybrid agent group 不在** (`container_configs.provider IS NULL` の agent_group が 0 件): Preflight で fail-fast。対処 = `pnpm exec tsx scripts/init-hybrid-agent.ts` (or GKE では `scripts/init-hybrid-agent-gke.sh`) を先に実行。
+
+2. **`HYBRID_MG_ID` 複数候補**: 現在 script は最初の 1 件を採用。複数 wire がある場合は `VERIFY_M4F_HYBRID_MG_ID` env で明示指定して silent 縮退を回避。
+
+3. **`GATE_ENABLED != 'true'`**: Section 3 の in-secure 遮断が動かない → audit log が空になり fail。prod 期待値と反することを Section 1 で早期検知したいが、現状は Section 3 の warn / audit 空で顕在化。
+
+4. **LLM 分類 (biblio-other) の非決定性**: Section 2 は 4 発話中 3 以上一致で PASS の tolerance を持つが、Layer 4 LLM がタイムアウト頻発する場合は `GATE_MODEL` 上位モデル差替 hint (docs 参照)。
+
+5. **agent-container cold start 30-60s**: Section 4 は `--wait-ms 90000` を send_via_ncl に固定。cold start が長い場合は Preflight で warm-up 発話を挟むか、`--wait-ms` を env override 経路で拡張。
+
+6. **notify-admin debounce window (3000ms)**: 2 連続冪等の 2 回目実行時、in-secure DM 通知が `admin.notify.debounced` で return される = これは冪等成立 (2 重 DM を送らない)。Section 3 は debounced も pass 扱いに含める。
+
+7. **`stub-outbound` が in-secure 経路 (session 未作成) を stub できない**: in-secure は router.ts:388 で adapter.deliver 直呼び (session 未作成 = 4-tuple key が組めない = stub target 判定に含まれない) = 実 Slack DM に patron 定型文が飛ぶ可能性あり。verify-m4-f.sh 実行環境が prod ws なら DEN さんへの DM が 1 通発火するのは正常挙動。
+
+8. **verify-fugue-channel.sh chain 実行の Preflight 重複**: Section 6 で verify-fugue-channel.sh を chain 実行するため Preflight が 2 度走る = 許容 (両者独立性を維持)。
+
+9. **`progress.status.transition` の log rate 増加**: `updateTypingStatus` 側 rate 抑止 (`entry.currentStatus === status` 早期 return) が主機構。Cloud Logging コストは status 遷移頻度 × concurrent session 数で概算 (Phase 4 のセッション数 × 4 秒 refresh loop 想定)。恒常発火が日次 $5/day を超えたら emit level を info → debug に降格する運用手順を検討。
+
+10. **Pod restart 後 5 分未満の verify 実行で Section 5 集計が空**: `kubectl logs --since=5m` の window に progress event が入らない = Preflight で Pod start_time を assert する検知経路 (実装は Section 1 で warn 化のみ、実行前に `kubectl get pod -o jsonpath='{.status.startTime}'` を手動確認するのが実務上の運用)。
+
+### 目視 checklist (Slack UI 表示品質、UX 質感の判断領域は人間)
+
+Section 5 の programmatic 集計とは別に、以下 3 点を目視で確認する (`VERIFY_M4F_INCLUDE_VISUAL=1` で verify script 内から印字):
+
+1. Slack DM に「分類中」→「container 起動中」→「作業中 (<tool>)」の遷移が自然な順序 + 時間軸で表示される
+2. 実応答が返却された時点で status が自動クリアされる
+3. rate limit (429) の warn / `setTyping failed` の log が Cloud Logging に出ていない
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-f-agent-container-hybrid.prd.md` (Phase 5、任意)
+- Source Plan: `.claude/PRPs/plans/phase-5-verify-m4-f.plan.md` (Phase 完了時 completed/ に move)
+- 実装: `scripts/verify-m4-f.sh` (11 section 3 mode) + `src/cli/resources/messages.ts` (ncl 発話 verb) + `src/delivery.ts` (stub-outbound Set) + `src/modules/typing/index.ts` / `src/modules/progress-status/pre-spawn.ts` / `src/channels/chat-sdk-bridge.ts` (`progress.status.transition` info emit 追加)
+- 継承元 §M4-F Phase 4: 進行ステート表示 (Slack `assistant.threads.setStatus`) の基盤設計
 
 ---
 
