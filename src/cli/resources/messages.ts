@@ -21,13 +21,13 @@ import { randomUUID } from 'node:crypto';
 
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { findSessionForAgent, findSessionByAgentGroup, getSessionsByAgentGroup } from '../../db/sessions.js';
+import { findSessionForAgent, findSessionByAgentGroup } from '../../db/sessions.js';
 import { getGlobalAdmins, getOwners, getAdminsOfAgentGroup } from '../../modules/permissions/db/user-roles.js';
 import { log } from '../../log.js';
-import { getDueOutboundMessages, type OutboundMessage } from '../../db/session-db.js';
+import { type OutboundMessage } from '../../db/session-db.js';
 import { addStubOutboundTarget, removeStubOutboundTarget } from '../../delivery.js';
 import { routeInbound } from '../../router.js';
-import { openOutboundDb } from '../../session-manager.js';
+import { isPreSpawnDbOpenError, openOutboundDb } from '../../session-manager.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResource } from '../crud.js';
 
@@ -42,7 +42,7 @@ const POLL_INTERVAL_MS = 500;
  *   4. owner の先頭
  * どれも見つからなければ 'ncl:host' fallback (verify 経路の緊急退路、production では起きない)。
  */
-function resolveSenderUserId(agentGroupId: string, explicitUserId: string | undefined): string {
+export function resolveSenderUserId(agentGroupId: string, explicitUserId: string | undefined): string {
   if (explicitUserId) return explicitUserId;
   const scoped = getAdminsOfAgentGroup(agentGroupId);
   if (scoped.length > 0) return scoped[0].user_id;
@@ -51,6 +51,38 @@ function resolveSenderUserId(agentGroupId: string, explicitUserId: string | unde
   const owners = getOwners();
   if (owners.length > 0) return owners[0].user_id;
   return 'ncl:host';
+}
+
+/**
+ * DB open エラーを既存の pre-spawn 規律 (`delivery.ts:260` / `poller.ts:46`) と対称に分岐する。
+ * PR #154 review CR-5 対応: 従来 catch-all で全 error を silent 化していた結果、EACCES /
+ * SQLITE_CORRUPT / EMFILE 等の非 pre-spawn error まで「session がまだ spawn していない」と
+ * 誤認して silent に retry timeout していた。`isPreSpawnDbOpenError` は ENOENT + SQLITE_CANTOPEN
+ * のみ pre-spawn (debug) 扱いし、それ以外は warn で可視化する。
+ */
+function classifyDbOpenError(
+  err: unknown,
+  ctx: { agentGroupId: string; sessionId: string; caller: 'currentMaxOutboundSeq' | 'pollOutbound' },
+): void {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  const payload = {
+    session_id: ctx.sessionId,
+    agent_group_id: ctx.agentGroupId,
+    caller: ctx.caller,
+    err_code: code,
+    err,
+  };
+  if (isPreSpawnDbOpenError(code)) {
+    log.debug('ncl messages send: outbound.db open skipped (pre-spawn)', {
+      event: 'ncl.messages.send.db_open_skipped',
+      ...payload,
+    });
+  } else {
+    log.warn('ncl messages send: outbound.db open failed', {
+      event: 'ncl.messages.send.db_open_failed',
+      ...payload,
+    });
+  }
 }
 
 /** 現在の messages_out max seq を安全に取得する (session が未作成 or DB open 失敗時は 0)。 */
@@ -63,7 +95,8 @@ function currentMaxOutboundSeq(agentGroupId: string, sessionId: string): number 
     } finally {
       db.close();
     }
-  } catch {
+  } catch (err) {
+    classifyDbOpenError(err, { agentGroupId, sessionId, caller: 'currentMaxOutboundSeq' });
     return 0;
   }
 }
@@ -90,21 +123,16 @@ async function pollOutbound(
       } finally {
         db.close();
       }
-    } catch {
-      // outbound.db がまだ存在しない (session 未確定 or spawn 前) はリトライ継続
+    } catch (err) {
+      // PR #154 review CR-5 対応: pre-spawn (debug) vs 非 pre-spawn (warn) の 2 分岐
+      classifyDbOpenError(err, { agentGroupId, sessionId, caller: 'pollOutbound' });
       msgs = [];
     }
     if (msgs.length > 0) return { messages: msgs, timedOut: false };
-    // fetch inline 用の getDueOutboundMessages と機能重複だが本 helper は seq フィルタ + kind
-    // フィルタを持つため独自 SELECT を採用 (getDueOutboundMessages は timestamp 順で seq 制御不可)。
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
   return { messages: [], timedOut: true };
 }
-
-// getDueOutboundMessages import 削除は避ける (import されているが実際は inline SELECT
-// で置き換えたため参照 0。将来の polling 拡張で使う可能性を残すため keep)。
-void getDueOutboundMessages;
 
 registerResource({
   name: 'message',
@@ -133,10 +161,22 @@ registerResource({
         const explicitUserId = args.user_id as string | undefined;
         const explicitThreadId = args.thread_id as string | undefined;
         const stubOutbound = args.stub_outbound === true || args.stub_outbound === 'true' || args.stub_outbound === 1;
+        // PR #154 review IM-4 対応: 数値引数の NaN 経路を fail-fast 化。
+        // 従来 `Math.max(0, Number('abc')) = NaN` → `Date.now() < NaN` は常に false →
+        // pollOutbound が一度も回らず即 `timedOut: true` で silent 退化していた。
         const waitMsRaw = args.wait_ms;
-        const waitMs = waitMsRaw === undefined || waitMsRaw === null ? DEFAULT_WAIT_MS : Math.max(0, Number(waitMsRaw));
-        const explicitFromSeq =
-          args.from_seq === undefined || args.from_seq === null ? undefined : Number(args.from_seq);
+        const waitMs = waitMsRaw === undefined || waitMsRaw === null ? DEFAULT_WAIT_MS : Number(waitMsRaw);
+        if (!Number.isFinite(waitMs) || waitMs < 0) {
+          throw new Error(`--wait-ms must be a non-negative number (received: ${String(waitMsRaw)})`);
+        }
+        let explicitFromSeq: number | undefined;
+        if (args.from_seq !== undefined && args.from_seq !== null) {
+          const parsed = Number(args.from_seq);
+          if (!Number.isFinite(parsed) || parsed < 0) {
+            throw new Error(`--from-seq must be a non-negative number (received: ${String(args.from_seq)})`);
+          }
+          explicitFromSeq = parsed;
+        }
 
         if (!agentGroupId) throw new Error('--agent-group-id is required');
         if (!messagingGroupId) throw new Error('--messaging-group-id is required');
@@ -157,7 +197,10 @@ registerResource({
         const fromSeq = explicitFromSeq ?? (preSession ? currentMaxOutboundSeq(agentGroupId, preSession.id) : 0);
 
         if (stubOutbound) {
-          addStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id, threadId);
+          // PR #154 review CR-1 対応: 3-tuple key (agent_group_id + channel_type + platform_id)。
+          // thread_id は session_mode='shared' で null 化される仕様のため key から除外。
+          // 詳細は `src/delivery.ts:stubTargetKey` の JSDoc 参照。
+          addStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id);
         }
 
         const requestId = randomUUID();
@@ -234,13 +277,13 @@ registerResource({
             messages: messages.map((m) => ({
               id: m.id,
               kind: m.kind,
-              seq: (m as OutboundMessage & { seq?: number }).seq,
+              seq: m.seq,
               content: m.content,
             })),
           };
         } finally {
           if (stubOutbound) {
-            removeStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id, threadId);
+            removeStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id);
           }
         }
       },
@@ -252,8 +295,10 @@ registerResource({
 // verb 名は `messages-send` として registry.ts に登録される (crud.ts の customOperations 変換規則)。
 export const _messagesResourceLoaded = true;
 
-// 補足: findSessionForAgent は session_mode 判定を持たない (thread_id 直マッチのみ)。
-// per-thread mode で thread_id なしの session が存在すると miss するため fallback として
-// findSessionByAgentGroup (最新 active) を並置。verify 経路は毎回 fresh session を想定するため
-// 実質 miss しないが defensive に fallback を持つ。
-void getSessionsByAgentGroup;
+// 設計メモ: session 解決は findSessionForAgent (thread_id 直マッチ) を第一候補、
+// findSessionByAgentGroup (最新 active) を fallback として並置する (`preSession` / `postSession`
+// の 2 段解決)。session_mode='per-thread' で thread_id なし session が存在するケース (Fugue 経路
+// など今は理論上のみ) を吸収するための defensive fallback。verify 経路は毎回 fresh session を
+// 想定するため実運用では preSession/postSession の第一候補が hit する。
+// PR #154 review CM-3 対応: `getSessionsByAgentGroup` import + void は本 file の実装に無関係な
+// 説明コメントで誤導的だったため削除 (import 自体も撤去)。

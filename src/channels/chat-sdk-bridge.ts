@@ -22,6 +22,7 @@ import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
 
 import { log } from '../log.js';
 import { getTracer } from '../observability/index.js';
+import { logProgressStatusTransition } from '../modules/progress-status/transition-log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
@@ -551,29 +552,54 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     async setTyping(platformId: string, threadId: string | null, status?: TypingStatus) {
       const tid = threadId ?? platformId;
-      // M4-F Phase 5: vendor 呼出パラメータの観測 log。vendor 内部の 401 / 429 は本 code から
-      // 取れないため outcome='triggered' で「送信を試みた事実」を確定的に記録。vendor 生ログ
-      // `[chat-sdk:slack]` prefix との timestamp 突合で握りつぶし事案を運用調査時に復元する
-      // (runbook §M4-F Phase 5 罠に手順集約)。
-      log.info('progress.status.transition', {
-        event: 'progress.status.transition',
-        source: 'chat-sdk-bridge.setTyping',
-        session_id: null,
-        agent_group_id: null,
-        channel_type: 'slack',
-        platform_id: platformId,
-        thread_id: threadId,
-        vendor_thread_id: tid,
-        status: status ?? null,
-        adapter_supports_typing: true,
-        outcome: 'triggered',
-      });
-      // vendor `Adapter.startTyping(tid, status?)` は @chat-adapter/slack@4.14.0 で
-      // status 引数対応済、4.30.0 (pin) まで CHANGELOG 上変更なし。TypingStatus
-      // (channels/adapter.ts) の内部 null (明示クリア) は undefined に正規化して
-      // vendor 側 `?? "Typing..."` fallback に載せる (vendor は null / undefined を
-      // 同一に扱う実装 = 意味区別は本境界で失われる、契約通り)。
-      await adapter.startTyping(tid, status ?? undefined);
+      // M4-F Phase 5: vendor 呼出パラメータの観測 log。PR #154 review IM-3 対応で他 2 emitter
+      // (`triggerTyping` / `emitPreSpawnStatus`) と同じ try/catch 分岐に統一 = 成功時のみ
+      // outcome='triggered' + 失敗時 outcome='failed' を emit。vendor 内部の 401 / 429 は
+      // 本 code から取れない (vendor の内部 catch で握りつぶされる) ため、outcome='failed'
+      // に到達するのは vendor の startTyping 呼出自体が throw する稀ケースに限られる。vendor
+      // が握りつぶした事案は生ログ `[chat-sdk:slack]` prefix と timestamp 突合で復元する
+      // (runbook §M4-F Phase 4/5 罠に手順集約)。
+      try {
+        // vendor `Adapter.startTyping(tid, status?)` は @chat-adapter/slack@4.14.0 で
+        // status 引数対応済、4.30.0 (pin) まで CHANGELOG 上変更なし。TypingStatus
+        // (channels/adapter.ts) の内部 null (明示クリア) は undefined に正規化して
+        // vendor 側 `?? "Typing..."` fallback に載せる (vendor は null / undefined を
+        // 同一に扱う実装 = 意味区別は本境界で失われる、契約通り)。
+        await adapter.startTyping(tid, status ?? undefined);
+        logProgressStatusTransition({
+          source: 'chat-sdk-bridge.setTyping',
+          session_id: null,
+          agent_group_id: null,
+          channel_type: 'slack',
+          platform_id: platformId,
+          thread_id: threadId,
+          vendor_thread_id: tid,
+          status: status ?? null,
+          adapter_supports_typing: true,
+          outcome: 'triggered',
+        });
+      } catch (err) {
+        // vendor 側 `logger:'silent'` 初期化で本 catch は事実上ネットワーク層 throw のみ拾う。
+        log.warn('chat-sdk-bridge.setTyping threw (vendor 外の稀ケース)', {
+          event: 'progress.status.set_typing_failed',
+          channel_type: 'slack',
+          err: err instanceof Error ? err.message : String(err),
+        });
+        logProgressStatusTransition({
+          source: 'chat-sdk-bridge.setTyping',
+          session_id: null,
+          agent_group_id: null,
+          channel_type: 'slack',
+          platform_id: platformId,
+          thread_id: threadId,
+          vendor_thread_id: tid,
+          status: status ?? null,
+          adapter_supports_typing: true,
+          outcome: 'failed',
+        });
+        // routing / dispatch を殺さない best-effort 契約は typing 経路と対称
+        // (呼出元 `triggerTyping` 側の catch でも二重 catch されるが冪等)。
+      }
     },
 
     async teardown() {

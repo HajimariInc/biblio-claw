@@ -140,6 +140,11 @@ fi
 # =============================================================================
 if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   : "${GCP_PROJECT_ID:?preflight fail-fast: Prod mode で GCP_PROJECT_ID 未設定}"
+  # PR #154 review S4 対応: BQ_DATASET_ID は本 script (Phase 5) の Section では直接参照しないが、
+  # 将来 Section 5.5 相当 (M4-F 固有 event `progress.status.transition` / `gate.classified` の BQ 到達
+  # shape assert、plan §Out of Scope で「Phase 6 で追加余地」) を追加した際に必要になる env の
+  # pre-warming として fail-fast を維持する。Prod 環境で BQ sink (M4-A Phase 3) が動作している
+  # 前提を preflight で担保する意味合いもある (env 不在 = M4-A 前提未満 = M4-F verify も破綻)。
   : "${BQ_DATASET_ID:?preflight fail-fast: Prod mode で BQ_DATASET_ID 未設定}"
 
   CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
@@ -273,15 +278,28 @@ info '  Preflight OK — Section 2 以降に進む'
 # =============================================================================
 info "=== [2/9] 3 分類 routing (代表発話 4 種 → gate.classified log の gate_classification field 検証) ==="
 
-# gate.classified log から発話に一致する分類を抽出する helper。REQUEST_ID 相関は
-# ncl の event_id (`ncl-<uuid>`) が log に載る形式に依存するが、現状の router.ts:349
-# の gate.classified emit は request_id を持たない = 発話後の N 秒以内の直近 event を採用する。
+# gate.classified log から発話に一致する分類を抽出する helper。
+# PR #154 review IM-2 対応: 従来 tail -1 で「直近 1 件」を使い回すヒューリスティックだったが、
+# 同じ期待値 (biblio-other が i=1/i=2 の 2 発話) が連続する場合に i=1 の古い log 行を i=2 でも
+# 誤って再利用する false PASS が起きていた。前回発話までの gate.classified 行数を module-scope
+# 変数で記録し、次回はそれ以降の行のみ対象にすることで stale reuse を撲滅する。
+GATE_CLASSIFIED_LINE_OFFSET=0
 extract_gate_classification() {
   local since_arg="$1"
   local outfile="$STDERR_DIR/gate-classified-$RANDOM.log"
   get_orchestrator_logs '"event":"gate.classified"' "$outfile" "$since_arg"
-  # 直近 1 件の gate_classification field を抽出 (tail -1)。
-  tail -1 "$outfile" | jq -r '.gate_classification // empty' 2>/dev/null || true
+  # 前回発話までの行数を skip し、それ以降の行のみを対象にする (stale reuse 撲滅)。
+  local current_line_count
+  current_line_count=$(wc -l < "$outfile" 2>/dev/null | tr -d ' ' || echo 0)
+  if [ "$current_line_count" -le "$GATE_CLASSIFIED_LINE_OFFSET" ]; then
+    # 新規発火なし = 前回と同じ行数のまま = i=2 発話に対する gate.classified が届いていない
+    printf '' # 空返却 = mismatch 扱いで retry へ
+    return
+  fi
+  # 新規行の末尾 1 件を採用 (最新の gate.classified event)
+  tail -n "$((current_line_count - GATE_CLASSIFIED_LINE_OFFSET))" "$outfile" | tail -1 \
+    | jq -r '.gate_classification // empty' 2>/dev/null || true
+  GATE_CLASSIFIED_LINE_OFFSET=$current_line_count
 }
 
 # 発話 4 種の代表テスト。M4-F Phase 2 gate の 4 layer で「biblio-adk / biblio-other / in-secure」
@@ -367,12 +385,19 @@ info "=== [3/9] in-secure 3 点 (audit + patron 定型文 + notify-admin log eve
 # 直近の audit log / notify-admin log を確認。
 
 # (a) audit 経路: local = data/gate-audit.jsonl、prod = Cloud Logging の gate.blocked event
+#
+# PR #154 review CR-4 対応: 実 log shape は `src/gate/audit-log.ts:buildGateAuditPayload` で
+# 組み立てられ、`message: 'gate.blocked'` (Cloud Logging reserved field) + `gate_classification:
+# 'in-secure'` + `severity: 'WARNING'` を持つ。従来の `"event":"gate.blocked"` / `"outcome":"blocked"`
+# grep は `event`/`outcome` field 自体が payload に存在しないため常に空 = Section 3 hard fail に
+# 到達していた。`.jsonl` (local) と Cloud Logging (prod) は同一 payload shape のため grep pattern
+# も共通で `"message":"gate.blocked"` を使う。
 audit_file="$STDERR_DIR/audit.log"
 if [ "$MODE" = 'prod' ]; then
-  get_orchestrator_logs '"event":"gate.blocked"|"outcome":"blocked"' "$audit_file" "3m"
+  get_orchestrator_logs '"message":"gate.blocked"' "$audit_file" "3m"
 else
   if [ -f data/gate-audit.jsonl ]; then
-    tail -50 data/gate-audit.jsonl | grep '"outcome":"blocked"' > "$audit_file" || true
+    tail -50 data/gate-audit.jsonl | grep '"message":"gate.blocked"' > "$audit_file" || true
   else
     : > "$audit_file"
   fi
@@ -386,8 +411,10 @@ fi
 # (b) patron 定型文返信: `router.ts:388-400` で adapter.deliver 直呼び。stub-outbound は
 #     session_id ベースだが in-secure 経路は session 未作成 = stub 対象外 = 実 Slack DM に飛ぶ
 #     可能性がある。verify では log 側で patron 定型文文字列の deliver 試行 event を検出する。
+# PR #154 review CR-4 対応: pattern の後半 `"event":"gate.blocked"` は誤 (message field で
+# 表現される)。前半の日本語文字列は router.ts:392 の実文言そのままなので有効。
 patron_file="$STDERR_DIR/patron.log"
-get_orchestrator_logs '"event":"gate.blocked"|"入力に不審な内容"' "$patron_file" "3m"
+get_orchestrator_logs '"message":"gate.blocked"|"入力に不審な内容"' "$patron_file" "3m"
 if [ ! -s "$patron_file" ]; then
   warn "  patron 定型文経路: log event が見つからない (adapter 未登録 or deliver 失敗)"
 else
@@ -395,8 +422,10 @@ else
 fi
 
 # (c) notify-admin log event: notifyAdmin 発火時の log event を検出
+# PR #154 review IM-1 対応: 実 event 名は `notify.admin.*` の prefix。従来の `admin.notify.*` は
+# 逆順で誤り (`src/modules/approvals/notify-admin.ts:79,100,137` で emit される名前と不一致)。
 notify_file="$STDERR_DIR/notify.log"
-get_orchestrator_logs '"event":"admin.notify.sent"|"admin.notify.debounced"|"admin.notify.no_approver"' "$notify_file" "3m"
+get_orchestrator_logs '"event":"notify.admin.sent"|"notify.admin.debounced"|"notify.admin.no_approver"' "$notify_file" "3m"
 if [ ! -s "$notify_file" ]; then
   warn "  notify-admin 経路: log event が見つからない (admin user 未登録 or notify silent skip)"
 else
@@ -426,6 +455,15 @@ CONTAINER_UTTERANCES=(
 
 CONTAINER_FAIL_COUNT=0
 
+# PR #154 review CR-3 対応: 従来 `container_state.current_tool` を send_via_ncl 完了後に
+# 見ていたが、PostToolUse フック (`container/agent-runner/src/providers/claude.ts:176-184`) で
+# 最終応答生成前に current_tool が NULL クリアされる仕様のため、正常系でも常に空になり
+# 偽陰性で fail していた。代替として `progress.status.transition` event の status field に
+# 記録される「日本語 tool 名文言」(`updateTypingStatus` 経路、tool-status-map.ts が Bash/装備/
+# skill 系を含む 18+ tool を map) を発話ごとに検知する形に変更。tool 実行痕跡は event log で
+# 恒久記録されるため PostToolUse タイミングに依存しない。
+CONTAINER_TRANS_OFFSET=0
+
 for i in "${!CONTAINER_UTTERANCES[@]}"; do
   utterance="${CONTAINER_UTTERANCES[$i]}"
   info "  [4-$((i+1))] 発話: $utterance"
@@ -437,22 +475,29 @@ for i in "${!CONTAINER_UTTERANCES[@]}"; do
 
   if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
     CLEANUP_SESSION_IDS+=("$session_id")
-    # container_state.current_tool の遷移を outbound.db から確認 (polling 30s)
-    # 実 tool 実行痕跡があれば current_tool が非 null になる。
-    if [ "$MODE" = 'prod' ]; then
-      current_tool_query="SELECT current_tool FROM container_state WHERE id=1"
-      # session の outbound.db path は data/v2-sessions/<agent_group_id>/<session_id>/outbound.db
-      current_tool=$(kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
-        pnpm exec tsx scripts/q.ts "/data/v2-sessions/${HYBRID_AGENT_GROUP_ID}/${session_id}/outbound.db" \
-        "$current_tool_query" 2>/dev/null | head -1 | tr -d '\r\n' || echo '')
+    # progress.status.transition event の中で今回 session に紐づく行を検知する。
+    # tool 実行痕跡 = source=updateTypingStatus + status が「container 起動中」以外の tool 名
+    # (例: 「Bash 実行中」「装備中」「slack で整形中」等) を含む event が 1 件以上あれば OK。
+    trans_scan_file="$STDERR_DIR/container-trans-$((i+1)).log"
+    get_orchestrator_logs '"event":"progress.status.transition"' "$trans_scan_file" "5m"
+
+    # 前回発話までの行数を skip して stale reuse を撲滅 (I2 と同流儀)
+    current_lines=$(wc -l < "$trans_scan_file" 2>/dev/null | tr -d ' ' || echo 0)
+    new_lines=$((current_lines - CONTAINER_TRANS_OFFSET))
+    if [ "$new_lines" -gt 0 ]; then
+      # 新規行から session_id 一致 + status が「container 起動中」/「分類中」以外の日本語 tool 名を持つ event を数える
+      tool_events=$(tail -n "$new_lines" "$trans_scan_file" \
+        | jq -c --arg sid "$session_id" 'select(.session_id == $sid and .status != null and .status != "container 起動中" and .status != "分類中")' 2>/dev/null \
+        | wc -l | tr -d ' ' || echo 0)
     else
-      current_tool=$(pnpm exec tsx scripts/q.ts "data/v2-sessions/${HYBRID_AGENT_GROUP_ID}/${session_id}/outbound.db" \
-        "SELECT current_tool FROM container_state WHERE id=1" 2>/dev/null | head -1 | tr -d '\r\n' || echo '')
+      tool_events=0
     fi
-    if [ -n "$current_tool" ]; then
-      info "         current_tool='$current_tool' (tool 実行痕跡あり)"
+    CONTAINER_TRANS_OFFSET=$current_lines
+
+    if [ "${tool_events:-0}" -ge 1 ]; then
+      info "         tool 実行痕跡 OK (progress.status.transition で tool 名 status を検知、$tool_events 件)"
     else
-      warn "         current_tool 空 = tool 未起動 or agent 未応答 (cold start / rate limit の可能性)"
+      warn "         tool 実行痕跡 空 = tool 未起動 or agent 未応答 (cold start / rate limit / LLM 応答ばらつきの可能性)"
       CONTAINER_FAIL_COUNT=$((CONTAINER_FAIL_COUNT+1))
     fi
   else
@@ -479,6 +524,15 @@ trans_count=$(wc -l < "$trans_file" || echo 0)
 trans_count=${trans_count//[[:space:]]/}
 info "  progress.status.transition event 検出数: $trans_count"
 
+# PR #154 review IM-5 対応: count=0 は完全未発火 = 明確な regression = fail 昇格。
+# 3 assertion 全 warn-only の状態で「何があっても Section 5 OK 通過」= 進行ステート表示
+# regression 検知能力ゼロを解消する。count < 3 は tolerance で warn 継続 (LLM ばらつき許容)。
+if [ "$trans_count" -eq 0 ]; then
+  fail "Section 5 fail: progress.status.transition event が 0 件 (完全未発火 = 明確な regression)
+    対処: (a) src/modules/typing / progress-status / chat-sdk-bridge の emit 実装が壊れていないか
+          (b) log level = info で emit されているか (LOG_LEVEL=warn/error だと filter される)
+          (c) Section 2/4 の発話が gate → session まで到達しているか"
+fi
 if [ "$trans_count" -lt 3 ]; then
   warn "  Section 5 warn: progress.status.transition event 数が 3 未満 (Section 2/4 発話時の遷移が空)
     対処: (a) hybrid wire 経由の発話が gate → session 作成 → tool 実行まで到達しているか
@@ -559,12 +613,14 @@ info "  Section 6 OK: Fugue 不変検証 chain 完了"
 if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   info "=== [7/9] 1 trace 串刺し (Cloud Trace REST v1、prod のみ) ==="
 
-  # 直近発話 (Section 4 最終) の trace_id を Pod ログから抽出。
-  # M4-A で trace_id は Cloud Logging reserved field `logging.googleapis.com/trace` に載る
-  # 想定 (kubectl logs は JSON 出力 = trace_id field を jq で拾える)。
+  # PR #154 review CR-2 対応: 従来 `"event":"router.dispatch"` を grep していたが、実装には
+  # そんな event 名は存在しない (`router.dispatch.adk` 等の suffix 付き、しかも ADK 経路専用
+  # で hybrid `provider IS NULL` セッションでは発火しない)。gate.classified event は Section 2
+  # で既に使用済 + hybrid/ADK 両経路で発火 + Cloud Logging reserved field で trace_id 相関
+  # 済のため、trace_id 抽出元として最適。
   trace_log_file="$STDERR_DIR/trace-scan.log"
   kubectl logs "$POD" -c orchestrator -n "$NAMESPACE" --since=5m 2>/dev/null \
-    | grep '"event":"router.dispatch"' > "$trace_log_file" || true
+    | grep '"event":"gate.classified"' > "$trace_log_file" || true
 
   TRACE_ID=''
   if [ -s "$trace_log_file" ]; then
@@ -575,21 +631,21 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
   fi
 
   if [ -z "$TRACE_ID" ] || [ ${#TRACE_ID} -ne 32 ]; then
-    warn "  trace_id が抽出できない (直近 log に router.dispatch event なし or trace 未計装)"
-    warn "  Section 7 skip (M4-A observability の trace 依存、hybrid 経路の trace 相関は Phase 6+ で追跡)"
+    warn "  trace_id が抽出できない (直近 log に gate.classified event なし or trace 未計装)"
+    warn "  Section 7 skip (M4-A observability の trace 依存、GATE_ENABLED=false の場合も同経路)"
   else
     info "  抽出 TRACE_ID=$TRACE_ID"
     TOKEN="$(gcloud auth print-access-token 2>/dev/null || true)"
     [ -n "$TOKEN" ] || fail "gcloud access token 取得失敗 = keyless 認証破損"
 
     # 30x3s retry poll (verify-m4-b.sh:343-359 pattern)
+    # 期待 span: gate.classify (M4-F Phase 2 で追加) + agent-container 経由 tool span (Bash/mcp__/biblio.*)
     span_names=''
     for i in $(seq 1 30); do
       body=$(curl -fsS -H "Authorization: Bearer $TOKEN" \
         "https://cloudtrace.googleapis.com/v1/projects/${GCP_PROJECT_ID}/traces/${TRACE_ID}" 2>/dev/null || true)
       if [ -n "$body" ]; then
         span_names=$(printf '%s' "$body" | jq -r '.spans[]?.name' 2>/dev/null || true)
-        # gate.classify + agent-container 経由 tool span の 2 種待ち
         if printf '%s' "$span_names" | grep -qE 'gate\.classify' \
            && printf '%s' "$span_names" | grep -qE 'biblio\.|mcp__|Bash'; then
           info "  Cloud Trace 応答受信: gate.classify + tool span の両方検出"

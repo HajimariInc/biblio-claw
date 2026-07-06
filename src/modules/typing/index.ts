@@ -21,6 +21,7 @@ import fs from 'fs';
 
 import type { TypingStatus } from '../../channels/adapter.js';
 import { log } from '../../log.js';
+import { logProgressStatusTransition } from '../progress-status/transition-log.js';
 import { heartbeatPath } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -99,8 +100,7 @@ async function triggerTyping(
     // vendor 内部 catch (rate limit / 401) は本 code から観測不能なため outcome='triggered'
     // に統一 (握りつぶし事案は vendor 生ログ `[chat-sdk:slack]` prefix と timestamp 突合で
     // 復元、runbook §M4-F Phase 5 罠に手順集約)。
-    log.info('progress.status.transition', {
-      event: 'progress.status.transition',
+    logProgressStatusTransition({
       source: 'triggerTyping',
       session_id: sessionId,
       agent_group_id: agentGroupId,
@@ -124,8 +124,7 @@ async function triggerTyping(
       err: err instanceof Error ? err.message : String(err),
     });
     // M4-F Phase 5: 失敗パスも progress.status.transition に含めて集計を dashboard 化可能に。
-    log.info('progress.status.transition', {
-      event: 'progress.status.transition',
+    logProgressStatusTransition({
       source: 'triggerTyping',
       session_id: sessionId,
       agent_group_id: agentGroupId,
@@ -251,8 +250,7 @@ export function updateTypingStatus(sessionId: string, status: TypingStatus): voi
   // M4-F Phase 5: 遷移点の観測 log。previousStatus を含めることで status 履歴を復元可能に。
   // pause 中の状態変更 (即発火 skip) と 実発火の両ケースで emit (「状態は遷移した」事実の記録)、
   // 実発火の outcome は triggerTyping 側 emit に載る (source='triggerTyping')。
-  log.info('progress.status.transition', {
-    event: 'progress.status.transition',
+  logProgressStatusTransition({
     source: 'updateTypingStatus',
     session_id: sessionId,
     agent_group_id: entry.agentGroupId,

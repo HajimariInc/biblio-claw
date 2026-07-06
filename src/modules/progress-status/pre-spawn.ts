@@ -21,6 +21,7 @@ import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { log } from '../../log.js';
 
 import { toolNameToStatus } from './tool-status-map.js';
+import { logProgressStatusTransition } from './transition-log.js';
 
 /**
  * session 未確定な pre-spawn 経路 (gate 分類中) 用の一発 status 発射。
@@ -47,8 +48,7 @@ export async function emitPreSpawnStatus(
       channel_type: channelType,
     });
     // M4-F Phase 5: no_adapter 分岐も progress.status.transition に含めて集計を pipeline 化。
-    log.info('progress.status.transition', {
-      event: 'progress.status.transition',
+    logProgressStatusTransition({
       source: 'emitPreSpawnStatus',
       session_id: null,
       agent_group_id: null,
@@ -63,8 +63,7 @@ export async function emitPreSpawnStatus(
   }
   try {
     await adapter.setTyping(platformId, threadId, status);
-    log.info('progress.status.transition', {
-      event: 'progress.status.transition',
+    logProgressStatusTransition({
       source: 'emitPreSpawnStatus',
       session_id: null,
       agent_group_id: null,
@@ -82,8 +81,7 @@ export async function emitPreSpawnStatus(
       channel_type: channelType,
       err,
     });
-    log.info('progress.status.transition', {
-      event: 'progress.status.transition',
+    logProgressStatusTransition({
       source: 'emitPreSpawnStatus',
       session_id: null,
       agent_group_id: null,
@@ -145,8 +143,7 @@ export async function emitAdkToolStatus(
   // M4-F Phase 5: 遷移点の観測 log (source='emitAdkToolStatus' で ADK 経路を区別)。
   // 続く emitPreSpawnStatus の emit (source='emitPreSpawnStatus') も発火するが、本 emit のみが
   // tool_name / previous_status を保持し、ADK 経路の運用調査に必要な情報を提供する。
-  log.info('progress.status.transition', {
-    event: 'progress.status.transition',
+  logProgressStatusTransition({
     source: 'emitAdkToolStatus',
     session_id: null,
     agent_group_id: null,

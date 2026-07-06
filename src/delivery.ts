@@ -60,9 +60,22 @@ const inflightDeliveries = new Set<string>();
  * M4-F Phase 5: `ncl messages send --stub-outbound` の verify 経路で
  * 実 channel deliver を silent skip するための target set。
  *
- * key = `${agentGroupId}:${channelType}:${platformId}:${threadId ?? ''}` の 4-tuple。
- * 「どの session の / どの配送先への」outbound を stub するかを 1 key で表現し、
- * 同 MG に fan-out する別 agent group の deliver は無影響のまま残す。
+ * key = `${agentGroupId}:${channelType}:${platformId}` の **3-tuple** (agent_group_id +
+ * channel_type + platform_id)。thread_id は key から意図的に除外する。
+ *
+ * **PR #154 review CR-1 対応**: 従来 4-tuple (thread_id を含む) だったが、hybrid Slack DM
+ * (`init-hybrid-agent.ts:240`) が `session_mode: 'shared'` で wire されている実運用では、
+ * `resolveSession` (`src/session-manager.ts:101,111,174`) が `thread_id = null` に強制する。
+ * この `null` が `writeSessionRouting` → agent-runner の `getSessionRouting` → 応答の
+ * default routing に伝播し `messages_out.thread_id = null` として書き込まれる一方、
+ * `messages.ts` は routeInbound 前に session を持たないため `threadId = mg.platform_id`
+ * (非 null) で stub key を積む → 4-tuple 一致条件が構造的に成立せず、stub 対象が
+ * 実配送側で恒久的に false 判定される silent 不作動が起きていた。
+ *
+ * 3-tuple 化のトレードオフ: 同一 MG に **同一 agent_group** から同時に別 thread の deliver
+ * が走ると両方 stub される。ただし本 verify 経路の想定用途 (`verify-m4-f.sh`) では 1
+ * agent_group × 1 MG × sequential dispatch のため、この巻き添えは実運用上発生しない
+ * (fan-out 別 agent_group への副作用ゼロは agent_group_id で担保、これは元設計と同じ)。
  *
  * production 経路は Set が常に空 = `isStubOutboundTarget` は常に false = 挙動不変。
  * verify のみ `addStubOutboundTarget` → messages send → finally で
@@ -70,43 +83,27 @@ const inflightDeliveries = new Set<string>();
  */
 const stubOutboundTargets = new Set<string>();
 
-/** stub target key を組み立てる。message 側 (channel_type/platform_id/thread_id) と
- *  session.agent_group_id の 4-tuple で一意化する。 */
-function stubTargetKey(
-  agentGroupId: string,
-  channelType: string | null,
-  platformId: string | null,
-  threadId: string | null,
-): string {
-  return `${agentGroupId}:${channelType ?? ''}:${platformId ?? ''}:${threadId ?? ''}`;
+/** stub target key を組み立てる。agent_group_id + channel_type + platform_id の 3-tuple。
+ *  thread_id を除外することで session_mode='shared' が強制する `thread_id=null` を吸収する。 */
+function stubTargetKey(agentGroupId: string, channelType: string | null, platformId: string | null): string {
+  return `${agentGroupId}:${channelType ?? ''}:${platformId ?? ''}`;
 }
 
-export function addStubOutboundTarget(
-  agentGroupId: string,
-  channelType: string,
-  platformId: string,
-  threadId: string | null,
-): void {
-  stubOutboundTargets.add(stubTargetKey(agentGroupId, channelType, platformId, threadId));
+export function addStubOutboundTarget(agentGroupId: string, channelType: string, platformId: string): void {
+  stubOutboundTargets.add(stubTargetKey(agentGroupId, channelType, platformId));
 }
 
-export function removeStubOutboundTarget(
-  agentGroupId: string,
-  channelType: string,
-  platformId: string,
-  threadId: string | null,
-): void {
-  stubOutboundTargets.delete(stubTargetKey(agentGroupId, channelType, platformId, threadId));
+export function removeStubOutboundTarget(agentGroupId: string, channelType: string, platformId: string): void {
+  stubOutboundTargets.delete(stubTargetKey(agentGroupId, channelType, platformId));
 }
 
 export function isStubOutboundTarget(
   agentGroupId: string,
   channelType: string | null,
   platformId: string | null,
-  threadId: string | null,
 ): boolean {
   if (stubOutboundTargets.size === 0) return false;
-  return stubOutboundTargets.has(stubTargetKey(agentGroupId, channelType, platformId, threadId));
+  return stubOutboundTargets.has(stubTargetKey(agentGroupId, channelType, platformId));
 }
 
 /** test 用 backdoor: module state を reset する。production import path からは呼ばない。 */
@@ -440,13 +437,18 @@ async function deliverMessage(
   // --stub-outbound` から key を仕込むと、この session への実 channel deliver を silent
   // skip する (production 経路は Set 空 = 常に false = 挙動不変)。stub 対象は
   // markDelivered だけ通り、outbox cleanup も走らせる (通常 deliver の副作用と対称)。
-  if (isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id, msg.thread_id)) {
-    log.debug('delivery skipped by stub-outbound (verify path)', {
+  // PR #154 review CR-1 対応: key は 3-tuple (agent_group_id + channel_type + platform_id)
+  // で thread_id を含めない。詳細は stubTargetKey の JSDoc を参照。
+  // PR #154 review S8 対応: log level を debug → info に格上げ。本番 `LOG_LEVEL=info` でも
+  // Cloud Logging に届くようにして「verify 中に何を skip したか」の運用調査を可能に。
+  if (isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id)) {
+    log.info('delivery skipped by stub-outbound (verify path)', {
       event: 'delivery.stub_outbound.skipped',
       session_id: session.id,
       agent_group_id: session.agent_group_id,
       channel_type: msg.channel_type,
       platform_id: msg.platform_id,
+      thread_id: msg.thread_id,
       message_id: msg.id,
     });
     clearOutbox(session.agent_group_id, session.id, msg.id);
