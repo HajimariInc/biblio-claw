@@ -22,9 +22,16 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import {
+  clearOutbox,
+  isPreSpawnDbOpenError,
+  openInboundDb,
+  openOutboundDb,
+  readOutboxFiles,
+} from './session-manager.js';
+import { refreshProgressStatus } from './modules/progress-status/poller.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import type { OutboundFile, TypingStatus } from './channels/adapter.js';
 import type { Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -58,7 +65,8 @@ export interface ChannelDeliveryAdapter {
     content: string,
     files?: OutboundFile[],
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  // status 引数の意味は TypingStatus (channels/adapter.ts) を参照。
+  setTyping?(channelType: string, platformId: string, threadId: string | null, status?: TypingStatus): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -125,6 +133,17 @@ async function pollActive(): Promise<void> {
     const sessions = getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // M4-F Phase 4: container_state.current_tool を 1s poll で読んで typing status を更新。
+      // deliverSessionMessages と直列で問題ない (inflightDeliveries は delivery 用の別集合、
+      // refreshProgressStatus は同期実行 + updateTypingStatus の変化時 no-op で吸収)。
+      // best-effort: progress-status failure は delivery を殺さない。
+      await refreshProgressStatus(session).catch((err) => {
+        log.warn('progress-status refresh failed', {
+          event: 'progress.status.refresh_failed',
+          session_id: session.id,
+          err,
+        });
+      });
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });
@@ -171,12 +190,17 @@ async function drainSession(session: Session): Promise<void> {
     outDb = openOutboundDb(agentGroup.id, session.id);
     inDb = openInboundDb(agentGroup.id, session.id);
   } catch (err) {
-    // ENOENT は初回 spawn 前 = 正常スキップなので debug。それ以外 (EACCES / EMFILE / EIO 等の
-    // パーミッション / I/O エラー) は本番 LOG_LEVEL=info でも見える warn に倒す。
+    // pre-spawn 判定は session-manager.ts の isPreSpawnDbOpenError に集約 (ENOENT +
+    // SQLITE_CANTOPEN の 2 code で「初回 spawn 前」の正常経路 = poller.ts と共通化)。
+    // それ以外 (EACCES / EMFILE / EIO 等の パーミッション / I/O エラー) は本番
+    // LOG_LEVEL=info でも見える warn に倒す。
+    // 当初は ENOENT のみ debug 分岐で、SQLITE_CANTOPEN (better-sqlite3 readonly open 特有)
+    // が warn に落ちて cold start ごとにノイズが出ていた (PR #145 review type-design C-4
+    // 実測)。poller.ts の SQLITE_CANTOPEN 判定 (C3) と対称に是正。
     const code = (err as NodeJS.ErrnoException)?.code;
-    const ctx = { session_id: session.id, agent_group_id: agentGroup.id, err };
-    if (code === 'ENOENT') {
-      log.debug('drainSession: db open skipped', { event: 'delivery.db_open_skipped', ...ctx });
+    const ctx = { session_id: session.id, agent_group_id: agentGroup.id, err_code: code, err };
+    if (isPreSpawnDbOpenError(code)) {
+      log.debug('drainSession: db open skipped (pre-spawn)', { event: 'delivery.db_open_skipped', ...ctx });
     } else {
       log.warn('drainSession: db open failed', { event: 'delivery.db_open_failed', ...ctx });
     }

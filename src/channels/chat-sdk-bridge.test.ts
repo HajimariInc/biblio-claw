@@ -205,3 +205,66 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+// PR #145 review pr-test-analyzer IM-11 対応: bridge.setTyping の status forward
+// が既存 test に一度も含まれていなかった。M4-F Phase 4 で追加した `status ?? undefined`
+// 正規化 (vendor 側 `"Typing..."` fallback 温存の要) が silent regression する経路を
+// 塞ぐ最小の contract test。
+describe('createChatSdkBridge.setTyping (M4-F Phase 4 IM-11)', () => {
+  interface TypingCall {
+    tid: string;
+    status: string | undefined;
+  }
+
+  function makeTypingCapture(): { calls: TypingCall[]; startTyping: (tid: string, status?: string) => Promise<void> } {
+    const calls: TypingCall[] = [];
+    const startTyping = async (tid: string, status?: string): Promise<void> => {
+      calls.push({ tid, status });
+    };
+    return { calls, startTyping };
+  }
+
+  it('forwards non-null status to vendor startTyping as-is', async () => {
+    const { calls, startTyping } = makeTypingCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ startTyping } as Partial<Adapter>),
+      supportsThreads: true,
+    });
+    await bridge.setTyping!('U1', 'T1', 'Web 検索中');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ tid: 'T1', status: 'Web 検索中' });
+  });
+
+  it('normalizes null status to undefined (vendor default fallback)', async () => {
+    const { calls, startTyping } = makeTypingCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ startTyping } as Partial<Adapter>),
+      supportsThreads: true,
+    });
+    await bridge.setTyping!('U1', 'T1', null);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ tid: 'T1', status: undefined });
+  });
+
+  it('normalizes undefined status to undefined (vendor default fallback)', async () => {
+    const { calls, startTyping } = makeTypingCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ startTyping } as Partial<Adapter>),
+      supportsThreads: true,
+    });
+    await bridge.setTyping!('U1', 'T1');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ tid: 'T1', status: undefined });
+  });
+
+  it('falls back to platformId when threadId is null (=DM 経路)', async () => {
+    const { calls, startTyping } = makeTypingCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ startTyping } as Partial<Adapter>),
+      supportsThreads: true,
+    });
+    await bridge.setTyping!('U1', null, '仕入れ中');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ tid: 'U1', status: '仕入れ中' });
+  });
+});

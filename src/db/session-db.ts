@@ -7,6 +7,7 @@
  */
 import Database from 'better-sqlite3';
 
+import { log } from '../log.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 
 /** Apply the inbound or outbound schema to a DB file. Idempotent. */
@@ -225,6 +226,14 @@ export interface ContainerState {
  * when either the table doesn't exist yet (older session DB) or no tool is
  * active. Host sweep reads this to widen stuck-detection tolerance while
  * Bash is running with a long declared timeout.
+ *
+ * PR #145 review silent-failure CR-2 対応: 当初は bare catch で「テーブル未存在」
+ * のみ想定していたが、I/O 障害 (EIO / SQLITE_BUSY / SQLITE_CORRUPT 等) も同じく
+ * silent 消失させていた。M4-F Phase 4 で `refreshProgressStatus` が read consumer
+ * に追加され silent 消失時 `progress.status.refresh_failed` 監視イベントに到達しない
+ * 経路が判明したため、`no such table` のみ debug 抑制、それ以外は `log.warn` に
+ * 昇格して観察可能にする (返り値の null contract は不変 = 呼出側は「tool 未実行」
+ * 扱いのままで挙動同等)。
  */
 export function getContainerState(outDb: Database.Database): ContainerState | null {
   try {
@@ -235,8 +244,22 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
       )
       .get() as ContainerState | undefined;
     return row ?? null;
-  } catch {
-    // Table not present on older session DBs — treat as "no tool in flight".
+  } catch (err) {
+    // "no such table: container_state" は older session DBs (schema migration 前) で
+    // 発生する正常経路。err.message で判別 (better-sqlite3 は SQLite ネイティブメッセージ
+    // をそのまま throw、error code は付与されない)。
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('no such table')) {
+      return null;
+    }
+    // I/O 障害 / lock / 破損等: silent 消失させず可視化。呼出側 (host-sweep /
+    // refreshProgressStatus) の null contract は維持 (= 「tool 未実行」扱いで
+    // 挙動同等) だが、頻発すれば監視表 (`db.container_state.read_failed`) から
+    // 検知できるようにする。
+    log.warn('getContainerState: read failed', {
+      event: 'db.container_state.read_failed',
+      err_message: msg,
+    });
     return null;
   }
 }

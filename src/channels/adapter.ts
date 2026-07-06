@@ -93,6 +93,28 @@ export interface OutboundFile {
   data: Buffer;
 }
 
+/**
+ * `setTyping` の `status` 引数が取りうる値 (M4-F Phase 4)。
+ *
+ * 3 状態を意味的に区別する:
+ *   - `undefined` — 呼出側で status を指定しない (typing indicator は生存だが表示文言未指定)
+ *   - 非空 `string` — 進行ステート文言 (例: 「Web 検索中」)
+ *   - `null` — 明示クリア意図 (内部状態遷移で「作業終了」を表現するため保持)
+ *
+ * vendor 境界 (chat-sdk-bridge の setTyping、`@chat-adapter/slack`) では
+ * `status ?? undefined` で null → undefined に正規化される。vendor 実装は
+ * `?? "Typing..."` で null / undefined を同一に fallback するため、Slack 上の
+ * 観測挙動は両者で差がない (どちらも default 文言に戻る)。すなわち null と
+ * undefined の意味区別は内部 API 契約 (`updateTypingStatus` の状態遷移) のみで、
+ * vendor 到達時には失われる = 内部の設計語彙。
+ *
+ * PR #145 review C-1: signature の 4 引数目を `TypingStatus` 必須化しても
+ * TypeScript 関数部分型付けが余剰引数無視で素通りするため、境界通過は
+ * 回帰テスト (`src/index.test.ts` の `setTyping` wrapper 引数 forward test) で
+ * 保証する。型は「意味の source of truth」を集約する役割のみで検知能力を持たない。
+ */
+export type TypingStatus = string | null;
+
 /** Outbound message from host to adapter. */
 export interface OutboundMessage {
   kind: string;
@@ -133,7 +155,7 @@ export interface ChannelAdapter {
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
   // Optional
-  setTyping?(platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(platformId: string, threadId: string | null, status?: TypingStatus): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;
 

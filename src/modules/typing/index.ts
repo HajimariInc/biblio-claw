@@ -19,6 +19,8 @@
  */
 import fs from 'fs';
 
+import type { TypingStatus } from '../../channels/adapter.js';
+import { log } from '../../log.js';
 import { heartbeatPath } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -45,7 +47,8 @@ const HEARTBEAT_FRESH_MS = 6000;
 const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  // status 引数の意味は TypingStatus (channels/adapter.ts) を参照。
+  setTyping?(channelType: string, platformId: string, threadId: string | null, status?: TypingStatus): Promise<void>;
 }
 
 interface TypingTarget {
@@ -56,6 +59,12 @@ interface TypingTarget {
   interval: NodeJS.Timeout;
   startedAt: number;
   pausedUntil: number; // epoch ms; 0 = not paused
+  /**
+   * M4-F Phase 4: 現在の progress-status 文言。updateTypingStatus で書き換えられ、
+   * refresh loop の 4s tick が毎回 vendor に forward する (Slack 側 2 分自動クリア回避 +
+   * status 継続表示)。null = 未設定 (vendor 側 default 文言に fallback)。
+   */
+  currentStatus: TypingStatus;
 }
 
 let adapter: TypingAdapter | null = null;
@@ -72,11 +81,29 @@ export function setTypingAdapter(a: TypingAdapter): void {
   adapter = a;
 }
 
-async function triggerTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
+async function triggerTyping(
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+  status: TypingStatus,
+): Promise<void> {
   try {
-    await adapter?.setTyping?.(channelType, platformId, threadId);
-  } catch {
+    // TypingStatus (channels/adapter.ts) の内部設計語彙では null (明示クリア) と
+    // undefined (未指定) を区別するが、vendor 境界では両者とも `"Typing..."` fallback に
+    // 収束する。`status ?? undefined` で null → undefined 正規化して vendor 実装契約に合わせる。
+    await adapter?.setTyping?.(channelType, platformId, threadId, status ?? undefined);
+  } catch (err) {
     // Typing is best-effort — don't let it fail delivery or routing.
+    // ただし PR #145 review C2 で判明: vendor (@chat-adapter/slack) が `logger:'silent'`
+    // で初期化されているため vendor 側の warn log も出ない = 完全不可視化。既定 4s refresh +
+    // 1s poller の高頻度呼出しなので同一 error は multiplicative に鳴りうる = log flooding
+    // 防止のため warn 発火は本来 debounce したいが、まず可視化を優先 (重要度は Slack scope 剥奪
+    // + rate limit 429 の検知 > 大量ノイズの回避)。debounce は将来 issue 化。
+    log.warn('setTyping failed (best-effort, routing continues)', {
+      event: 'progress.status.set_typing_failed',
+      channel_type: channelType,
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -96,6 +123,7 @@ export function startTypingRefresh(
   channelType: string,
   platformId: string,
   threadId: string | null,
+  initialStatus: TypingStatus = null,
 ): void {
   const existing = typingRefreshers.get(sessionId);
   if (existing) {
@@ -104,14 +132,25 @@ export function startTypingRefresh(
     // the container-wake latency budget. Also clear any lingering
     // post-delivery pause: a new inbound means the user expects
     // typing to show immediately.
-    triggerTyping(channelType, platformId, threadId).catch(() => {});
+    //
+    // M4-F Phase 4: 直近 status を維持したまま refresh 再開 (新 inbound で status を
+    // リセットしない = poller が次 tick で新しい tool 名を反映する)。
+    // initialStatus 引数は re-inbound では無視 (既存 currentStatus を優先)。
+    // .catch は on-purpose dead: triggerTyping は内部で全 error を catch + log.warn 化
+    // (C2 対応、event: 'progress.status.set_typing_failed') するため契約上 reject しない。
+    // 将来 triggerTyping が rethrow に変わったら unhandledRejection 撲滅の保険として残す。
+    triggerTyping(channelType, platformId, threadId, existing.currentStatus).catch(() => {});
     existing.startedAt = Date.now();
     existing.pausedUntil = 0;
     return;
   }
 
-  // Immediate tick + periodic refresh.
-  triggerTyping(channelType, platformId, threadId).catch(() => {});
+  // Immediate tick + periodic refresh. initialStatus を渡すと最初の発火から
+  // その status で送る = 直後の updateTypingStatus 呼出との race を撲滅する
+  // (PR #145 実機で発見: startTypingRefresh(null) + updateTypingStatus('container 起動中')
+  //  の 2 発 fire-and-forget が Slack API 到達順で「Typing...」が後勝ちする経路あり)。
+  // .catch on-purpose dead (triggerTyping contract: never rejects、上の説明参照)。
+  triggerTyping(channelType, platformId, threadId, initialStatus).catch(() => {});
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
@@ -124,7 +163,8 @@ export function startTypingRefresh(
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId).catch(() => {});
+      // .catch on-purpose dead (triggerTyping contract: never rejects、C2 対応済)。
+      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.currentStatus).catch(() => {});
       return;
     }
 
@@ -142,7 +182,37 @@ export function startTypingRefresh(
     interval,
     startedAt,
     pausedUntil: 0,
+    currentStatus: initialStatus,
   });
+}
+
+/**
+ * M4-F Phase 4: active な typing refresh の現在 status を書き換える。
+ *
+ * refresh loop の次 4s tick が新 status を vendor に forward するが、UX 反応性のため
+ * 「変化検知点で 1 回即発火」も併用する。**同値時 no-op は rate limit ガードの主機構** =
+ * poller が 1s tick で呼び出しても、tool 未変化なら追加 API 呼出しなし。
+ *
+ * Contract:
+ *   - session が typingRefreshers に居ない場合 (未起動 / stop 済) は no-op で throw しない
+ *   - 前値と同一 status は no-op (rate limit 節約)
+ *   - null → 非 null、非 null → null、A → B の遷移は即 1 回発火
+ *   - **pause 中 (pausedUntil > Date.now()) は状態更新のみで即発火は skip**、次 pause 明け
+ *     tick が forward する (PR #145 review code-reviewer IM-2 対応: 実応答直後 10 秒間の
+ *     `pauseTypingRefreshAfterDelivery` が周期 tick 側では尊重されているのに、poller の
+ *     1s tick から呼ばれる updateTypingStatus が pause を無視して発火する race を解消)
+ *   - refresh loop の 4s tick が currentStatus を毎回 forward (Slack 2 分自動クリア回避)
+ */
+export function updateTypingStatus(sessionId: string, status: TypingStatus): void {
+  const entry = typingRefreshers.get(sessionId);
+  if (!entry) return;
+  if (entry.currentStatus === status) return;
+  entry.currentStatus = status;
+  // pause 中は状態のみ更新 = pause 明け tick が新 status を forward する
+  if (entry.pausedUntil > Date.now()) return;
+  // 即発火: 次の 4s tick を待たず変化点で 1 回送信 (UX 反応性)。
+  // .catch on-purpose dead (triggerTyping contract: never rejects、C2 対応済)。
+  triggerTyping(entry.channelType, entry.platformId, entry.threadId, status).catch(() => {});
 }
 
 /**
