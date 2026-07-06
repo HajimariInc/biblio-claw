@@ -40,6 +40,7 @@
 import { isFinalResponse } from '@google/adk';
 
 import { getChannelAdapter } from '../channels/channel-registry.js';
+import { isStubDeliveryByMg } from '../delivery.js';
 import { log } from '../log.js';
 
 import { getSharedRunner } from './dispatcher.js';
@@ -216,6 +217,17 @@ async function deliverToPatron(payload: AdkApprovalPayload, text: string, reques
       event: 'adk.approval.no_adapter',
       request_id: requestId,
       channel_type: payload.channelType,
+    });
+    return;
+  }
+  // issue #155 案 B 対応: ADK approval resume 経路の stub check (dispatcher.ts と対称)
+  if (isStubDeliveryByMg(payload.channelType, payload.platformId)) {
+    log.info('ADK approval resolve: deliver skipped by stub (verify path)', {
+      event: 'adk.approval.stubbed',
+      request_id: requestId,
+      channel_type: payload.channelType,
+      platform_id: payload.platformId,
+      final_text_length: text.length,
     });
     return;
   }
