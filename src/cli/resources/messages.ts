@@ -25,7 +25,12 @@ import { findSessionForAgent, findSessionByAgentGroup } from '../../db/sessions.
 import { getGlobalAdmins, getOwners, getAdminsOfAgentGroup } from '../../modules/permissions/db/user-roles.js';
 import { log } from '../../log.js';
 import { type OutboundMessage } from '../../db/session-db.js';
-import { addStubOutboundTarget, removeStubOutboundTarget } from '../../delivery.js';
+import {
+  addStubOutboundTarget,
+  removeStubOutboundTarget,
+  addStubDeliveryByMg,
+  removeStubDeliveryByMg,
+} from '../../delivery.js';
 import { routeInbound } from '../../router.js';
 import { isPreSpawnDbOpenError, openOutboundDb } from '../../session-manager.js';
 import type { InboundEvent } from '../../channels/adapter.js';
@@ -201,6 +206,9 @@ registerResource({
           // thread_id は session_mode='shared' で null 化される仕様のため key から除外。
           // 詳細は `src/delivery.ts:stubTargetKey` の JSDoc 参照。
           addStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id);
+          // issue #155 案 B 対応: 2-tuple key を追加登録。in-secure reject / notify-admin /
+          // ADK fallback / session 経路 (agent_group 不整合時の二重防御) の 4 経路を塞ぐ。
+          addStubDeliveryByMg(mg.channel_type, mg.platform_id);
         }
 
         const requestId = randomUUID();
@@ -284,6 +292,8 @@ registerResource({
         } finally {
           if (stubOutbound) {
             removeStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id);
+            // issue #155 案 B 対応: 2-tuple key も cleanup (汚染残置を撲滅)
+            removeStubDeliveryByMg(mg.channel_type, mg.platform_id);
           }
         }
       },

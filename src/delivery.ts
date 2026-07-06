@@ -111,6 +111,47 @@ export function _resetStubOutboundTargetsForTest(): void {
   stubOutboundTargets.clear();
 }
 
+/**
+ * issue #155 案 B 対応: `--stub-outbound` を「outbound + notify + reject」全経路に拡張するため
+ * の 2-tuple key の Set。key = `${channelType}:${platformId}`。
+ *
+ * **既存 stubOutboundTargets (3-tuple) との使い分け**:
+ * - stubOutboundTargets = agent_group_id + channel + platform。既存 deliverToSession 用。
+ * - stubDeliveryByMg = channel + platform のみ。**agent_group_id が resolvable でない経路**
+ *   (in-secure reject / notify-admin / ADK fallback) 用。
+ *
+ * **案 B の想定副作用**:
+ * - fan-out 別 agent_group から同 MG への deliver も stub される可能性 = ただし verify 用途
+ *   では 1 agent_group × 1 MG のため実運用で衝突しない
+ * - deliverToSession で二重防御に使うことで **案 F (session 経路 stub 適用漏れ) の症状も吸収**
+ *   (agent_group_id 不整合による key mismatch を回避)
+ *
+ * production 経路は Set が常に空 = 挙動不変。
+ */
+const stubDeliveryByMg = new Set<string>();
+
+function stubMgKey(channelType: string | null, platformId: string | null): string {
+  return `${channelType ?? ''}:${platformId ?? ''}`;
+}
+
+export function addStubDeliveryByMg(channelType: string, platformId: string): void {
+  stubDeliveryByMg.add(stubMgKey(channelType, platformId));
+}
+
+export function removeStubDeliveryByMg(channelType: string, platformId: string): void {
+  stubDeliveryByMg.delete(stubMgKey(channelType, platformId));
+}
+
+export function isStubDeliveryByMg(channelType: string | null, platformId: string | null): boolean {
+  if (stubDeliveryByMg.size === 0) return false;
+  return stubDeliveryByMg.has(stubMgKey(channelType, platformId));
+}
+
+/** test 用 backdoor。 */
+export function _resetStubDeliveryByMgForTest(): void {
+  stubDeliveryByMg.clear();
+}
+
 export interface ChannelDeliveryAdapter {
   deliver(
     channelType: string,
@@ -441,7 +482,12 @@ async function deliverMessage(
   // で thread_id を含めない。詳細は stubTargetKey の JSDoc を参照。
   // PR #154 review S8 対応: log level を debug → info に格上げ。本番 `LOG_LEVEL=info` でも
   // Cloud Logging に届くようにして「verify 中に何を skip したか」の運用調査を可能に。
-  if (isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id)) {
+  // issue #155 案 B/F 対応: 3-tuple (既存) と 2-tuple (新設) の OR 判定で二重防御。
+  // session 経路の agent_group_id 不整合による key mismatch (案 F 症状) を吸収する。
+  if (
+    isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id) ||
+    isStubDeliveryByMg(msg.channel_type, msg.platform_id)
+  ) {
     log.info('delivery skipped by stub-outbound (verify path)', {
       event: 'delivery.stub_outbound.skipped',
       session_id: session.id,

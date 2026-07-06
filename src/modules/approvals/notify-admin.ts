@@ -15,6 +15,7 @@
  * `'no_delivery'` / `'deliver_failed'` / `'debounced'`)。
  */
 import { getChannelAdapter } from '../../channels/channel-registry.js';
+import { isStubDeliveryByMg } from '../../delivery.js';
 import { log } from '../../log.js';
 
 import { pickApprover, pickApprovalDelivery } from './primitive.js';
@@ -48,6 +49,15 @@ export interface NotifyAdminOptions {
   subject: string;
   /** DM 本文 (改行含む詳細情報)。secret を含まないよう呼出側で truncate 済想定。 */
   body: string;
+  /**
+   * issue #155 案 B 対応: patron 発話の event context を optional で渡す。verify 経路で
+   * `--stub-outbound` によって登録された 2-tuple key (channel_type + platform_id) にマッチ
+   * する場合、admin DM の実発火を silent skip する。production 経路は undefined で挙動不変。
+   */
+  sourceEvent?: {
+    channelType: string;
+    platformId: string;
+  };
 }
 
 /**
@@ -115,6 +125,20 @@ export async function notifyAdmin(opts: NotifyAdminOptions): Promise<NotifyAdmin
         channel_type: target.messagingGroup.channel_type,
       });
       return 'deliver_failed';
+    }
+    // issue #155 案 B 対応: patron event が stub 対象なら admin DM 発火を skip。
+    // key は **patron 側 event** の (channel + platform) で判定 (admin 側 mg ではなく)。
+    if (opts.sourceEvent && isStubDeliveryByMg(opts.sourceEvent.channelType, opts.sourceEvent.platformId)) {
+      log.info('notifyAdmin: stubbed by verify path', {
+        event: 'notify.admin.stubbed',
+        user_id: target.userId,
+        subject: opts.subject,
+        source_channel: opts.sourceEvent.channelType,
+        source_platform: opts.sourceEvent.platformId,
+      });
+      // debounce Map への書き込みは skip (verify 経路の実行を production の debounce state に
+      // 汚染残置させない)。
+      return 'sent';
     }
     try {
       await adapter.deliver(target.messagingGroup.platform_id, null, {

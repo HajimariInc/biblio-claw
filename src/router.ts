@@ -34,6 +34,7 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
+import { isStubDeliveryByMg } from './delivery.js';
 import { emitPreSpawnStatus, PIPELINE_STATUS } from './modules/progress-status/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -369,11 +370,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       });
       if (gateResult.classification === 'in-secure') {
         // (1) admin DM 通知 (notify-only、承認カードではない)
+        // issue #155 案 B 対応: verify 経路の stub 判定用に sourceEvent を渡す。
         void notifyAdmin({
           channelType: event.channelType,
           agentGroupId: agents[0]?.agent_group_id ?? null,
           subject: 'gate.blocked',
           body: `Injection 疑い発話を検出しました。\nlayer: ${gateResult.layerHit}\nreason: ${gateResult.reason}\nchannel: ${event.channelType}\nuser: ${userId ?? '(unknown)'}`,
+          sourceEvent: { channelType: event.channelType, platformId: event.platformId },
         }).catch((err) =>
           log.warn('gate notifyAdmin unexpected throw', {
             event: 'gate.blocked.notify_admin_throw',
@@ -385,19 +388,31 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         //     fallback の写経元)
         const adapter = getChannelAdapter(event.channelType);
         if (adapter) {
-          await adapter
-            .deliver(event.platformId, event.threadId, {
-              kind: 'chat',
-              content: {
-                text: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。管理者に通知しました。',
-              },
-            })
-            .catch((deliverErr) => {
-              log.error('gate in-secure patron deliver failed', {
-                event: 'gate.blocked.patron_deliver_failed',
-                err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
-              });
+          // issue #155 案 B 対応: verify 経路 `--stub-outbound` で登録された 2-tuple key
+          // (channel_type + platform_id) にマッチする場合、in-secure reject の patron 定型文
+          // 発火を silent skip する。in-secure 経路は session 未作成 = agent_group_id が
+          // resolvable でないため 2-tuple key を採用。
+          if (isStubDeliveryByMg(event.channelType, event.platformId)) {
+            log.info('gate in-secure patron deliver skipped by stub (verify path)', {
+              event: 'gate.blocked.patron_deliver_stubbed',
+              channel_type: event.channelType,
+              platform_id: event.platformId,
             });
+          } else {
+            await adapter
+              .deliver(event.platformId, event.threadId, {
+                kind: 'chat',
+                content: {
+                  text: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。管理者に通知しました。',
+                },
+              })
+              .catch((deliverErr) => {
+                log.error('gate in-secure patron deliver failed', {
+                  event: 'gate.blocked.patron_deliver_failed',
+                  err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+                });
+              });
+          }
         } else {
           // I7 対応: adapter が未登録の稀ケース (channel が routeInbound を通っているのに
           // active adapter に居ない = adapter 起動失敗 or unregister 中) を silent にしない。
@@ -688,20 +703,30 @@ async function deliverToAgent(
       });
       const adapter = getChannelAdapter(event.channelType);
       if (adapter) {
-        // deliver 自体の失敗は log 拾って swallow (= 循環 catch 防止、routeInbound 全体
-        // を throw させない)
-        await adapter
-          .deliver(event.platformId, event.threadId, {
-            kind: 'chat',
-            content: { text: 'エラー: システムエラーが発生しました。しばらくして再度お試しください。' },
-          })
-          .catch((deliverErr) => {
-            log.error('ADK dispatcher fallback deliver also failed', {
-              event: 'router.dispatch.adk_fallback_deliver_failed',
-              request_id: requestId,
-              err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
-            });
+        // issue #155 案 B 対応: 2-tuple key stub check (ADK dispatcher fallback 経路)
+        if (isStubDeliveryByMg(event.channelType, event.platformId)) {
+          log.info('ADK dispatcher fallback deliver skipped by stub (verify path)', {
+            event: 'router.dispatch.adk_fallback_stubbed',
+            request_id: requestId,
+            channel_type: event.channelType,
+            platform_id: event.platformId,
           });
+        } else {
+          // deliver 自体の失敗は log 拾って swallow (= 循環 catch 防止、routeInbound 全体
+          // を throw させない)
+          await adapter
+            .deliver(event.platformId, event.threadId, {
+              kind: 'chat',
+              content: { text: 'エラー: システムエラーが発生しました。しばらくして再度お試しください。' },
+            })
+            .catch((deliverErr) => {
+              log.error('ADK dispatcher fallback deliver also failed', {
+                event: 'router.dispatch.adk_fallback_deliver_failed',
+                request_id: requestId,
+                err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+              });
+            });
+        }
       }
     }
     return;

@@ -228,6 +228,7 @@ send_via_ncl() {
     user_arg="--user-id $OWNER_USER_ID"
   fi
   local common_args=(
+    "--json"
     "--agent-group-id" "$HYBRID_AGENT_GROUP_ID"
     "--messaging-group-id" "$HYBRID_MG_ID"
     "--text" "$text"
@@ -236,15 +237,25 @@ send_via_ncl() {
   )
   local stderr_file="$STDERR_DIR/ncl-$key.stderr"
   local stdout_file="$STDERR_DIR/ncl-$key.stdout"
+  # pnpm run <script> の後の `--` は pnpm→tsx→client.ts の argv に届いて
+  # parseArgv (client.ts:63-81) が `--` を空 key の flag として解釈 → 直後の
+  # positional (`messages`) が args[''] に吸われ、command が `send` 単独に化ける
+  # (server が `no command "send"` を返す)。pnpm は `--` なしでも script args を
+  # 正しく forward するため、`--` は付けない。
+  #
+  # `--silent` は pnpm 自身の flag = script name の echo (`> nanoclaw@2.0.70 ncl ...`)
+  # を **stdout** に書き出す pnpm 既定の behavior を抑制。verify は --json JSON output
+  # を jq parse するため、pnpm noise が混ざると "Invalid numeric literal" で parse fail
+  # (実測 2026-07-06)。 --silent は pnpm 自身の flag なので script name の直前に置く。
   if [ "$MODE" = 'prod' ]; then
     if ! kubectl exec "$POD" -c orchestrator -n "$NAMESPACE" -- \
-         pnpm run ncl -- messages send $user_arg "${common_args[@]}" \
+         pnpm run --silent ncl messages send $user_arg "${common_args[@]}" \
          >"$stdout_file" 2>"$stderr_file"; then
       LAST_HARNESS_STDERR="$stderr_file"
       fail "ncl messages send ($key) failed (prod)"
     fi
   else
-    if ! pnpm run ncl -- messages send $user_arg "${common_args[@]}" \
+    if ! pnpm run --silent ncl messages send $user_arg "${common_args[@]}" \
          >"$stdout_file" 2>"$stderr_file"; then
       LAST_HARNESS_STDERR="$stderr_file"
       fail "ncl messages send ($key) failed (local)"
@@ -317,6 +328,14 @@ GATE_EXPECTED=(
   "biblio-other"
   "in-secure"
 )
+# issue #155 案 D 対応: deterministic pattern (in-secure Layer 1 / biblio-adk keyword) は
+# 1 attempt に制限し、Slack 発火リスクを抑える。Layer 4 LLM (biblio-other) のみ 3 attempt。
+# 従来「retry は害にならない」と考えていたが、実測 2026-07-06 で in-secure 発話が 3 attempt
+# 全消化 = 実 Slack に同発話 3 回 + admin notify 3 通 + patron 定型文 3 通 = 計 6 通の
+# 副作用が発火 (Stackdriver → kubectl logs 遅延 5-15s + `--stub-outbound` が notify/reject
+# 経路未対応の 2 段連鎖)。案 B (stub 拡張) と併用が望ましいが、案 D 単独でも発火数を
+# 1/3 に削減できる保険。
+GATE_ATTEMPTS=(1 3 3 1)
 
 GATE_FAIL_COUNT=0
 GATE_SESSION_IDS=()
@@ -327,22 +346,26 @@ for i in "${!GATE_UTTERANCES[@]}"; do
   info "  [2-$((i+1))] 発話: $utterance"
   info "         期待 classification: $expected"
 
-  # LLM 経路 (Layer 4) は最大 3 attempt retry。deterministic pattern (in-secure Layer 1、
-  # biblio-adk keyword) は 1 attempt で確定するが retry は害にならない。
-  attempts=3
+  # attempts は発話ごとに個別 (deterministic pattern = 1, Layer 4 LLM = 3)
+  attempts="${GATE_ATTEMPTS[$i]}"
   matched=0
   for a in $(seq 1 $attempts); do
     stdout_json=$(send_via_ncl "$utterance" "gate-$((i+1))-a$a")
     # session_id を控えて Section 5 の集計に相乗り + trap cleanup 対象に
-    session_id=$(printf '%s' "$stdout_json" | tail -1 | jq -r '.session_id // empty' 2>/dev/null || true)
+    # (frame shape = {id, ok, data:{session_id, delivered_count, timed_out, ...}}、
+    #  --json は pretty-print で multi-line なので tail -1 は使わず JSON 全体を jq に渡す)
+    session_id=$(printf '%s' "$stdout_json" | jq -r '.data.session_id // empty' 2>/dev/null || true)
     if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
       GATE_SESSION_IDS+=("$session_id")
     fi
 
-    # gate.classified log を polling (最大 10s)
-    for _try in $(seq 1 20); do
+    # gate.classified log を polling (最大 30s = 60 × 0.5s)。
+    # GKE Stackdriver → kubectl logs 経路には 5-15s の buffering 遅延がある
+    # (実測 2026-07-06: 10s polling では gate event が届く前に諦めて空返し →
+    # 全 attempt mismatch になる false FAIL が発生)。prod では 30s まで許容する。
+    for _try in $(seq 1 60); do
       sleep 0.5
-      actual=$(extract_gate_classification "1m")
+      actual=$(extract_gate_classification "2m")
       if [ -n "$actual" ]; then break; fi
     done
 
@@ -468,9 +491,10 @@ for i in "${!CONTAINER_UTTERANCES[@]}"; do
   utterance="${CONTAINER_UTTERANCES[$i]}"
   info "  [4-$((i+1))] 発話: $utterance"
   stdout_json=$(send_via_ncl "$utterance" "container-$((i+1))")
-  session_id=$(printf '%s' "$stdout_json" | tail -1 | jq -r '.session_id // empty' 2>/dev/null || true)
-  delivered_count=$(printf '%s' "$stdout_json" | tail -1 | jq -r '.delivered_count // 0' 2>/dev/null || echo 0)
-  timed_out=$(printf '%s' "$stdout_json" | tail -1 | jq -r '.timed_out // false' 2>/dev/null || true)
+  # frame shape = {id, ok, data:{session_id, delivered_count, timed_out, ...}}
+  session_id=$(printf '%s' "$stdout_json" | jq -r '.data.session_id // empty' 2>/dev/null || true)
+  delivered_count=$(printf '%s' "$stdout_json" | jq -r '.data.delivered_count // 0' 2>/dev/null || echo 0)
+  timed_out=$(printf '%s' "$stdout_json" | jq -r '.data.timed_out // false' 2>/dev/null || true)
   info "         session_id=$session_id delivered_count=$delivered_count timed_out=$timed_out"
 
   if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
