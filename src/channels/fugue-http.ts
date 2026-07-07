@@ -1,11 +1,11 @@
 /**
- * Fugue channel adapter (M4-E) — 独立 HTTP server (Node built-in `http.createServer`)。
+ * Fugue channel adapter (M4-E + M4-H) — 独立 HTTP server (Node built-in `http.createServer`)。
  *
  * Phase 1 の scope (skeleton、Phase 2/3 で consult/equip endpoint はそれぞれ full spec 化):
  *   - Bearer auth (timing-safe compare) → no_header / bad_scheme / bad_token を 401 で返す
  *     (client 応答は `{error: 'unauthorized'}` のみ、reason はサーバログ限定 = 未認証
  *     クライアントに auth oracle を漏らさない)
- *   - path routing (`/v1/channels/fugue/{consult,equip}`) の frame (endpoint 実体は Phase 2/3)
+ *   - path routing (`/v1/channels/fugue/{consult,equip,ask}`) の frame (endpoint 実体は各 Phase で追加)
  *   - 未知 path → 404 / URL parse 失敗 → 400 (log 付き) / JSON parse 失敗 → 400 /
  *     body 上限超過 (1 MiB) → 413 / Zod validation 失敗 → 400 / 内部エラー → 500
  *   - lifecycle: start() / stop() を Promise 化 (`src/cli/socket-server.ts` の `startCliServer`
@@ -36,6 +36,17 @@
  *   - 部分失敗経路は consult と対称 = `listBiblio` throw / DB write throw どちらも 200 +
  *     `status:'error'` + `warnings`、5xx は 401/413/500 (uncaught) に限定
  *
+ * M4-H Phase 1 の scope (ask skeleton):
+ *   - `handleAsk`: `FugueAskRequest` (query + optional intent + optional context_hint) 受理 →
+ *     Zod parse (400 validation) → `withFugueEntrySpan('ask', ...)` → 固定 shape reply の 3 段
+ *   - Phase 1 skeleton は必ず `status: 'not_available'` + `warnings: ['skeleton_response']` を返す
+ *     (gate / backend / rate limit は Phase 2-4 で追加、Phase 1 では実装しない)
+ *   - `writeJson` 直前に `FugueAskReply.safeParse` で self-validation を挟み、fail 時は
+ *     `status:'error'` + warnings に理由を積んで 200 fallback (AD の本義: 5xx を出さない、
+ *     内部整合性欠損を Fugue 側に silent に流さない)
+ *   - biblio.<action> 相乗り span は張らない (backend 未接続、TODO(M4-H Phase 3) で
+ *     withBiblioActionSpan('ask', ...) 追加検討)
+ *
  * Chat SDK webhook (`src/webhook-server.ts`) とは path 形式が違うため独立 server として新設。
  * `webhook-server.ts` からは createServer 外殻 + try/catch → 500 fallback の骨格のみ写経、
  * lazy-start は使わず `setup()` から明示 start() する (Fugue adapter は adapter lifecycle に
@@ -57,9 +68,10 @@ import { evaluateGate, isGateEnabled, withGateSpan } from '../gate/gate.js';
 import type { GateResult } from '../gate/types.js';
 import { log } from '../log.js';
 import { notifyAdmin } from '../modules/approvals/notify-admin.js';
-import { extractTraceContextFromHttpHeaders, withFugueEntrySpan } from '../observability/index.js';
+import { extractTraceContextFromHttpHeaders, withFugueEntrySpan, type FugueOperation } from '../observability/index.js';
 
 import {
+  FugueAskReply,
   FugueAskRequest,
   FugueConsultRequest,
   FugueEquipRequest,
@@ -173,13 +185,13 @@ function writeError(res: http.ServerResponse, status: number, body: FugueErrorRe
 }
 
 /**
- * Fugue endpoint (consult / equip) の request body を読み、Zod で検証し、data を返す共通ヘルパ。
+ * Fugue endpoint (consult / equip / ask) の request body を読み、Zod で検証し、data を返す共通ヘルパ。
  *
  * 目的 (PR #135 review 提案 10、code-simplifier): consult と equip の冒頭 44 行が operation 名
  * (event log field) と schema 以外は完全に同一実装だった。手書き複製のため片方だけ直す
  * regression の温床 (413/400 分岐が equip 側でテスト対象外だった Important 6 と根同じ)。ヘルパ化で
- *   - 乖離リスクを構造的に消す (consult と equip の分岐は 1 箇所に集約)
- *   - equip 側の 413/400 テストは `parseFugueRequest` に対して 1 度書けば両 endpoint をカバー
+ *   - 乖離リスクを構造的に消す (consult / equip / ask の分岐は 1 箇所に集約)
+ *   - equip 側の 413/400 テストは `parseFugueRequest` に対して 1 度書けば全 endpoint をカバー
  *   - event 名は `fugue.${operation}.body_too_large` 等の string interpolation で維持 = ランタイム
  *     で emit される log event value は refactor 前と完全同一 (`fugue-http.otel-log.test.ts` に無影響)
  *
@@ -187,6 +199,9 @@ function writeError(res: http.ServerResponse, status: number, body: FugueErrorRe
  * 無変更で PASS)。static grep test (5xx 出現数 / 200-outcome ペアリング) は 413/400 分岐にしか関係
  * しないため無傷。
  *
+ * @param operation Fugue operation 種別 (`FugueOperation` に依存 = 型リンクで drift を防ぐ)。
+ *                  event 名 (`fugue.<operation>.<phase>`) の string interpolation にのみ使用、
+ *                  ロジック分岐は生成されない。
  * @returns 検証成功時は `data` (Zod schema の output 型)、失敗時は `null` + 呼び出し側は
  *          そのまま return する契約 (response 書き込みは本ヘルパ側で完了済)。
  */
@@ -196,7 +211,7 @@ async function parseFugueRequest<T>(
   schema: {
     safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: { issues: unknown[] } };
   },
-  operation: 'consult' | 'equip' | 'ask',
+  operation: FugueOperation,
 ): Promise<T | null> {
   let body: unknown;
   try {
@@ -1146,18 +1161,24 @@ export class FugueHttpServer {
    *
    * Contract §5.5 shape で 200 + `status: 'not_available'` + `warnings: ['skeleton_response']`
    * を返す固定応答。gate / backend / rate limit は Phase 2-4 で追加、Phase 1 では Zod parse →
-   * withFugueEntrySpan → 固定 reply 組み立て → 200 応答の 3 段のみを実装する。
+   * withFugueEntrySpan → 固定 reply 組み立て → self-validation → 200 応答の 4 段を実装する。
    *
    * 目的: Fugue 側 `BiblioClawAdvisorService.ask()` の HTTP round-trip + shape validation +
    * ValidationError 経路のテストを、biblio 側 backend 実装 (Phase 3) 完了を待たずに先行させる。
    *
-   * `status: 'not_available'` は Contract §5.5 で「バックエンド未接続 or M4-F Phase 3 未到達」の
-   * semantics で定義済 = Phase 1 skeleton の意味と一致。Fugue 側 AD は `not_available` を
-   * 「AD ラウンド省略」として fallback 可能なため、Phase 1 skeleton が Prod deploy されても
-   * Fugue 側は静かに fallback する (LLM cost 消費なし)。
+   * `status` の 4 status 意味論は `FugueAskReply` の JSDoc を参照 (schema 側を正本として重複を回避)。
+   * Phase 1 skeleton は `not_available` を必ず返す = 「backend 未接続」の semantics と一致し、
+   * Fugue 側 AD は AD ラウンド省略で静かに fallback する (LLM cost 消費なし)。
    *
    * `warnings: ['skeleton_response']` は本 PRD で新設した Phase 1 限定の marker (非 Contract 語彙、
-   * unknown warning code は Fugue 側で log-only 扱い)。Phase 3 完了時に空配列に切り替える。
+   * unknown warning code は Fugue 側で log-only 扱い)。
+   * TODO(M4-H Phase 3): backend 結線完了時に (a) `status` を `'ok'` に切替、(b) `warnings` から
+   * `'skeleton_response'` を除去、(c) `summary` / `findings` / `sources` を実データで埋める。
+   *
+   * **self-validation (A3-2)**: 応答直前に `FugueAskReply.safeParse(reply)` を挟み、内部整合性
+   * 欠損 (Phase 3 以降で summary 動的生成時に .max(600) 超過等) を fail-closed で捕捉する。
+   * Phase 1 では固定 reply なので safeParse は必ず success するが、Phase 3 で有用になる安全網。
+   * fail 時は AD の本義契約に従い 200 + `status:'error'` + `warnings` で運ぶ (5xx 出さない)。
    */
   private async handleAsk(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const startedAt = performance.now();
@@ -1178,20 +1199,18 @@ export class FugueHttpServer {
 
     // 2 段 span 構造 (Phase 4 で正式化、consult / equip と対称):
     //   fugue.ask (この helper、kind=INTERNAL)
-    // Phase 1 skeleton では biblio.<action> 相乗り span は張らない (backend 未接続、Phase 3 で
-    // withBiblioActionSpan('ask', ...) の追加を検討)。auto SERVER span 層は ESM フック未整備で
-    // 現状発火せず (Phase 5 判断で 2 段構造を正式仕様として運用、詳細: `docs/operations-runbook.md`
-    // §M4-E Phase 4 §ESM フック判断)。
+    // Phase 1 skeleton では biblio.<action> 相乗り span は張らない (backend 未接続)。
+    // TODO(M4-H Phase 3): backend 結線時に withBiblioActionSpan('ask', ...) の追加検討
+    // (`BiblioActionName` union に 'ask' 追加要、M4-A biblio.<action> 集計への相乗り妥当性を判定)。
+    // auto SERVER span 層は ESM フック未整備で現状発火せず (Phase 5 判断で 2 段構造を正式仕様として
+    // 運用、詳細: `docs/operations-runbook.md` §M4-E Phase 4 §ESM フック判断)。
     await withFugueEntrySpan('ask', request_id, async (fugueSpan) => {
       // intent 属性は string で刻む (`.optional().nullable()` の 2 パスを 'null' に集約 =
       // Cloud Trace の属性検索で `fugue.intent='null'` 一択で見つけられる)。
       fugueSpan.setAttribute('fugue.intent', intent ?? 'null');
-      // Phase 1 skeleton は必ず not_available で応答するため outcome は fixed。Phase 3 で
-      // status に応じて `ok` / `not_available` / `error` 等に分岐させる。
-      fugueSpan.setAttribute('fugue.outcome', 'not_available');
 
       const processing_time_ms = Math.round(performance.now() - startedAt);
-      const reply: FugueAskReplyT = {
+      const skeletonReply: FugueAskReplyT = {
         schema_version: '1',
         request_id,
         operation: 'ask',
@@ -1204,6 +1223,42 @@ export class FugueHttpServer {
         warnings: ['skeleton_response'],
       };
 
+      // self-validation (A3-2): 内部整合性 (discriminated union の status × payload 相関、field
+      // 上限、型) を出荷前に検証。Phase 1 では固定 reply なので通常 success するが、Phase 3 で
+      // summary 動的生成時に有用な安全網 (silent contract violation を Fugue 側に流さない)。
+      const validated = FugueAskReply.safeParse(skeletonReply);
+      if (!validated.success) {
+        // 内部矛盾検知 = biblio-claw 側の bug。AD の本義契約: 5xx を出さず 200 + status:'error' +
+        // warnings で運ぶ (Fugue 側 AD ラウンドの継続判断を阻害しない)。
+        fugueSpan.setAttribute('fugue.outcome', 'error');
+        log.error('Fugue ask internal reply self-validation failed', {
+          event: 'fugue.ask.self_validation_failed',
+          channel: 'fugue',
+          outcome: 'failure',
+          request_id,
+          issues: validated.error.issues,
+          processing_time_ms,
+        });
+        const errorReply: FugueAskReplyT = {
+          schema_version: '1',
+          request_id,
+          operation: 'ask',
+          status: 'error',
+          summary: 'internal reply self-validation failed (biblio-claw bug, please report to biblio-claw team).',
+          findings: [],
+          sources: [],
+          raw: {},
+          processing_time_ms,
+          warnings: ['skeleton_response', 'self_validation_failed'],
+        };
+        writeJson(res, 200, errorReply);
+        return;
+      }
+
+      // Phase 1 skeleton は必ず not_available で応答 (validated.data.status === 'not_available')。
+      // TODO(M4-H Phase 3): backend 結線後は status に応じて 'ok' / 'error' 等に分岐。
+      fugueSpan.setAttribute('fugue.outcome', 'not_available');
+
       log.info('Fugue ask completed (skeleton)', {
         event: 'fugue.ask.completed',
         channel: 'fugue',
@@ -1213,7 +1268,7 @@ export class FugueHttpServer {
         processing_time_ms,
       });
 
-      writeJson(res, 200, reply);
+      writeJson(res, 200, validated.data);
     });
   }
 }

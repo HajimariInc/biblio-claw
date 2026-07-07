@@ -1,5 +1,5 @@
 /**
- * scripts/fake-fugue-client.ts — Fugue channel adapter (M4-E Phase 1-5) 疎通確認用の
+ * scripts/fake-fugue-client.ts — Fugue channel adapter (M4-E Phase 1-5 + M4-H Phase 1) 疎通確認用の
  * Fake Fugue クライアント CLI。
  *
  * biblio-claw 側の HTTP endpoint に Bearer 付き POST を打って RESULT=<json> を stdout に
@@ -11,11 +11,16 @@
  * 追加。Phase 3 で equip subcommand を full spec 化 (`--skill-id <str>` 必須 + `channel:'fugue'`
  * 自動付与)。Phase 4 で `--traceparent <hex>` オプション (W3C Trace Context 継承検証用)。
  * Phase 5 で `FUGUE_URL` env サポート (Prod HTTPS URL 全体切替、末尾 `/` strip)。
+ * **M4-H Phase 1 で `ask` subcommand 追加** (`--query <str>` optional default + `--intent
+ * <search-web|drive-lookup|general>` optional、intent 未指定時は body に含めず server 側
+ * `.optional().nullable()` の optional パス到達)。
  *
  * Usage:
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "Figma" --mode "review-with-ad"
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --query "test"
  *   pnpm exec tsx scripts/fake-fugue-client.ts equip --skill-id "HajimariInc--figma-reviewer"
+ *   pnpm exec tsx scripts/fake-fugue-client.ts ask --query "Next.js 15 release date?"
+ *   pnpm exec tsx scripts/fake-fugue-client.ts ask --query "..." --intent search-web
  *   pnpm exec tsx scripts/fake-fugue-client.ts consult --bad-token
  */
 import { readEnvFile } from '../src/env.js';

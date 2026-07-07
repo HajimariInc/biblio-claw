@@ -66,9 +66,10 @@ export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 
 /**
  * Fugue ask endpoint (M4-H) の intent literal union。Phase 1 では受理のみ (Zod validation
- * pass 後は log field に emit するだけ、skeleton response には反映しない)。Phase 2 で
- * gate 4 層と `INTENT_GATE_MISMATCH` 検出に再利用するため定数化しておく (inline enum に
- * すると Phase 2 で export し直す必要が出る)。
+ * pass 後は log field に emit するだけ、skeleton response には反映しない)。
+ *
+ * TODO(M4-H Phase 2): gate 4 層と `INTENT_GATE_MISMATCH` 検出に再利用する。定数化しておく
+ * ことで Phase 2 で inline enum を export し直す手戻りを防ぐ。
  */
 export const FUGUE_ASK_INTENTS = ['search-web', 'drive-lookup', 'general'] as const;
 export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
@@ -105,8 +106,8 @@ export type FugueAskRequestT = z.infer<typeof FugueAskRequest>;
 /**
  * ask endpoint の source item (Phase 3 で外部 backend の実結果を格納)。
  *
- * Phase 1 skeleton では `sources: []` (backend 未接続)。`metadata` は `.default({})` で最後に
- * 置く (v4 `.max(N).default(X)` 順序 constraint、逆順は compile error)。
+ * Phase 1 skeleton では `sources: []` (backend 未接続)。`metadata` は上限を持たない自由な
+ * dict (backend-specific な補助情報を透過的に運ぶ)。
  */
 export const Source = z.object({
   id: z.string().min(1).max(64).describe('Unique source id within a single ask response.'),
@@ -123,6 +124,11 @@ export type SourceT = z.infer<typeof Source>;
  *
  * Phase 1 skeleton では `findings: []` (backend 未接続)。`source_ids` は上限 5 で
  * findings 側から `sources` の item を後方参照する形。
+ *
+ * GOTCHA (Zod v4): `source_ids` は `.max(5).default([])` の順で書く必要がある。逆順
+ * (`.default([]).max(5)`) にすると `TS2339: Property 'max' does not exist on type
+ * 'ZodDefault<...>'` の compile error になる (v4 で `.default()` は output 型扱いに変更、
+ * v3 記法と非互換)。
  */
 export const Finding = z.object({
   text: z.string().min(1).max(600).describe('Extracted finding text (max 600 chars).'),
@@ -141,25 +147,74 @@ export type FindingT = z.infer<typeof Finding>;
  *
  * - `ok` — 正常応答 (summary / findings / sources のいずれかが埋まる、Phase 3 完了時点で発火)
  * - `denied` — gate `in-secure` 判定 (Phase 2 で扱う)
- * - `not_available` — バックエンド未接続 or M4-F Phase 3 未到達 (時期依存)。**Phase 1 skeleton
- *   の意味と一致** — agent-container backend を呼ばない = Contract 上「未接続状態」の semantics
+ * - `not_available` — バックエンド未接続 (backend が Phase 3 で結線されるまで発火)。**Phase 1
+ *   skeleton の意味と一致** — agent-container backend を呼ばない = Contract 上「未接続状態」の
+ *   semantics。Fugue 側 AD は `not_available` を「AD ラウンド省略」の signal として静かに fallback する。
  * - `error` — timeout / 部分失敗
  *
- * Phase 1 skeleton は必ず `status: 'not_available'` + `warnings: ['skeleton_response']` を
- * 返す (Phase 3 完了時に `status: 'ok'` に切替 + `warnings` から `skeleton_response` を除去)。
+ * Phase 1 skeleton は必ず `status: 'not_available'` + `warnings: ['skeleton_response']` を返す。
+ * TODO(M4-H Phase 3): backend 結線完了時に (a) `status` を `'ok'` に切替、(b) `warnings` から
+ * `'skeleton_response'` を除去、(c) `summary` / `findings` / `sources` の 3 並列 payload を実データで埋める。
+ *
+ * **discriminated union 設計 (A3-1)**: Phase 3 で status ごとの分岐が実装される時点で `FugueEquipReply`
+ * (PR #117) と同型の discriminated union 化を予告している。Phase 1 skeleton では常に `status:'not_available'`
+ * だが、Contract §5.5 の 4 status を型で明示することで、Phase 2/3 実装時に status × payload 相関の
+ * silent 不整合を compile-time で検知する。
  */
-export const FugueAskReply = z.object({
-  schema_version: z.literal('1'),
-  request_id: z.string(),
-  operation: z.literal('ask'),
-  status: z.enum(['ok', 'denied', 'not_available', 'error']),
-  summary: z.string().min(1).max(600),
-  findings: z.array(Finding).max(10).default([]),
-  sources: z.array(Source).max(20).default([]),
-  raw: z.record(z.string(), z.unknown()).default({}),
-  processing_time_ms: z.number().int().nonnegative(),
-  warnings: z.array(z.string()).default([]),
-});
+export const FugueAskReply = z.discriminatedUnion('status', [
+  // 'ok': backend 結線後の正常応答 (Phase 3)
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('ok'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+  // 'denied': gate in-secure 判定 (Phase 2)
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('denied'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+  // 'not_available': backend 未接続 (Phase 1 skeleton の default)
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('not_available'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+  // 'error': timeout / 部分失敗
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('error'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+]);
 export type FugueAskReplyT = z.infer<typeof FugueAskReply>;
 
 /**

@@ -290,6 +290,50 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   [ "$auth_fail_token_kind" = 'bad' ] \
     || fail "local auth-fail token_kind != bad (got '$auth_fail_token_kind')"
   info "  local auth-fail: status=401 token=bad (OK)"
+
+  # --- ask endpoint (M4-H Phase 1 skeleton、Section 2 内で疎通確認) ---
+  # Phase 1 skeleton は必ず 200 + status:'not_available' + warnings:['skeleton_response'] を返す。
+  # gate / backend / rate limit は Phase 2-4 で追加、Phase 1 は 3 assertion (疎通 / no auth / invalid
+  # intent) のみで shape 契約 + path enumeration 遮断不変を担保。TODO(M4-H Phase 2): gate 実装完了時に
+  # denied 経路 + INTENT_GATE_MISMATCH assertion を追加。
+  LAST_HARNESS_STDERR="$STDERR_DIR/local-ask.stderr"
+  ask_result="$(pnpm exec tsx scripts/fake-fugue-client.ts ask \
+    --query "typescript" \
+    2>"$LAST_HARNESS_STDERR" | extract_result || true)"
+  [ -n "$ask_result" ] || fail "local ask が RESULT を出さなかった"
+
+  ask_status="$(json_field "$ask_result" 'status')"
+  ask_reply="$(json_field "$ask_result" 'response_body.status')"
+  ask_token_kind="$(json_field "$ask_result" 'used_token_kind')"
+  [ "$ask_status" = '200' ] || fail "local ask status != 200 (got '$ask_status'): $ask_result"
+  [ "$ask_reply" = 'not_available' ] \
+    || fail "local ask reply status != 'not_available' (Phase 1 skeleton の固定応答、got '$ask_reply'): $ask_result"
+  [ "$ask_token_kind" = 'valid' ] \
+    || fail "local ask used_token_kind != valid (got '$ask_token_kind')"
+  info "  local ask: status=200 reply=not_available token=valid (Phase 1 skeleton OK)"
+
+  # ask 経路の no auth = 401 (path enumeration 遮断不変、consult/equip と対称)
+  LAST_HARNESS_STDERR="$STDERR_DIR/local-ask-noauth.stderr"
+  ask_noauth_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "http://127.0.0.1:8080/v1/channels/fugue/ask" \
+    -H "Content-Type: application/json" \
+    -d '{"schema_version":"1","request_id":"verify-ask-noauth","query":"test"}' \
+    2>"$LAST_HARNESS_STDERR" || echo 'curl-failed')"
+  [ "$ask_noauth_status" = '401' ] \
+    || fail "local ask (no auth) expected 401 (got '$ask_noauth_status') = path enumeration 遮断不変違反"
+  info "  local ask (no auth): status=401 (OK)"
+
+  # ask 経路の invalid intent literal = 400 (Zod validation fail 経路の確認)
+  LAST_HARNESS_STDERR="$STDERR_DIR/local-ask-invalid-intent.stderr"
+  ask_bad_intent_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "http://127.0.0.1:8080/v1/channels/fugue/ask" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $FUGUE_SHARED_TOKEN" \
+    -d '{"schema_version":"1","request_id":"verify-ask-bad-intent","query":"test","intent":"not-valid"}' \
+    2>"$LAST_HARNESS_STDERR" || echo 'curl-failed')"
+  [ "$ask_bad_intent_status" = '400' ] \
+    || fail "local ask (invalid intent literal) expected 400 (got '$ask_bad_intent_status') = Zod validation fail 経路が機能していない"
+  info "  local ask (invalid intent): status=400 (OK)"
 fi
 
 # =============================================================================

@@ -6,15 +6,27 @@
  * import 副作用が同一状態で走ることを保証)。実 HTTP fetch で以下を検証:
  *
  * - 200 skeleton 応答 (status='not_available' + warnings=['skeleton_response'] + 固定 shape)
- * - intent field: literal / null / 未指定の 3 パスで 200 (`.optional().nullable()`)
+ * - intent field: 3 literal (`it.each(FUGUE_ASK_INTENTS)`) / null / 未指定で 200 (`.optional().nullable()`)
  * - context_hint: record / null / 未指定の 3 パスで 200
  * - 400 Zod validation fail (schema_version 欠落 / invalid intent literal / query 空 / request_id 過長)
  * - 401 no auth (`/ask` でも 404 にならない = auth check が path 分岐より前という不変)
  * - processing_time_ms が non-negative integer
  * - 404 unknown path が既存挙動維持 (`/invoke` 経路)
+ * - span 属性 (`fugue.ask` 名 + `channel`/`fugue.operation`/`fugue.request_id`/`fugue.intent`/
+ *   `fugue.outcome`) を実 HTTP 経由で検証 (`fugue-http.otel.test.ts` の consult パターン写経)
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as otelApi from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import {
+  AlwaysOnSampler,
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  ParentBasedSampler,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FUGUE_ASK_INTENTS, type FugueAskReplyT } from './fugue-schemas.js';
 import { FugueHttpServer } from './fugue-http.js';
 
 const TOKEN = 'ask-test-token-abcdef0123456789abcdef0123456789abcdef01';
@@ -80,24 +92,11 @@ async function postAsk(body: unknown, options: { auth?: boolean } = { auth: true
   });
 }
 
-interface FugueAskReplyShape {
-  schema_version: '1';
-  request_id: string;
-  operation: 'ask';
-  status: 'ok' | 'denied' | 'not_available' | 'error';
-  summary: string;
-  findings: unknown[];
-  sources: unknown[];
-  raw: Record<string, unknown>;
-  processing_time_ms: number;
-  warnings: string[];
-}
-
 describe('handleAsk (M4-H Phase 1 skeleton)', () => {
   it('200 skeleton response with minimum valid body', async () => {
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-1', query: 'test query' });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(body).toMatchObject({
       schema_version: '1',
       request_id: 'req-ask-1',
@@ -115,34 +114,23 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
   it('processing_time_ms is a non-negative integer', async () => {
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-ptm', query: 'x' });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(Number.isInteger(body.processing_time_ms)).toBe(true);
     expect(body.processing_time_ms).toBeGreaterThanOrEqual(0);
   });
 
-  it('accepts intent field as literal (search-web)', async () => {
+  // A1-12: FUGUE_ASK_INTENTS の 3 リテラル (search-web / drive-lookup / general) を it.each で網羅。
+  it.each(FUGUE_ASK_INTENTS)('accepts intent field as literal (%s)', async (intent) => {
     const res = await postAsk({
       schema_version: '1',
-      request_id: 'req-ask-intent-lit',
+      request_id: `req-ask-intent-${intent}`,
       query: 'test',
-      intent: 'search-web',
+      intent,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(body.status).toBe('not_available');
     expect(body.operation).toBe('ask');
-  });
-
-  it('accepts intent field as literal (drive-lookup)', async () => {
-    const res = await postAsk({
-      schema_version: '1',
-      request_id: 'req-ask-intent-drv',
-      query: 'test',
-      intent: 'drive-lookup',
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
-    expect(body.status).toBe('not_available');
   });
 
   it('accepts intent field as null', async () => {
@@ -153,7 +141,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
       intent: null,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(body.status).toBe('not_available');
   });
 
@@ -165,7 +153,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
       context_hint: { screen_summary: 'foo', active_tab: 'bar' },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(body.status).toBe('not_available');
     // Phase 1 skeleton は context_hint を応答に反映しない (Phase 3 で backend に渡す予定)。
     expect(body.raw).toEqual({});
@@ -179,7 +167,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
       context_hint: null,
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(body.status).toBe('not_available');
   });
 
@@ -187,7 +175,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     const longQuery = 'x'.repeat(2000);
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-max', query: longQuery });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyShape;
+    const body = (await res.json()) as FugueAskReplyT;
     expect(body.status).toBe('not_available');
   });
 
@@ -263,5 +251,109 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body).toMatchObject({ error: 'not_found' });
+  });
+});
+
+/**
+ * C6 (pr-test-analyzer Important 1): `handleAsk` の span 属性 (`fugue.ask` 名 + channel /
+ * fugue.operation / fugue.request_id / fugue.intent / fugue.outcome) を実 HTTP 経由で検証する。
+ *
+ * intent の `undefined`/`null`/リテラルの 3 パスを文字列 `'null'` / literal 名に畳み込む正規化
+ * (`fugue-http.ts:1207`) は handleAsk 固有の新規ドメインロジックであり、typo や setAttribute 漏れ
+ * があっても 200 応答自体は正しく返るため通常の response body test では検知不能。Phase 2 で
+ * `INTENT_GATE_MISMATCH` 判定の入力になるため、Phase 1 で HTTP 経由の実結合 assertion を固める。
+ *
+ * `fugue-http.otel.test.ts` の consult / equip パターンを写経。
+ */
+describe('handleAsk span attributes (M4-H Phase 1)', () => {
+  let memoryExporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+  let server: FugueHttpServer;
+  let baseUrl: string;
+
+  beforeAll(() => {
+    otelApi.context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+    memoryExporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({
+      sampler: new ParentBasedSampler({ root: new AlwaysOnSampler() }),
+      spanProcessors: [new SimpleSpanProcessor(memoryExporter)],
+    });
+    otelApi.trace.setGlobalTracerProvider(provider);
+  });
+
+  afterAll(async () => {
+    await provider?.shutdown().catch(() => undefined);
+    otelApi.trace.disable();
+    otelApi.context.disable();
+  });
+
+  beforeEach(async () => {
+    memoryExporter.reset();
+    server = new FugueHttpServer({ port: 0, host: '127.0.0.1', expectedToken: TOKEN });
+    const started = await server.start();
+    baseUrl = `http://127.0.0.1:${started.port}`;
+  });
+
+  afterEach(async () => {
+    await server.stop();
+  });
+
+  async function postAskSpan(body: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/v1/channels/fugue/ask`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('fugue.ask span (INTERNAL kind) が発火し、基本属性が刻まれる', async () => {
+    const res = await postAskSpan({ schema_version: '1', request_id: 'req-span-basic', query: 'test' });
+    expect(res.status).toBe(200);
+
+    const spans = memoryExporter.getFinishedSpans();
+    const fugue = spans.find((s) => s.name === 'fugue.ask');
+    expect(fugue).toBeDefined();
+    expect(fugue!.kind).toBe(otelApi.SpanKind.INTERNAL);
+    expect(fugue!.attributes.channel).toBe('fugue');
+    expect(fugue!.attributes['fugue.operation']).toBe('ask');
+    expect(fugue!.attributes['fugue.request_id']).toBe('req-span-basic');
+  });
+
+  it.each(FUGUE_ASK_INTENTS)('intent literal (%s) は fugue.intent 属性にそのまま刻まれる', async (intent) => {
+    const res = await postAskSpan({
+      schema_version: '1',
+      request_id: `req-span-intent-${intent}`,
+      query: 'test',
+      intent,
+    });
+    expect(res.status).toBe(200);
+    const fugue = memoryExporter.getFinishedSpans().find((s) => s.name === 'fugue.ask');
+    expect(fugue?.attributes['fugue.intent']).toBe(intent);
+  });
+
+  it('intent 未指定は fugue.intent="null" に畳み込まれる', async () => {
+    const res = await postAskSpan({ schema_version: '1', request_id: 'req-span-intent-undef', query: 'test' });
+    expect(res.status).toBe(200);
+    const fugue = memoryExporter.getFinishedSpans().find((s) => s.name === 'fugue.ask');
+    expect(fugue?.attributes['fugue.intent']).toBe('null');
+  });
+
+  it('intent: null も fugue.intent="null" に畳み込まれる (`.optional().nullable()` の 2 パス集約)', async () => {
+    const res = await postAskSpan({
+      schema_version: '1',
+      request_id: 'req-span-intent-null',
+      query: 'test',
+      intent: null,
+    });
+    expect(res.status).toBe(200);
+    const fugue = memoryExporter.getFinishedSpans().find((s) => s.name === 'fugue.ask');
+    expect(fugue?.attributes['fugue.intent']).toBe('null');
+  });
+
+  it('Phase 1 skeleton の fugue.outcome は not_available で固定', async () => {
+    const res = await postAskSpan({ schema_version: '1', request_id: 'req-span-outcome', query: 'test' });
+    expect(res.status).toBe(200);
+    const fugue = memoryExporter.getFinishedSpans().find((s) => s.name === 'fugue.ask');
+    expect(fugue?.attributes['fugue.outcome']).toBe('not_available');
   });
 });
