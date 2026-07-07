@@ -90,7 +90,7 @@ function generateId(prefix: string): string {
  *
  * `createMessagingGroupAgent` は `agent_destinations` に `target_type='channel'` の row を
  * 自動作成する (`db/messaging-groups.ts:148-190`)。これにより agent が
- * `<message to="fugue-ask-mg">` を書けるようになる。
+ * `<message to="fugue-ask-synthetic">` を書けるようになる。
  */
 function wireFugueChannel(ag: AgentGroup, now: string): void {
   let fugueMg: MessagingGroup | undefined = getMessagingGroupByPlatform(FUGUE_CHANNEL, FUGUE_PLATFORM_ID);
@@ -237,8 +237,17 @@ export function seedFugueAskAgent(args: Args, now: string): SeedResult {
   // initGroupFilesystem が `ensureContainerConfig` を内部で呼ぶため、
   // updateContainerConfigScalars の前に必ず通す (行不在なら UPDATE が silent no-op)。
   // groups/<folder>/CLAUDE.md に agent 側 root instruction を配置する (Task 8 相当、
-  // Task 5 に統合)。handleAsk が単一 <ask-response>{JSON}</ask-response> tag で応答を
-  // 抽出するので、agent が独自に <message to> を書かない設計。
+  // Task 5 に統合)。
+  //
+  // **PR #178 実測反省 (Option 1 hotfix、2026-07-08)**:
+  // 当初「agent が独自に `<message to>` を書かない設計」で instruction したが、
+  // 実際は agent-runner の `dispatchResultText` (poll-loop.ts:508-548) が
+  // `<message to="name">body</message>` タグ **必須** で、未ラップ text は
+  // scratchpad drop + LLM nudge 発火 = handleAsk 側で timeout / tag_missing の原因。
+  // 正しい応答形式は **`<message to="fugue-ask-synthetic"><ask-response>{JSON}</ask-response></message>`**
+  // の 2 段包み。agent-runner が `<message>` を剥ぎ取り、body の `<ask-response>` タグ付き
+  // JSON が `messages_out.content` の text field に届く経路 = handleAsk の
+  // `parseAgentAskResponse` が正しく抽出可能。
   initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n`
@@ -252,10 +261,12 @@ export function seedFugueAskAgent(args: Args, now: string): SeedResult {
       + 'ただし intent が誤っている可能性もあるため、自分の判断で tool 選択して構わない。\n'
       + 'query に `context_hint` (Fugue Director 側の任意情報 = 画面要約 / active_tab 等) が付いている\n'
       + '場合は、tool 選択・検索クエリ組立・応答内容の絞り込みの参考情報として活用してよい。\n\n'
-      + '## 2. 応答フォーマット (必須)\n\n'
-      + '得た情報を以下の JSON schema で **単一の `<ask-response>` タグ内に** 埋め込んで応答しろ。\n'
-      + '`<ask-response>` タグ以外の文章は書かない (handleAsk の regex 抽出が定まらなくなる)。\n\n'
+      + '## 2. 応答フォーマット (必須) — 2 段包み\n\n'
+      + '**外側 `<message to="fugue-ask-synthetic">` タグで必ずラップし、内側に `<ask-response>` 1 個のみ書け**。\n'
+      + '未ラップの生 text は agent-runner が scratchpad として drop するため、Fugue Director に届かない。\n\n'
+      + '正しい応答フォーマット:\n\n'
       + '```\n'
+      + '<message to="fugue-ask-synthetic">\n'
       + '<ask-response>{\n'
       + '  "summary": "AD の発話素材 (500 字以内、日本語、事実のみ)。Grounding された内容を書け",\n'
       + '  "findings": [\n'
@@ -265,10 +276,13 @@ export function seedFugueAskAgent(args: Args, now: string): SeedResult {
       + '    {"kind": "web", "title": "..", "url": "..", "snippet": "..", "metadata": {}}\n'
       + '  ]\n'
       + '}</ask-response>\n'
+      + '</message>\n'
       + '```\n\n'
       + '## 3. 制約 (silent parse fail 防止)\n\n'
-      + '- `<ask-response>` タグの外に一切文章を書かない (regex 抽出が失敗する)\n'
-      + '- `<message to="...">` タグを書かない (handleAsk は単一 message 抽出で処理する)\n'
+      + '- **外側 `<message to="fugue-ask-synthetic">` タグは必須** (未ラップは scratchpad drop で応答が届かない)\n'
+      + '- 内側 `<ask-response>` は 1 個のみ、`<ask-response>` タグの外 (かつ `<message>` タグ内) には\n'
+      + '  一切文章を書かない (handleAsk の regex 抽出が定まらなくなる)\n'
+      + '- `<message to="fugue-ask-synthetic">` 以外の宛先 (別 destination) を書かない (Fugue 経路以外に発火しない)\n'
       + '- `sources[]` は 20 件以下、`findings[]` は 10 件以下、`findings.source_indexes` は\n'
       + '  `sources` 配列の index (0-indexed) を指す。存在しない index は書かない\n'
       + '- Tavily response の title/url/snippet はそのまま transcribe を推奨 (LLM 側で書き換えると source 信頼性が下がる)\n'

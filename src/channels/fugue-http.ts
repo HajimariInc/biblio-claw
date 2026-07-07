@@ -2030,7 +2030,9 @@ export class FugueHttpServer {
     if (contextHint && Object.keys(contextHint).length > 0) {
       parts.push(`\n(context_hint: ${JSON.stringify(contextHint)})`);
     }
-    parts.push('\n\n応答は `<ask-response>{JSON}</ask-response>` タグ単体で書け (CLAUDE.md §2 参照)。');
+    // 応答フォーマット指示は CLAUDE.local.md §2 に集約 (2 段包み = `<message to="fugue-ask-synthetic">
+    // <ask-response>{JSON}</ask-response></message>`)。ここで別 instruction を書くと agent が
+    // 混乱して empty response を返す (2026-07-08 実測、PR #178 Option 1 hotfix)。
     return parts.join('');
   }
 }
