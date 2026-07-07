@@ -52,8 +52,10 @@
 import { isFinalResponse } from '@google/adk';
 
 import { getChannelAdapter } from '../channels/channel-registry.js';
+import { isStubDeliveryByMg } from '../delivery.js';
 import { log } from '../log.js';
 import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
+import { clearAdkTargetStatus, emitAdkToolStatus } from '../modules/progress-status/index.js';
 
 import { buildRootAgent } from './root-agent.js';
 import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
@@ -247,6 +249,33 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
         }
       }
 
+      // M4-F Phase 4: 通常 tool 呼出 (HITL 以外) を event.content.parts から検知し、
+      // Slack assistant status 欄を tool 名の日本語文言に書き換える。ADK は session 概念なし =
+      // adapter 直呼びで一発発射 (event 間隔は数秒 = Slack 2 分自動クリア余裕内、refresh loop 不要)。
+      //
+      // - `adk_request_confirmation` は HITL wrapper で以下の longRunningIds 分岐が処理する = skip
+      // - `fc.name` は adk-js が構築する ADK ネイティブ tool 名 (mcp__ prefix なし、biblio 9 tool)。
+      //   tool-status-map.ts の ADK_BIBLIO_STATUS 分岐で対応、未知 tool は generic fallback。
+      // - `void` fire-and-forget: event stream 消費を数百 ms 遅らせない (best-effort 契約)。
+      const eventParts = event.content?.parts ?? [];
+      for (const part of eventParts) {
+        const fc = part.functionCall;
+        if (!fc?.name || fc.name === 'adk_request_confirmation') continue;
+        // PR #145 review S3: 現状 emitAdkToolStatus は内部 try/catch で保護され reject
+        // しない契約だが、将来 toolNameToStatus / getChannelAdapter に throw が入った場合の
+        // 保険として明示 `.catch()` を挿入。unhandledRejection に落ちて event 名 / request_id
+        // 欠落のログになる経路を撲滅。
+        const toolName = fc.name;
+        void emitAdkToolStatus(channelType, platformId, threadId, toolName).catch((err) => {
+          log.warn('emitAdkToolStatus unexpected throw', {
+            event: 'adk.dispatcher.emit_tool_status_failed',
+            request_id: requestId,
+            tool_name: toolName,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+
       // Phase 4: HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)
       //
       // **adk-js@1.3.0 実装契約** (Phase 4 review C1 対応):
@@ -256,15 +285,18 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       // function call id。両者は別 namespace で一致しないため、`requestedToolConfirmations[id]`
       // 引き経路は使えない。`event.content.parts` を直接走査して `adk_request_confirmation`
       // function call を見つける方式に統一する。
+      //
+      // PR #145 review code-simplifier P-5 対応: 上の tool status ループが評価した
+      // `eventParts` を再利用する (元は同一 event の parts を「eventParts」と「parts」
+      // で 2 度計算していた = 別名で同じ配列を指していた)。
       const longRunningIds = event.longRunningToolIds;
       if (longRunningIds && longRunningIds.length > 0) {
         pending = true;
-        const parts = event.content?.parts ?? [];
         let dispatched = 0;
         // longRunningToolIds に対応する wrapper function call を parts から抽出。
         // 通常 1 event に 1 wrapper だが、複数破壊操作の同時 pause (issue #110) に備えて
         // for-loop で全件処理する。
-        for (const part of parts) {
+        for (const part of eventParts) {
           const fc = part.functionCall;
           if (!fc || fc.name !== 'adk_request_confirmation' || !fc.id) continue;
           // longRunningToolIds に含まれる wrapper のみ処理 (= 型上の double check、
@@ -374,6 +406,13 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     // 通常経路のみ deleteSession、pending は resume 側 (approval-dispatcher.ts) が cleanup。
     if (!pending) {
       await deleteSessionSafe();
+      // PR #145 review IM-1: emitAdkToolStatus の rate-limit ガード用の per-target
+      // 直近 status Map を明示解放。次 invocation で同 tool の初回発火が通り、
+      // Map の key 累積 (メモリリーク) も防ぐ。pending 経路は resume 時に continuous
+      // な同 invocation として扱うため clear しない (resume 側 approval-dispatcher が
+      // deleteSession と同じタイミングで別途 clear する必要はない = 同一 target 上で
+      // 別 tool の連続発火が続くだけなので guarantee が要らない)。
+      clearAdkTargetStatus(channelType, platformId, threadId);
     }
   }
 
@@ -413,6 +452,20 @@ async function deliverFallback(
       event: 'adk.dispatcher.no_adapter',
       request_id: requestId,
       channel_type: channelType,
+    });
+    return;
+  }
+
+  // issue #155 案 B 対応: ADK dispatcher 経路の stub check。fan-out で hybrid MG に
+  // wire された ADK agent group が biblio-adk 分類発話を pull → ここで実 Slack 配信
+  // される経路を塞ぐ (verify 実測 2026-07-07 で顕在化)。
+  if (isStubDeliveryByMg(channelType, platformId)) {
+    log.info('ADK dispatcher: deliver skipped by stub (verify path)', {
+      event: 'adk.dispatcher.stubbed',
+      request_id: requestId,
+      channel_type: channelType,
+      platform_id: platformId,
+      final_text_length: text.length,
     });
     return;
   }

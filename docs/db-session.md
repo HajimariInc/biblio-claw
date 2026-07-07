@@ -177,6 +177,28 @@ CREATE TABLE session_state (
 
 アクセス:`container/agent-runner/src/db/session-state.ts`。
 
+### 4.4 `container_state`
+
+コンテナが現在実行中の tool 名 (`current_tool`) + `Bash` 宣言 timeout + tool 開始時刻を保持する KV ライク 1 行テーブル (`id=1` PRIMARY KEY)。`container/agent-runner/src/providers/claude.ts` の `PreToolUse` / `PostToolUse` hook が tool 名を書き込み / クリアする。
+
+```sql
+CREATE TABLE container_state (
+  id                       INTEGER PRIMARY KEY,
+  current_tool             TEXT,
+  tool_declared_timeout_ms INTEGER,
+  tool_started_at          TEXT
+);
+```
+
+**Read consumers** (host 側、readonly open):
+
+- `src/host-sweep.ts:decideStuckAction` — `Bash` 宣言 timeout の間は stuck-detection tolerance を広げる (kill-idle を発火させない)。
+- `src/modules/progress-status/poller.ts:refreshProgressStatus` (M4-F Phase 4 追加) — `src/delivery.ts:pollActive` の 1s tick で `current_tool` を読み `tool-status-map` で日本語文言に変換して `updateTypingStatus` に forward。Slack 進行ステート表示 (`assistant.threads.setStatus`) の駆動源。
+
+**書き込み契約**: コンテナ内 agent-runner のみ書き込む (host は書かない)。read 失敗 (`no such table` / I/O 障害) は `getContainerState()` が `null` fallback + `log.warn` で報告 (PR #145 review silent-failure CR-2 対応)、呼出側は「tool 未実行」扱いで動作継続する best-effort 契約。
+
+アクセス: `src/db/session-db.ts:getContainerState`、`container/agent-runner/src/db/connection.ts:setContainerToolInFlight` / `clearContainerToolInFlight`。
+
 ---
 
 ## 5. スキーマ進化

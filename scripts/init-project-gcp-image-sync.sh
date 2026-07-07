@@ -142,11 +142,13 @@ info "==== Phase 4.5 image-sync (tag=$TAG, dry-run=$DRY_RUN) ===="
 # === Block 1: pre-flight =============================================================
 info '=== Block 1: pre-flight ==='
 
-# 必須 cmd
-for c in docker kubectl gcloud sed; do
-  command -v "$c" >/dev/null 2>&1 || fail "必須コマンドが見つかりません: $c"
+# 必須 cmd (envsubst は Block 5 の Ingress ${DOMAIN} 展開に必要 = 罠 10 対応、
+# M4-F Phase 1 revival-core で `kubectl apply -f k8s/` が envsubst 未処理で Ingress
+# `${DOMAIN}` literal 登録 invalid で FAIL した実測に基づき preflight に追加)。
+for c in docker kubectl gcloud sed envsubst; do
+  command -v "$c" >/dev/null 2>&1 || fail "必須コマンドが見つかりません: $c (envsubst 未インストールなら sudo apt install gettext / brew install gettext)"
 done
-ok '[cmd] docker / kubectl / gcloud / sed 揃い'
+ok '[cmd] docker / kubectl / gcloud / sed / envsubst 揃い'
 
 # cluster context gate (= 別 cluster での誤実行防止、verify-phase-2-wiring.sh:32-36 と同パターン)
 ctx="$(kubectl config current-context 2>/dev/null || echo '<none>')"
@@ -288,11 +290,77 @@ fi
 # === Block 5: kubectl apply + rollout status 待ち ====================================
 info '=== Block 5: kubectl apply + rollout 待ち ==='
 
+# PR #145 実機で判明した罠 (2026-07-06):
+# `kubectl apply -f k8s/` は StatefulSet spec を manifest 内容で完全に書き換えるため、
+# 過去に `kubectl set env` で in-place 変更した env (= manifest には反映されていない
+# override 値) が全て消える。M4-F Phase 2 の GATE_ENABLED は「main 合流退路として
+# manifest = false、GKE のみ kubectl set env で true」の運用モデルだったが、Phase 4
+# deploy で Prod が silent regression した。恒久策として (a) manifest 側で GATE_ENABLED
+# を 'true' に既定変更 (2026-07-06 PR #145 で恒久化)、(b) 本 script で apply 前後の
+# 差分を検知して復元する二重保険を敷く。
+# 対象 env は PRESERVE_ENV_KEYS で明示 (将来 ADK_APPROVAL_TIMEOUT_MS 等が加わる想定)。
+# bash 3.2 互換のため `KEY=VALUE` 形式の 1 配列で保持 (連想配列不使用、parallel array で
+# インデックスずれる罠を構造的に消す = PR #145 review code-simplifier P-6)。
+# `${entry%%=*}` (最初の `=` より前) / `${entry#*=}` (最初の `=` より後ろ) で分離可能なため、
+# 値に `=` が含まれても正しく分離できる (今の GATE_ENABLED=true は単純ケース)。
+PRESERVE_ENV_KEYS=("GATE_ENABLED")
+PRESERVED=()
+if ! "$NO_APPLY"; then
+  info '[preserve] apply 前に override 済 env の現状値を保存 (deploy regression 防止)'
+  for env_key in "${PRESERVE_ENV_KEYS[@]}"; do
+    # PR #145 review silent-failure IM-6: `2>/dev/null || echo ''` は kubectl 失敗
+    # (認証切れ / API server 到達不能 / context 誤り) と「値が空 (env 未設定)」を
+    # 区別しない silent fallback。二重保険自身に穴があった。exit code を分離して
+    # 「失敗を明示」する = restore 側で「保存されていない = 復元不要」の判断が
+    # kubectl 失敗と env 空を混同しない。
+    val="$(kubectl -n "$NS" get statefulset biblio-orchestrator \
+      -o jsonpath="{.spec.template.spec.containers[?(@.name=='orchestrator')].env[?(@.name=='${env_key}')].value}" \
+      2>/dev/null)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      warn "[preserve] ${env_key}: kubectl get 失敗 (exit=$rc)。認証 / context / API server 到達性を確認。復元保証されません"
+      continue
+    fi
+    if [ -n "$val" ]; then
+      PRESERVED+=("${env_key}=${val}")
+      info "[preserve] ${env_key}=${val}"
+    fi
+  done
+fi
+
 if "$NO_APPLY"; then
   info '[apply] --no-apply 指定、skip'
 else
-  info '[apply] kubectl apply -f k8s/'
-  run kubectl apply -f "$ROOT/k8s/"
+  # k8s/25-ingress-fugue-channel.yaml の `host: ${DOMAIN}` は envsubst で展開してから
+  # apply する必要がある (M4-E Phase 5 罠 10/11 = envsubst 未処理で literal 登録 invalid)。
+  # DOMAIN は env で明示、あるいは Secret Manager `fugue-domain-name` から動的取得
+  # (host 名を静的ファイルに露出させない設計、runbook §M4-E Phase 5 §Step 3 参照)。
+  info '[apply] envsubst ${DOMAIN} + kubectl apply (tmpdir 経由)'
+  if [ -z "${DOMAIN:-}" ]; then
+    # `--project` は image build/push の GAR と同一プロジェクト前提。
+    DOMAIN="$(gcloud secrets versions access latest --secret=fugue-domain-name \
+      --project=hajimari-ai-hackathon-2026 2>/dev/null | tr -d '[:space:]' || true)"
+  fi
+  [ -n "${DOMAIN:-}" ] || \
+    fail "[apply] DOMAIN 未解決 (env 未設定 + Secret Manager fugue-domain-name 空 or gcloud 権限不足)。DOMAIN=<host> を env で明示 or gcloud secrets versions access で単独確認"
+  export DOMAIN
+  # tmpdir で render (Ingress のみ envsubst、他 manifest は cp で pass-through)。
+  # ${DOMAIN} を含む file を grep で判定 = 将来 別 manifest に env 変数が増えた場合も自動追随。
+  apply_tmp="$(mktemp -d -t biblio-p4-5-apply-XXXXXX)"
+  # top-level script なので trap EXIT で cleanup (関数 scope の RETURN は使わない)
+  trap 'rm -rf "$apply_tmp"' EXIT
+  substituted_count=0
+  for f in "$ROOT/k8s"/*.yaml; do
+    base="$(basename "$f")"
+    if grep -q '${DOMAIN}' "$f" 2>/dev/null; then
+      envsubst '${DOMAIN}' < "$f" > "$apply_tmp/$base"
+      substituted_count=$((substituted_count + 1))
+    else
+      cp "$f" "$apply_tmp/$base"
+    fi
+  done
+  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN} を実値 ($DOMAIN) に展開"
+  run kubectl apply -f "$apply_tmp/"
   ok '[apply] kubectl apply done'
 
   # rollout-restart オプション (= 同 tag 上書き push の場合の明示再起動)
@@ -309,6 +377,45 @@ else
     kubectl rollout status "statefulset/biblio-orchestrator" -n "$NS" --timeout=300s \
       || fail "[rollout] timeout or failed. kubectl describe pod $ORCH_POD -n $NS で原因確認"
     ok '[rollout] partitioned roll out complete'
+  fi
+
+  # preserve 済 env を restore (2 回目 rollout が走る = 追加 ~2 分)。
+  # manifest 値と一致するなら no-op 判定でスキップ (kubectl set env は spec を書き換えて
+  # rollout を trigger するため、無駄な rollout を避ける)。
+  # PR #145 review P-6: PRESERVED は KEY=VALUE 形式の 1 配列で保持 = parallel array の
+  # インデックスずれ罠を構造的に消す。
+  if [ ${#PRESERVED[@]} -gt 0 ]; then
+    info '[restore] preserve 済 env の現在値との差分を確認'
+    restored_count=0
+    for entry in "${PRESERVED[@]}"; do
+      key="${entry%%=*}"    # 最初の `=` より前 (KEY)
+      val="${entry#*=}"     # 最初の `=` より後ろ全部 (VALUE、`=` 含みも OK)
+      manifest_val="$(kubectl -n "$NS" get statefulset biblio-orchestrator \
+        -o jsonpath="{.spec.template.spec.containers[?(@.name=='orchestrator')].env[?(@.name=='${key}')].value}" \
+        2>/dev/null)"
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        warn "[restore] ${key}: kubectl get 失敗 (exit=$rc)、manifest 側の現状値を取得できず。復元を skip"
+        continue
+      fi
+      if [ "$val" = "$manifest_val" ]; then
+        ok "[restore] ${key}=${val} (manifest と一致 = no-op)"
+      else
+        info "[restore] ${key}: manifest='${manifest_val}' → 前値='${val}' で復元 (kubectl set env、追加 rollout)"
+        if "$DRY_RUN"; then
+          info "[dry-run] kubectl -n $NS set env statefulset/biblio-orchestrator ${key}=${val}"
+        else
+          run kubectl -n "$NS" set env "statefulset/biblio-orchestrator" "${key}=${val}"
+          restored_count=$((restored_count + 1))
+        fi
+      fi
+    done
+    if [ "$restored_count" -gt 0 ] && ! "$DRY_RUN"; then
+      info "[restore] $restored_count 個の env を復元、追加 rollout 待ち (timeout=300s)"
+      kubectl rollout status "statefulset/biblio-orchestrator" -n "$NS" --timeout=300s \
+        || fail '[restore] 2 回目 rollout timeout or failed'
+      ok '[restore] 追加 rollout 完了'
+    fi
   fi
 fi
 

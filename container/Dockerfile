@@ -28,6 +28,11 @@ ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=52.2.1
 ARG BUN_VERSION=1.3.12
 ARG GH_CLI_VERSION=2.95.0
+# tavily-mcp: Web 検索 MCP server (M4-F Phase 3、life-capabilities)。
+# npm view tavily-mcp version で最新を確認、pnpm-workspace.yaml の
+# `minimumReleaseAge: 4320` (3日) を超えた stable を pin する。
+# 0.2.20 = 2026-05-29 リリース (実装時点 2026-07-05 で 5 週以上経過)。
+ARG TAVILY_MCP_VERSION=0.2.20
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -154,6 +159,22 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+# ---- tavily-mcp (M4-F Phase 3、life-capabilities) ---------------------------
+# Web 検索 MCP server (axios ベース、`NODE_EXTRA_CA_CERTS` 尊重)。
+# runtime に `npx -y tavily-mcp` させると初回 npm registry pull で MCP 30s
+# タイムアウトを踏むリスクがあるため事前焼き込みで解消。
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "tavily-mcp@${TAVILY_MCP_VERSION}"
+
+# ---- Drive MCP server (M4-F Phase 3、life-capabilities) ---------------------
+# 自作 stdio MCP server。Bun ではなく Node 22 で走らせる (oven-sh/bun#30381 の
+# HTTPS-over-CONNECT-proxy バグ回避)。実 ADC token は持たず、
+# `Authorization: Bearer placeholder` を OneCLI MITM proxy が実 token に置換する
+# (詳細は container/mcp-servers/drive/README.md)。
+COPY mcp-servers/drive /opt/mcp-servers/drive
+RUN cd /opt/mcp-servers/drive \
+    && npm install --omit=dev --no-audit --no-fund --loglevel=error
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.

@@ -365,6 +365,22 @@ export function openOutboundDb(agentGroupId: string, sessionId: string): Databas
   return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId));
 }
 
+/**
+ * true なら「未 spawn (初回起動前)」を示す db-open 失敗コード。
+ *
+ * - `ENOENT` — fs レベルで file open 自体が失敗 (write-mode open で fs 経由の open が先に失敗)
+ * - `SQLITE_CANTOPEN` — better-sqlite3 readonly open 特有 (fs stat は通るが sqlite level
+ *   で open が失敗、PR #145 review C3 実測、readonly=true 経路で発生)
+ *
+ * 呼出元 (`refreshProgressStatus` / `drainSession`) はこの判定で「pre-spawn 正常経路
+ * = debug 抑制」と「I/O 障害 = warn 昇格」を分岐する。SQLITE_CANTOPEN は当初 poller.ts
+ * にのみ適用され drainSession に未展開だった (PR #145 review type-design C-4 で発見)
+ * ため helper 化して両経路で共通化した。
+ */
+export function isPreSpawnDbOpenError(code: string | undefined): boolean {
+  return code === 'ENOENT' || code === 'SQLITE_CANTOPEN';
+}
+
 /** Open the outbound DB for a session with write access. Only safe to call when no container is running. */
 export function openOutboundDbRw(agentGroupId: string, sessionId: string): Database.Database {
   return openOutboundDbRwRaw(outboundDbPath(agentGroupId, sessionId));

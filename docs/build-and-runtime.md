@@ -39,7 +39,7 @@ host とコンテナはそれぞれ独自のパッケージツリーを持つ:
 
 `container/Dockerfile` は `node:22-slim` 上のシングルステージビルドである:
 
-- **Pin された ARG** — `BUN_VERSION`、`CLAUDE_CODE_VERSION`、`AGENT_BROWSER_VERSION`、`VERCEL_VERSION`、`GH_CLI_VERSION`。PR で意図的にバンプする。
+- **Pin された ARG** — `BUN_VERSION`、`CLAUDE_CODE_VERSION`、`AGENT_BROWSER_VERSION`、`VERCEL_VERSION`、`GH_CLI_VERSION`、`TAVILY_MCP_VERSION` (M4-F Phase 3、Web 検索 MCP server)。PR で意図的にバンプする。
 - **CJK フォント** — `ARG INSTALL_CJK_FONTS=false`。`container/build.sh` は `.env` から `INSTALL_CJK_FONTS` を読み、build-arg として渡す。デフォルトビルドで ~200MB 節約;ユーザが中国語/日本語/韓国語のコンテンツを扱う場合はオプトインする。
 - **BuildKit のキャッシュマウント** — `/var/cache/apt`、`/var/lib/apt`、`/root/.bun/install/cache`、`/root/.cache/pnpm`。`package.json` / `bun.lock` が変わっていない再ビルドは速い。BuildKit が必要(Docker 23+ ではデフォルト、Apple Container と互換)。
 - **`tini` を init として使う** — Chromium のゾンビプロセスを reap し、SIGTERM を転送して in-flight の `outbound.db` 書き込みを確定させる。

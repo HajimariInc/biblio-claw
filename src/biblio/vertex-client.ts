@@ -525,3 +525,167 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
     },
   );
 }
+
+/** `callVertexGeminiJson` の引数。`responseSchema` は Vertex 側 JSON Schema (type UPPERCASE)。 */
+export interface VertexJsonCallArgs {
+  /** 入力テキスト (system 不要、user 1 turn 想定で十分)。 */
+  prompt: string;
+  /** 生成上限。JSON 応答は 3 分類 + reason 100 chars 目安で 64 tokens で十分。 */
+  maxOutputTokens: number;
+  /** 決定性目的なら 0。gate 判定は 0 固定で呼ぶ想定。 */
+  temperature: number;
+  /**
+   * Vertex Gemini の `responseSchema` フィールドに直接載せる JSON Schema オブジェクト。
+   *
+   * **GOTCHA (M4-F Phase 2 罠 3)**: Vertex Gemini の `type` は **UPPERCASE** (`OBJECT` /
+   * `STRING` / `NUMBER` 等)、Anthropic の JSON Schema は lowercase (`object` / `string`)。
+   * ADK 経由の `simple_zod_to_json.ts` (`normalizeSchema`) は逆方向 (UPPERCASE → lowercase)
+   * のため**流用しない**。呼び出し側 (Layer 4 evaluator) が Vertex 形式で直接 literal
+   * 生成する。TODO: 将来 `responseFormat` (2026-07 時点 deprecated 表記だが機能する
+   * `responseSchema` の後継) 移行判断。
+   */
+  responseSchema: Record<string, unknown>;
+  /**
+   * ハードタイムアウト (ms)。gate 判定は fast path なので既定 3000ms
+   * (fugue/patron 体感悪化を招かないため)。**`GATE_TIMEOUT_MS` env の解決は呼出元
+   * (`src/gate/layer4-evaluator.ts:readGateTimeoutMs`) の責務**、本関数は解決済の値を
+   * 受け取るのみで env を直接読まない。
+   */
+  timeoutMs?: number;
+  /** 既定は `.env` の `GATE_MODEL` (fallback `gemini-3.1-flash-lite`)。差し替え用 (テストなど)。 */
+  modelId?: string;
+}
+
+/** JSON schema 強制版 Gemini 応答 (parts[0].text は JSON 文字列)。 */
+interface VertexGeminiJsonResponse extends VertexGeminiResponse {}
+
+/**
+ * Vertex × Gemini を `:generateContent` 経路で JSON schema 強制で叩き、`JSON.parse` 済 unknown を返す。
+ *
+ * 既存 `callVertexGemini` (dangerous 軸判定用、text/plain response) は touch しない。M4-F
+ * Phase 2 gate Layer 4 evaluator (`src/gate/layer4-evaluator.ts`) 専用の JSON schema 強制版。
+ *
+ * 応答 shape:
+ *   - `generationConfig.responseMimeType: 'application/json'` + `generationConfig.responseSchema`
+ *     で Vertex 側が JSON 応答を強制、`candidates[0].content.parts[0].text` に JSON 文字列が入る
+ *   - 本関数は `JSON.parse(text)` を実行して unknown を返す (Zod validate は呼び出し側 Layer 4 で)
+ *
+ * fallback は呼び出し側 (Layer 4 evaluator) の責務: 本関数は失敗で throw する
+ * (invalid JSON / 4xx / 5xx / timeout 全て throw)。Layer 4 が catch して
+ * `classification: 'biblio-other'` fallback (対話が既定の受け皿) に倒す。
+ */
+export async function callVertexGeminiJson(args: VertexJsonCallArgs, ctx?: VertexCallCtx): Promise<unknown> {
+  const env = readEnvFile(['ANTHROPIC_VERTEX_PROJECT_ID', 'CLOUD_ML_REGION', 'GATE_MODEL']);
+  const project = env.ANTHROPIC_VERTEX_PROJECT_ID;
+  if (!project) {
+    throw new Error('vertex-client: ANTHROPIC_VERTEX_PROJECT_ID is not set (.env / process.env both empty)');
+  }
+  const region = env.CLOUD_ML_REGION || DEFAULT_REGION;
+  // `GATE_MODEL` の 3 層 fallback: 明示 arg > .env > default 'gemini-3.1-flash-lite'。
+  const modelId = args.modelId || env.GATE_MODEL || 'gemini-3.1-flash-lite';
+  const timeoutMs = args.timeoutMs ?? 3000;
+  const url = vertexUrl(project, region, modelId, 'google', 'generateContent');
+  const tracer = getTracer();
+  return tracer.startActiveSpan(
+    `${GEN_AI_OPERATION_CHAT} ${modelId}`,
+    {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        [GEN_AI_OPERATION_NAME]: GEN_AI_OPERATION_CHAT,
+        [GEN_AI_PROVIDER_NAME]: GEN_AI_PROVIDER_GCP_VERTEX_AI,
+        [GEN_AI_REQUEST_MODEL]: modelId,
+        [SERVER_ADDRESS]: vertexHost(region),
+        'biblio.request_id': ctx?.requestId,
+        'biblio.session_id': ctx?.sessionId,
+        'biblio.axis': ctx?.axis ?? 'gate',
+      },
+    },
+    async (span) => {
+      const t0 = performance.now();
+      try {
+        // JSON schema 強制モード + thinking OFF (gate 判定は VERDICT 1 行相当なので thinking 不要)。
+        const body = {
+          contents: [{ role: 'user', parts: [{ text: args.prompt }] }],
+          generationConfig: {
+            temperature: args.temperature,
+            maxOutputTokens: args.maxOutputTokens,
+            responseMimeType: 'application/json',
+            responseSchema: args.responseSchema,
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        };
+
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer placeholder',
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+
+        if (!res.ok) {
+          let bodyText = '';
+          try {
+            bodyText = (await res.text()).slice(0, 500);
+          } catch (bodyErr) {
+            log.warn('vertex-client: failed to read json error response body', {
+              status: res.status,
+              bodyErr,
+            });
+          }
+          log.warn(
+            'vertex.call failed',
+            vertexLogFields(ctx, modelId, {
+              outcome: 'failure',
+              status: res.status,
+              latency_ms: Math.round(performance.now() - t0),
+              error_body_preview: bodyText.slice(0, 200),
+            }),
+          );
+          throw new Error(`vertex-client: generateContent (json) ${res.status} ${res.statusText} — ${bodyText}`);
+        }
+
+        const json = (await res.json()) as VertexGeminiJsonResponse;
+        const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof text !== 'string' || text.length === 0) {
+          throw new Error(
+            `vertex-client: json response missing candidates[0].content.parts[0].text — ${JSON.stringify(json).slice(0, 300)}`,
+          );
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch (parseErr) {
+          throw new Error(`vertex-client: response text is not valid JSON — text=${text.slice(0, 200)}`, {
+            cause: parseErr,
+          });
+        }
+        if (!json.usageMetadata) {
+          log.warn('vertex.call: usageMetadata absent (json)', vertexLogFields(ctx, modelId));
+        }
+        log.info(
+          'vertex.call',
+          vertexLogFields(ctx, modelId, {
+            outcome: 'success',
+            tokens_in: json.usageMetadata?.promptTokenCount ?? 0,
+            tokens_out: json.usageMetadata?.candidatesTokenCount ?? 0,
+            latency_ms: Math.round(performance.now() - t0),
+          }),
+        );
+        const usage = extractVertexUsage(json, 'gemini');
+        if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
+        if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
+        return parsed;
+      } catch (err) {
+        const errorRecord = err instanceof Error ? err : new Error(String(err));
+        span.recordException(errorRecord);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+        throw err;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}

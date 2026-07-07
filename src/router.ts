@@ -22,6 +22,9 @@ import { randomUUID } from 'node:crypto';
 import { dispatchToAdk } from './adk/dispatcher.js';
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
+import { appendGateAuditLog } from './gate/audit-log.js';
+import { evaluateGate, isGateEnabled, withGateSpan } from './gate/gate.js';
+import type { GateResult } from './gate/types.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
@@ -31,8 +34,11 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
+import { isStubDeliveryByMg } from './delivery.js';
+import { emitPreSpawnStatus, PIPELINE_STATUS } from './modules/progress-status/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
+import { notifyAdmin } from './modules/approvals/notify-admin.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
@@ -259,36 +265,196 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    we need their actual rows for fan-out).
   const agents = getMessagingGroupAgents(mg.id);
 
-  // 4. Fan-out: evaluate each wired agent independently against engage_mode,
-  //    sender_scope, and access gate. An agent that engages gets its own
-  //    session and container wake. An agent that declines but has
-  //    ignored_message_policy='accumulate' still gets the message stored in
-  //    its session (trigger=0) so the context is available when it does
-  //    engage later. Drop policy = skip silently.
-  //
-  //    Subscribe (for mention-sticky wirings on threaded platforms) fires
-  //    once per message from this loop — the first engaging mention-sticky
-  //    wiring triggers adapter.subscribe(...); subsequent wirings don't
-  //    re-subscribe (chat.subscribe is idempotent anyway, but the flag
-  //    avoids the extra await).
+  // M4-F review C1: multi-wire × GATE_ENABLED=false の一時的不整合を runtime 検知。
+  // Phase 2 の allowFanout は「gate mismatch skip が fan-out 二重発火を抑止する」ことを
+  // 前提に成立するが、GATE_ENABLED=false 時は mismatch skip が動かず、両 wire が同一
+  // メッセージに応答する構造上のリスクが再発する (rollback 経路 / deploy Step 3→4 window)。
+  // mg.id 単位で 1 回だけ warn (module-scope Set で dedup、Pod 再起動で reset)。
+  if (agents.length > 1 && !isGateEnabled() && !warnedMultiWireGateOff.has(mg.id)) {
+    warnedMultiWireGateOff.add(mg.id);
+    log.warn('Multiple agents wired to messaging group but GATE_ENABLED=false — fan-out will double-dispatch', {
+      event: 'router.wire.multi_wire_gate_off',
+      messaging_group_id: mg.id,
+      channel_type: event.channelType,
+      platform_id: event.platformId,
+      agent_count: agents.length,
+    });
+  }
+
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
 
+  // M4-F review I4 対応: engagement 判定を先に済ませ、少なくとも 1 agent が engage or
+  // accumulate する場合のみ gate 評価を発火する。従来は全 message に対して Layer 4 (Vertex
+  // Gemini) が発火し、mention なし ambient channel 発言 (drop policy 対象) にも LLM 呼出 +
+  // FP 検知 patron 返信が起きる問題があった。accumulate 経路も poisoning 防御のため gate 対象。
+  interface AgentDecision {
+    agent: MessagingGroupAgent;
+    agentGroup: AgentGroup;
+    engages: boolean;
+    accessOk: boolean;
+    scopeOk: boolean;
+  }
+  const decisions: AgentDecision[] = [];
+  for (const agent of agents) {
+    const agentGroup = getAgentGroup(agent.agent_group_id);
+    if (!agentGroup) continue;
+    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
+    const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
+    decisions.push({ agent, agentGroup, engages, accessOk, scopeOk });
+  }
+  const willAnyAgentAct = decisions.some((d) => {
+    const willEngage = d.engages && d.accessOk && d.scopeOk;
+    const willAccumulate =
+      d.agent.ignored_message_policy === 'accumulate' && !(d.engages && (!d.accessOk || !d.scopeOk));
+    return willEngage || willAccumulate;
+  });
+
+  // M4-F Phase 2: gate 判定 (`GATE_ENABLED=true` + willAnyAgentAct 時のみ発火)。gate 自体の
+  // unexpected throw は fail-open (gateResult=null) で従来経路継続。Layer 4 内部の Vertex/Zod
+  // fallback は既に biblio-other に倒れるため throw は本来稀ケース = catch は保険。
+  let gateResult: GateResult | null = null;
+  if (isGateEnabled() && willAnyAgentAct) {
+    // M4-F Phase 4: 分類前に「分類中」status を出す。session 未確定な pre-spawn 区間の
+    // 一発発射 (fire-and-forget、adapter 直呼び)。gate 通過後は session 確定 → 既存の
+    // startTypingRefresh の initialStatus='container 起動中' 経路 (下の deliverToAgent
+    // wake 分岐) に引き継がれる。文言は PIPELINE_STATUS に集約 (tool-status-map.ts)。
+    // silent-failure-hunter IM-5 対応: fire-and-forget の unhandledRejection を撲滅する
+    // ため明示 `.catch()` を挿入 (現状 emitPreSpawnStatus は throw しない契約だが、
+    // dispatcher.ts:emitAdkToolStatus の S3 と同流儀の防衛)。
+    void emitPreSpawnStatus(
+      event.channelType,
+      event.platformId,
+      event.threadId,
+      PIPELINE_STATUS.GATE_CLASSIFYING,
+    ).catch((err) => {
+      log.warn('emitPreSpawnStatus unexpected throw', {
+        event: 'progress.status.pre_spawn.dispatch_failed',
+        channel_type: event.channelType,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    });
+    try {
+      gateResult = await withGateSpan(messageText, async (span) => {
+        const result = await evaluateGate(messageText);
+        span.setAttribute('gate.classification', result.classification);
+        span.setAttribute('gate.layer_hit', result.layerHit);
+        span.setAttribute('gate.reason', result.reason);
+        span.setAttribute('gate.latency_ms', result.latencyMs);
+        if (result.model) span.setAttribute('gate.model', result.model);
+        if (result.degraded) span.setAttribute('gate.degraded', true); // I6
+        span.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
+        return result;
+      });
+      log.info('gate classified', {
+        event: 'gate.classified',
+        gate_classification: gateResult.classification,
+        gate_layer: gateResult.layerHit,
+        gate_reason: gateResult.reason,
+        gate_latency_ms: gateResult.latencyMs,
+        gate_degraded: gateResult.degraded ?? false,
+        channel_type: event.channelType,
+        messaging_group_id: mg.id,
+      });
+      appendGateAuditLog({
+        outcome: gateResult.classification === 'in-secure' ? 'blocked' : 'allowed',
+        layer: gateResult.layerHit,
+        classification: gateResult.classification,
+        reason: gateResult.reason,
+        utterance: messageText,
+        channel: normalizeGateAuditChannel(event.channelType),
+        channelType: event.channelType,
+        userId,
+        degraded: gateResult.degraded,
+      });
+      if (gateResult.classification === 'in-secure') {
+        // (1) admin DM 通知 (notify-only、承認カードではない)
+        // issue #155 案 B 対応: verify 経路の stub 判定用に sourceEvent を渡す。
+        void notifyAdmin({
+          channelType: event.channelType,
+          agentGroupId: agents[0]?.agent_group_id ?? null,
+          subject: 'gate.blocked',
+          body: `Injection 疑い発話を検出しました。\nlayer: ${gateResult.layerHit}\nreason: ${gateResult.reason}\nchannel: ${event.channelType}\nuser: ${userId ?? '(unknown)'}`,
+          sourceEvent: { channelType: event.channelType, platformId: event.platformId },
+        }).catch((err) =>
+          log.warn('gate notifyAdmin unexpected throw', {
+            event: 'gate.blocked.notify_admin_throw',
+            err: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        // (2) audit log は既に appendGateAuditLog で発火済
+        // (3) patron 定型文返信 (session 未作成のため adapter.deliver 直接呼出、ADK dispatcher
+        //     fallback の写経元)
+        const adapter = getChannelAdapter(event.channelType);
+        if (adapter) {
+          // issue #155 案 B 対応: verify 経路 `--stub-outbound` で登録された 2-tuple key
+          // (channel_type + platform_id) にマッチする場合、in-secure reject の patron 定型文
+          // 発火を silent skip する。in-secure 経路は session 未作成 = agent_group_id が
+          // resolvable でないため 2-tuple key を採用。
+          if (isStubDeliveryByMg(event.channelType, event.platformId)) {
+            log.info('gate in-secure patron deliver skipped by stub (verify path)', {
+              event: 'gate.blocked.patron_deliver_stubbed',
+              channel_type: event.channelType,
+              platform_id: event.platformId,
+            });
+          } else {
+            await adapter
+              .deliver(event.platformId, event.threadId, {
+                kind: 'chat',
+                content: {
+                  text: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。管理者に通知しました。',
+                },
+              })
+              .catch((deliverErr) => {
+                log.error('gate in-secure patron deliver failed', {
+                  event: 'gate.blocked.patron_deliver_failed',
+                  err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+                });
+              });
+          }
+        } else {
+          // I7 対応: adapter が未登録の稀ケース (channel が routeInbound を通っているのに
+          // active adapter に居ない = adapter 起動失敗 or unregister 中) を silent にしない。
+          log.warn('gate in-secure patron notification skipped (no adapter for channel)', {
+            event: 'gate.blocked.no_patron_adapter',
+            channel_type: event.channelType,
+          });
+        }
+        return; // fan-out loop に入らず終了 (dropped_messages 記録経路も skip)
+      }
+    } catch (err) {
+      // gate 自体の unexpected throw (Layer 4 fallback を超えた例外) は fail-open で対話継続。
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.warn('gate unexpected throw, falling back to open (existing wiring)', {
+        event: 'gate.unexpected_throw',
+        err: errMsg,
+      });
+      // I5 対応: gate error も audit trail に載せる (Cloud Logging BQ sink 経由の集計から
+      // silent undercount を防ぐ = gate 呼出総数と成功数の差分が観測可能に)。
+      appendGateAuditLog({
+        outcome: 'error',
+        reason: errMsg,
+        utterance: messageText,
+        channel: normalizeGateAuditChannel(event.channelType),
+        channelType: event.channelType,
+        userId,
+      });
+      gateResult = null; // 以降の provider mismatch skip も無効化
+    }
+  }
+
+  // 4. Fan-out (I4 refactor 後): pre-computed decisions を消化。engage / accumulate / drop の
+  //    3 分岐は従来と同一。mention-sticky subscribe は engage の初回発火時に 1 回。
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
 
-  for (const agent of agents) {
-    const agentGroup = getAgentGroup(agent.agent_group_id);
-    if (!agentGroup) continue;
-
-    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
-
-    const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
-    const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
+  for (const decision of decisions) {
+    const { agent, agentGroup, engages, accessOk, scopeOk } = decision;
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true, gateResult);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -319,7 +485,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false, gateResult);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -338,11 +504,43 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       platform_id: event.platformId,
       user_id: userId,
       sender_name: parsed.sender ?? null,
-      reason: 'no_agent_engaged',
+      // gate mismatch skip 経由で 0 になった場合を dropped_messages 上で区別可能に
+      reason: gateResult ? 'no_agent_engaged_after_gate' : 'no_agent_engaged',
       messaging_group_id: mg.id,
       agent_group_id: null,
     });
+    // C2: gate 有効化 + 分類済なのに全 agent が skip されたケース (両 wire 未確立 or mismatch
+    // で patron 応答が silent に消えるパターン) を warn で観測可能に。
+    if (gateResult) {
+      log.warn('gate: no agent engaged after classification (all skipped by provider mismatch)', {
+        event: 'gate.no_engaged_agent',
+        messaging_group_id: mg.id,
+        gate_classification: gateResult.classification,
+        agent_count: agents.length,
+      });
+    }
   }
+}
+
+/**
+ * M4-F review C1 対応: multi-wire × GATE_ENABLED=false 状態を 1 回だけ warn するための
+ * module scope Set (key = messaging_group_id、Pod 再起動で reset される in-memory guard)。
+ */
+const warnedMultiWireGateOff = new Set<string>();
+
+/**
+ * M4-F review I11 (type-design 所見 1 + silent-failure I4 統合) 対応: audit event の
+ * `channel` field は closed union (`slack | cli | fugue | other`)。router.ts は Slack / CLI /
+ * fugue-http 経由の Fugue はここを通らない (fugue-http.ts が別経路で `channel:'fugue'` を
+ * 直書き) ため実質 Slack / CLI のみだが、将来 channel adapter (Discord/Telegram/Teams 等)
+ * が routeInbound に流れ込んだ際、暗黙 `'slack'` fallback で silent misattribute する罠を
+ * `'other'` 明示で防ぐ。
+ */
+function normalizeGateAuditChannel(channelType: string): 'slack' | 'cli' | 'fugue' | 'other' {
+  if (channelType === 'slack') return 'slack';
+  if (channelType === 'cli') return 'cli';
+  if (channelType === 'fugue') return 'fugue';
+  return 'other';
 }
 
 /**
@@ -406,6 +604,7 @@ async function deliverToAgent(
   userId: string | null,
   adapterSupportsThreads: boolean,
   wake: boolean,
+  gateResult: GateResult | null = null,
 ): Promise<void> {
   // Provider dispatch (M4-B Phase 3): agent_group が provider='adk' を選択している
   // 場合、agent-runner container 経路 (= session / container spawn) をスキップし、
@@ -439,6 +638,29 @@ async function deliverToAgent(
   // (現状 `ncl sessions` は read-only で該当 mutator 不在のため実害ゼロ)。
   const containerConfig = getContainerConfig(agentGroup.id);
   const providerName = (containerConfig?.provider ?? 'claude').toLowerCase();
+  // M4-F Phase 2: gate classification と provider の mismatch skip。
+  // gateResult=null (= GATE_ENABLED=false or gate unexpected throw で fail-open) 時は
+  // skip せず既存経路継続 (= gate 無効化時の main 合流退路を担保)。
+  //
+  // silent-failure-hunter C1 + S2 対応: `log.debug` は default LOG_LEVEL=info で filter
+  // され Cloud Logging / BQ sink に届かない = patron 経路の routing 決定が観測不能。
+  // `log.warn` に昇格することで audit trail の外側でも「gate は allowed としたが
+  // provider mismatch で個別 agent は skip した」という配送判断を明示的に残す。
+  if (gateResult) {
+    const isAdk = providerName === 'adk';
+    const shouldSkip =
+      (gateResult.classification === 'biblio-adk' && !isAdk) || (gateResult.classification === 'biblio-other' && isAdk);
+    if (shouldSkip) {
+      log.warn('gate skip: classification-provider mismatch', {
+        event: 'gate.skip.mismatch',
+        gate_classification: gateResult.classification,
+        agent_provider: providerName,
+        agent_group_id: agentGroup.id,
+        messaging_group_id: mg.id,
+      });
+      return;
+    }
+  }
   if (providerName === 'adk') {
     if (!wake) {
       log.debug('ADK path: non-wake message dropped (in-process = no session accumulation)', {
@@ -481,20 +703,30 @@ async function deliverToAgent(
       });
       const adapter = getChannelAdapter(event.channelType);
       if (adapter) {
-        // deliver 自体の失敗は log 拾って swallow (= 循環 catch 防止、routeInbound 全体
-        // を throw させない)
-        await adapter
-          .deliver(event.platformId, event.threadId, {
-            kind: 'chat',
-            content: { text: 'エラー: システムエラーが発生しました。しばらくして再度お試しください。' },
-          })
-          .catch((deliverErr) => {
-            log.error('ADK dispatcher fallback deliver also failed', {
-              event: 'router.dispatch.adk_fallback_deliver_failed',
-              request_id: requestId,
-              err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
-            });
+        // issue #155 案 B 対応: 2-tuple key stub check (ADK dispatcher fallback 経路)
+        if (isStubDeliveryByMg(event.channelType, event.platformId)) {
+          log.info('ADK dispatcher fallback deliver skipped by stub (verify path)', {
+            event: 'router.dispatch.adk_fallback_stubbed',
+            request_id: requestId,
+            channel_type: event.channelType,
+            platform_id: event.platformId,
           });
+        } else {
+          // deliver 自体の失敗は log 拾って swallow (= 循環 catch 防止、routeInbound 全体
+          // を throw させない)
+          await adapter
+            .deliver(event.platformId, event.threadId, {
+              kind: 'chat',
+              content: { text: 'エラー: システムエラーが発生しました。しばらくして再度お試しください。' },
+            })
+            .catch((deliverErr) => {
+              log.error('ADK dispatcher fallback deliver also failed', {
+                event: 'router.dispatch.adk_fallback_deliver_failed',
+                request_id: requestId,
+                err: deliverErr instanceof Error ? deliverErr.message : String(deliverErr),
+              });
+            });
+        }
       }
     }
     return;
@@ -569,7 +801,20 @@ async function deliverToAgent(
   if (wake) {
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
-    startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
+    // M4-F Phase 4 (PR #145 実機で race 発見 → 修正): startTypingRefresh の immediate
+    // tick を initialStatus='container 起動中' で発火し、cold start 区間 (~10-15s) を
+    // 明示化する。以降は poller が container_state.current_tool を読んで tool 名日本語
+    // 文言に遷移する。かつて分離していた updateTypingStatus 呼出は Slack API 到達順の
+    // race (「Typing...」が後勝ち) を招くため、initialStatus 経由の 1 発集約に変更。
+    // 文言は PIPELINE_STATUS (tool-status-map.ts) に集約。
+    startTypingRefresh(
+      session.id,
+      session.agent_group_id,
+      event.channelType,
+      event.platformId,
+      event.threadId,
+      PIPELINE_STATUS.CONTAINER_STARTING,
+    );
     const freshSession = getSession(session.id);
     if (freshSession) {
       const woke = await wakeContainer(freshSession);

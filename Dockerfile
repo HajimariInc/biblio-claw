@@ -42,11 +42,15 @@ FROM node:24-slim
 
 WORKDIR /app
 
-# 余分な APT cache を残さない (image サイズ最適化)
+# 余分な APT cache を残さない (image サイズ最適化)。
+# jq は scripts/onecli-*-secret.sh が JSON payload 組立/解析に使う (M4-F Phase 3 で追加。
+# 従来は sidecar rotator image 内でのみ実行されていたため orchestrator に未 install だったが、
+# Tavily secret 投入は orchestrator container 内で走らせる必要があるため恒久化)。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
     curl \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # === GitHub CLI (= debug 用 + 将来互換のため残置。acquire.ts の存在確認は

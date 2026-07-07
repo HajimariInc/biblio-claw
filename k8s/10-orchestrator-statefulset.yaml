@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4e-p5-2
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4f-p5-4
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4e-p5-2,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p5-4,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -212,6 +212,23 @@ spec:
             # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
             - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
             - { name: FUGUE_HTTP_PORT, value: '8080' }
+            # === M4-F Phase 2 gate agent (Phase 3 以降 GKE 常時 true 運用) ===
+            # gate 4 層 (pattern → escape → XML → LLM evaluator) の 3 分類 routing
+            # (biblio-adk / biblio-other / in-secure)。**GKE Prod は Phase 3 (2026-07-05)
+            # で kubectl set env で有効化して以降、両 wire (ADK + hybrid) 前提で稼働**。
+            # PR #145 で判明した罠 (kubectl apply -f k8s/ が manifest 内容で spec を上書き
+            # → kubectl set env で入れた true が消える regression) を受けて manifest 既定
+            # を 'true' に恒久化 (2026-07-06)。**GATE_ENABLED=false は「ADK / hybrid の
+            # どちらか片方だけが wire される単一 provider 運用時のみ」で使う設定**
+            # (詳細: runbook §M4-F Phase 2 §GATE_ENABLED 運用条件)。
+            # image-sync script (init-project-gcp-image-sync.sh) は本 env を preserve/restore
+            # する二重保険を持つ (kubectl set env で override した値が deploy で消える罠を防ぐ)。
+            - { name: GATE_ENABLED, value: 'true' }
+            - { name: GATE_MODEL, value: gemini-3.1-flash-lite }
+            # `.jsonl` local fallback は GKE では emptyDir にしか書けず永続化されない
+            # (Pod 再起動で消失)。GCP は Cloud Logging → BQ sink が主経路のため
+            # GATE_AUDIT_LOG_DISABLE=1 で `.jsonl` fallback を無効化する運用を推奨。
+            - { name: GATE_AUDIT_LOG_DISABLE, value: '1' }
           # Slack tokens (A 案: Slack は orchestrator に統合)。Secret が未投入
           # でも Pod は起動できるよう optional 化 (factory が null を返して skip)。
           envFrom:
@@ -293,7 +310,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4e-p5-2
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4f-p5-4
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -339,7 +356,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4e-p5-2
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -353,6 +370,40 @@ spec:
             - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: vertex-token-rotator }
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+
+        # ---- drive-token-rotator sidecar (M4-F Phase 3、life-capabilities) ----
+        # 40min 周期で onecli-drive-secret.sh を呼んで drive.readonly scope 付き
+        # access token を OneCLI に投入。**image は vertex-token-rotator と同一** =
+        # build 資産の二重メンテを回避し、Dockerfile.sidecar.vertex 側で
+        # scripts/drive-rotate.sh + scripts/onecli-drive-secret.sh も焼き込む
+        # (M4-F Phase 3 の Dockerfile 更新済)。差分は command と env のみ:
+        #   - command: bash /scripts/drive-rotate.sh
+        #   - DRIVE_SECRET_NAME (Vertex とは別 secret)
+        # R4 経路 (2026-07-06 恒久対応): metadata server から biblio-orchestrator@ の
+        # caller token を取得 → iamcredentials.googleapis.com/generateAccessToken で
+        # `biblio-google-drive-user@` を impersonate + scope=drive.readonly 明示 →
+        # drive.readonly scope 付き token を発行。前提として orchestrator@ が
+        # drive-user@ に対して `roles/iam.serviceAccountTokenCreator` を持つこと
+        # (`terraform/iam-drive-user/` module で宣言、ない場合 403 fail、詳細は
+        # runbook §M4-F Phase 3 罠 7)。Drive フォルダ ACL は drive-user@ にのみ共有
+        # (orchestrator@ には共有しない = 境界分離)。
+        # image tag は運用中の値をそのまま反映する形。詳細は runbook §M4-F Phase 3
+        # §deploy 手順 (image-sync 経由で bump)。
+        - name: drive-token-rotator
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          command: ['bash', '/scripts/drive-rotate.sh']
+          env:
+            - { name: ONECLI_URL, value: 'http://localhost:10254' }
+            - { name: DRIVE_SECRET_NAME, value: biblio-claw-drive }
+            # Vertex と同流儀: 40min 周期で ADC TTL ~60min との margin 20min を確保。
+            - { name: ROTATE_INTERVAL_SEC, value: '2400' }
+            - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: LOG_FORMAT, value: json }
+            - { name: LOG_COMPONENT, value: drive-token-rotator }
           resources:
             requests:
               cpu: 50m

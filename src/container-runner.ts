@@ -7,6 +7,16 @@
  * `ContainerRuntimeProvider` (Docker locally, K8s Job on GKE) selected via the
  * `CONTAINER_PROVIDER` env var. This file builds a runtime-neutral
  * `AgentSpawnSpec` (mounts, env, command, OneCLI raw args) and hands it off.
+ *
+ * M4-F Phase 4 (PR #145) 逸脱理由 breadcrumb:
+ *   progress-status (Slack 進行ステート表示) の「container 起動中」文言は本 file の内側
+ *   では発射せず、`src/router.ts` の `deliverToAgent()` wake 分岐で `startTypingRefresh`
+ *   に `initialStatus=PIPELINE_STATUS.CONTAINER_STARTING` を渡す設計に集約している。
+ *   元 plan は container-runner.ts の spawn 前で `emitPreSpawnStatus` を直呼びする予定
+ *   だったが、既に `startTypingRefresh` 済の状態 (= refresh loop が currentStatus=null で
+ *   稼働中) と競合して次 4s tick で status が上書きされる race を招くため、router.ts
+ *   に集約し `wakeContainer` の signature 拡張は不要とした。詳細は
+ *   `docs/operations-runbook.md` §M4-F Phase 4 §既知の罠 #4。
  */
 import { execSync } from 'child_process';
 import fs from 'fs';

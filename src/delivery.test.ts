@@ -271,3 +271,60 @@ describe('deliverSessionMessages — permission check', () => {
     expect(delivered.has('out-unauth')).toBe(true);
   });
 });
+
+// PR #154 review CR-1 対応の回帰防止 integration test。stub-outbound Set は 4-tuple ではなく
+// 3-tuple (agent_group_id + channel_type + platform_id) で照合する契約を持ち、session の
+// thread_id が null であっても production hybrid セッション (`session_mode='shared'`) で正しく
+// skip されなければならない。従来 messages.test.ts は routeInbound を mock していたため
+// `deliverMessage` の skip 分岐が一度も走らず、C1 の bug が unit test を素通りしていた。
+describe('stub-outbound skip (PR #154 review CR-1 / IM-9)', () => {
+  it('skips real deliver when target is in stubOutboundTargets (thread_id=null shared session)', async () => {
+    seedAgentAndChannel();
+    // shared session → thread_id=null で作成される (session_mode='shared' の resolveSession)
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-stub');
+
+    // 3-tuple key で target を登録 (thread_id は key から除外される)
+    const { addStubOutboundTarget, removeStubOutboundTarget } = await import('./delivery.js');
+    addStubOutboundTarget('ag-1', 'telegram', 'telegram:123');
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content) {
+        calls.push(content);
+        return 'plat-msg';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    // 実 deliver 呼出はゼロ (silent skip)
+    expect(calls).toHaveLength(0);
+    // だが markDelivered は通る (通常経路と同じ副作用、再送ループには入らない)
+    const inDb = openInboundDb('ag-1', session.id);
+    expect(getDeliveredIds(inDb).has('out-stub')).toBe(true);
+    inDb.close();
+
+    // trap cleanup: Set を空に戻す (test 間 leak 防止)
+    removeStubOutboundTarget('ag-1', 'telegram', 'telegram:123');
+  });
+
+  it('empty stub Set → production 経路は無影響 (isStubOutboundTarget が常に false の fast path)', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-normal');
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, content) {
+        calls.push(content);
+        return 'plat-msg';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    // stub Set 空 → 通常経路 = 実 deliver 呼出される
+    expect(calls).toHaveLength(1);
+  });
+});

@@ -47,6 +47,7 @@ vi.mock('../env.js', () => ({
     CLOUD_ML_REGION: 'global',
     CATEGORIZE_MODEL: 'claude-sonnet-4-6',
     INSPECT_DANGEROUS_MODEL: 'gemini-2.5-flash',
+    GATE_MODEL: 'gemini-3.1-flash-lite',
   })),
 }));
 
@@ -58,7 +59,7 @@ vi.mock('node:fs', () => ({
   default: { readFileSync: readFileSyncMock },
 }));
 
-import { callVertexAnthropic, callVertexGemini, setupVertexProxy } from './vertex-client.js';
+import { callVertexAnthropic, callVertexGemini, callVertexGeminiJson, setupVertexProxy } from './vertex-client.js';
 
 /** 簡易 Response モック (ok / status / json / text)。 */
 function res(
@@ -195,6 +196,92 @@ describe('callVertexGemini — 4xx/5xx', () => {
   it('503 (Vertex 一時的失敗) を status 付きで throw する', async () => {
     fetchMock.mockResolvedValue(res(503, 'service temporarily unavailable'));
     await expect(callVertexGemini({ prompt: 'x', maxOutputTokens: 32, temperature: 0 })).rejects.toThrow(/503/);
+  });
+});
+
+/**
+ * `callVertexGeminiJson` (M4-F Phase 2 で追加、Layer 4 evaluator 用)。
+ *
+ * pr-test-analyzer I9 対応: 従来 `layer4-evaluator.test.ts` から完全 mock されており、実装 (~115 行)
+ * が unit test で一度も実行されない状態だった。callVertexGemini の対称 pattern で 4 経路 (正常
+ * parse / JSON parse fail / candidates 欠落 / 4xx-5xx) を assert。
+ */
+describe('callVertexGeminiJson — request body 構造', () => {
+  it('responseMimeType=application/json + responseSchema + thinkingBudget=0 を載せて POST する', async () => {
+    fetchMock.mockResolvedValue(
+      res(200, {
+        candidates: [{ content: { parts: [{ text: '{"classification":"biblio-other","reason":"ok"}' }] } }],
+      }),
+    );
+    const schema = {
+      type: 'OBJECT',
+      properties: { classification: { type: 'STRING' }, reason: { type: 'STRING' } },
+    };
+    await callVertexGeminiJson({
+      prompt: 'classify me',
+      maxOutputTokens: 64,
+      temperature: 0,
+      responseSchema: schema,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const call = fetchMock.mock.calls[0];
+    const url = call[0] as string;
+    const init = call[1] as { method?: string; body?: string };
+    expect(url).toContain('/publishers/google/models/gemini-3.1-flash-lite:generateContent');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body as string);
+    expect(body.generationConfig.responseMimeType).toBe('application/json');
+    expect(body.generationConfig.responseSchema).toEqual(schema);
+    expect(body.generationConfig.thinkingConfig.thinkingBudget).toBe(0);
+    expect(body.generationConfig.maxOutputTokens).toBe(64);
+    expect(body.generationConfig.temperature).toBe(0);
+  });
+});
+
+describe('callVertexGeminiJson — response parse', () => {
+  it('candidates[0].content.parts[0].text を JSON.parse して返す', async () => {
+    fetchMock.mockResolvedValue(
+      res(200, {
+        candidates: [{ content: { parts: [{ text: '{"classification":"biblio-adk","reason":"acquire"}' }] } }],
+      }),
+    );
+    const result = await callVertexGeminiJson({
+      prompt: 'x',
+      maxOutputTokens: 64,
+      temperature: 0,
+      responseSchema: {},
+    });
+    expect(result).toEqual({ classification: 'biblio-adk', reason: 'acquire' });
+  });
+
+  it('text が invalid JSON なら throw する (validation は呼出元 Layer 4 の責務、境界で失敗検知)', async () => {
+    fetchMock.mockResolvedValue(res(200, { candidates: [{ content: { parts: [{ text: 'not-valid-json' }] } }] }));
+    await expect(
+      callVertexGeminiJson({ prompt: 'x', maxOutputTokens: 64, temperature: 0, responseSchema: {} }),
+    ).rejects.toThrow(/not valid JSON/);
+  });
+
+  it('candidates が空配列なら throw する (応答崩れ防御)', async () => {
+    fetchMock.mockResolvedValue(res(200, { candidates: [] }));
+    await expect(
+      callVertexGeminiJson({ prompt: 'x', maxOutputTokens: 64, temperature: 0, responseSchema: {} }),
+    ).rejects.toThrow(/candidates\[0\]\.content\.parts\[0\]\.text/);
+  });
+});
+
+describe('callVertexGeminiJson — 4xx/5xx', () => {
+  it('400 (bad schema) を status + body 抜粋付きで throw する', async () => {
+    fetchMock.mockResolvedValue(res(400, '{"error":{"message":"invalid responseSchema"}}'));
+    await expect(
+      callVertexGeminiJson({ prompt: 'x', maxOutputTokens: 64, temperature: 0, responseSchema: {} }),
+    ).rejects.toThrow(/400/);
+  });
+
+  it('500 (Vertex 一時的失敗) を throw する', async () => {
+    fetchMock.mockResolvedValue(res(500, 'internal error'));
+    await expect(
+      callVertexGeminiJson({ prompt: 'x', maxOutputTokens: 64, temperature: 0, responseSchema: {} }),
+    ).rejects.toThrow(/500/);
   });
 });
 

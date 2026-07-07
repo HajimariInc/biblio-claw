@@ -22,9 +22,16 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import {
+  clearOutbox,
+  isPreSpawnDbOpenError,
+  openInboundDb,
+  openOutboundDb,
+  readOutboxFiles,
+} from './session-manager.js';
+import { refreshProgressStatus } from './modules/progress-status/poller.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import type { OutboundFile } from './channels/adapter.js';
+import type { OutboundFile, TypingStatus } from './channels/adapter.js';
 import type { Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
@@ -49,6 +56,102 @@ const deliveryAttempts = new Map<string, number>();
  */
 const inflightDeliveries = new Set<string>();
 
+/**
+ * M4-F Phase 5: `ncl messages send --stub-outbound` の verify 経路で
+ * 実 channel deliver を silent skip するための target set。
+ *
+ * key = `${agentGroupId}:${channelType}:${platformId}` の **3-tuple** (agent_group_id +
+ * channel_type + platform_id)。thread_id は key から意図的に除外する。
+ *
+ * **PR #154 review CR-1 対応**: 従来 4-tuple (thread_id を含む) だったが、hybrid Slack DM
+ * (`init-hybrid-agent.ts:240`) が `session_mode: 'shared'` で wire されている実運用では、
+ * `resolveSession` (`src/session-manager.ts:101,111,174`) が `thread_id = null` に強制する。
+ * この `null` が `writeSessionRouting` → agent-runner の `getSessionRouting` → 応答の
+ * default routing に伝播し `messages_out.thread_id = null` として書き込まれる一方、
+ * `messages.ts` は routeInbound 前に session を持たないため `threadId = mg.platform_id`
+ * (非 null) で stub key を積む → 4-tuple 一致条件が構造的に成立せず、stub 対象が
+ * 実配送側で恒久的に false 判定される silent 不作動が起きていた。
+ *
+ * 3-tuple 化のトレードオフ: 同一 MG に **同一 agent_group** から同時に別 thread の deliver
+ * が走ると両方 stub される。ただし本 verify 経路の想定用途 (`verify-m4-f.sh`) では 1
+ * agent_group × 1 MG × sequential dispatch のため、この巻き添えは実運用上発生しない
+ * (fan-out 別 agent_group への副作用ゼロは agent_group_id で担保、これは元設計と同じ)。
+ *
+ * production 経路は Set が常に空 = `isStubOutboundTarget` は常に false = 挙動不変。
+ * verify のみ `addStubOutboundTarget` → messages send → finally で
+ * `removeStubOutboundTarget` を必ず呼び、汚染を残さない。
+ */
+const stubOutboundTargets = new Set<string>();
+
+/** stub target key を組み立てる。agent_group_id + channel_type + platform_id の 3-tuple。
+ *  thread_id を除外することで session_mode='shared' が強制する `thread_id=null` を吸収する。 */
+function stubTargetKey(agentGroupId: string, channelType: string | null, platformId: string | null): string {
+  return `${agentGroupId}:${channelType ?? ''}:${platformId ?? ''}`;
+}
+
+export function addStubOutboundTarget(agentGroupId: string, channelType: string, platformId: string): void {
+  stubOutboundTargets.add(stubTargetKey(agentGroupId, channelType, platformId));
+}
+
+export function removeStubOutboundTarget(agentGroupId: string, channelType: string, platformId: string): void {
+  stubOutboundTargets.delete(stubTargetKey(agentGroupId, channelType, platformId));
+}
+
+export function isStubOutboundTarget(
+  agentGroupId: string,
+  channelType: string | null,
+  platformId: string | null,
+): boolean {
+  if (stubOutboundTargets.size === 0) return false;
+  return stubOutboundTargets.has(stubTargetKey(agentGroupId, channelType, platformId));
+}
+
+/** test 用 backdoor: module state を reset する。production import path からは呼ばない。 */
+export function _resetStubOutboundTargetsForTest(): void {
+  stubOutboundTargets.clear();
+}
+
+/**
+ * issue #155 案 B 対応: `--stub-outbound` を「outbound + notify + reject」全経路に拡張するため
+ * の 2-tuple key の Set。key = `${channelType}:${platformId}`。
+ *
+ * **既存 stubOutboundTargets (3-tuple) との使い分け**:
+ * - stubOutboundTargets = agent_group_id + channel + platform。既存 deliverToSession 用。
+ * - stubDeliveryByMg = channel + platform のみ。**agent_group_id が resolvable でない経路**
+ *   (in-secure reject / notify-admin / ADK fallback) 用。
+ *
+ * **案 B の想定副作用**:
+ * - fan-out 別 agent_group から同 MG への deliver も stub される可能性 = ただし verify 用途
+ *   では 1 agent_group × 1 MG のため実運用で衝突しない
+ * - deliverToSession で二重防御に使うことで **案 F (session 経路 stub 適用漏れ) の症状も吸収**
+ *   (agent_group_id 不整合による key mismatch を回避)
+ *
+ * production 経路は Set が常に空 = 挙動不変。
+ */
+const stubDeliveryByMg = new Set<string>();
+
+function stubMgKey(channelType: string | null, platformId: string | null): string {
+  return `${channelType ?? ''}:${platformId ?? ''}`;
+}
+
+export function addStubDeliveryByMg(channelType: string, platformId: string): void {
+  stubDeliveryByMg.add(stubMgKey(channelType, platformId));
+}
+
+export function removeStubDeliveryByMg(channelType: string, platformId: string): void {
+  stubDeliveryByMg.delete(stubMgKey(channelType, platformId));
+}
+
+export function isStubDeliveryByMg(channelType: string | null, platformId: string | null): boolean {
+  if (stubDeliveryByMg.size === 0) return false;
+  return stubDeliveryByMg.has(stubMgKey(channelType, platformId));
+}
+
+/** test 用 backdoor。 */
+export function _resetStubDeliveryByMgForTest(): void {
+  stubDeliveryByMg.clear();
+}
+
 export interface ChannelDeliveryAdapter {
   deliver(
     channelType: string,
@@ -58,7 +161,8 @@ export interface ChannelDeliveryAdapter {
     content: string,
     files?: OutboundFile[],
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  // status 引数の意味は TypingStatus (channels/adapter.ts) を参照。
+  setTyping?(channelType: string, platformId: string, threadId: string | null, status?: TypingStatus): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -125,6 +229,17 @@ async function pollActive(): Promise<void> {
     const sessions = getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
+      // M4-F Phase 4: container_state.current_tool を 1s poll で読んで typing status を更新。
+      // deliverSessionMessages と直列で問題ない (inflightDeliveries は delivery 用の別集合、
+      // refreshProgressStatus は同期実行 + updateTypingStatus の変化時 no-op で吸収)。
+      // best-effort: progress-status failure は delivery を殺さない。
+      await refreshProgressStatus(session).catch((err) => {
+        log.warn('progress-status refresh failed', {
+          event: 'progress.status.refresh_failed',
+          session_id: session.id,
+          err,
+        });
+      });
     }
   } catch (err) {
     log.error('Active delivery poll error', { err });
@@ -171,12 +286,17 @@ async function drainSession(session: Session): Promise<void> {
     outDb = openOutboundDb(agentGroup.id, session.id);
     inDb = openInboundDb(agentGroup.id, session.id);
   } catch (err) {
-    // ENOENT は初回 spawn 前 = 正常スキップなので debug。それ以外 (EACCES / EMFILE / EIO 等の
-    // パーミッション / I/O エラー) は本番 LOG_LEVEL=info でも見える warn に倒す。
+    // pre-spawn 判定は session-manager.ts の isPreSpawnDbOpenError に集約 (ENOENT +
+    // SQLITE_CANTOPEN の 2 code で「初回 spawn 前」の正常経路 = poller.ts と共通化)。
+    // それ以外 (EACCES / EMFILE / EIO 等の パーミッション / I/O エラー) は本番
+    // LOG_LEVEL=info でも見える warn に倒す。
+    // 当初は ENOENT のみ debug 分岐で、SQLITE_CANTOPEN (better-sqlite3 readonly open 特有)
+    // が warn に落ちて cold start ごとにノイズが出ていた (PR #145 review type-design C-4
+    // 実測)。poller.ts の SQLITE_CANTOPEN 判定 (C3) と対称に是正。
     const code = (err as NodeJS.ErrnoException)?.code;
-    const ctx = { session_id: session.id, agent_group_id: agentGroup.id, err };
-    if (code === 'ENOENT') {
-      log.debug('drainSession: db open skipped', { event: 'delivery.db_open_skipped', ...ctx });
+    const ctx = { session_id: session.id, agent_group_id: agentGroup.id, err_code: code, err };
+    if (isPreSpawnDbOpenError(code)) {
+      log.debug('drainSession: db open skipped (pre-spawn)', { event: 'delivery.db_open_skipped', ...ctx });
     } else {
       log.warn('drainSession: db open failed', { event: 'delivery.db_open_failed', ...ctx });
     }
@@ -351,6 +471,33 @@ async function deliverMessage(
   // Channel delivery
   if (!msg.channel_type || !msg.platform_id) {
     log.warn('Message missing routing fields', { id: msg.id });
+    return;
+  }
+
+  // M4-F Phase 5: verify 用 stub-outbound の skip 分岐。verify 中に `ncl messages send
+  // --stub-outbound` から key を仕込むと、この session への実 channel deliver を silent
+  // skip する (production 経路は Set 空 = 常に false = 挙動不変)。stub 対象は
+  // markDelivered だけ通り、outbox cleanup も走らせる (通常 deliver の副作用と対称)。
+  // PR #154 review CR-1 対応: key は 3-tuple (agent_group_id + channel_type + platform_id)
+  // で thread_id を含めない。詳細は stubTargetKey の JSDoc を参照。
+  // PR #154 review S8 対応: log level を debug → info に格上げ。本番 `LOG_LEVEL=info` でも
+  // Cloud Logging に届くようにして「verify 中に何を skip したか」の運用調査を可能に。
+  // issue #155 案 B/F 対応: 3-tuple (既存) と 2-tuple (新設) の OR 判定で二重防御。
+  // session 経路の agent_group_id 不整合による key mismatch (案 F 症状) を吸収する。
+  if (
+    isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id) ||
+    isStubDeliveryByMg(msg.channel_type, msg.platform_id)
+  ) {
+    log.info('delivery skipped by stub-outbound (verify path)', {
+      event: 'delivery.stub_outbound.skipped',
+      session_id: session.id,
+      agent_group_id: session.agent_group_id,
+      channel_type: msg.channel_type,
+      platform_id: msg.platform_id,
+      thread_id: msg.thread_id,
+      message_id: msg.id,
+    });
+    clearOutbox(session.agent_group_id, session.id, msg.id);
     return;
   }
 

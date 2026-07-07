@@ -161,16 +161,19 @@ export type FugueEquipReply =
  *   (現状 `writeError()` の 5xx path は 500 `error:'internal'` のみ発火、`unavailable` variant
  *   は未実装の予備 = discriminated union で reason を持てる契約だけ用意している)
  *
- * 4 分類:
+ * 5 分類 (M4-F Phase 2 で `in_secure` を追加):
  *
  * - `env_missing`: 棚 owner/repo の env 未設定 = biblio-claw 設定不備 (Phase 5 の Prod
  *   deploy で解消予定、Phase 2 development 期は起こりうる)
  * - `github_http`: GitHub API が 5xx / rate limit / auth failure を返した (transient)
  * - `marketplace_parse`: `marketplace.json` が壊れている (shelve PR の途中状態等、transient
  *   になりうる)
+ * - `in_secure`: **M4-F Phase 2 追加**。gate 4 層で prompt injection と判定された発話
+ *   (`raw.reason: 'in_secure'` として consult reply に emit)。Fugue Director consumer は
+ *   `warnings` の `'input rejected by input gate'` と併せて「入力が拒否された」を認識する。
  * - `other`: 未分類の Error / 非 Error 値
  */
-export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplace_parse' | 'other';
+export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplace_parse' | 'in_secure' | 'other';
 
 /**
  * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 500
