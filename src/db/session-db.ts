@@ -270,6 +270,13 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
 
 export interface OutboundMessage {
   id: string;
+  /**
+   * host が偶数 / container が奇数 (CLAUDE.md「Two-DB セッション分割」で定義された不変条件)。
+   * PR #154 review IM-6: 従来この型に無かったため呼出側 (M4-F Phase 5 `messages.ts`) で
+   * 二重 cast (`as OutboundMessage & { seq?: number }`) の温床になっていた。schema には
+   * 確実に存在する column (`schema.ts:225`) なので明示。
+   */
+  seq: number;
   kind: string;
   platform_id: string | null;
   channel_type: string | null;

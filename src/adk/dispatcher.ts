@@ -52,6 +52,7 @@
 import { isFinalResponse } from '@google/adk';
 
 import { getChannelAdapter } from '../channels/channel-registry.js';
+import { isStubDeliveryByMg } from '../delivery.js';
 import { log } from '../log.js';
 import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
 import { clearAdkTargetStatus, emitAdkToolStatus } from '../modules/progress-status/index.js';
@@ -451,6 +452,20 @@ async function deliverFallback(
       event: 'adk.dispatcher.no_adapter',
       request_id: requestId,
       channel_type: channelType,
+    });
+    return;
+  }
+
+  // issue #155 案 B 対応: ADK dispatcher 経路の stub check。fan-out で hybrid MG に
+  // wire された ADK agent group が biblio-adk 分類発話を pull → ここで実 Slack 配信
+  // される経路を塞ぐ (verify 実測 2026-07-07 で顕在化)。
+  if (isStubDeliveryByMg(channelType, platformId)) {
+    log.info('ADK dispatcher: deliver skipped by stub (verify path)', {
+      event: 'adk.dispatcher.stubbed',
+      request_id: requestId,
+      channel_type: channelType,
+      platform_id: platformId,
+      final_text_length: text.length,
     });
     return;
   }

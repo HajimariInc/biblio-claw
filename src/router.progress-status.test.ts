@@ -35,7 +35,8 @@ describe('router.ts progress-status 配線 (static assertion)', () => {
     //   PIPELINE_STATUS.GATE_CLASSIFYING)` の呼出構造を寛容な正規表現で確認する。
     // 引数のいずれかを落として書いたら赤くなる (「event.channelType」または
     // 「PIPELINE_STATUS.GATE_CLASSIFYING」の grep miss)。
-    const pattern = /emitPreSpawnStatus\(\s*event\.channelType\s*,\s*event\.platformId\s*,\s*event\.threadId\s*,\s*PIPELINE_STATUS\.GATE_CLASSIFYING/s;
+    const pattern =
+      /emitPreSpawnStatus\(\s*event\.channelType\s*,\s*event\.platformId\s*,\s*event\.threadId\s*,\s*PIPELINE_STATUS\.GATE_CLASSIFYING/s;
     expect(pattern.test(SRC)).toBe(true);
   });
 

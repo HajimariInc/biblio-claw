@@ -12,3 +12,9 @@
 export { refreshProgressStatus } from './poller.js';
 export { toolNameToStatus, PIPELINE_STATUS } from './tool-status-map.js';
 export { emitPreSpawnStatus, emitAdkToolStatus, clearAdkTargetStatus } from './pre-spawn.js';
+export {
+  logProgressStatusTransition,
+  type ProgressStatusSource,
+  type ProgressStatusOutcome,
+  type ProgressStatusTransitionFields,
+} from './transition-log.js';

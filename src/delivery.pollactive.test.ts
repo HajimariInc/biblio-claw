@@ -36,7 +36,8 @@ describe('pollActive best-effort 契約 (static assertion)', () => {
 
   it('refreshProgressStatus 呼出に .catch() が付き log.warn 発火する', () => {
     // best-effort 契約: reject を吸収して構造化 warn を発火 (event: 'progress.status.refresh_failed')。
-    const pattern = /refreshProgressStatus\(session\)\.catch\([\s\S]*?event:\s*['"]progress\.status\.refresh_failed['"]/s;
+    const pattern =
+      /refreshProgressStatus\(session\)\.catch\([\s\S]*?event:\s*['"]progress\.status\.refresh_failed['"]/s;
     expect(pattern.test(SRC)).toBe(true);
   });
 

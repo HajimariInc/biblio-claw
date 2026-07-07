@@ -21,6 +21,7 @@ import fs from 'fs';
 
 import type { TypingStatus } from '../../channels/adapter.js';
 import { log } from '../../log.js';
+import { logProgressStatusTransition } from '../progress-status/transition-log.js';
 import { heartbeatPath } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -86,12 +87,30 @@ async function triggerTyping(
   platformId: string,
   threadId: string | null,
   status: TypingStatus,
+  sessionId: string | null = null,
+  agentGroupId: string | null = null,
 ): Promise<void> {
+  const adapterSupportsTyping = typeof adapter?.setTyping === 'function';
   try {
     // TypingStatus (channels/adapter.ts) の内部設計語彙では null (明示クリア) と
     // undefined (未指定) を区別するが、vendor 境界では両者とも `"Typing..."` fallback に
     // 収束する。`status ?? undefined` で null → undefined 正規化して vendor 実装契約に合わせる。
     await adapter?.setTyping?.(channelType, platformId, threadId, status ?? undefined);
+    // M4-F Phase 5: 成功パス observability。「送信を試みた事実」を確定的に記録する。
+    // vendor 内部 catch (rate limit / 401) は本 code から観測不能なため outcome='triggered'
+    // に統一 (握りつぶし事案は vendor 生ログ `[chat-sdk:slack]` prefix と timestamp 突合で
+    // 復元、runbook §M4-F Phase 5 罠に手順集約)。
+    logProgressStatusTransition({
+      source: 'triggerTyping',
+      session_id: sessionId,
+      agent_group_id: agentGroupId,
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      status,
+      adapter_supports_typing: adapterSupportsTyping,
+      outcome: 'triggered',
+    });
   } catch (err) {
     // Typing is best-effort — don't let it fail delivery or routing.
     // ただし PR #145 review C2 で判明: vendor (@chat-adapter/slack) が `logger:'silent'`
@@ -103,6 +122,18 @@ async function triggerTyping(
       event: 'progress.status.set_typing_failed',
       channel_type: channelType,
       err: err instanceof Error ? err.message : String(err),
+    });
+    // M4-F Phase 5: 失敗パスも progress.status.transition に含めて集計を dashboard 化可能に。
+    logProgressStatusTransition({
+      source: 'triggerTyping',
+      session_id: sessionId,
+      agent_group_id: agentGroupId,
+      channel_type: channelType,
+      platform_id: platformId,
+      thread_id: threadId,
+      status,
+      adapter_supports_typing: adapterSupportsTyping,
+      outcome: 'failed',
     });
   }
 }
@@ -139,7 +170,7 @@ export function startTypingRefresh(
     // .catch は on-purpose dead: triggerTyping は内部で全 error を catch + log.warn 化
     // (C2 対応、event: 'progress.status.set_typing_failed') するため契約上 reject しない。
     // 将来 triggerTyping が rethrow に変わったら unhandledRejection 撲滅の保険として残す。
-    triggerTyping(channelType, platformId, threadId, existing.currentStatus).catch(() => {});
+    triggerTyping(channelType, platformId, threadId, existing.currentStatus, sessionId, agentGroupId).catch(() => {});
     existing.startedAt = Date.now();
     existing.pausedUntil = 0;
     return;
@@ -150,7 +181,7 @@ export function startTypingRefresh(
   // (PR #145 実機で発見: startTypingRefresh(null) + updateTypingStatus('container 起動中')
   //  の 2 発 fire-and-forget が Slack API 到達順で「Typing...」が後勝ちする経路あり)。
   // .catch on-purpose dead (triggerTyping contract: never rejects、上の説明参照)。
-  triggerTyping(channelType, platformId, threadId, initialStatus).catch(() => {});
+  triggerTyping(channelType, platformId, threadId, initialStatus, sessionId, agentGroupId).catch(() => {});
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
@@ -164,7 +195,14 @@ export function startTypingRefresh(
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
       // .catch on-purpose dead (triggerTyping contract: never rejects、C2 対応済)。
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.currentStatus).catch(() => {});
+      triggerTyping(
+        entry.channelType,
+        entry.platformId,
+        entry.threadId,
+        entry.currentStatus,
+        sessionId,
+        entry.agentGroupId,
+      ).catch(() => {});
       return;
     }
 
@@ -206,13 +244,31 @@ export function startTypingRefresh(
 export function updateTypingStatus(sessionId: string, status: TypingStatus): void {
   const entry = typingRefreshers.get(sessionId);
   if (!entry) return;
-  if (entry.currentStatus === status) return;
+  const previousStatus = entry.currentStatus;
+  if (previousStatus === status) return;
   entry.currentStatus = status;
+  // M4-F Phase 5: 遷移点の観測 log。previousStatus を含めることで status 履歴を復元可能に。
+  // pause 中の状態変更 (即発火 skip) と 実発火の両ケースで emit (「状態は遷移した」事実の記録)、
+  // 実発火の outcome は triggerTyping 側 emit に載る (source='triggerTyping')。
+  logProgressStatusTransition({
+    source: 'updateTypingStatus',
+    session_id: sessionId,
+    agent_group_id: entry.agentGroupId,
+    channel_type: entry.channelType,
+    platform_id: entry.platformId,
+    thread_id: entry.threadId,
+    status,
+    previous_status: previousStatus,
+    adapter_supports_typing: typeof adapter?.setTyping === 'function',
+    outcome: 'transition',
+  });
   // pause 中は状態のみ更新 = pause 明け tick が新 status を forward する
   if (entry.pausedUntil > Date.now()) return;
   // 即発火: 次の 4s tick を待たず変化点で 1 回送信 (UX 反応性)。
   // .catch on-purpose dead (triggerTyping contract: never rejects、C2 対応済)。
-  triggerTyping(entry.channelType, entry.platformId, entry.threadId, status).catch(() => {});
+  triggerTyping(entry.channelType, entry.platformId, entry.threadId, status, sessionId, entry.agentGroupId).catch(
+    () => {},
+  );
 }
 
 /**

@@ -44,7 +44,8 @@ describe('deliveryAdapter argument forwarding (static assertion)', () => {
     // wrapper 側 signature が 4 引数を受け付けていることを確認 (= 過去に一度 3 引数に
     // 落として書いたのが C1 の原因。宣言側で余剰引数無視される罠なので signature
     // sanity も併せて確認する)。
-    const pattern = /async\s+setTyping\s*\(\s*channelType[\s:]+string\s*,\s*platformId[\s:]+string\s*,\s*threadId[\s\S]*?status\?/;
+    const pattern =
+      /async\s+setTyping\s*\(\s*channelType[\s:]+string\s*,\s*platformId[\s:]+string\s*,\s*threadId[\s\S]*?status\?/;
     expect(pattern.test(SRC)).toBe(true);
   });
 });
