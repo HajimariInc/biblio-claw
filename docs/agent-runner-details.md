@@ -1,5 +1,7 @@
 # NanoClaw Agent-Runner 詳細
 
+> **語彙メモ**: biblio-claw 独自語彙 (`biblio` / `司書` / `patron` / `装備` / `禁書` / `焼却` 等) の解説は [`glossary.md`](glossary.md) 参照。
+
 コンテナ内 agent-runner の実装レベル詳細。高レベル設計は [architecture.md](architecture.md) を参照。
 
 ## 関心の分離
