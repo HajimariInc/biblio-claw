@@ -291,11 +291,13 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
     || fail "local auth-fail token_kind != bad (got '$auth_fail_token_kind')"
   info "  local auth-fail: status=401 token=bad (OK)"
 
-  # --- ask endpoint (M4-H Phase 1 skeleton、Section 2 内で疎通確認) ---
-  # Phase 1 skeleton は必ず 200 + status:'not_available' + warnings:['skeleton_response'] を返す。
-  # gate / backend / rate limit は Phase 2-4 で追加、Phase 1 は 3 assertion (疎通 / no auth / invalid
-  # intent) のみで shape 契約 + path enumeration 遮断不変を担保。TODO(M4-H Phase 2): gate 実装完了時に
-  # denied 経路 + INTENT_GATE_MISMATCH assertion を追加。
+  # --- ask endpoint (M4-H Phase 1 skeleton + Phase 2 gate、Section 2 内で疎通確認) ---
+  # Phase 1 skeleton は skeleton_response marker を warnings に含む 200 応答を返す (backend / rate
+  # limit は Phase 3-4 で追加)。Phase 2 (PR #173) で gate 4 層通過ロジックを実装済 (in-secure denial
+  # + INTENT_GATE_MISMATCH + fail-open)。現状の 3 assertion (疎通 / no auth / invalid intent) は intent
+  # 未指定・非 in-secure な query のため GATE_ENABLED の値に関わらず PASS する = regression なし。
+  # TODO(M4-H Phase 6): denied 経路 (in-secure query) + INTENT_GATE_MISMATCH assertion を verify に追加
+  # (PRD Phase 6 = 任意 verify スコープ、11 assertion の一部)。
   LAST_HARNESS_STDERR="$STDERR_DIR/local-ask.stderr"
   ask_result="$(pnpm exec tsx scripts/fake-fugue-client.ts ask \
     --query "typescript" \
