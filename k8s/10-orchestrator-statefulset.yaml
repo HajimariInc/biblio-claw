@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4f-p5-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4f-p5-4
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p5-1,
+                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p5-4,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -310,7 +310,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4f-p5-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4f-p5-4
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -356,7 +356,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -394,7 +394,7 @@ spec:
         # image tag は運用中の値をそのまま反映する形。詳細は runbook §M4-F Phase 3
         # §deploy 手順 (image-sync 経由で bump)。
         - name: drive-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-1
+          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
           command: ['bash', '/scripts/drive-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
