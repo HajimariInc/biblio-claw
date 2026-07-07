@@ -65,6 +65,104 @@ export const FugueEquipRequest = z.object({
 export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 
 /**
+ * Fugue ask endpoint (M4-H) の intent literal union。Phase 1 では受理のみ (Zod validation
+ * pass 後は log field に emit するだけ、skeleton response には反映しない)。Phase 2 で
+ * gate 4 層と `INTENT_GATE_MISMATCH` 検出に再利用するため定数化しておく (inline enum に
+ * すると Phase 2 で export し直す必要が出る)。
+ */
+export const FUGUE_ASK_INTENTS = ['search-web', 'drive-lookup', 'general'] as const;
+export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
+
+/**
+ * Fugue ask endpoint (M4-H) の Request full spec (Phase 1 skeleton)。
+ *
+ * consult より広い `query` 上限 (2000 char) は PRD §5.5 に準拠 (Fugue Director が Web
+ * 検索・Drive lookup を要求する自然文は長くなりうる)。`intent` は将来 gate 4 層で
+ * `INTENT_GATE_MISMATCH` 検出に使う (Phase 2 以降)、Phase 1 では受理のみで応答には反映しない。
+ * `context_hint` は consult 側と同一 shape (`.optional().nullable()` 順を統一)。
+ */
+export const FugueAskRequest = z.object({
+  schema_version: z.literal('1').describe('Schema version. Phase 1 accepts "1" only.'),
+  request_id: z.string().min(1).max(64).describe('Client-provided idempotency key (max 64 chars).'),
+  query: z
+    .string()
+    .min(1)
+    .max(2000)
+    .describe('Free-text ask query from Fugue Director (max 2000 chars, wider than consult).'),
+  intent: z
+    .enum(FUGUE_ASK_INTENTS)
+    .optional()
+    .nullable()
+    .describe('Optional intent hint (search-web/drive-lookup/general). Phase 1 receives but does not act on it.'),
+  context_hint: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .nullable()
+    .describe('Optional context (screen_summary etc). Phase 1 receives but does not use.'),
+});
+export type FugueAskRequestT = z.infer<typeof FugueAskRequest>;
+
+/**
+ * ask endpoint の source item (Phase 3 で外部 backend の実結果を格納)。
+ *
+ * Phase 1 skeleton では `sources: []` (backend 未接続)。`metadata` は `.default({})` で最後に
+ * 置く (v4 `.max(N).default(X)` 順序 constraint、逆順は compile error)。
+ */
+export const Source = z.object({
+  id: z.string().min(1).max(64).describe('Unique source id within a single ask response.'),
+  kind: z.enum(['web', 'drive']).describe('Source backend kind (Phase 3 で `web` = Tavily, `drive` = Google Drive).'),
+  title: z.string().min(1).max(400).describe('Source title (Web page title / Drive file name).'),
+  url: z.string().min(1).max(1000).describe('Source URL (Web link / Drive file URL).'),
+  snippet: z.string().min(1).max(1100).describe('Short excerpt or summary from the source.'),
+  metadata: z.record(z.string(), z.unknown()).default({}).describe('Optional backend-specific metadata.'),
+});
+export type SourceT = z.infer<typeof Source>;
+
+/**
+ * ask endpoint の finding item (Phase 3 で外部 backend の抽出結果を格納)。
+ *
+ * Phase 1 skeleton では `findings: []` (backend 未接続)。`source_ids` は上限 5 で
+ * findings 側から `sources` の item を後方参照する形。
+ */
+export const Finding = z.object({
+  text: z.string().min(1).max(600).describe('Extracted finding text (max 600 chars).'),
+  source_ids: z
+    .array(z.string())
+    .max(5)
+    .default([])
+    .describe('Source ids from `sources[]` supporting this finding (max 5).'),
+});
+export type FindingT = z.infer<typeof Finding>;
+
+/**
+ * Fugue ask endpoint の Reply body (Phase 1 skeleton)。
+ *
+ * status の意味 (Contract §5.5):
+ *
+ * - `ok` — 正常応答 (summary / findings / sources のいずれかが埋まる、Phase 3 完了時点で発火)
+ * - `denied` — gate `in-secure` 判定 (Phase 2 で扱う)
+ * - `not_available` — バックエンド未接続 or M4-F Phase 3 未到達 (時期依存)。**Phase 1 skeleton
+ *   の意味と一致** — agent-container backend を呼ばない = Contract 上「未接続状態」の semantics
+ * - `error` — timeout / 部分失敗
+ *
+ * Phase 1 skeleton は必ず `status: 'not_available'` + `warnings: ['skeleton_response']` を
+ * 返す (Phase 3 完了時に `status: 'ok'` に切替 + `warnings` から `skeleton_response` を除去)。
+ */
+export const FugueAskReply = z.object({
+  schema_version: z.literal('1'),
+  request_id: z.string(),
+  operation: z.literal('ask'),
+  status: z.enum(['ok', 'denied', 'not_available', 'error']),
+  summary: z.string().min(1).max(600),
+  findings: z.array(Finding).max(10).default([]),
+  sources: z.array(Source).max(20).default([]),
+  raw: z.record(z.string(), z.unknown()).default({}),
+  processing_time_ms: z.number().int().nonnegative(),
+  warnings: z.array(z.string()).default([]),
+});
+export type FugueAskReplyT = z.infer<typeof FugueAskReply>;
+
+/**
  * biblio-shelf の 1 skill を Fugue Director に返すときの参照型 (Phase 3 で decidable 化)。
  *
  * biblio-claw 側で組み立てて返すのみで、Fugue 側から受け取ることはない → interface で

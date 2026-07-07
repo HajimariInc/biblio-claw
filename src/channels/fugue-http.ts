@@ -60,8 +60,11 @@ import { notifyAdmin } from '../modules/approvals/notify-admin.js';
 import { extractTraceContextFromHttpHeaders, withFugueEntrySpan } from '../observability/index.js';
 
 import {
+  FugueAskRequest,
   FugueConsultRequest,
   FugueEquipRequest,
+  type FugueAskReplyT,
+  type FugueAskRequestT,
   type FugueConsultMode,
   type FugueConsultReply,
   type FugueConsultRequestT,
@@ -74,6 +77,7 @@ import {
 
 const CONSULT_PATH = '/v1/channels/fugue/consult';
 const EQUIP_PATH = '/v1/channels/fugue/equip';
+const ASK_PATH = '/v1/channels/fugue/ask';
 /**
  * LB health check / K8s readiness / liveness 用の unauthenticated endpoint (Phase 5)。
  *
@@ -192,7 +196,7 @@ async function parseFugueRequest<T>(
   schema: {
     safeParse: (v: unknown) => { success: true; data: T } | { success: false; error: { issues: unknown[] } };
   },
-  operation: 'consult' | 'equip',
+  operation: 'consult' | 'equip' | 'ask',
 ): Promise<T | null> {
   let body: unknown;
   try {
@@ -504,6 +508,10 @@ export class FugueHttpServer {
       }
       if (pathname === EQUIP_PATH) {
         await runInContext(() => this.handleEquip(req, res));
+        return;
+      }
+      if (pathname === ASK_PATH) {
+        await runInContext(() => this.handleAsk(req, res));
         return;
       }
 
@@ -1130,6 +1138,82 @@ export class FugueHttpServer {
 
         writeJson(res, 200, reply);
       });
+    });
+  }
+
+  /**
+   * M4-H Phase 1 skeleton: ask endpoint。
+   *
+   * Contract §5.5 shape で 200 + `status: 'not_available'` + `warnings: ['skeleton_response']`
+   * を返す固定応答。gate / backend / rate limit は Phase 2-4 で追加、Phase 1 では Zod parse →
+   * withFugueEntrySpan → 固定 reply 組み立て → 200 応答の 3 段のみを実装する。
+   *
+   * 目的: Fugue 側 `BiblioClawAdvisorService.ask()` の HTTP round-trip + shape validation +
+   * ValidationError 経路のテストを、biblio 側 backend 実装 (Phase 3) 完了を待たずに先行させる。
+   *
+   * `status: 'not_available'` は Contract §5.5 で「バックエンド未接続 or M4-F Phase 3 未到達」の
+   * semantics で定義済 = Phase 1 skeleton の意味と一致。Fugue 側 AD は `not_available` を
+   * 「AD ラウンド省略」として fallback 可能なため、Phase 1 skeleton が Prod deploy されても
+   * Fugue 側は静かに fallback する (LLM cost 消費なし)。
+   *
+   * `warnings: ['skeleton_response']` は本 PRD で新設した Phase 1 限定の marker (非 Contract 語彙、
+   * unknown warning code は Fugue 側で log-only 扱い)。Phase 3 完了時に空配列に切り替える。
+   */
+  private async handleAsk(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const startedAt = performance.now();
+
+    const parsed = await parseFugueRequest<FugueAskRequestT>(req, res, FugueAskRequest, 'ask');
+    if (!parsed) return;
+    const { request_id, query, intent, context_hint } = parsed;
+
+    log.info('Fugue ask invoked', {
+      event: 'fugue.ask.invoked',
+      channel: 'fugue',
+      request_id,
+      intent: intent ?? null,
+      query_length: query.length,
+      // PII 保護: context_hint の中身は emit しない、key 名のみログに残す (consult 側と同流儀)。
+      context_hint_keys: Object.keys(context_hint ?? {}),
+    });
+
+    // 2 段 span 構造 (Phase 4 で正式化、consult / equip と対称):
+    //   fugue.ask (この helper、kind=INTERNAL)
+    // Phase 1 skeleton では biblio.<action> 相乗り span は張らない (backend 未接続、Phase 3 で
+    // withBiblioActionSpan('ask', ...) の追加を検討)。auto SERVER span 層は ESM フック未整備で
+    // 現状発火せず (Phase 5 判断で 2 段構造を正式仕様として運用、詳細: `docs/operations-runbook.md`
+    // §M4-E Phase 4 §ESM フック判断)。
+    await withFugueEntrySpan('ask', request_id, async (fugueSpan) => {
+      // intent 属性は string で刻む (`.optional().nullable()` の 2 パスを 'null' に集約 =
+      // Cloud Trace の属性検索で `fugue.intent='null'` 一択で見つけられる)。
+      fugueSpan.setAttribute('fugue.intent', intent ?? 'null');
+      // Phase 1 skeleton は必ず not_available で応答するため outcome は fixed。Phase 3 で
+      // status に応じて `ok` / `not_available` / `error` 等に分岐させる。
+      fugueSpan.setAttribute('fugue.outcome', 'not_available');
+
+      const processing_time_ms = Math.round(performance.now() - startedAt);
+      const reply: FugueAskReplyT = {
+        schema_version: '1',
+        request_id,
+        operation: 'ask',
+        status: 'not_available',
+        summary: 'Phase 1 skeleton response (backend not yet wired, see M4-H PRD Phase 3 for full implementation).',
+        findings: [],
+        sources: [],
+        raw: {},
+        processing_time_ms,
+        warnings: ['skeleton_response'],
+      };
+
+      log.info('Fugue ask completed (skeleton)', {
+        event: 'fugue.ask.completed',
+        channel: 'fugue',
+        outcome: 'not_available',
+        request_id,
+        intent: intent ?? null,
+        processing_time_ms,
+      });
+
+      writeJson(res, 200, reply);
     });
   }
 }

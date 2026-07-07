@@ -44,11 +44,12 @@ import { getTracer } from './otel.js';
 /**
  * Fugue channel が扱う operation の closed union。
  *
+ * M4-H で `ask` を追加 (Web 検索 / Drive lookup 等を伴う自然文問い合わせ endpoint)。
  * 将来 `invoke` (skill 実行) 等を追加する場合はここに値を追加する。M4-E PRD の scope では
- * 現状 `consult` / `equip` のみで、`invoke` は将来検討事項として位置付けられている
+ * 現状 `consult` / `equip` / `ask` のみで、`invoke` は将来検討事項として位置付けられている
  * (詳細は非公開 PRD の scope 節、public 化時に本コメントは残置で参照不能になる点は許容)。
  */
-export type FugueOperation = 'consult' | 'equip';
+export type FugueOperation = 'consult' | 'equip' | 'ask';
 
 /**
  * Fugue channel の entry span を生成し、`fn` を span active state で実行する。

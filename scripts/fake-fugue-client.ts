@@ -20,7 +20,7 @@
  */
 import { readEnvFile } from '../src/env.js';
 
-type Subcommand = 'consult' | 'equip';
+type Subcommand = 'consult' | 'equip' | 'ask';
 
 interface Result {
   subcommand: Subcommand;
@@ -45,7 +45,7 @@ interface Result {
 }
 
 function isSubcommand(v: string | undefined): v is Subcommand {
-  return v === 'consult' || v === 'equip';
+  return v === 'consult' || v === 'equip' || v === 'ask';
 }
 
 /**
@@ -64,7 +64,7 @@ async function main(): Promise<number> {
 
   if (!isSubcommand(subcommand)) {
     process.stderr.write(
-      'usage: fake-fugue-client.ts <consult|equip> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>] [--traceparent <00-32hex-16hex-flags>]\n',
+      'usage: fake-fugue-client.ts <consult|equip|ask> [--bad-token] [--query <str>] [--mode <brainstorm-with-ad|review-with-ad|ask-ad|coaching-with-ad>] [--skill-id <str>] [--intent <search-web|drive-lookup|general>] [--traceparent <00-32hex-16hex-flags>]\n',
     );
     return 2;
   }
@@ -110,8 +110,8 @@ async function main(): Promise<number> {
   const startedAt = Date.now();
 
   // Phase 2: consult は full spec (`query` / `mode`)、Phase 3: equip も full spec (`skill_id` +
-  // `channel:'fugue'`)。`context_hint` は Phase 2 では検索ロジックに反映されないため、options 化しない
-  // (over-thinking-avoidance: 使わない可変性は入れない、必要になったら追加)。
+  // `channel:'fugue'`)。M4-H Phase 1: ask endpoint skeleton (`query` + optional `intent`)。
+  // `context_hint` は options 化しない (over-thinking-avoidance: 使わない可変性は入れない、必要になったら追加)。
   let body: Record<string, unknown>;
   if (subcommand === 'consult') {
     body = {
@@ -121,6 +121,17 @@ async function main(): Promise<number> {
       // --mode 未指定時は 'ask-ad'。server 側 Zod が invalid literal を reject するため
       // ここでは client 側 validate せず、意図的に不正値を送る verify テストにも耐える。
       mode: parseOption(argv, 'mode') ?? 'ask-ad',
+    };
+  } else if (subcommand === 'ask') {
+    // ask 経路 (M4-H Phase 1)。--query は default あり (skeleton 疎通目的)。--intent は
+    // 未指定時に body に含めない = server 側 `intent: .optional().nullable()` の optional パスに乗る
+    // (Zod は明示 null と undefined を両方 accept)。invalid literal ('foo' 等) は server 側で 400 reject。
+    const intentRaw = parseOption(argv, 'intent');
+    body = {
+      schema_version: '1',
+      request_id: `fake-${startedAt}`,
+      query: parseOption(argv, 'query') ?? 'default ask query',
+      ...(intentRaw !== undefined ? { intent: intentRaw } : {}),
     };
   } else {
     // equip 経路 (Phase 3)。`--skill-id` は状態変更対象を指定するため default 値なし = 未指定は usage error。
