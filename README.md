@@ -4,7 +4,7 @@
 
 ## Fork Attribution / 上流との関係
 
-biblio-claw は **[nanocoai/nanoclaw](https://github.com/nanocoai/nanoclaw)** (NanoClaw v2、上流 commit `2492259`、2026-05-28) を fork して base 化しています。上流 NanoClaw 由来のドキュメントは `docs/` 配下に英語のまま参考として残置、biblio-claw 独自の拡張ドキュメントは `CLAUDE.md` §ドキュメント索引 + `docs/glossary.md` (biblio 独自語彙集) 経由で辿れます。
+biblio-claw は **[nanocoai/nanoclaw](https://github.com/nanocoai/nanoclaw)** (NanoClaw v2、上流 commit `2492259`、2026-05-28) を fork して base 化しています。上流 NanoClaw 由来のドキュメントは `docs/` 配下 (日本語訳を含む) に参考として残置、biblio-claw 独自の拡張ドキュメントは `CLAUDE.md` §ドキュメント索引 + `docs/glossary.md` (biblio 独自語彙集) 経由で辿れます。
 
 - **上流由来 doc の参考リンク集**: [`docs/README.md`](docs/README.md)
 - **biblio-claw 独自 doc の索引**: [`CLAUDE.md`](CLAUDE.md#ドキュメント索引)
