@@ -74,6 +74,12 @@ export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 export const FUGUE_ASK_INTENTS = ['search-web', 'drive-lookup', 'general'] as const;
 export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
 
+// M4-H Phase 2: ask endpoint 向け warnings 定数 (Contract §5.5 準拠、named export で test 済みの厳格な文字列契約)。
+// consult/equip の inline literal (`'input rejected by input gate'`) との書き味の混在は許容 (Fugue 側実装が塊で疎通
+// 取れた時点で fix 方針、DEN さん判断 2026-07-06)。
+export const AD_ASK_DENIED_BY_GATE = 'AD_ASK_DENIED_BY_GATE' as const;
+export const INTENT_GATE_MISMATCH = 'INTENT_GATE_MISMATCH' as const;
+
 /**
  * Fugue ask endpoint (M4-H) の Request full spec (Phase 1 skeleton)。
  *

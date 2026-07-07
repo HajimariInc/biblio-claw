@@ -71,10 +71,12 @@ import { notifyAdmin } from '../modules/approvals/notify-admin.js';
 import { extractTraceContextFromHttpHeaders, withFugueEntrySpan, type FugueOperation } from '../observability/index.js';
 
 import {
+  AD_ASK_DENIED_BY_GATE,
   FugueAskReply,
   FugueAskRequest,
   FugueConsultRequest,
   FugueEquipRequest,
+  INTENT_GATE_MISMATCH,
   type FugueAskReplyT,
   type FugueAskRequestT,
   type FugueConsultMode,
@@ -1209,6 +1211,159 @@ export class FugueHttpServer {
       // Cloud Trace の属性検索で `fugue.intent='null'` 一択で見つけられる)。
       fugueSpan.setAttribute('fugue.intent', intent ?? 'null');
 
+      // M4-H Phase 2 gate 挿入 (ask): query を 4 層評価。in-secure なら 200 + status:'denied'
+      // + warnings:[AD_ASK_DENIED_BY_GATE] + raw.reason:'in_secure' で応答 (AD の本義 契約: 5xx は
+      // 認可 / 上限超過 / biblio-claw 自体の応答不能に限定)。gate 未有効時は skip = skeleton 経路
+      // 継続。intent 指定あり + gate 分類 = 'biblio-adk' なら INTENT_GATE_MISMATCH を warnings に
+      // append (通常経路継続、Contract §5.5 運用規約)。写経元: handleConsult L586-682 / handleEquip
+      // L892-977。ask 固有差分は plan §Patterns to Mirror「in-secure denial 分岐」参照。
+      const gateWarnings: string[] = [];
+      if (isGateEnabled()) {
+        let gateResult: GateResult | null = null;
+        try {
+          gateResult = await withGateSpan(query, async (gateSpan) => {
+            const result = await evaluateGate(query);
+            gateSpan.setAttribute('gate.classification', result.classification);
+            gateSpan.setAttribute('gate.layer_hit', result.layerHit);
+            gateSpan.setAttribute('gate.reason', result.reason);
+            gateSpan.setAttribute('gate.latency_ms', result.latencyMs);
+            if (result.model) gateSpan.setAttribute('gate.model', result.model);
+            if (result.degraded) gateSpan.setAttribute('gate.degraded', true);
+            gateSpan.setAttribute('gate.outcome', result.classification === 'in-secure' ? 'blocked' : 'allowed');
+            return result;
+          });
+        } catch (err) {
+          // gate 自体の unexpected throw は fail-open (現状経路継続、gateResult=null のまま fall
+          // through)。consult/equip と同流儀。gate throw を outer catch で処理させると
+          // fugue.outcome='error' 上書き + 500 応答となり AD の本義違反 (plan Task 4 GOTCHA #1)。
+          const errMsg = err instanceof Error ? err.message : String(err);
+          log.warn('Fugue ask gate unexpected throw, falling back to open', {
+            event: 'fugue.ask.gate_unexpected_throw',
+            channel: 'fugue',
+            request_id,
+            err: errMsg,
+          });
+          // audit trail に載せる (BQ 集計から silent undercount 防止)
+          appendGateAuditLog({
+            outcome: 'error',
+            reason: errMsg,
+            utterance: query,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
+          });
+        }
+        if (gateResult) {
+          appendGateAuditLog({
+            outcome: gateResult.classification === 'in-secure' ? 'blocked' : 'allowed',
+            layer: gateResult.layerHit,
+            classification: gateResult.classification,
+            reason: gateResult.reason,
+            utterance: query,
+            channel: 'fugue',
+            channelType: 'fugue',
+            userId: null,
+            degraded: gateResult.degraded,
+          });
+          if (gateResult.classification === 'in-secure') {
+            // in-secure 分岐: 200 + status:'denied' + warnings:[AD_ASK_DENIED_BY_GATE]。
+            // consult の in-secure 分岐 (L639-680) を写経、ask 固有差分は
+            //   - status:'denied' (consult は 'error'、Contract §5.5 準拠で FugueAskReply の
+            //     discriminated union の literal 制約)
+            //   - warnings:[AD_ASK_DENIED_BY_GATE] (consult は inline literal)
+            //   - log 追加 field: intent:intent??null (consult は mode)
+            //   - self-validation 経由 (Phase 1 skeleton パターン踏襲)
+            fugueSpan.setAttribute('fugue.outcome', 'in_secure');
+            void notifyAdmin({
+              channelType: 'slack',
+              agentGroupId: null,
+              subject: 'gate.blocked (fugue)',
+              body: `Fugue 経由の injection 疑い発話 (ask)。\nlayer: ${gateResult.layerHit}\nreason: ${gateResult.reason}\nrequest_id: ${request_id}`,
+            }).catch((err) =>
+              log.warn('Fugue ask gate notifyAdmin unexpected throw', {
+                event: 'fugue.ask.gate_notify_admin_throw',
+                request_id,
+                err: err instanceof Error ? err.message : String(err),
+              }),
+            );
+            const processing_time_ms = Math.round(performance.now() - startedAt);
+            log.warn('Fugue ask rejected by input gate', {
+              event: 'fugue.ask.in_secure',
+              channel: 'fugue',
+              outcome: 'in_secure',
+              request_id,
+              intent: intent ?? null,
+              gate_layer: gateResult.layerHit,
+              gate_reason: gateResult.reason,
+              processing_time_ms,
+            });
+            const deniedReply: FugueAskReplyT = {
+              schema_version: '1',
+              request_id,
+              operation: 'ask',
+              status: 'denied',
+              summary: '入力に不審な内容が含まれる可能性があるため、この発話は処理できませんでした。',
+              findings: [],
+              sources: [],
+              raw: { reason: 'in_secure', query, intent: intent ?? null },
+              processing_time_ms,
+              warnings: [AD_ASK_DENIED_BY_GATE],
+            };
+            // self-validation (Phase 1 skeleton パターン踏襲、silent contract violation を Fugue
+            // 側に流さない)。fail 時は既存 errorReply 経路と同じ log.error emit + errorReply.warnings
+            // に AD_ASK_DENIED_BY_GATE と self_validation_failed の両方を含める (denial 意図と bug
+            // 両方が観測可能、plan Task 4 GOTCHA #4)。
+            const validated = FugueAskReply.safeParse(deniedReply);
+            if (!validated.success) {
+              fugueSpan.setAttribute('fugue.outcome', 'error');
+              log.error('Fugue ask denied reply self-validation failed', {
+                event: 'fugue.ask.self_validation_failed',
+                channel: 'fugue',
+                outcome: 'failure',
+                request_id,
+                issues: validated.error.issues,
+                processing_time_ms,
+              });
+              const errorReply: FugueAskReplyT = {
+                schema_version: '1',
+                request_id,
+                operation: 'ask',
+                status: 'error',
+                summary: 'internal reply self-validation failed (biblio-claw bug, please report to biblio-claw team).',
+                findings: [],
+                sources: [],
+                raw: {},
+                processing_time_ms,
+                warnings: [AD_ASK_DENIED_BY_GATE, 'self_validation_failed'],
+              };
+              writeJson(res, 200, errorReply);
+              return;
+            }
+            writeJson(res, 200, validated.data);
+            return;
+          }
+          // intent mismatch 判定 (Phase 2 新規設計、consult/equip に前例なし)。
+          // ask endpoint は Layer 4 の biblio-other fallback を期待する経路 = biblio-other は
+          // "期待分類"、biblio-adk は "期待外分類"。intent の 3 literal 値 (search-web /
+          // drive-lookup / general) はいずれも「汎用 AI Agent 経路」を意味し、biblio-adk (ADK
+          // 装備 skill 経路) とは意味論的に食い違う = intent literal 値によらず biblio-adk なら
+          // mismatch。intent 未指定 (null/undefined) は「gate 完全委任」で常に一致扱い、warnings
+          // なし。詳細は plan §判断 A 参照。
+          if (intent && gateResult.classification === 'biblio-adk') {
+            gateWarnings.push(INTENT_GATE_MISMATCH);
+            log.info('Fugue ask intent-gate classification mismatch', {
+              event: 'fugue.ask.intent_gate_mismatch',
+              channel: 'fugue',
+              request_id,
+              intent,
+              gate_classification: gateResult.classification,
+              gate_layer: gateResult.layerHit,
+              gate_reason: gateResult.reason,
+            });
+          }
+        }
+      }
+
       const processing_time_ms = Math.round(performance.now() - startedAt);
       const skeletonReply: FugueAskReplyT = {
         schema_version: '1',
@@ -1220,7 +1375,7 @@ export class FugueHttpServer {
         sources: [],
         raw: {},
         processing_time_ms,
-        warnings: ['skeleton_response'],
+        warnings: ['skeleton_response', ...gateWarnings],
       };
 
       // self-validation (A3-2): 内部整合性 (discriminated union の status × payload 相関、field
@@ -1265,6 +1420,9 @@ export class FugueHttpServer {
         outcome: 'not_available',
         request_id,
         intent: intent ?? null,
+        // Phase 2 で追加: gateWarnings を含む最終 warnings を log に emit (BQ 集計から INTENT_GATE_MISMATCH
+        // 発火頻度が拾える)。validated.data.warnings は skeletonReply.warnings と同値 (safeParse 成功時)。
+        warnings: skeletonReply.warnings,
         processing_time_ms,
       });
 
