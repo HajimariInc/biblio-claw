@@ -2,15 +2,21 @@
  * Fugue HTTP server の M4-H Phase 2 gate 統合 test (ask endpoint 専用)。
  *
  * fugue-http.gate.test.ts (consult/equip) の mock pattern + fugue-http.ask.test.ts の
- * postAsk helper を写経して、以下の 6 describe を検証:
+ * postAsk helper を写経して、以下の 6 describe / 13 it を検証:
  *
- * 1. GATE_ENABLED=false は現状経路継続 (skeleton reply、gate 未呼出、mismatch なし)
- * 2. GATE_ENABLED=true + biblio-other → 通常経路 (skeleton reply、appendGateAuditLog outcome=allowed)
- * 3. GATE_ENABLED=true + biblio-adk + intent 指定 → INTENT_GATE_MISMATCH warnings + 通常経路
- * 4. GATE_ENABLED=true + biblio-adk + intent 未指定 → mismatch なし + 通常経路
- * 5. GATE_ENABLED=true + in-secure → 200 + status:'denied' + warnings:[AD_ASK_DENIED_BY_GATE]
- *    + notifyAdmin 発火 + appendGateAuditLog outcome=blocked
- * 6. GATE_ENABLED=true + gate throw → fail-open (skeleton reply) + log.warn + audit outcome=error
+ * 1. GATE_ENABLED=false (2 it) — skeleton reply、gate 未呼出、mismatch なし (intent 有無両パス)
+ * 2. GATE_ENABLED=true + biblio-other (2 it) — 通常経路 (skeleton reply)、intent 指定でも
+ *    INTENT_GATE_MISMATCH は付かない (期待分類)、appendGateAuditLog outcome=allowed
+ * 3. GATE_ENABLED=true + biblio-adk + intent 指定 (3 it、it.each で `search-web` / `drive-lookup`
+ *    / `general` の全 3 literal を網羅) — warnings に INTENT_GATE_MISMATCH append、
+ *    `event:'fugue.ask.intent_gate_mismatch'` info log
+ * 4. GATE_ENABLED=true + biblio-adk + intent 未指定 (2 it) — mismatch なし (undefined + null 両パス)
+ * 5. GATE_ENABLED=true + in-secure (3 it) — 200 + status:'denied' + warnings:[AD_ASK_DENIED_BY_GATE]
+ *    + notifyAdmin 発火 + appendGateAuditLog outcome=blocked + `event:'fugue.ask.in_secure'` log +
+ *    intent 指定でも denial 先行 return + notifyAdmin reject 時の fire-and-forget 契約
+ *    (`event:'fugue.ask.gate_notify_admin_throw'`)
+ * 6. GATE_ENABLED=true + gate throw (1 it) — fail-open (skeleton reply) + `log.warn` +
+ *    audit outcome=error
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -261,10 +267,11 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + biblio-adk + int
 });
 
 describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + in-secure = 200 + denied', () => {
-  it('status=denied + warnings=[AD_ASK_DENIED_BY_GATE] + notifyAdmin fire-and-forget + audit outcome=blocked', async () => {
+  it('status=denied + warnings=[AD_ASK_DENIED_BY_GATE] + notifyAdmin fire-and-forget + audit outcome=blocked + fugue.ask.in_secure ログ', async () => {
     const gateModule = await import('../gate/gate.js');
     const auditModule = await import('../gate/audit-log.js');
     const notifyModule = await import('../modules/approvals/notify-admin.js');
+    const logModule = await import('../log.js');
     vi.mocked(gateModule.isGateEnabled).mockReturnValue(true);
     vi.mocked(gateModule.evaluateGate).mockResolvedValue({
       classification: 'in-secure',
@@ -303,6 +310,20 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + in-secure = 200 
         channel: 'fugue',
       }),
     );
+
+    // fugue.ask.in_secure ログ (BQ 集計の一次シグナル = 遮断件数の追跡源) の構造検証。
+    // silent-failure-hunter Medium 対応で追加 (Phase 2 review、PR #173)。
+    expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('rejected by input gate'),
+      expect.objectContaining({
+        event: 'fugue.ask.in_secure',
+        channel: 'fugue',
+        outcome: 'in_secure',
+        gate_layer: 'layer1',
+        gate_reason: 'instruction override detected',
+        intent: null,
+      }),
+    );
   });
 
   it('in-secure 判定 + intent 指定でも denied 分岐が先に return (INTENT_GATE_MISMATCH は付加しない)', async () => {
@@ -326,6 +347,47 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + in-secure = 200 
     expect(body.warnings).toEqual([AD_ASK_DENIED_BY_GATE]);
     expect(body.warnings).not.toContain(INTENT_GATE_MISMATCH);
     expect(body.raw.intent).toBe('drive-lookup');
+  });
+
+  it('notifyAdmin reject → 200 応答は notifyAdmin 完了を待たず返り、fugue.ask.gate_notify_admin_throw が emit される', async () => {
+    // pr-test-analyzer Important 対応で追加 (Phase 2 review、PR #173)。
+    // notifyAdmin の fire-and-forget `.catch()` ハンドラ (`event:'fugue.ask.gate_notify_admin_throw'`) は
+    // Acceptance Criteria に明記された 4 event のうちの 1 つで、これまで発火する test が存在しなかった。
+    // notifyAdmin 自体は throw しない契約 (notify-admin.ts の内部 try/catch) だが、防御的二重化として
+    // 発火可能状態が担保されていることを確認する。
+    const gateModule = await import('../gate/gate.js');
+    const notifyModule = await import('../modules/approvals/notify-admin.js');
+    const logModule = await import('../log.js');
+    vi.mocked(gateModule.isGateEnabled).mockReturnValue(true);
+    vi.mocked(gateModule.evaluateGate).mockResolvedValue({
+      classification: 'in-secure',
+      reason: 'instruction override',
+      layerHit: 'layer1',
+      latencyMs: 3,
+    });
+    vi.mocked(notifyModule.notifyAdmin).mockRejectedValueOnce(new Error('slack down'));
+
+    const res = await postAsk({
+      schema_version: '1',
+      request_id: 'req-ask-notify-fail',
+      query: 'malicious',
+    });
+    // notifyAdmin の reject を待たずに 200 応答が返っていることの証明 (fire-and-forget 契約)。
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FugueAskReplyT;
+    expect(body.status).toBe('denied');
+
+    // `.catch()` の log.warn は次 tick 以降で発火するため vi.waitFor で待つ。
+    await vi.waitFor(() =>
+      expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+        expect.stringContaining('notifyAdmin unexpected throw'),
+        expect.objectContaining({
+          event: 'fugue.ask.gate_notify_admin_throw',
+          request_id: 'req-ask-notify-fail',
+          err: 'slack down',
+        }),
+      ),
+    );
   });
 });
 
