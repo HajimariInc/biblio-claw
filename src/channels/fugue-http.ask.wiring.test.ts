@@ -85,6 +85,16 @@ vi.mock('../db/session-db.js', async () => ({
   // OutboundMessage type は module 側で export のみ、runtime 影響なし。
 }));
 
+// node:fs の rmSync のみ mock 化 (cleanup isolation test で rmSync throw 経路を cover するため)。
+// wiring.test.ts scope 限定 (vi.mock は per-test-file、他 test file への影響なし)。
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    rmSync: vi.fn(),
+  };
+});
+
 // db/agent-groups / db/messaging-groups は env override 経路で bypass されるが、import 副作用の
 // 均一化のため mock 化 (test 内で DB lookup が走らないことを担保)。
 vi.mock('../db/agent-groups.js', () => ({
@@ -190,6 +200,9 @@ beforeEach(async () => {
   vi.mocked(sessionsModule.deleteSession).mockImplementation(() => undefined);
   vi.mocked(sessionDbModule.markDelivered).mockImplementation(() => undefined);
   vi.mocked(gateModule.isGateEnabled).mockReturnValue(false);
+  // node:fs.rmSync も default no-op に (cleanup isolation test で throw に上書き)
+  const fsModule = await import('node:fs');
+  vi.mocked(fsModule.rmSync).mockImplementation(() => undefined);
   vi.mocked(logModule.log.info).mockClear();
   vi.mocked(logModule.log.warn).mockClear();
   vi.mocked(logModule.log.error).mockClear();
@@ -217,6 +230,8 @@ afterEach(async () => {
   vi.mocked(containerModule.killContainer).mockClear();
   vi.mocked(sessionsModule.deleteSession).mockClear();
   vi.mocked(sessionDbModule.markDelivered).mockClear();
+  const fsModule = await import('node:fs');
+  vi.mocked(fsModule.rmSync).mockClear();
 });
 
 async function postAsk(body: unknown): Promise<Response> {
@@ -543,48 +558,102 @@ describe('handleAsk wiring (M4-H Phase 3) — parse failure', () => {
 // =============================================================================
 
 describe('handleAsk wiring (M4-H Phase 3) — cleanup exception isolation', () => {
-  it('killContainer throw が response を遅延しない (fire-and-forget) + cleanup.kill_throw warn 発火', async () => {
-    const sessionMgrModule = await import('../session-manager.js');
-    const containerModule = await import('../container-runner.js');
-    const logModule = await import('../log.js');
-    vi.mocked(containerModule.killContainer).mockImplementation(() => {
-      throw new Error('kill fail');
-    });
+  // PR #178 review 対応、提案 S4: cleanup 3 段独立 try/catch (killContainer / deleteSession / fs.rmSync)
+  // の各段独立発火を assert。1 段目失敗しても後続段が呼ばれる不変条件 = future refactor で「try/catch を
+  // 統合して簡素化」等の regression を検知する。
+  it.each([
+    {
+      name: 'killContainer throw',
+      target: 'kill' as const,
+      expectedEvent: 'fugue.ask.cleanup.kill_throw',
+      expectedMessage: 'cleanup: killContainer throw',
+    },
+    {
+      name: 'deleteSession throw',
+      target: 'delete' as const,
+      expectedEvent: 'fugue.ask.cleanup.delete_throw',
+      expectedMessage: 'cleanup: deleteSession throw',
+    },
+    {
+      name: 'fs.rmSync throw',
+      target: 'rm' as const,
+      expectedEvent: 'fugue.ask.cleanup.rmdir_throw',
+      expectedMessage: 'cleanup: session dir removal throw',
+    },
+  ])(
+    '$name が response を遅延しない (fire-and-forget) + 3 段独立 try/catch で後続段が継続呼出 + $expectedEvent warn 発火',
+    async ({ target, expectedEvent, expectedMessage }) => {
+      const sessionMgrModule = await import('../session-manager.js');
+      const containerModule = await import('../container-runner.js');
+      const sessionsModule = await import('../db/sessions.js');
+      const logModule = await import('../log.js');
+      const fsModule = await import('node:fs');
 
-    const askText = buildValidAskResponseText({ summary: 'ok summary' });
-    const fakeDb = buildFakeOutboundDb([
-      {
-        id: 'msg-out-clean',
-        seq: 3,
-        kind: 'chat',
-        content: buildMessageContent(askText),
-        platform_id: null,
-        channel_type: null,
-        thread_id: null,
-        in_reply_to: null,
-      },
-    ]);
-    vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
+      // target 段のみ throw に設定 (他 2 段は default no-op のまま)
+      if (target === 'kill') {
+        vi.mocked(containerModule.killContainer).mockImplementation(() => {
+          throw new Error('kill fail');
+        });
+      } else if (target === 'delete') {
+        vi.mocked(sessionsModule.deleteSession).mockImplementation(() => {
+          throw new Error('delete fail');
+        });
+      } else {
+        vi.mocked(fsModule.rmSync).mockImplementation(() => {
+          throw new Error('rm fail');
+        });
+      }
 
-    // response 自体は 200 ok で返る (cleanup throw に impact されない)
-    const res = await postAsk({
-      schema_version: '1',
-      request_id: 'req-cleanup-throw-1',
-      query: 'anything',
-    });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('ok');
+      const askText = buildValidAskResponseText({ summary: 'ok summary' });
+      const fakeDb = buildFakeOutboundDb([
+        {
+          id: `msg-out-clean-${target}`,
+          seq: 3,
+          kind: 'chat',
+          content: buildMessageContent(askText),
+          platform_id: null,
+          channel_type: null,
+          thread_id: null,
+          in_reply_to: null,
+        },
+      ]);
+      vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
 
-    // cleanup.kill_throw の warn は fire-and-forget な cleanup 経路が emit する。
-    // vi.waitFor で待つ (Promise chain の catch は次 tick で発火)。
-    await vi.waitFor(() =>
-      expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
-        expect.stringContaining('cleanup: killContainer throw'),
-        expect.objectContaining({ event: 'fugue.ask.cleanup.kill_throw' }),
-      ),
-    );
-  });
+      // response 自体は 200 ok で返る (cleanup throw に impact されない)
+      const res = await postAsk({
+        schema_version: '1',
+        request_id: `req-cleanup-throw-${target}`,
+        query: 'anything',
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as FugueAskReplyT;
+      expect(body.status).toBe('ok');
+
+      // 該当 event の warn 発火を確認 (vi.waitFor で fire-and-forget な cleanup 経路の次 tick を待つ)
+      await vi.waitFor(() =>
+        expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+          expect.stringContaining(expectedMessage),
+          expect.objectContaining({ event: expectedEvent }),
+        ),
+      );
+
+      // 3 段独立 try/catch = 前段 throw でも後続段が呼ばれる不変条件を assert
+      // (throw 対象の段は必ず呼ばれる = 前段 assertion、後段は throw target 別に判定)
+      if (target === 'kill') {
+        expect(vi.mocked(containerModule.killContainer)).toHaveBeenCalled();
+        expect(vi.mocked(sessionsModule.deleteSession)).toHaveBeenCalled(); // 2 段目継続
+        expect(vi.mocked(fsModule.rmSync)).toHaveBeenCalled(); // 3 段目継続
+      } else if (target === 'delete') {
+        expect(vi.mocked(containerModule.killContainer)).toHaveBeenCalled(); // 1 段目 success
+        expect(vi.mocked(sessionsModule.deleteSession)).toHaveBeenCalled();
+        expect(vi.mocked(fsModule.rmSync)).toHaveBeenCalled(); // 3 段目継続
+      } else {
+        expect(vi.mocked(containerModule.killContainer)).toHaveBeenCalled(); // 1 段目 success
+        expect(vi.mocked(sessionsModule.deleteSession)).toHaveBeenCalled(); // 2 段目 success
+        expect(vi.mocked(fsModule.rmSync)).toHaveBeenCalled();
+      }
+    },
+  );
 });
 
 // =============================================================================
@@ -618,5 +687,49 @@ describe('handleAsk wiring (M4-H Phase 3) — regression (Phase 1-2)', () => {
     expect(vi.mocked(sessionMgrModule.resolveSession)).not.toHaveBeenCalled();
     expect(vi.mocked(sessionMgrModule.writeSessionMessage)).not.toHaveBeenCalled();
     expect(vi.mocked(containerModule.wakeContainer)).not.toHaveBeenCalled();
+  });
+
+  // PR #178 review 対応、提案 S2 (再定義): plan §Test 構造の「gate throw fail-open は spawn しない」
+  // は Phase 3 で意味変化した (skeleton block 廃止で fail-open 継続 → spawn 経路に進む)。
+  // 代わりに end-to-end 経路 (gate throw fail-open → spawn 経路完走 → 200 応答) が outer catch
+  // まで抜けず継続する不変条件を wiring level で assert する。silent-failure-hunter 観点で
+  // 「gate throw を outer catch に抜けさせる誤修正」= 500 化 = AD の本義違反、の regression 防止。
+  it('gate throw fail-open は outer catch まで抜けず 200 応答 + spawn 経路継続 (gate 由来 warning なし)', async () => {
+    const gateModule = await import('../gate/gate.js');
+    const sessionMgrModule = await import('../session-manager.js');
+    vi.mocked(gateModule.isGateEnabled).mockReturnValue(true);
+    vi.mocked(gateModule.evaluateGate).mockRejectedValue(new Error('gate infra fail'));
+
+    // spawn 経路が完走する fake response (gate throw fail-open で spawn 経路に流れることを確認)
+    const askText = buildValidAskResponseText({ summary: 'ok summary after gate throw' });
+    const fakeDb = buildFakeOutboundDb([
+      {
+        id: 'msg-out-gate-throw',
+        seq: 3,
+        kind: 'chat',
+        content: buildMessageContent(askText),
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        in_reply_to: null,
+      },
+    ]);
+    vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
+
+    const res = await postAsk({
+      schema_version: '1',
+      request_id: 'req-regr-gate-throw-1',
+      query: 'anything',
+    });
+    // gate throw fail-open は 200 継続 (5xx を出さない、AD の本義契約)
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FugueAskReplyT;
+    // gateResult=null で継続 → gateWarnings=[] → spawn 経路完走 → status='ok'
+    expect(body.status).toBe('ok');
+    // gate 由来 warning (INTENT_GATE_MISMATCH / AD_ASK_DENIED_BY_GATE) は付かない
+    expect(body.warnings).not.toContain('INTENT_GATE_MISMATCH');
+    expect(body.warnings).not.toContain(AD_ASK_DENIED_BY_GATE);
+    // spawn 経路が確実に呼ばれたこと (in-secure denial との対比 = 未呼出ではない)
+    expect(vi.mocked(sessionMgrModule.resolveSession)).toHaveBeenCalled();
   });
 });

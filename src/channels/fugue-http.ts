@@ -1689,7 +1689,7 @@ export class FugueHttpServer {
           metadata: s.metadata,
         };
       });
-      const findings = parsed.value.findings.map((f) => {
+      const findings = parsed.value.findings.map((f, findingIdx) => {
         // 代表 source は source_indexes[0] を採用 (findings が複数 source を跨ぐ場合の
         // source-id 属性は 1 個しか付けられない spec 制約)。空 or out-of-range は
         // 'unknown' + 'web' で emit (source-id 属性の存在を維持、fail-open)。
@@ -1697,9 +1697,27 @@ export class FugueHttpServer {
         const repSource = repIdx !== undefined ? sources[repIdx] : undefined;
         const repSourceId = repSource?.id ?? 'unknown';
         const repKind: 'web' | 'drive' = repSource?.kind ?? 'web';
+        const validSourceIds = f.source_indexes
+          .map((i) => sources[i]?.id)
+          .filter((id): id is string => id !== undefined);
+        // **agent LLM が out-of-range な source_indexes を返した経路の observability**
+        // (PR #178 review 対応、中優先度 M2): silent fallback ('unknown' / 'web' で継続)
+        // で response 成立は優先するが、agent bug の検出のため log emit。BQ 集計で
+        // agent instruction 精度 (invalid index 頻度) の追跡源となる。
+        if (f.source_indexes.length > validSourceIds.length) {
+          log.info('Fugue ask finding source_indexes out-of-range (silent fallback applied)', {
+            event: 'fugue.ask.response.invalid_source_index',
+            channel: 'fugue',
+            request_id,
+            session_id: session.id,
+            finding_idx: findingIdx,
+            source_indexes: f.source_indexes,
+            sources_length: sources.length,
+          });
+        }
         return {
           text: wrapExternalContent(f.text, repSourceId, repKind),
-          source_ids: f.source_indexes.map((i) => sources[i]?.id).filter((id): id is string => id !== undefined),
+          source_ids: validSourceIds,
         };
       });
       // summary は agent 内 LLM の統合結果 (単一 source に紐付かない全体像) = 代表 kind='web'
@@ -1848,7 +1866,24 @@ export class FugueHttpServer {
             // outbound.db の delivered table に `INSERT OR IGNORE` (idempotent、
             // `session-db.ts:310` の SQL 参照)。同一 tick 内で hit → mark 完了するため
             // 500ms 分の race window が構造的にゼロになる。
-            markDelivered(outDb, first.id, null);
+            //
+            // **markDelivered 独立 try/catch** (PR #178 review 対応、中優先度 M1):
+            // markDelivered は通常 throw しないが (INSERT OR IGNORE は constraint miss で silent)、
+            // db 接続破壊 / IO error 時に throw する経路が理論上存在する。outer catch に流すと
+            // `fugue.ask.poll.open_error` に misclassify されて observability を失うため、独立
+            // catch で明示 event 化 (`fugue.ask.mark_delivered.throw`)。throw 時も `hit = first`
+            // は継続 (response 成立を優先、pollActive race window が復活する副作用は許容 =
+            // 5xx を出さない + observability を確保する trade-off)。
+            try {
+              markDelivered(outDb, first.id, null);
+            } catch (mdErr) {
+              log.warn('Fugue ask markDelivered threw (pollActive race window may reopen)', {
+                event: 'fugue.ask.mark_delivered.throw',
+                session_id: sessionId,
+                message_id: first.id,
+                err: mdErr instanceof Error ? mdErr.message : String(mdErr),
+              });
+            }
             hit = first;
           }
         } finally {

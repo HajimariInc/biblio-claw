@@ -167,7 +167,9 @@ export const AgentAskSource = z.object({
   title: z.string().min(1).max(400),
   url: z.string().min(1).max(1000),
   snippet: z.string().min(1).max(1100),
-  metadata: z.record(z.string(), z.unknown()).optional().default({}),
+  // 既存 `Source.metadata` (line 124) と consistency 統一 (PR #178 review 対応、提案 S1)。
+  // `.default({})` 単体で「input=undefined → {} 置換」が成立するため `.optional()` は不要。
+  metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type AgentAskSourceT = z.infer<typeof AgentAskSource>;
 
