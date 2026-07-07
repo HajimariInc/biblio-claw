@@ -75,6 +75,7 @@
  */
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import * as fs from 'node:fs';
 
 import { context, SpanStatusCode, trace } from '@opentelemetry/api';
 
@@ -83,21 +84,36 @@ import { requiresApproval } from '../biblio/hitl-policy.js';
 import { listBiblio } from '../biblio/list-biblio.js';
 import { GhHttpError, MarketplaceParseError, readListEnv } from '../biblio/shelf-gh.js';
 import type { ListBiblioItem, ListBiblioResult } from '../biblio/types.js';
+import { killContainer, wakeContainer } from '../container-runner.js';
+import { getAgentGroupByFolder } from '../db/agent-groups.js';
+import { deleteSession } from '../db/sessions.js';
 import { getFugueEquippedBiblioNames, insertFugueEquippedBiblio } from '../db/fugue-equipped-biblios.js';
+import { getMessagingGroupByPlatform } from '../db/messaging-groups.js';
+import { markDelivered, type OutboundMessage } from '../db/session-db.js';
 import { appendGateAuditLog } from '../gate/audit-log.js';
 import { evaluateGate, isGateEnabled, withGateSpan } from '../gate/gate.js';
 import type { GateResult } from '../gate/types.js';
 import { log } from '../log.js';
 import { notifyAdmin } from '../modules/approvals/notify-admin.js';
 import { extractTraceContextFromHttpHeaders, withFugueEntrySpan, type FugueOperation } from '../observability/index.js';
+import {
+  isPreSpawnDbOpenError,
+  openOutboundDb,
+  resolveSession,
+  sessionDir,
+  writeSessionMessage,
+} from '../session-manager.js';
 
+import { wrapExternalContent } from './fugue-ask-content.js';
 import {
   AD_ASK_DENIED_BY_GATE,
+  AgentAskResponse,
   FugueAskReply,
   FugueAskRequest,
   FugueConsultRequest,
   FugueEquipRequest,
   INTENT_GATE_MISMATCH,
+  type AgentAskResponseT,
   type FugueAskReplyT,
   type FugueAskRequestT,
   type FugueConsultMode,
@@ -134,6 +150,81 @@ const HEALTHZ_PATH = '/healthz';
  * 上限超過は 413 Payload Too Large + log.warn。
  */
 const MAX_BODY_SIZE_BYTES = 1024 * 1024;
+
+/**
+ * M4-H Phase 3 ask endpoint 用の agent-container polling 定数。
+ *
+ * - `FUGUE_ASK_POLL_INTERVAL_MS`: outbound.db を poll する tick 間隔 (500ms)。
+ *   `src/cli/resources/messages.ts:pollOutbound` の同名定数と揃える (verify での一貫性、
+ *   90s window で 180 tick は SQLite WAL mode + prepared statement の負荷として許容範囲)。
+ * - `FUGUE_ASK_DEFAULT_TIMEOUT_MS`: agent-container spawn + tool 呼出 + LLM 合成の総 wait
+ *   上限 (90_000ms)。Contract §5.5 の `asyncio.wait_for(90s)` と一致 (Fugue 側と対称)、
+ *   env `FUGUE_ASK_TIMEOUT_MS` で override 可 (test / smoke で短縮)。
+ * - `ASK_RESPONSE_RE`: agent 応答 (`content.text`) から `<ask-response>{JSON}</ask-response>`
+ *   を非貪欲抽出 (`[\s\S]*?` = `.` は改行を含まない、JSON が複数行になる場合を考慮)。
+ *   複数現れた場合は first match のみ採用 (agent instruction 違反時の耐性)。
+ */
+const FUGUE_ASK_POLL_INTERVAL_MS = 500;
+const FUGUE_ASK_DEFAULT_TIMEOUT_MS = 90_000;
+const ASK_RESPONSE_RE = /<ask-response>([\s\S]*?)<\/ask-response>/;
+
+/**
+ * M4-H Phase 3: fugue-ask 用の agent group folder / synthetic messaging_group platform_id。
+ * `scripts/init-fugue-ask-agent.ts` の同名 literal と一致させる (drift を防ぐため、次期に
+ * `src/config.ts` へ集約するのが理想だが、cross-file 依存の cyclical import 懸念があるため
+ * Phase 3 では両 file に literal を持たせる方針)。
+ */
+const FUGUE_ASK_AGENT_FOLDER = 'fugue-ask-biblio-shisho';
+const FUGUE_ASK_MG_PLATFORM_ID = 'fugue-ask-mg';
+
+interface FugueAskConfig {
+  agentGroupId: string;
+  messagingGroupId: string;
+}
+
+/**
+ * fugue-ask config の module-level cache。
+ *
+ * lookup 順は env override → DB lookup (folder / platform_id) の 2 段。DB lookup 成功後は
+ * cache 保持 (Prod では process lifetime 中 immutable、cache invalidation の需要なし)。
+ * test / hot-reload 用の reset は `_resetFugueAskConfigCache()` で提供 (production 経路
+ * では呼ばれない)。
+ */
+let fugueAskConfigCache: FugueAskConfig | null = null;
+
+function resolveFugueAskConfig(): FugueAskConfig | null {
+  if (fugueAskConfigCache) return fugueAskConfigCache;
+  const envAg = process.env.FUGUE_ASK_AGENT_GROUP_ID?.trim();
+  const envMg = process.env.FUGUE_ASK_MESSAGING_GROUP_ID?.trim();
+  if (envAg && envMg) {
+    fugueAskConfigCache = { agentGroupId: envAg, messagingGroupId: envMg };
+    return fugueAskConfigCache;
+  }
+  // DB lookup fallback。initDb 未実行 (test env / cold boot) or DB corruption で throw
+  // する可能性があるため try/catch で fail-open (null 返却) にし、caller = handleAsk が
+  // 200 + status:'error' + ask_config_missing warning で運ぶ (AD の本義契約: 5xx を出さない)。
+  // outer withFugueEntrySpan の catch まで throw を抜けさせると 500 化して契約違反となるため、
+  // 本 lookup 経路で必ず内側で吸収する。
+  try {
+    const ag = getAgentGroupByFolder(FUGUE_ASK_AGENT_FOLDER);
+    const mg = getMessagingGroupByPlatform('fugue', FUGUE_ASK_MG_PLATFORM_ID);
+    if (!ag || !mg) return null;
+    fugueAskConfigCache = { agentGroupId: ag.id, messagingGroupId: mg.id };
+    return fugueAskConfigCache;
+  } catch (err) {
+    log.warn('Fugue ask config DB lookup threw (fail-open, treated as missing)', {
+      event: 'fugue.ask.spawn.config_lookup_throw',
+      channel: 'fugue',
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** Test / hot-reload 用: cache reset (production では呼ばれない)。 */
+export function _resetFugueAskConfigCache(): void {
+  fugueAskConfigCache = null;
+}
 
 export interface FugueHttpServerOptions {
   /** Listen port。`0` = OS が空きポートを自動割当 (test 用の ephemeral port)。 */
@@ -1396,33 +1487,259 @@ export class FugueHttpServer {
         }
       }
 
+      // ================================================================
+      // M4-H Phase 3: gate 通過後 → agent-container spawn 経路
+      // ================================================================
+      // Phase 1-2 の skeleton block (`status:'not_available'` + `warnings:['skeleton_response']`)
+      // は Phase 3 で完全廃止。今後は agent-container 経由の実データ (`status:'ok'`) or
+      // `status:'error'` + 明示 warnings で運ぶ (AD の本義契約: 5xx を出さない、Contract §5.5)。
+      // in-secure denial / gate throw fail-open / intent mismatch (Phase 2 経路) は上流で処理
+      // 済み = 本 block には流れてこない (denial は先行 return、fail-open は gateResult=null +
+      // gateWarnings=[] で継続、mismatch は gateWarnings に append で継続)。
+      const askCtx = { request_id, startedAt };
+
+      // Step 0: config 解決 (env override → DB lookup)
+      const config = resolveFugueAskConfig();
+      if (!config) {
+        // init-fugue-ask-agent.ts が事前に実行されていない (Prod deploy 順序制約)。
+        // 5xx を出さず 200 + status:'error' + ask_config_missing warning で運ぶ (AD の本義)。
+        fugueSpan.setAttribute('fugue.outcome', 'error');
+        log.error('Fugue ask spawn config missing', {
+          event: 'fugue.ask.spawn.config_missing',
+          channel: 'fugue',
+          request_id,
+        });
+        writeJson(res, 200, {
+          schema_version: '1',
+          request_id,
+          operation: 'ask',
+          status: 'error',
+          summary: 'ask backend failed: ask_config_missing',
+          findings: [],
+          sources: [],
+          raw: {},
+          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          warnings: ['ask_config_missing', ...gateWarnings],
+        });
+        return;
+      }
+
+      // Step 1: session 都度作成 (per-thread mode = thread_id=request_id で自動新規化)
+      const { session, created } = resolveSession(
+        config.agentGroupId,
+        config.messagingGroupId,
+        request_id,
+        'per-thread',
+      );
+      if (!created) {
+        // request_id は idempotency key = request ごとに unique であるべき。既存 session を
+        // 拾った = Fugue Cloud Run の再送 or clock skew。fail-open で既存 session を使い続ける
+        // (session dir 汚染リスクは receive 動作より優先、Phase 3 論点 C の fallback)。
+        log.warn('Fugue ask session reuse detected (unexpected, using existing)', {
+          event: 'fugue.ask.spawn.session_reuse',
+          channel: 'fugue',
+          request_id,
+          session_id: session.id,
+        });
+      }
+
+      // Step 2: query prompt を messages_in に書込
+      const prompt = this.buildAskPrompt(query, intent, context_hint);
+      writeSessionMessage(session.agent_group_id, session.id, {
+        id: `fugue-ask-${request_id}`,
+        kind: 'user',
+        timestamp: new Date().toISOString(),
+        platformId: FUGUE_ASK_MG_PLATFORM_ID,
+        channelType: 'fugue',
+        threadId: request_id,
+        content: JSON.stringify({ text: prompt }),
+        trigger: 1,
+      });
+
+      // Step 3: spawn (K8s Job or Docker、TRACEPARENT env は container-runner 側で自動継承)
+      const fromSeq = this.currentMaxOutboundSeq(session.agent_group_id, session.id);
+      const spawnStartAt = performance.now();
+      log.info('Fugue ask spawn started', {
+        event: 'fugue.ask.spawn.start',
+        channel: 'fugue',
+        request_id,
+        session_id: session.id,
+        session_created: created,
+      });
+
+      // wakeContainer は never throws 契約 (container-runner.ts:94、Promise chain の catch あり)。
+      // false 戻り = spawn 失敗の signal。throw 想定コードは書かない。
+      const wakeOk = await wakeContainer(session);
+      if (!wakeOk) {
+        fugueSpan.setAttribute('fugue.outcome', 'error');
+        log.error('Fugue ask spawn failed (wakeContainer returned false)', {
+          event: 'fugue.ask.spawn.failed',
+          channel: 'fugue',
+          request_id,
+          session_id: session.id,
+        });
+        void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-spawn-failed').catch((err) =>
+          log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
+            event: 'fugue.ask.cleanup.throw',
+            request_id,
+            session_id: session.id,
+            err: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        writeJson(res, 200, {
+          schema_version: '1',
+          request_id,
+          operation: 'ask',
+          status: 'error',
+          summary: 'ask backend failed: ask_spawn_failed',
+          findings: [],
+          sources: [],
+          raw: { agent_session_id: session.id },
+          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          warnings: ['ask_spawn_failed', ...gateWarnings],
+        });
+        return;
+      }
+
+      // Step 4: 同期 poll wait (500ms interval, 90s deadline or env override)
+      // env FUGUE_ASK_TIMEOUT_MS は Number() 経由で数値化、NaN / 0 / 負値の場合 default に
+      // fall back (`Number('')===0` を含む、`Number.isFinite() && > 0` で明示評価)。
+      const parsedTimeout = Number(process.env.FUGUE_ASK_TIMEOUT_MS);
+      const timeoutMs =
+        Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : FUGUE_ASK_DEFAULT_TIMEOUT_MS;
+      const pollResult = await this.pollFugueAskResponse(session.agent_group_id, session.id, fromSeq, timeoutMs);
+
+      if (pollResult.timedOut) {
+        fugueSpan.setAttribute('fugue.outcome', 'timeout');
+        log.warn('Fugue ask spawn timeout', {
+          event: 'fugue.ask.spawn.timeout',
+          channel: 'fugue',
+          request_id,
+          session_id: session.id,
+          elapsed_ms: Math.round(performance.now() - spawnStartAt),
+          timeout_ms: timeoutMs,
+        });
+        void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-timeout').catch((err) =>
+          log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
+            event: 'fugue.ask.cleanup.throw',
+            request_id,
+            session_id: session.id,
+            err: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        writeJson(res, 200, {
+          schema_version: '1',
+          request_id,
+          operation: 'ask',
+          status: 'error',
+          summary: 'ask backend failed: ask_backend_timeout',
+          findings: [],
+          sources: [],
+          raw: { agent_session_id: session.id },
+          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          warnings: ['ask_backend_timeout', ...gateWarnings],
+        });
+        return;
+      }
+
+      // Step 5: response 抽出 + Zod validate
+      const rawContent = pollResult.message?.content ?? '';
+      const parsed = this.parseAgentAskResponse(rawContent);
+      if (!parsed.ok) {
+        fugueSpan.setAttribute('fugue.outcome', 'error');
+        log.warn('Fugue ask response parse failed', {
+          event: 'fugue.ask.response.parse_failed',
+          channel: 'fugue',
+          request_id,
+          session_id: session.id,
+          reason: parsed.reason,
+        });
+        void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-parse-failed').catch((err) =>
+          log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
+            event: 'fugue.ask.cleanup.throw',
+            request_id,
+            session_id: session.id,
+            err: err instanceof Error ? err.message : String(err),
+          }),
+        );
+        writeJson(res, 200, {
+          schema_version: '1',
+          request_id,
+          operation: 'ask',
+          status: 'error',
+          summary: 'ask backend failed: ask_response_malformed',
+          findings: [],
+          sources: [],
+          raw: { agent_session_id: session.id, parse_reason: parsed.reason },
+          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          warnings: ['ask_response_malformed', ...gateWarnings],
+        });
+        return;
+      }
+
+      // Step 6: 3 並列 payload 組立 (source-id 連番付与 → wrapExternalContent で 4 field XML 囲み)
+      const sources = parsed.value.sources.map((s, i) => {
+        const id = `src-${String(i + 1).padStart(2, '0')}`;
+        return {
+          id,
+          kind: s.kind,
+          title: wrapExternalContent(s.title, id, s.kind),
+          url: s.url,
+          snippet: wrapExternalContent(s.snippet, id, s.kind),
+          metadata: s.metadata,
+        };
+      });
+      const findings = parsed.value.findings.map((f) => {
+        // 代表 source は source_indexes[0] を採用 (findings が複数 source を跨ぐ場合の
+        // source-id 属性は 1 個しか付けられない spec 制約)。空 or out-of-range は
+        // 'unknown' + 'web' で emit (source-id 属性の存在を維持、fail-open)。
+        const repIdx = f.source_indexes[0];
+        const repSource = repIdx !== undefined ? sources[repIdx] : undefined;
+        const repSourceId = repSource?.id ?? 'unknown';
+        const repKind: 'web' | 'drive' = repSource?.kind ?? 'web';
+        return {
+          text: wrapExternalContent(f.text, repSourceId, repKind),
+          source_ids: f.source_indexes.map((i) => sources[i]?.id).filter((id): id is string => id !== undefined),
+        };
+      });
+      // summary は agent 内 LLM の統合結果 (単一 source に紐付かない全体像) = 代表 kind='web'
+      // + source-id='summary' で emit (Contract §5.5 で source-id 属性は必須なので dummy 値)。
+      const summary = wrapExternalContent(parsed.value.summary, 'summary', 'web');
+
       const processing_time_ms = Math.round(performance.now() - startedAt);
-      const skeletonReply: FugueAskReplyT = {
+      const okReply: FugueAskReplyT = {
         schema_version: '1',
         request_id,
         operation: 'ask',
-        status: 'not_available',
-        summary: 'Phase 1 skeleton response (backend not yet wired, see M4-H PRD Phase 3 for full implementation).',
-        findings: [],
-        sources: [],
-        raw: {},
+        status: 'ok',
+        summary,
+        findings,
+        sources,
+        raw: { agent_session_id: session.id },
         processing_time_ms,
-        warnings: ['skeleton_response', ...gateWarnings],
+        warnings: gateWarnings,
       };
 
-      // self-validation (A3-2): 内部整合性 (discriminated union の status × payload 相関、field
-      // 上限、型) を出荷前に検証。Phase 1 では固定 reply なので通常 success するが、Phase 3 で
-      // summary 動的生成時に有用な安全網 (silent contract violation を Fugue 側に流さない)。
-      const validated = FugueAskReply.safeParse(skeletonReply);
+      // Step 7: cleanup (fire-and-forget、応答遅延防止)
+      void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-completed').catch((err) =>
+        log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
+          event: 'fugue.ask.cleanup.throw',
+          request_id,
+          session_id: session.id,
+          err: err instanceof Error ? err.message : String(err),
+        }),
+      );
+
+      // Step 8: self-validation (Phase 2 と同流儀、silent contract violation を Fugue 側に流さない)
+      const validated = FugueAskReply.safeParse(okReply);
       if (!validated.success) {
-        // 内部矛盾検知 = biblio-claw 側の bug。AD の本義契約: 5xx を出さず 200 + status:'error' +
-        // warnings で運ぶ (Fugue 側 AD ラウンドの継続判断を阻害しない)。
         fugueSpan.setAttribute('fugue.outcome', 'error');
-        log.error('Fugue ask internal reply self-validation failed', {
+        log.error('Fugue ask okReply self-validation failed', {
           event: 'fugue.ask.self_validation_failed',
           channel: 'fugue',
           outcome: 'failure',
           request_id,
+          session_id: session.id,
           issues: validated.error.issues,
           processing_time_ms,
         });
@@ -1434,31 +1751,251 @@ export class FugueHttpServer {
           summary: 'internal reply self-validation failed (biblio-claw bug, please report to biblio-claw team).',
           findings: [],
           sources: [],
-          raw: {},
+          raw: { agent_session_id: session.id },
           processing_time_ms,
-          warnings: ['skeleton_response', 'self_validation_failed'],
+          warnings: ['self_validation_failed', ...gateWarnings],
         };
         writeJson(res, 200, errorReply);
         return;
       }
 
-      // Phase 1 skeleton は必ず not_available で応答 (validated.data.status === 'not_available')。
-      // TODO(M4-H Phase 3): backend 結線後は status に応じて 'ok' / 'error' 等に分岐。
-      fugueSpan.setAttribute('fugue.outcome', 'not_available');
-
-      log.info('Fugue ask completed (skeleton)', {
+      fugueSpan.setAttribute('fugue.outcome', 'ok');
+      log.info('Fugue ask completed', {
         event: 'fugue.ask.completed',
         channel: 'fugue',
-        outcome: 'not_available',
+        outcome: 'ok',
         request_id,
         intent: intent ?? null,
-        // Phase 2 で追加: gateWarnings を含む最終 warnings を log に emit (BQ 集計から INTENT_GATE_MISMATCH
-        // 発火頻度が拾える)。validated.data.warnings は skeletonReply.warnings と同値 (safeParse 成功時)。
-        warnings: skeletonReply.warnings,
+        session_id: session.id,
+        findings_count: findings.length,
+        sources_count: sources.length,
+        warnings: validated.data.warnings,
         processing_time_ms,
       });
-
       writeJson(res, 200, validated.data);
     });
+  }
+
+  /**
+   * M4-H Phase 3: outbound.db から `MAX(seq)` を安全に取得 (session が未作成 or DB open 失敗
+   * 時は 0 を返す)。`src/cli/resources/messages.ts:currentMaxOutboundSeq` と同流儀の pre-spawn
+   * silent fallback = 0 = 「まだ何も出ていない」= poll の fromSeq として妥当。
+   */
+  private currentMaxOutboundSeq(agentGroupId: string, sessionId: string): number {
+    try {
+      const db = openOutboundDb(agentGroupId, sessionId);
+      try {
+        const row = db.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number };
+        return row.m ?? 0;
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      const errCode = (err as { code?: string })?.code;
+      if (isPreSpawnDbOpenError(errCode)) {
+        log.debug('Fugue ask currentMaxOutboundSeq: pre-spawn (returning 0)', {
+          event: 'fugue.ask.max_seq.pre_spawn_open_error',
+          agent_group_id: agentGroupId,
+          session_id: sessionId,
+          err_code: errCode,
+        });
+      } else {
+        log.warn('Fugue ask currentMaxOutboundSeq: outbound.db open failed', {
+          event: 'fugue.ask.max_seq.open_error',
+          agent_group_id: agentGroupId,
+          session_id: sessionId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return 0;
+    }
+  }
+
+  /**
+   * M4-H Phase 3: outbound.db を polling して from_seq 超えの chat 経路 first message を集める。
+   * `src/cli/resources/messages.ts:pollOutbound` の写経。Fugue ask 版の追加要件:
+   *
+   *   - `kind === 'chat'` の first message のみ抽出 (system message は無視 = agent-runner の
+   *     ephemeral state 通知が混じらないよう filter)
+   *   - hit 直後 `markDelivered(outDb, msg.id, null)` を呼ぶ (pollActive race 対策、
+   *     Phase 3 論点 E = handleAsk が response を運ぶので `fugue.ts:deliver()` の
+   *     silent throw 経路には流さない)
+   *   - env `FUGUE_ASK_TIMEOUT_MS` で上限 override 可 (test / smoke で短縮)
+   *
+   * 都度 `openOutboundDb + close` (long-lived connection にしない、cross-mount visibility
+   * 不変条件 = `session-manager.ts` の top-of-file JSDoc §Cross-mount visibility invariants)。
+   * DB open 失敗は pre-spawn (agent-container が session dir を作る前) 経路は debug で silent 化、
+   * 非 pre-spawn は warn (`pollOutbound` の precedent と同流儀、silent failure 撲滅)。
+   */
+  private async pollFugueAskResponse(
+    agentGroupId: string,
+    sessionId: string,
+    fromSeq: number,
+    waitMs: number,
+  ): Promise<{ message: OutboundMessage | null; timedOut: boolean }> {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      let hit: OutboundMessage | null = null;
+      try {
+        const outDb = openOutboundDb(agentGroupId, sessionId);
+        try {
+          const rows = outDb
+            .prepare('SELECT * FROM messages_out WHERE seq > ? ORDER BY seq ASC')
+            .all(fromSeq) as OutboundMessage[];
+          const first = rows.find((r) => r.kind === 'chat');
+          if (first) {
+            // hit 直後 markDelivered = pollActive race 対策 (Phase 3 論点 E)。
+            // outbound.db の delivered table に `INSERT OR IGNORE` (idempotent、
+            // `session-db.ts:310` の SQL 参照)。同一 tick 内で hit → mark 完了するため
+            // 500ms 分の race window が構造的にゼロになる。
+            markDelivered(outDb, first.id, null);
+            hit = first;
+          }
+        } finally {
+          outDb.close();
+        }
+      } catch (err) {
+        const errCode = (err as { code?: string })?.code;
+        if (isPreSpawnDbOpenError(errCode)) {
+          log.debug('Fugue ask poll: outbound.db not yet ready (pre-spawn)', {
+            event: 'fugue.ask.poll.pre_spawn_open_error',
+            agent_group_id: agentGroupId,
+            session_id: sessionId,
+            err_code: errCode,
+          });
+        } else {
+          log.warn('Fugue ask poll: outbound.db open failed', {
+            event: 'fugue.ask.poll.open_error',
+            agent_group_id: agentGroupId,
+            session_id: sessionId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      if (hit) return { message: hit, timedOut: false };
+      await new Promise((r) => setTimeout(r, FUGUE_ASK_POLL_INTERVAL_MS));
+    }
+    return { message: null, timedOut: true };
+  }
+
+  /**
+   * agent 応答 (messages_out.content) から `<ask-response>{JSON}</ask-response>` を抽出して
+   * `AgentAskResponse` Zod schema で validate する。
+   *
+   * agent-runner が `writeMessageOut` する際 `content` は `JSON.stringify({text: body, ...})` の
+   * 形式 (`container/agent-runner/src/poll-loop.ts` の `dispatchResultText` 経路)。まず本体 text を
+   * 取り出し、regex で `<ask-response>` タグを非貪欲抽出 → `JSON.parse` → Zod safeParse。
+   *
+   * 失敗理由は 4 分類 (log には詳細を残し、handleAsk へは reason string のみ返す = 契約を狭く保つ):
+   *
+   *   - `content_shape`: content JSON parse fail or text field 不在 (agent-runner 側の bug or
+   *     未想定の content 型)
+   *   - `tag_missing`: `<ask-response>` タグ regex miss (agent instruction 違反)
+   *   - `json_parse`: タグ内 JSON.parse fail (LLM が壊れた JSON を書いた)
+   *   - `zod_validate`: `AgentAskResponse.safeParse` fail (LLM が schema を満たさない、
+   *     summary 上限超過や sources[] の kind literal 違反 等)
+   */
+  private parseAgentAskResponse(
+    content: string,
+  ): { ok: true; value: AgentAskResponseT } | { ok: false; reason: string } {
+    let body: string;
+    try {
+      const parsed = JSON.parse(content) as { text?: unknown };
+      if (typeof parsed.text !== 'string') {
+        return { ok: false, reason: 'content_shape' };
+      }
+      body = parsed.text;
+    } catch {
+      return { ok: false, reason: 'content_shape' };
+    }
+    const match = body.match(ASK_RESPONSE_RE);
+    if (!match || match[1] === undefined) {
+      return { ok: false, reason: 'tag_missing' };
+    }
+    let jsonValue: unknown;
+    try {
+      jsonValue = JSON.parse(match[1]);
+    } catch {
+      return { ok: false, reason: 'json_parse' };
+    }
+    const validated = AgentAskResponse.safeParse(jsonValue);
+    if (!validated.success) {
+      return { ok: false, reason: 'zod_validate' };
+    }
+    return { ok: true, value: validated.data };
+  }
+
+  /**
+   * agent-container の後始末 (fire-and-forget)。`killContainer` + `deleteSession` + session dir
+   * 削除の 3 段を独立 try/catch で分離 (1 段失敗しても後続を試行、各失敗を warn emit)。
+   *
+   * 契約:
+   *   - `killContainer` は既に exit している container に対して silent no-op
+   *     (`container-runner.ts:258`)
+   *   - `deleteSession` は central DB `sessions` row の削除 (idempotent、実装未確認だが
+   *     signature 上は void で throw 想定外)
+   *   - `fs.rmSync({recursive: true, force: true})` は dir 不在時に silent 通過
+   *
+   * 全経路 idempotent = 連続呼出が安全 (timeout / spawn 失敗 / parse 失敗 / okReply 後の 4 経路
+   * すべてから呼ばれるため)。
+   */
+  private async cleanupAskSession(agentGroupId: string, sessionId: string, reason: string): Promise<void> {
+    try {
+      killContainer(sessionId, reason);
+    } catch (err) {
+      log.warn('Fugue ask cleanup: killContainer throw', {
+        event: 'fugue.ask.cleanup.kill_throw',
+        session_id: sessionId,
+        reason,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      deleteSession(sessionId);
+    } catch (err) {
+      log.warn('Fugue ask cleanup: deleteSession throw', {
+        event: 'fugue.ask.cleanup.delete_throw',
+        session_id: sessionId,
+        reason,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      fs.rmSync(sessionDir(agentGroupId, sessionId), { recursive: true, force: true });
+    } catch (err) {
+      log.warn('Fugue ask cleanup: session dir removal throw', {
+        event: 'fugue.ask.cleanup.rmdir_throw',
+        session_id: sessionId,
+        reason,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * agent 用の prompt 文字列を組立てる (query + intent + context_hint)。
+   *
+   * PII 保護は log 側の話であり、agent には context_hint も渡す方針 (agent instruction §1 で
+   * intent 尊重 or 独自判断を許容している。context_hint も同様に情報源として使ってよい)。
+   *
+   * 現在の shape: `Fugue Director からの質問:\n{query}\n(intent: ...)\n(context_hint: {JSON})`
+   * + 応答フォーマット reminder。agent 側 CLAUDE.md instruction が
+   * `<ask-response>{JSON}</ask-response>` フォーマット強制する。
+   */
+  private buildAskPrompt(
+    query: string,
+    intent: string | null | undefined,
+    contextHint: Record<string, unknown> | null | undefined,
+  ): string {
+    const parts: string[] = [];
+    parts.push(`Fugue Director からの質問:\n${query}`);
+    if (intent) {
+      parts.push(`\n(intent hint: ${intent})`);
+    }
+    if (contextHint && Object.keys(contextHint).length > 0) {
+      parts.push(`\n(context_hint: ${JSON.stringify(contextHint)})`);
+    }
+    parts.push('\n\n応答は `<ask-response>{JSON}</ask-response>` タグ単体で書け (CLAUDE.md §2 参照)。');
+    return parts.join('');
   }
 }

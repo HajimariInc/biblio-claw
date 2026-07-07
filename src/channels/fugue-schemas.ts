@@ -147,6 +147,44 @@ export const Finding = z.object({
 export type FindingT = z.infer<typeof Finding>;
 
 /**
+ * ask endpoint 内部の agent-container protocol (M4-H Phase 3)。
+ *
+ * agent-container が `<ask-response>{JSON}</ask-response>` タグ内に書く JSON の型。
+ * Contract §5.5 の `Source` / `Finding` (handleAsk 応答型) とは別:
+ *
+ * - `AgentAskSource`: agent は `id` を発行しない (handleAsk 側で `src-01`, `src-02`, ... と連番付与)。
+ * - `AgentAskFinding.source_indexes`: `sources[]` の array index (0-indexed) を返す。
+ *   handleAsk が `source_indexes` → `Source.id` (`src-XX`) に変換して `Finding.source_ids` を組む。
+ *
+ * agent は Tavily / Drive tool を呼び終えたあと、最終 message に本 JSON を単一 `<ask-response>` タグで
+ * 包んで書き出す。handleAsk が regex 抽出 → `JSON.parse` → 本 schema で `safeParse` する。上限は
+ * Contract §5.5 の Response Field 定義 (summary/finding.text = 600、source.title = 400、source.url =
+ * 1000、source.snippet = 1100) と一致 = wrap 前の実長でも wrap 後の XML overhead 込みでも通過する
+ * ように上限は wrap 前実長で切る (handleAsk 側でも上限超過しない再帰チェックは行わない)。
+ */
+export const AgentAskSource = z.object({
+  kind: z.enum(['web', 'drive']),
+  title: z.string().min(1).max(400),
+  url: z.string().min(1).max(1000),
+  snippet: z.string().min(1).max(1100),
+  metadata: z.record(z.string(), z.unknown()).optional().default({}),
+});
+export type AgentAskSourceT = z.infer<typeof AgentAskSource>;
+
+export const AgentAskFinding = z.object({
+  text: z.string().min(1).max(600),
+  source_indexes: z.array(z.number().int().nonnegative()).max(5).default([]),
+});
+export type AgentAskFindingT = z.infer<typeof AgentAskFinding>;
+
+export const AgentAskResponse = z.object({
+  summary: z.string().min(1).max(600),
+  findings: z.array(AgentAskFinding).max(10).default([]),
+  sources: z.array(AgentAskSource).max(20).default([]),
+});
+export type AgentAskResponseT = z.infer<typeof AgentAskResponse>;
+
+/**
  * Fugue ask endpoint の Reply body (Phase 1 skeleton)。
  *
  * status の意味 (Contract §5.5):

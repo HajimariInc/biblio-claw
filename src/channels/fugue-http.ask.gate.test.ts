@@ -115,8 +115,8 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=false は現状経路�
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-gate-off-1', query: 'anything' });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.status).toBe('error');
+    expect(body.warnings).toEqual(['ask_config_missing']);
     expect(vi.mocked(gateModule.evaluateGate)).not.toHaveBeenCalled();
   });
 
@@ -132,7 +132,7 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=false は現状経路�
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.warnings).toEqual(['ask_config_missing']);
     expect(body.warnings).not.toContain(INTENT_GATE_MISMATCH);
   });
 });
@@ -153,8 +153,8 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + biblio-other = �
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-other-1', query: 'general question' });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.status).toBe('error');
+    expect(body.warnings).toEqual(['ask_config_missing']);
 
     expect(vi.mocked(auditModule.appendGateAuditLog)).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: 'allowed', classification: 'biblio-other', channel: 'fugue' }),
@@ -178,7 +178,7 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + biblio-other = �
       intent: 'search-web',
     });
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.warnings).toEqual(['ask_config_missing']);
     expect(body.warnings).not.toContain(INTENT_GATE_MISMATCH);
   });
 });
@@ -206,8 +206,8 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + biblio-adk + int
       });
       expect(res.status).toBe(200);
       const body = (await res.json()) as FugueAskReplyT;
-      expect(body.status).toBe('not_available');
-      expect(body.warnings).toEqual(['skeleton_response', INTENT_GATE_MISMATCH]);
+      expect(body.status).toBe('error');
+      expect(body.warnings).toEqual(['ask_config_missing', INTENT_GATE_MISMATCH]);
 
       expect(vi.mocked(logModule.log.info)).toHaveBeenCalledWith(
         expect.stringContaining('intent-gate classification mismatch'),
@@ -235,7 +235,7 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + biblio-adk + int
 
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-noint-1', query: 'anything' });
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.warnings).toEqual(['ask_config_missing']);
     expect(body.warnings).not.toContain(INTENT_GATE_MISMATCH);
 
     const mismatchLog = vi
@@ -261,7 +261,7 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + biblio-adk + int
       intent: null,
     });
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.warnings).toEqual(['ask_config_missing']);
     expect(body.warnings).not.toContain(INTENT_GATE_MISMATCH);
   });
 });
@@ -402,8 +402,8 @@ describe('handleAsk gate (M4-H Phase 2) — GATE_ENABLED=true + gate throw = fai
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-throw-1', query: 'anything' });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
-    expect(body.warnings).toEqual(['skeleton_response']);
+    expect(body.status).toBe('error');
+    expect(body.warnings).toEqual(['ask_config_missing']);
     expect(body.warnings).not.toContain(AD_ASK_DENIED_BY_GATE);
     expect(body.warnings).not.toContain(INTENT_GATE_MISMATCH);
 
