@@ -316,7 +316,8 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   #
   # PR #132 review C1 対応: grep pattern を text/json 両対応化。
   # `src/log.ts:31,41-48` により LOG_FORMAT 未設定時は text 形式 (`event="fugue.equip.hitl_required"`
-  # = `=` 区切り、colon なし) がデフォルトで、`.env.example:187` も text をローカル推奨とする。
+  # = `=` 区切り、colon なし) がデフォルトで、`.env.example` の LOG_FORMAT=text default も
+  # ローカル推奨とする。
   # 元の JSON 前提の grep pattern `'"event":"..."'` (colon 区切り) は text 形式に一切マッチせず
   # false-negative canary になっていた (matrix 逆転が起きても常に PASS)。両形式を包含する
   # extended regex に変更して text/json どちらでも検知可能に。
