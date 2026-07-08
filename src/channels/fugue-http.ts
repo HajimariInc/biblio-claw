@@ -645,6 +645,14 @@ export class FugueHttpServer {
       // として構造的 bypass = PRD 意思決定 #7)。auth 通過 + trace 継承済み位置で挿入 = healthz
       // は影響を受けない (前段の early-return で処理済み、`HEALTHZ_PATH` 分岐)。
       //
+      // **粒度 (review 中 1 対応)**: key として `this.opts.expectedToken` (= server 側 constant、
+      // Fugue と共有する Bearer token 1 つ) を tokenDigest 化するため、認証通過した全 request が
+      // 同一 digest に集約される = 実質「**per biblio-claw instance の global 60 req/min rate
+      // limit**」として動作 (Contract §5.6 の cost 保護意図)。将来 multi-caller / per-tenant 化
+      // する場合は request 由来の Bearer (auth 通過時の `req.headers.authorization`) を渡すよう
+      // 切り替えるだけで helper 本体は無変更で対応可能。詳細は `fugue-rate-limit.ts` の module
+      // docstring §粒度 参照。
+      //
       // `Retry-After` header は writeError の前に setHeader = writeError 内の writeHead は
       // 'Content-Type' のみを引数で渡し、setHeader 済み分は Node.js の http.ServerResponse
       // 契約で自動 merge される (PRD 意思決定 #E で writeError signature 拡張を回避)。
@@ -1491,12 +1499,12 @@ export class FugueHttpServer {
             const validated = FugueAskReply.safeParse(deniedReply);
             if (!validated.success) {
               fugueSpan.setAttribute('fugue.outcome', 'error');
-              // Task 6 (M4-H Phase 4): outcome set 直後の recordFugueProcessingTime 呼出。
-              // 親スコープの processing_time_ms 変数は既に定義済 (denied 経路の in_secure outcome
-              // set 直後、~L1463) だが、対称性 assertion (recordFugueProcessingTime 呼出数 ==
-              // fugue.outcome set 数 = 17) を満たすため本 nested 経路でも helper を明示呼出する
-              // (span attribute の再 set = 同値上書きで副作用なし、ad-honji.test.ts で機械検知)。
-              recordFugueProcessingTime(fugueSpan, startedAt);
+              // review 中 2 対応: 二重 recordFugueProcessingTime 呼出しを除去。親スコープの
+              // `processing_time_ms` (in_secure 経路 outcome set 直後の line 1461 で確定) と
+              // `fugue.processing_time_ms` span attribute をそのまま再利用する = span attr と
+              // response body が同値のまま維持され、silent inconsistency (~ms ずれ) が消える。
+              // 対称性契約 (17 == 17) は ad-honji.test.ts の pattern-match assertion に変更した
+              // (「outcome set 直後 or self_validation_failed 分岐で親再利用」を許容)。
               log.error('Fugue ask denied reply self-validation failed', {
                 event: 'fugue.ask.self_validation_failed',
                 channel: 'fugue',
@@ -1861,10 +1869,11 @@ export class FugueHttpServer {
       }
 
       fugueSpan.setAttribute('fugue.outcome', 'ok');
-      // Task 6 (M4-H Phase 4): outcome set 直後の recordFugueProcessingTime 呼出。
-      // 親スコープの processing_time_ms 変数は line 1803 で既定義 (ok reply 組立時)。
-      // 対称性 assertion (recordFugueProcessingTime 呼出数 == fugue.outcome set 数 = 17)。
-      recordFugueProcessingTime(fugueSpan, askCtx.startedAt);
+      // review 中 2 対応: 二重 recordFugueProcessingTime 呼出しを除去。親スコープの
+      // `processing_time_ms` (ok reply 組立時の line 1803 で確定) と `fugue.processing_time_ms`
+      // span attribute をそのまま再利用する = span attr と response body が同値のまま維持され、
+      // silent inconsistency (~ms ずれ) が消える。対称性契約は pattern-match 化した (詳細は
+      // denied 経路の同コメント + ad-honji.test.ts の該当 assertion を参照)。
       log.info('Fugue ask completed', {
         event: 'fugue.ask.completed',
         channel: 'fugue',

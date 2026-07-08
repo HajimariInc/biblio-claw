@@ -117,6 +117,27 @@ describe('checkFugueAskRateLimit', () => {
       expect(r.retryAfterSec).toBe(1);
     }
   });
+
+  it('defensive: points=0 override は NaN 汚染せず 1 秒 backoff で fail-closed (review 提案 1 対応)', () => {
+    // 明示 points=0 は resolveFugueAskRatePoints が到達させない (>0 フィルタ) が、直接
+    // 引数で渡すと以前は `filtered.length < 0 === false` → 拒否経路の `filtered[0]=undefined` →
+    // retryAfterSec=NaN の silent 汚染が発生していた。修正後は `limit <= 0` guard で 1 秒
+    // backoff を返す (0 point = 永久拒否の意図と一致、client の即時再送ループも防ぐ)。
+    const r = checkFugueAskRateLimit(DIGEST_A, 1_000_000, 0);
+    expect(r.allowed).toBe(false);
+    if (!r.allowed) {
+      expect(r.retryAfterSec).toBe(1);
+      expect(Number.isNaN(r.retryAfterSec)).toBe(false);
+    }
+  });
+
+  it('defensive: points=-5 override も同じく NaN 汚染せず fail-closed', () => {
+    const r = checkFugueAskRateLimit(DIGEST_A, 1_000_000, -5);
+    expect(r.allowed).toBe(false);
+    if (!r.allowed) {
+      expect(r.retryAfterSec).toBe(1);
+    }
+  });
 });
 
 describe('tokenDigest', () => {
