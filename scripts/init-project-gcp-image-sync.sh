@@ -41,7 +41,7 @@ if [ -f "$ROOT/.env" ]; then set -a; . "$ROOT/.env"; set +a; fi
 # info/warn/fail/extract_result/json_field/json_array_length は verify-m3-helpers.sh に集約
 # (M3 PRD Phase 5 PR #21 code-simplifier 推奨)。本 Phase 4.5 で必要だが helpers に未集約な
 # ok() のみ局所定義 (= verify-phase-4-deploy.sh:41 と同流儀、両 source による
-# info/warn/fail 二重定義を回避、CLAUDE.md memory biblio-design-overthinking-avoidance と整合)。
+# info/warn/fail 二重定義を回避)。
 # shellcheck source=scripts/verify-m3-helpers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/verify-m3-helpers.sh"
 ok() { printf '[OK]   %s\n' "$*" >&2; }

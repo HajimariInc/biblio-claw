@@ -30,8 +30,8 @@
 --   `trace-fields.ts` 側は Preferred Format (bare 32-hex) で送出し、Fluent Bit /
 --   Cloud Logging 取り込み層が projectId 補完する設計 (詳細 docs/operations-runbook.md
 --   §M4-A Phase 2 log↔trace 連携)。
--- - `DATE(timestamp, 'Asia/Tokyo')` で JST 基準 (auto memory m4-a-phase-3-bq-sink-lessons.md
---   「DATE(timestamp) TZ bug」回避、デフォルト UTC 評価で朝の時間帯に 0 件症状を防ぐ)。
+-- - `DATE(timestamp, 'Asia/Tokyo')` で JST 基準 (「DATE(timestamp) TZ bug」回避、
+--   デフォルト UTC 評価で朝の時間帯に 0 件症状を防ぐ)。
 -- - latency / token usage は span attribute としてのみ記録 (Cloud Trace 側)。
 --   BQ サマリは event 単位の boundary 集計に絞る (Phase 3 lesson 「log と span の責務分離」)。
 
