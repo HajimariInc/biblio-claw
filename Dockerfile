@@ -86,6 +86,10 @@ RUN pnpm run build
 COPY scripts/ ./scripts/
 RUN mkdir -p ./groups
 
+# M4-H Phase 5: init-fugue-ask-agent.ts が readFileSync するため system-prompts のみ selective COPY
+# (container/ 全体は agent-runner image が別 build のため .dockerignore で exclude 維持)
+COPY container/agent-runner/src/system-prompts/ ./container/agent-runner/src/system-prompts/
+
 # === Runtime defaults ===
 # DATA_DIR は env で上書き前提 (Local: /app/data、GKE: /data の PVC mountPath)
 # DSN_PROVIDER / SCHEDULER_PROVIDER / SECRET_PROVIDER / ONECLI_URL も env で必ず指定する

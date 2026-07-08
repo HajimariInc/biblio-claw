@@ -1,9 +1,11 @@
-// Fugue channel adapter (M4-E) の entry span helper。
+// Fugue channel adapter (M4-E + M4-H) の entry span helper。
 //
 // **Phase 4 での trace 構造 (2 段、review C1 対応で明示)**:
 //
-//   fugue.consult (or fugue.equip)  (この helper、kind=INTERNAL)
+//   fugue.consult (or fugue.equip / fugue.ask)  (この helper、kind=INTERNAL)
 //     └─ biblio.list (or biblio.equip)  (`withBiblioActionSpan` 経由、M4-A 集計に相乗り)
+//        ※ fugue.ask は Phase 1 skeleton では biblio.<action> 相乗り span を張らない
+//        (backend 未接続)。TODO(M4-H Phase 3): backend 結線時に withBiblioActionSpan 追加検討。
 //
 // **auto HTTP SERVER span 層は Phase 5 で 2 段構造を正式化として確定**:
 // 本 repo は `"type": "module"` の純 ESM プロジェクトで、起動は `node --import
@@ -23,7 +25,7 @@
 //
 // M4-A `withBiblioActionSpan` (src/biblio/action-helpers.ts の `withBiblioActionSpan` 関数) の
 // 写経で、span 名 / attributes / signature を Fugue channel 用に最小化した helper:
-//   - span 名: `fugue.${operation}` (operation ∈ 'consult' | 'equip')
+//   - span 名: `fugue.${operation}` (operation ∈ 'consult' | 'equip' | 'ask')
 //   - kind: INTERNAL (2 段構造 = 上に SERVER 層を積まない、上記 ESM フック判断で確定)
 //   - attributes: `channel: 'fugue'` を span level で持ち、Cloud Trace UI で channel filter 可能に
 //                 (M4-A biblio.* は channel-agnostic 集計を維持するため biblio 側では付与しない)
@@ -44,11 +46,13 @@ import { getTracer } from './otel.js';
 /**
  * Fugue channel が扱う operation の closed union。
  *
- * 将来 `invoke` (skill 実行) 等を追加する場合はここに値を追加する。M4-E PRD の scope では
- * 現状 `consult` / `equip` のみで、`invoke` は将来検討事項として位置付けられている
- * (詳細は非公開 PRD の scope 節、public 化時に本コメントは残置で参照不能になる点は許容)。
+ * M4-E で `consult` / `equip` を導入、M4-H で `ask` を追加 (Web 検索 / Drive lookup 等を伴う
+ * 自然文問い合わせ endpoint)。将来 `invoke` (skill 実行) 等を追加する場合はここに値を追加する。
+ * M4-E + M4-H PRD の scope では現状 `consult` / `equip` / `ask` のみで、`invoke` は将来検討事項
+ * として位置付けられている (詳細は非公開 PRD の scope 節、public 化時に本コメントは残置で参照不能に
+ * なる点は許容)。
  */
-export type FugueOperation = 'consult' | 'equip';
+export type FugueOperation = 'consult' | 'equip' | 'ask';
 
 /**
  * Fugue channel の entry span を生成し、`fn` を span active state で実行する。
@@ -61,7 +65,7 @@ export type FugueOperation = 'consult' | 'equip';
  *     (両 helper とも同じ `getTracer('biblio-claw')` を使い、AsyncLocalStorageContextManager
  *     で active span を伝搬)
  *
- * @param operation Fugue の operation 種別 (`'consult'` | `'equip'`)。span 名は `fugue.${operation}` になる。
+ * @param operation Fugue の operation 種別 (`'consult'` | `'equip'` | `'ask'`)。span 名は `fugue.${operation}` になる。
  * @param requestId Fugue から受け取った `request_id`。span attribute `fugue.request_id` として記録される。
  * @param fn span active state で実行する非同期関数。`span` を引数で受け取り、outcome や追加属性を
  *           `span.setAttribute` で自由に設定できる。
@@ -109,4 +113,29 @@ export async function withFugueEntrySpan<T>(
       }
     },
   );
+}
+
+/**
+ * Fugue handler の outcome set 直後に呼び、`fugue.processing_time_ms` span attribute を
+ * 記録すると同時に、後段の log / response body で再利用可能な processing_time_ms (ms 単位、
+ * `Math.round` 済) を返す。
+ *
+ * M4-H Phase 4 (Task 6): 呼出側の `Math.round(performance.now() - startedAt)` の重複を
+ * 1 helper に集約。span attribute set 忘れを静的 grep 可能な形にする (呼出数 ==
+ * `fugueSpan.setAttribute('fugue.outcome', ...)` 数で対称性を担保、
+ * `fugue-http.ad-honji.test.ts` の静的 assertion で機械検知)。
+ *
+ * `withFugueEntrySpan` の catch fallback 経路 (`fugue.outcome='error'` 上書き) では
+ * startedAt を渡せないため呼ばない。従って本 helper 呼出数 == 呼出側で outcome set
+ * した回数の対称性が正 (unexpected 例外時のみ processing_time_ms が抜ける許容、
+ * plan Task 6 GOTCHA)。
+ *
+ * @param span withFugueEntrySpan で受け取った `fugueSpan`
+ * @param startedAtMs handler 冒頭の `performance.now()` 値
+ * @returns processing_time_ms (ms 単位、`Math.round` 済) = log/response body で再利用
+ */
+export function recordFugueProcessingTime(span: Span, startedAtMs: number): number {
+  const elapsed = Math.round(performance.now() - startedAtMs);
+  span.setAttribute('fugue.processing_time_ms', elapsed);
+  return elapsed;
 }

@@ -39,6 +39,15 @@ vitest.skills.config.ts
 # 別 build target (agent-runner image は container/build.sh で別途 build)
 container
 
+# M4-H Phase 5: init-fugue-ask-agent.ts (orchestrator 側 script) が
+# readFileSync するため system-prompts のみ例外的に build context に含める。
+# `.dockerignore` の negation pattern は親ディレクトリを段階的に unignore する必要あり
+# (Docker 既知挙動、`!container/agent-runner/src/system-prompts/**` 単独では親が exclude)。
+!container/agent-runner
+!container/agent-runner/src
+!container/agent-runner/src/system-prompts
+!container/agent-runner/src/system-prompts/**
+
 # K8s manifest / setup (image には焼かない)
 k8s
 setup

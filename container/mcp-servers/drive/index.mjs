@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * biblio-claw Drive MCP server (M4-F Phase 3: life-capabilities)
+ * biblio-claw Drive MCP server (life-capabilities の一部)
  *
  * agent-container 内で spawn される独立 Node 22 stdio MCP server。
  * agent-runner (Bun) 内で fetch() を叩かない設計 (= oven-sh/bun#30381 の
@@ -10,7 +10,7 @@
  * ## 構成
  * 純粋ロジック (driveFetch / formatError / listFiles / getFile / dispatch /
  * TOOL_LIST) は `logic.mjs` に分離。本 file は stdio transport の薄い wiring
- * のみを担う (testability を確保するため、`mcp-env-overlay.ts` と同流儀の分離)。
+ * のみを担う (testability を確保するため、host 側 MCP wrapper と同流儀の分離)。
  * `logic.test.mjs` から fake `globalThis.fetch` を差し替えて 401/403/404 分岐 +
  * timeout + Google Docs / Binary 分岐等を unit test で検証できる。
  *
