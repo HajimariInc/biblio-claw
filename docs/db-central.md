@@ -301,22 +301,25 @@ Agent group ごとのコンテナランタイム設定。provider、model、pack
 
 ```sql
 CREATE TABLE container_configs (
-  agent_group_id         TEXT PRIMARY KEY REFERENCES agent_groups(id) ON DELETE CASCADE,
-  provider               TEXT,
-  model                  TEXT,
-  effort                 TEXT,
-  image_tag              TEXT,
-  assistant_name         TEXT,
-  max_messages_per_prompt INTEGER,
-  skills                 TEXT NOT NULL DEFAULT '"all"',
-  mcp_servers            TEXT NOT NULL DEFAULT '{}',
-  packages_apt           TEXT NOT NULL DEFAULT '[]',
-  packages_npm           TEXT NOT NULL DEFAULT '[]',
-  additional_mounts      TEXT NOT NULL DEFAULT '[]',
-  cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
-  updated_at             TEXT NOT NULL
+  agent_group_id           TEXT PRIMARY KEY REFERENCES agent_groups(id) ON DELETE CASCADE,
+  provider                 TEXT,
+  model                    TEXT,
+  effort                   TEXT,
+  image_tag                TEXT,
+  assistant_name           TEXT,
+  max_messages_per_prompt  INTEGER,
+  skills                   TEXT NOT NULL DEFAULT '"all"',
+  mcp_servers              TEXT NOT NULL DEFAULT '{}',
+  packages_apt             TEXT NOT NULL DEFAULT '[]',
+  packages_npm             TEXT NOT NULL DEFAULT '[]',
+  additional_mounts        TEXT NOT NULL DEFAULT '[]',
+  cli_scope                TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
+  system_prompt_override   TEXT,                             -- M4-H Phase 3.5: fugue-ask 用 custom system prompt (非 NULL のみ preset bypass)
+  updated_at               TEXT NOT NULL
 );
 ```
+
+- `system_prompt_override` は M4-H Phase 3.5 で追加 (migration 020)。fugue-ask agent group のみ非 NULL、他 agent group は NULL で既存 preset 経路を継続する (`ClaudeProvider.query` の `customPrompt ?? preset` 分岐)。非 NULL 時は SDK に `systemPrompt: <string>` + `settingSources: []` を渡し、CLAUDE.md / CLAUDE.local.md auto-load を isolate する。
 
 - **Reader:** `src/container-config.ts`、`src/container-runner.ts`、`src/cli/dispatch.ts`(scope 強制)、`src/claude-md-compose.ts`
 - **Writer:** `src/db/container-configs.ts`、`src/modules/self-mod/apply.ts`、`src/backfill-container-configs.ts`
@@ -363,6 +366,7 @@ CREATE TABLE boots (
 | 017 | `017-session-equipped-biblios.ts` | `session_equipped_biblios` — biblio-claw 追加 (M3 Phase 2)。session 単位の装備リスト (session_id + biblio_name + order_index + equipped_at、PK = (session_id, biblio_name)、ON DELETE CASCADE) |
 | 018 | `018-biblio-settings.ts` | `biblio_settings` — biblio-claw 追加 (個別 PRD `individual-skill-shiire` Phase 5 dynamic-config)。biblio 設定値の動的変更を persist (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)。初期行なし = 空 table = `acquire.ts:resolveSkillThreshold` の DB → env → DEFAULT 3 層 fallback で env 経路に降りる |
 | 019 | `019-fugue-equipped-biblios.ts` | `fugue_equipped_biblios` — biblio-claw 追加 (M4-E Phase 3 equip-hitl)。Fugue channel の装備状態を channel-scoped で永続化 (biblio_name TEXT PRIMARY KEY, equipped_at TEXT NOT NULL, request_id TEXT NOT NULL)。`sessions(id)` FK なし = Fugue に `supportsThreads: false`(session 概念なし)のため `session_equipped_biblios` とは別テーブル。焼却 (`shokyaku`) 時に `deleteFugueEquippedBiblioByName` で並置削除 |
+| 020 | `020-system-prompt-override.ts` | `ALTER TABLE container_configs ADD COLUMN system_prompt_override TEXT` — biblio-claw 追加 (M4-H Phase 3.5)。fugue-ask agent group 専用の custom system prompt を保持し、非 NULL 時は Claude SDK の `systemPrompt` string 経路 (preset 全 bypass) + `settingSources: []` (CLAUDE.md / CLAUDE.local.md auto-load 遮断) に切り替える。他 group は NULL で既存 preset 経路を継続 (regression zero) |
 
 005 と 006 は意図的に欠番 — 初期開発中にマイグレーションが番号付け直された。
 
