@@ -35,7 +35,7 @@ const ShelveBiblioMultiInput = z.object({
         biblioName: z
           .string()
           .describe(
-            'Biblio name in "<owner>--<repo>" or "<owner>--<repo>--<skill>" format (e.g. "example-org--biblio-min").',
+            'Biblio name in "<owner>--<repo>" or "<owner>--<repo>--<skill>" format (e.g. "HajimariInc--test-biblio-minimal").',
           ),
         category: z
           .enum(BIBLIO_CATEGORIES)

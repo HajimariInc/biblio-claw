@@ -6,20 +6,20 @@
  * ADC Bearer に書き換えるため、host 側は `Bearer placeholder` を載せて proxy + 自前 CA に
  * 到達できれば良い。Anthropic ではなく Google 1st party モデル (publishers/google) なので、
  * Vertex AI API が enable 済の project (= biblio-claw が agent で利用中) で追加の Marketplace
- * enable は不要 (= local/GKE 共に DEN さんの GCP 作業ゼロで動く)。
+ * enable は不要 (= local/GKE 共にメンテナの GCP 作業ゼロで動く)。
  *
  * モデルは `.env` の `INSPECT_DANGEROUS_MODEL` で指定する (例: `gemini-2.5-flash`)。
  * 既定値はあえて持たない: 検品ロジックをハードコードしたモデル ID に縛り付けない方針
- * (DEN さん指示)。未設定なら起動時に warn + 検品時 throw → inspect() が fail-closed (HOLD)。
+ * (メンテナ判断)。未設定なら起動時に warn + 検品時 throw → inspect() が fail-closed (HOLD)。
  *
  * Node built-in fetch は `dispatcher` オプションを公開しないため (nodejs/node#43187)、
  * `undici` を依存に追加し `ProxyAgent` を `setGlobalDispatcher` で global 適用する。
  * agent (claude-code) 経路は providers/claude.ts + secret/onecli.ts が env で配線するが、
  * host fetch はこのクライアントが proxy + CA を ProxyAgent で動的に効かせる。
  *
- * 用途規約 (CLAUDE.md / DEN さん指針): NanoClaw ネイティブ + Claude 特性不要な host 側補助
- * 推論 (= 本クライアント) には Google モデル可、skill 発動に絡む推論 (カテゴライズ等) は
- * Anthropic 必須。Phase 2 検品 dangerous 軸はこの第 1 例。
+ * 用途規約 (CLAUDE.md 参照): host ネイティブ + Claude 特性不要な host 側補助推論 (= 本クライアント)
+ * には Google モデル可、skill 発動に絡む推論 (カテゴライズ等) は Anthropic 必須。検品 dangerous
+ * 軸はこの第 1 例。
  *
  * 失敗 (`!res.ok` / fetch throw / `candidates[0].content.parts[0].text` 不在) は throw —
  * 呼び出し側 (`inspect()`) が catch して fail-closed (HOLD/inspect_error) に倒す。

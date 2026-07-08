@@ -5,7 +5,7 @@
  *   1. agent (Claude) が `shokyaku_biblio` MCP ツールで outbound.db に system action を書く
  *      (content: `{ action, name, category }`)
  *   2. delivery poll がここを呼ぶ → 入力 validate → `requestApproval('shokyaku_confirm', ...)` で
- *      admin (DEN) に Slack DM カードを送る → `writeBackMessage` で「承認待ち」を patron に通知
+ *      admin に Slack DM カードを送る → `writeBackMessage` で「承認待ち」を patron に通知
  *   3. admin 承認後に `registerApprovalHandler('shokyaku_confirm', ...)` のコールバックが発火し、
  *      `shokyaku()` を実行 → `notify()` で patron に PR URL or 失敗理由を通知
  *
