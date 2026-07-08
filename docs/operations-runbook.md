@@ -3855,7 +3855,7 @@ kubectl set env statefulset/biblio-orchestrator -n biblio-claw \
 ```sql
 SELECT jsonPayload.channel, jsonPayload.operation,
        JSON_VALUE(jsonPayload.event) AS event_name, COUNT(*) AS cnt
-FROM `hajimari-ai-hackathon-2026.biblio_ops.stdout_*`
+FROM `hajimari-ai-hackathon-2026.llm_observability.stdout`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
   AND jsonPayload.channel = 'fugue'
   AND jsonPayload.operation = 'ask'
@@ -3867,7 +3867,7 @@ ORDER BY cnt DESC
 
 ```sql
 SELECT DATE(timestamp) AS d, COUNT(*) AS rate_limited_cnt
-FROM `hajimari-ai-hackathon-2026.biblio_ops.stdout_*`
+FROM `hajimari-ai-hackathon-2026.llm_observability.stdout`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
   AND jsonPayload.channel = 'fugue' AND jsonPayload.operation = 'ask'
   AND JSON_VALUE(jsonPayload.event) = 'ask.rate_limited'
@@ -3986,7 +3986,7 @@ pnpm exec tsx scripts/fake-fugue-client.ts ask --query "Next.js 15 のリリー�
 # (d) BQ sink query (smoke 完了 5 分待ち後)
 bq query --use_legacy_sql=false --project_id=hajimari-ai-hackathon-2026 \
 "SELECT jsonPayload.channel, jsonPayload.operation, COUNT(*) AS cnt
- FROM \`hajimari-ai-hackathon-2026.biblio_ops.stdout_*\`
+ FROM \`hajimari-ai-hackathon-2026.llm_observability.stdout\`
  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
    AND jsonPayload.channel = 'fugue' AND jsonPayload.operation = 'ask'
  GROUP BY 1, 2"
@@ -4032,7 +4032,7 @@ bash scripts/init-project-gcp-image-sync.sh --tag m4h-p5-N --confirm
 
    ```bash
    kubectl set image statefulset/biblio-orchestrator -n biblio-claw \
-     orchestrator=asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/orchestrator:m4f-p5-4
+     orchestrator=asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:m4f-p5-4
    kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s
    ```
 
