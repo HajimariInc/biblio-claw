@@ -38,7 +38,7 @@ interface ChannelAdapter {
 
   // オプション
   //
-  // M4-F Phase 4 で `status?: TypingStatus` (= `string | null | undefined`) を追加。
+  // Slack 進行ステート表示対応で `status?: TypingStatus` (= `string | null | undefined`) を追加。
   // 意味は `channels/adapter.ts` の TypingStatus 型定義に集約 (undefined = 未指定、
   // 非空 string = 進行ステート文言、null = 内部の明示クリア意図)。既存 adapter (CLI /
   // Fugue 等) は本メソッド未実装のため optional のまま = 影響ゼロ。
@@ -152,7 +152,7 @@ function createChatSdkBridge(
     },
 
     async setTyping(platformId, threadId, status) {
-      // M4-F Phase 4: status を vendor に forward。null は undefined に正規化して
+      // 進行ステート表示: status を vendor に forward。null は undefined に正規化して
       // vendor 側 `?? "Typing..."` fallback に載せる (vendor 実装は null/undefined を同一扱い)。
       await adapter.startTyping(threadId ?? platformId, status ?? undefined);
     },

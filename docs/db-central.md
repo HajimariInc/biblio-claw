@@ -203,7 +203,7 @@ CREATE INDEX idx_agent_dest_target ON agent_destinations(target_type, target_id)
 
 - **セッション結合 MCP 承認** — `install_packages`、`add_mcp_server`。`session_id` が設定される。
 - **OneCLI クレデンシャル承認** — `session_id` は NULL の可能性;`agent_group_id` + `channel_type` + `platform_id` が admin カードをルーティングする。
-- **ADK HITL 承認** (`action: 'adk_confirm'`、M4-B Phase 4 追加) — 破壊操作 tool (`enkin_biblio` / `shokyaku_biblio`) の admin 承認。`session_id` は NULL (NanoClaw session を経由しない in-process ADK Runner のため)、`payload` に ADK session id / functionCallId / userId / channel 情報を JSON serialize して保持。発行: `src/modules/approvals/adk-approvals.ts:requestAdkApproval`、resume: `src/adk/approval-dispatcher.ts:resolveAdkApproval` (response-handler.ts の adk_confirm 分岐から呼出)。
+- **ADK HITL 承認** (`action: 'adk_confirm'`、ADK HITL 承認導入で追加) — 破壊操作 tool (`enkin_biblio` / `shokyaku_biblio`) の admin 承認。`session_id` は NULL (NanoClaw session を経由しない in-process ADK Runner のため)、`payload` に ADK session id / functionCallId / userId / channel 情報を JSON serialize して保持。発行: `src/modules/approvals/adk-approvals.ts:requestAdkApproval`、resume: `src/adk/approval-dispatcher.ts:resolveAdkApproval` (response-handler.ts の adk_confirm 分岐から呼出)。
 
 ```sql
 CREATE TABLE pending_approvals (
@@ -314,19 +314,19 @@ CREATE TABLE container_configs (
   packages_npm             TEXT NOT NULL DEFAULT '[]',
   additional_mounts        TEXT NOT NULL DEFAULT '[]',
   cli_scope                TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
-  system_prompt_override   TEXT,                             -- M4-H Phase 3.5: fugue-ask 用 custom system prompt (非 NULL のみ preset bypass)
+  system_prompt_override   TEXT,                             -- fugue-ask 用 custom system prompt (非 NULL のみ preset bypass)
   updated_at               TEXT NOT NULL
 );
 ```
 
-- `system_prompt_override` は M4-H Phase 3.5 で追加 (migration 020)。fugue-ask agent group のみ非 NULL、他 agent group は NULL で既存 preset 経路を継続する (`ClaudeProvider.query` の `customPrompt ?? preset` 分岐)。非 NULL 時は SDK に `systemPrompt: <string>` + `settingSources: []` を渡し、CLAUDE.md / CLAUDE.local.md auto-load を isolate する。
+- `system_prompt_override` は Fugue channel の fugue-ask agent group 対応で追加 (migration 020)。fugue-ask agent group のみ非 NULL、他 agent group は NULL で既存 preset 経路を継続する (`ClaudeProvider.query` の `customPrompt ?? preset` 分岐)。非 NULL 時は SDK に `systemPrompt: <string>` + `settingSources: []` を渡し、CLAUDE.md / CLAUDE.local.md auto-load を isolate する。
 
 - **Reader:** `src/container-config.ts`、`src/container-runner.ts`、`src/cli/dispatch.ts`(scope 強制)、`src/claude-md-compose.ts`
 - **Writer:** `src/db/container-configs.ts`、`src/modules/self-mod/apply.ts`、`src/backfill-container-configs.ts`
 
 ### 1.16 `boots`
 
-biblio-claw 追加。`id=1` の単一行を持ち、host 起動毎に `count` を monotonic increment する決定的指紋テーブル。Phase 2 verify (`scripts/verify-phase-2-wiring.sh` §7) で「Pod 再作成跨ぎで count が増える」ことを assertion することで、PVC + SQLite の永続化が機能していることを確認する (PoC-13 写経)。
+biblio-claw 追加。`id=1` の単一行を持ち、host 起動毎に `count` を monotonic increment する決定的指紋テーブル。PVC 永続化 verify (`scripts/verify-phase-2-wiring.sh` §7) で「Pod 再作成跨ぎで count が増える」ことを assertion することで、PVC + SQLite の永続化が機能していることを確認する (先行 PoC の設計を踏襲)。
 
 ```sql
 CREATE TABLE boots (
@@ -362,11 +362,11 @@ CREATE TABLE boots (
 | 009 | `009-drop-pending-credentials.ts` | 廃止された `pending_credentials` テーブルを drop |
 | 014 | `014-container-configs.ts` | `container_configs` — agent group ごとのコンテナランタイム設定 |
 | 015 | `015-cli-scope.ts` | `ALTER TABLE container_configs ADD COLUMN cli_scope` |
-| 016 | `016-boots.ts` | `boots` — biblio-claw 追加。Phase 2 verify 用の決定的指紋 (PVC + SQLite 永続化アサーション) |
-| 017 | `017-session-equipped-biblios.ts` | `session_equipped_biblios` — biblio-claw 追加 (M3 Phase 2)。session 単位の装備リスト (session_id + biblio_name + order_index + equipped_at、PK = (session_id, biblio_name)、ON DELETE CASCADE) |
-| 018 | `018-biblio-settings.ts` | `biblio_settings` — biblio-claw 追加 (個別 PRD `individual-skill-shiire` Phase 5 dynamic-config)。biblio 設定値の動的変更を persist (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)。初期行なし = 空 table = `acquire.ts:resolveSkillThreshold` の DB → env → DEFAULT 3 層 fallback で env 経路に降りる |
-| 019 | `019-fugue-equipped-biblios.ts` | `fugue_equipped_biblios` — biblio-claw 追加 (M4-E Phase 3 equip-hitl)。Fugue channel の装備状態を channel-scoped で永続化 (biblio_name TEXT PRIMARY KEY, equipped_at TEXT NOT NULL, request_id TEXT NOT NULL)。`sessions(id)` FK なし = Fugue に `supportsThreads: false`(session 概念なし)のため `session_equipped_biblios` とは別テーブル。焼却 (`shokyaku`) 時に `deleteFugueEquippedBiblioByName` で並置削除 |
-| 020 | `020-system-prompt-override.ts` | `ALTER TABLE container_configs ADD COLUMN system_prompt_override TEXT` — biblio-claw 追加 (M4-H Phase 3.5)。fugue-ask agent group 専用の custom system prompt を保持し、非 NULL 時は Claude SDK の `systemPrompt` string 経路 (preset 全 bypass) + `settingSources: []` (CLAUDE.md / CLAUDE.local.md auto-load 遮断) に切り替える。他 group は NULL で既存 preset 経路を継続 (regression zero) |
+| 016 | `016-boots.ts` | `boots` — biblio-claw 追加。PVC + SQLite 永続化アサーション用の決定的指紋 |
+| 017 | `017-session-equipped-biblios.ts` | `session_equipped_biblios` — biblio-claw 追加 (装備機構)。session 単位の装備リスト (session_id + biblio_name + order_index + equipped_at、PK = (session_id, biblio_name)、ON DELETE CASCADE) |
+| 018 | `018-biblio-settings.ts` | `biblio_settings` — biblio-claw 追加 (動的設定変更対応)。biblio 設定値の動的変更を persist (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)。初期行なし = 空 table = `acquire.ts:resolveSkillThreshold` の DB → env → DEFAULT 3 層 fallback で env 経路に降りる |
+| 019 | `019-fugue-equipped-biblios.ts` | `fugue_equipped_biblios` — biblio-claw 追加 (Fugue channel 装備状態対応)。Fugue channel の装備状態を channel-scoped で永続化 (biblio_name TEXT PRIMARY KEY, equipped_at TEXT NOT NULL, request_id TEXT NOT NULL)。`sessions(id)` FK なし = Fugue に `supportsThreads: false`(session 概念なし)のため `session_equipped_biblios` とは別テーブル。焼却 (`shokyaku`) 時に `deleteFugueEquippedBiblioByName` で並置削除 |
+| 020 | `020-system-prompt-override.ts` | `ALTER TABLE container_configs ADD COLUMN system_prompt_override TEXT` — biblio-claw 追加 (Fugue channel の fugue-ask agent group 対応)。fugue-ask agent group 専用の custom system prompt を保持し、非 NULL 時は Claude SDK の `systemPrompt` string 経路 (preset 全 bypass) + `settingSources: []` (CLAUDE.md / CLAUDE.local.md auto-load 遮断) に切り替える。他 group は NULL で既存 preset 経路を継続 (regression zero) |
 
 005 と 006 は意図的に欠番 — 初期開発中にマイグレーションが番号付け直された。
 
