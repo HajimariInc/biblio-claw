@@ -6,14 +6,13 @@
 #   envFrom で SLACK_BOT_TOKEN / SLACK_APP_TOKEN を受け取れば別 Pod 不要。
 # - agent コンテナは CONTAINER_PROVIDER=k8s で K8s Job として spawn
 #   (k8s/02-orchestrator-rbac.yaml の RBAC が前提)。
-# - M2 PRD A Phase 3: OneCLI gateway / GH App token rotator / Vertex Bearer
-#   token rotator を本 Pod の Native sidecar (K8s 1.28+ initContainers +
-#   restartPolicy: Always pattern) として統合した。これにより
-#     * 旧 `biblio-onecli` Deployment は廃止 (本 Pod の onecli sidecar に統合)
-#     * 旧 `biblio-sidecar` CronJob は廃止 (本 Pod の gh-token-rotator sidecar に統合)
-#     * `k8s/onecli-ca-secret.md` の手動 CA 投入手順は廃止 (orchestrator 本体
-#       内の ca-secret-sync が emptyDir 経由で読んだ CA を K8s Secret に自動 upsert)
-#   詳細は PRD A Phase 3 plan / CLAUDE.md §シークレット を参照。
+# - OneCLI gateway / GH App token rotator / Vertex Bearer token rotator を本 Pod の
+#   Native sidecar (K8s 1.28+ initContainers + restartPolicy: Always pattern) として
+#   統合。これにより:
+#     * onecli / gh-token-rotator は本 Pod の Native sidecar として動作 (統合 architecture)
+#     * CA 投入は orchestrator 本体内の ca-secret-sync が emptyDir 経由で読んだ CA を
+#       K8s Secret に自動 upsert する経路
+#   詳細は CLAUDE.md §シークレット を参照。
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -37,7 +36,7 @@ spec:
     spec:
       serviceAccountName: biblio-orchestrator-ksa
       # ===========================================================================
-      # initContainers (Phase 3): 1 本物 init + 2 Native sidecar
+      # initContainers: 1 本物 init + 2 Native sidecar
       # - fetch-pem        — 本物 init (restartPolicy なし、run-to-completion)
       # - cloud-sql-proxy  — Native sidecar (restartPolicy: Always、後続を起動 gate)
       # - onecli           — Native sidecar (restartPolicy: Always、CA bundle を共有)
@@ -64,7 +63,7 @@ spec:
               cpu: 100m
               memory: 256Mi
 
-        # 2. cloud-sql-proxy (Native sidecar、旧 20-onecli-deployment.yaml から移管):
+        # 2. cloud-sql-proxy (Native sidecar):
         #    WI で IAM 認証して 127.0.0.1:5432 に Cloud SQL を proxy。後続 onecli の
         #    DB 接続 (DATABASE_URL=localhost:5432) を成立させる。
         - name: cloud-sql-proxy
@@ -74,7 +73,7 @@ spec:
             - '--auto-iam-authn'
             - '--private-ip'
             - '--port=5432'
-            - '${GCP_PROJECT_ID}:asia-northeast1:biblio-pgsql'
+            - '${GCP_PROJECT_ID}:asia-northeast1:${CLOUD_SQL_INSTANCE}'
           # startupProbe は付けない:
           #  - cloud-sql-proxy v2 image は distroless で sh/nc を持たず exec probe 不可
           #  - cloud-sql-proxy は 127.0.0.1:5432 のみ listen するため、tcpSocket probe
@@ -88,7 +87,7 @@ spec:
               cpu: 100m
               memory: 256Mi
 
-        # 3. onecli (Native sidecar、旧 20-onecli-deployment.yaml から移管):
+        # 3. onecli (Native sidecar):
         #    OneCLI gateway。10254 (REST) / 10255 (MITM proxy) を listen。
         #    `/app/data/gateway` を emptyDir `onecli-ca` 経由で同 Pod 内 orchestrator
         #    と共有し、起動時に生成する CA bundle (`ca.pem` / `ca.key`) を orchestrator
@@ -101,11 +100,10 @@ spec:
             - name: AUTH_MODE
               value: 'local'
             # IAM 認証 = password 不要。username = "biblio-orchestrator@<project>.iam"。
-            # URL 内の `@` は user に含まれるため %40 でエンコード。Phase 3 で
-            # KSA を統合した結果、cloud-sql-proxy も orchestrator GSA で認証する
-            # ため username が変わる (旧 biblio-onecli@... → biblio-orchestrator@...)。
+            # URL 内の `@` は user に含まれるため %40 でエンコード。KSA 統合により
+            # cloud-sql-proxy も orchestrator GSA で認証する経路。
             - name: DATABASE_URL
-              value: 'postgresql://biblio-orchestrator%40${GCP_PROJECT_ID}.iam@127.0.0.1:5432/biblio_onecli?sslmode=disable'
+              value: 'postgresql://biblio-orchestrator%40${GCP_PROJECT_ID}.iam@127.0.0.1:5432/<cloud-sql-db-name>?sslmode=disable'
             - { name: APP_URL, value: 'http://localhost:10254' }
             - { name: GATEWAY_API_URL, value: 'http://localhost:10255' }
           ports:
@@ -132,7 +130,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:${IMAGE_TAG}
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,29 +148,27 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:m4f-p5-4,
+                value: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:${IMAGE_TAG},
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
-            # === Group filesystem root (M2 PRD A Phase 2) ===
+            # === Group filesystem root ===
             # K8sJobProvider:translateSpec が agent Pod の hostPath mount を
             # /data/ 配下のみ通すため、groups/<folder>/ も PVC subPath で見える
             # /data/groups/ に置く。src/config.ts:GROUPS_DIR が env override 対応済。
             - { name: GROUPS_DIR, value: /data/groups }
-            # agent Pod 用 PVC + Secret 名 (M2 PRD A Phase 2.5)。
-            # Phase 3 から CA Secret は orchestrator 内 ca-secret-sync が
+            # agent Pod 用 PVC + Secret 名。CA Secret は orchestrator 内 ca-secret-sync が
             # emptyDir 経由で読んで自動 upsert する (手動投入は廃止)。
             - { name: AGENT_PVC_NAME, value: data-biblio-orchestrator-0 }
             - { name: ONECLI_CA_SECRET_NAME, value: biblio-onecli-ca }
-            # === OneCLI gateway (Phase 3 で localhost 経由に変更) ===
-            # 旧: biblio-onecli.biblio-claw.svc.cluster.local:10254
-            # 新: 同 Pod 内の onecli sidecar = http://localhost:10254
+            # === OneCLI gateway (localhost 経由) ===
+            # 同 Pod 内の onecli sidecar = http://localhost:10254
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
             # === orchestrator 本体が OneCLI MITM 経由で外部 API を呼ぶ際の
             #     TLS trust anchor。emptyDir 経由で onecli sidecar が生成する ca.pem
             #     を /etc/ssl/certs/onecli/ca.pem として参照する ===
             - { name: NODE_EXTRA_CA_CERTS, value: /etc/ssl/certs/onecli/ca.pem }
-            # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===
+            # === Vertex × Claude (OneCLI MITM 経由) ===
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
             # === orchestrator コード (drive/logic.mjs, init-hybrid-agent.ts, etc) が
@@ -184,50 +180,48 @@ spec:
             # === 検品 (Vertex × Gemini) + カテゴライズ (Vertex × Claude) の model 設定 ===
             # local docker compose では `.env` 経由で渡るが、GKE manifest に明示投入が必要。
             # 欠落すると inspect_biblio が「INSPECT_DANGEROUS_MODEL が未設定」で HOLD、
-            # categorize_biblio も同様の失敗経路に倒れる (init-project-gcp PRD env 投入漏れ、
-            # 2026-06-24 L5 Phase 6 verify-slack-e2e-gke 実走で顕在化)。
+            # categorize_biblio も同様の失敗経路に倒れる (env 投入漏れは verify 実走で顕在化)。
             - { name: INSPECT_DANGEROUS_MODEL, value: gemini-2.5-flash }
             - { name: CATEGORIZE_MODEL, value: claude-sonnet-4-6 }
             # === Assistant identity ===
             - { name: ASSISTANT_NAME, value: biblio }
-            # === 棚リポ参照 (init-project-gcp Phase 4.6 bug 4 修正) ===
-            # list-biblio / shelve / unshelve / acquire 等が棚 (HajimariInc/biblio-shelf)
+            # === 棚リポ参照 ===
+            # list-biblio / shelve / unshelve / acquire 等が棚 (<shelf-repo-owner>/<shelf-repo-name>)
             # を指すために必要。local docker compose では `.env` 経由で渡るが、GKE
             # では Pod 起動時から env として持っていないと `readListEnv` / `readShelveEnv`
             # が起動直後に throw し、最初の `@bot 蔵書` / `@bot 仕入れて` で
             # 設定エラー応答になる (= HTTP 401 ではなく `Error: list: required env missing: ...`)。
-            # email は GitHub が検証しないため架空アドレスで commit 成立 (= DEN さん個人 email を露出させない)。
-            - { name: SHELF_REPO_OWNER, value: HajimariInc }
-            - { name: SHELF_REPO_NAME, value: biblio-shelf }
-            - { name: SHELF_PR_AUTHOR_NAME, value: 'biblio-claw bot' }
-            - { name: SHELF_PR_AUTHOR_EMAIL, value: 'biblio-claw@wforest.jp' }
+            # email は GitHub が検証しないため架空アドレスで commit 成立 (= maintainer 個人 email を露出させない)。
+            - { name: SHELF_REPO_OWNER, value: <shelf-repo-owner> }
+            - { name: SHELF_REPO_NAME, value: <shelf-repo-name> }
+            - { name: SHELF_PR_AUTHOR_NAME, value: '<bot-commit-author-name>' }
+            - { name: SHELF_PR_AUTHOR_EMAIL, value: '<bot-commit-author-email>' }
             # === ログ設定 (= Cloud Logging が jsonPayload として自動解析) ===
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: host-orchestrator }
-            # === OTel (M4-A Phase 1) ===
+            # === OTel ===
             # OTLP endpoint はコードで hardcode (= telemetry.googleapis.com)。
             # OTEL_DIAG=true は常時 off。Bun "Request timed out" 診断が必要な場合
             # のみ一時投入 (opentelemetry-js#5260: span は届く、warn は無視可能)。
             - { name: OTEL_SERVICE_NAME, value: biblio-claw }
             - { name: OTEL_RESOURCE_ATTRIBUTES, value: deployment.environment=gke }
-            # Phase 2: GenAI semconv (Development) の受容を明示。
+            # GenAI semconv (Development) の受容を明示。
             - { name: OTEL_SEMCONV_STABILITY_OPT_IN, value: gen_ai_latest_experimental }
-            # === Fugue channel (M4-E Phase 5) ===
+            # === Fugue channel ===
             # 0.0.0.0 bind = Pod IP に listen し LB からの流入を受ける。127.0.0.1 だと
             # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
             - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
             - { name: FUGUE_HTTP_PORT, value: '8080' }
-            # === M4-F Phase 2 gate agent (Phase 3 以降 GKE 常時 true 運用) ===
+            # === gate agent (GKE 常時 true 運用) ===
             # gate 4 層 (pattern → escape → XML → LLM evaluator) の 3 分類 routing
-            # (biblio-adk / biblio-other / in-secure)。**GKE Prod は Phase 3 (2026-07-05)
-            # で kubectl set env で有効化して以降、両 wire (ADK + hybrid) 前提で稼働**。
-            # PR #145 で判明した罠 (kubectl apply -f k8s/ が manifest 内容で spec を上書き
-            # → kubectl set env で入れた true が消える regression) を受けて manifest 既定
-            # を 'true' に恒久化 (2026-07-06)。**GATE_ENABLED=false は「ADK / hybrid の
-            # どちらか片方だけが wire される単一 provider 運用時のみ」で使う設定**
-            # (詳細: runbook §M4-F Phase 2 §GATE_ENABLED 運用条件)。
-            # image-sync script (init-project-gcp-image-sync.sh) は本 env を preserve/restore
-            # する二重保険を持つ (kubectl set env で override した値が deploy で消える罠を防ぐ)。
+            # (biblio-adk / biblio-other / in-secure)。**GKE Prod は両 wire (ADK + hybrid)
+            # 前提で稼働**。過去に kubectl apply -f k8s/ が manifest 内容で spec を上書きし、
+            # kubectl set env で入れた true が消える regression を踏んだため manifest 既定
+            # を 'true' に恒久化。**GATE_ENABLED=false は「ADK / hybrid のどちらか片方だけが
+            # wire される単一 provider 運用時のみ」で使う設定** (詳細: 運用 doc §GATE_ENABLED
+            # 運用条件)。image-sync script (init-project-gcp-image-sync.sh) は本 env を
+            # preserve/restore する二重保険を持つ (kubectl set env で override した値が
+            # deploy で消える罠を防ぐ)。
             - { name: GATE_ENABLED, value: 'true' }
             - { name: GATE_MODEL, value: gemini-3.1-flash-lite }
             # `.jsonl` local fallback は GKE では emptyDir にしか書けず永続化されない
@@ -240,16 +234,16 @@ spec:
             - secretRef:
                 name: biblio-slack-tokens
                 optional: true
-            # Fugue channel の Bearer 認証 token (M4-E Phase 5)。
+            # Fugue channel の Bearer 認証 token。
             # `optional: false` = 未投入時に Pod 起動失敗 = Prod で silent skip を防ぐ
             # (fugue.ts factory が null 返却で adapter 起動しない silent 経路の撲滅)。
             # Secret 中身は `FUGUE_SHARED_TOKEN` key 単一。Secret Manager からの投入手順は
-            # docs/operations-runbook.md §M4-E Phase 5 参照。
+            # docs/operations-runbook.md 参照。
             - secretRef:
                 name: biblio-fugue-shared-token
                 optional: false
           ports:
-            # Fugue HTTP endpoint (M4-E Phase 5)。GCE Ingress の Service targetPort が
+            # Fugue HTTP endpoint。GCE Ingress の Service targetPort が
             # name 参照 (`fugue`) で解決するため named port。protocol は TCP のみ。
             - name: fugue
               containerPort: 8080
@@ -260,10 +254,10 @@ spec:
             # ca-secret-sync が `/etc/ssl/certs/onecli/ca.pem` を読んで K8s Secret に upsert する。
             - { name: onecli-ca, mountPath: /etc/ssl/certs/onecli, readOnly: true }
           # ===========================================================================
-          # Probes (M4-E Phase 5、issue #73 吸収): 2 段 sentinel + 3 probe パターン。
+          # Probes: 2 段 sentinel + 3 probe パターン。
           # 3 probe いずれも `/tmp/host-ready` sentinel の存在で判定する exec probe を採用。
           #
-          # 設計判断 (PR #126 レビュー C1+C2+C3 対応): 初期 plan は readiness/liveness を
+          # 設計判断 (過去 review 対応): 初期 plan は readiness/liveness を
           # httpGet /healthz にする案だったが、以下 3 点の silent failure を撲滅するため
           # 全 probe を exec に統一する:
           #   (C1) NetworkPolicy Ingress rule に kubelet probe 送信元を allow する必要が
@@ -279,13 +273,13 @@ spec:
           #   (C3) 旧コメント「`initChannelAdapters` throw → sentinel 未書込 → crash loop」は
           #        実装 (channel-registry.ts:57-60 の per-adapter catch) と矛盾していた。
           #        現在は「main() で throw する経路 (writeFileSync 失敗 / DB migration 失敗
-          #        等) のみが Pod 再起動を招き、per-adapter の credential 欠落は silent skip」
+          #        等) のみが Pod 再起動を招り、per-adapter の credential 欠落は silent skip」
           #        という実装通りの契約に修正。
           #
           # Fugue endpoint への外部 request が失敗した場合の可視化は Fugue Cloud Run 側で
           # connection refused / 5xx として明示的に観測される (silent failure ではない)。
           # fugue-http server が起動後に死んだ場合の自動 restart は本設計では効かない
-          # (現状の Slack 等他 channel も同じ = 対称性維持)、Prod で問題化したら別 issue で対応。
+          # (現状の Slack 等他 channel も同じ = 対称性維持)、Prod で問題化したら別途対応。
           # ===========================================================================
           startupProbe:
             exec:
@@ -311,11 +305,11 @@ spec:
               cpu: 500m
               memory: 1Gi
 
-        # ---- gh-token-rotator sidecar (Phase 3、案 1A: 既存 1-shot script を loop wrap) ----
+        # ---- gh-token-rotator sidecar (既存 1-shot script を loop wrap) ----
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
-        # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
+        # gh-token-rotator は本 Pod の Native sidecar として動作 (統合 architecture)。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-gh:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-gh:${IMAGE_TAG}
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -335,8 +329,8 @@ spec:
             # 参照されないが、orchestrator container と値を揃えて運用一貫性を保つ
             # (= rotator pod 内 debug で SHELF_REPO_* を grep したとき orchestrator
             # と同じ literal が見えることで「経路が同じ」と判別できる)。
-            - { name: SHELF_REPO_OWNER, value: HajimariInc }
-            - { name: SHELF_REPO_NAME, value: biblio-shelf }
+            - { name: SHELF_REPO_OWNER, value: <shelf-repo-owner> }
+            - { name: SHELF_REPO_NAME, value: <shelf-repo-name> }
             - name: GH_APP_ID
               valueFrom:
                 secretKeyRef:
@@ -354,21 +348,21 @@ spec:
               cpu: 50m
               memory: 64Mi
 
-        # ---- vertex-token-rotator sidecar (Phase 3、案 1A: 既存 1-shot script を loop wrap) ----
+        # ---- vertex-token-rotator sidecar (既存 1-shot script を loop wrap) ----
         # 40min 周期で onecli-vertex-secret.sh を呼んで ADC token を OneCLI に投入
-        # (issue #49: 旧 50min 周期は ADC TTL ~60min と 10min gap、40min で 20min margin に拡大)。
+        # (旧 50min 周期は ADC TTL ~60min と 10min gap、40min で 20min margin に拡大)。
         # gcloud は WI 経由で orchestrator KSA → biblio-orchestrator GSA
-        # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
-        # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
+        # (`roles/aiplatform.user`) を impersonate する (初回 GSA binding は operator が
+        # gcloud で手動実行)。旧手動 `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:${IMAGE_TAG}
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
             - { name: CLOUD_ML_REGION, value: global }
             - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
-            # issue #49: 50min (3000s) は ADC token TTL ~60min との 10min gap 帯に
+            # 50min (3000s) は ADC token TTL ~60min との 10min gap 帯に
             # agent Pod spawn が当たると起動直後の Vertex 呼び出しで 401 を踏むため、
             # 40min 周期で gap を ~0min に縮小する (script 既定値とも同期)。
             - { name: ROTATE_INTERVAL_SEC, value: '2400' }
@@ -380,26 +374,24 @@ spec:
               cpu: 50m
               memory: 256Mi
 
-        # ---- drive-token-rotator sidecar (M4-F Phase 3、life-capabilities) ----
+        # ---- drive-token-rotator sidecar (life-capabilities) ----
         # 40min 周期で onecli-drive-secret.sh を呼んで drive.readonly scope 付き
         # access token を OneCLI に投入。**image は vertex-token-rotator と同一** =
         # build 資産の二重メンテを回避し、Dockerfile.sidecar.vertex 側で
         # scripts/drive-rotate.sh + scripts/onecli-drive-secret.sh も焼き込む
-        # (M4-F Phase 3 の Dockerfile 更新済)。差分は command と env のみ:
+        # (Dockerfile 更新済)。差分は command と env のみ:
         #   - command: bash /scripts/drive-rotate.sh
         #   - DRIVE_SECRET_NAME (Vertex とは別 secret)
-        # R4 経路 (2026-07-06 恒久対応): metadata server から biblio-orchestrator@ の
+        # R4 経路 (恒久対応): metadata server から biblio-orchestrator@ の
         # caller token を取得 → iamcredentials.googleapis.com/generateAccessToken で
         # `biblio-google-drive-user@` を impersonate + scope=drive.readonly 明示 →
         # drive.readonly scope 付き token を発行。前提として orchestrator@ が
         # drive-user@ に対して `roles/iam.serviceAccountTokenCreator` を持つこと
-        # (`terraform/iam-drive-user/` module で宣言、ない場合 403 fail、詳細は
-        # runbook §M4-F Phase 3 罠 7)。Drive フォルダ ACL は drive-user@ にのみ共有
-        # (orchestrator@ には共有しない = 境界分離)。
-        # image tag は運用中の値をそのまま反映する形。詳細は runbook §M4-F Phase 3
-        # §deploy 手順 (image-sync 経由で bump)。
+        # (`terraform/iam-drive-user/` module で宣言、ない場合 403 fail)。
+        # Drive フォルダ ACL は drive-user@ にのみ共有 (orchestrator@ には共有しない =
+        # 境界分離)。image tag は運用中の値をそのまま反映する形 (image-sync 経由で bump)。
         - name: drive-token-rotator
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:${IMAGE_TAG}
           command: ['bash', '/scripts/drive-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
