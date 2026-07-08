@@ -70,10 +70,10 @@ async function main(): Promise<number> {
   }
   const traceparent = parseOption(argv, 'traceparent');
 
-  // shell env (process.env) を .env より優先する resolver。CLAUDE.md 公開ポリシーに従い
-  // `.env` に Prod の domain / token を hardcode しない運用のため、Prod verify 時に
+  // shell env (process.env) を .env より優先する resolver。Prod の domain / token は
+  // 静的な `.env` に書かず Secret Manager 経由で運用するため、Prod verify 時に
   // `FUGUE_URL=... FUGUE_SHARED_TOKEN=... pnpm exec tsx ...` で shell env が `.env` の
-  // local dev token を override できることが必須 (PR #126 Task 7 実行で判明した設計 bug 修正)。
+  // local dev token を override できることが必須 (Prod verify 実行で判明した設計 bug 修正)。
   //
   // readEnvFile は `.env` 優先 + `process.env` fallback の設計 (`src/env.ts:22-67`) で、
   // Slack token 等の常時保管系には向くが、Prod verify のような ad-hoc override には不向き。
