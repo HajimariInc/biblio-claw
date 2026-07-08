@@ -276,7 +276,7 @@ export const enkinBiblio: McpToolDefinition = {
   tool: {
     name: 'enkin_biblio',
     description:
-      '禁書: 棚から biblio を除去するが装備源 (`/workspace/biblios/<name>/` の本物実体) は残置する (= 再装備可)。`name` (biblio 名 `<owner>--<repo>`) + `category` (biblio-dev|art|bf|ai、shelve 時に決めた値) を渡す。**破壊操作なので host 側で admin (DEN) 承認を経由する** — 承認後に shelf 側へ削除方向の draft PR が立ち、PR URL が後続のメッセージで通知される。fire-and-forget。装備リストの変更は本 tool では行わない (= 禁書後も装備源 dir が残るため次 spawn でも biblio は装備される。物理削除して再装備不可にしたい場合は shokyaku_biblio を使うこと)。',
+      '禁書: 棚から biblio を除去するが装備源 (`/workspace/biblios/<name>/` の本物実体) は残置する (= 再装備可)。`name` (biblio 名 `<owner>--<repo>`) + `category` (biblio-dev|art|bf|ai、shelve 時に決めた値) を渡す。**破壊操作なので host 側で admin 承認を経由する** — 承認後に shelf 側へ削除方向の draft PR が立ち、PR URL が後続のメッセージで通知される。fire-and-forget。装備リストの変更は本 tool では行わない (= 禁書後も装備源 dir が残るため次 spawn でも biblio は装備される。物理削除して再装備不可にしたい場合は shokyaku_biblio を使うこと)。',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -320,7 +320,7 @@ export const shokyakuBiblio: McpToolDefinition = {
   tool: {
     name: 'shokyaku_biblio',
     description:
-      '焼却: 棚から biblio を除去し、装備源 (`/workspace/biblios/<name>/` の本物実体) も物理削除する (= 再装備不可)。`name` (biblio 名 `<owner>--<repo>`) + `category` (biblio-dev|art|bf|ai、shelve 時に決めた値) を渡す。**破壊操作なので host 側で admin (DEN) 承認を経由する** — 承認後に shelf 側へ削除方向の draft PR が立ち + host の装備源 dir が `fs.rmSync` で物理削除される。装備リストからも全 session で個別削除される (= 次回 spawn 以降の warn ノイズ抑制)。fire-and-forget — PR URL は後続のメッセージで通知される。',
+      '焼却: 棚から biblio を除去し、装備源 (`/workspace/biblios/<name>/` の本物実体) も物理削除する (= 再装備不可)。`name` (biblio 名 `<owner>--<repo>`) + `category` (biblio-dev|art|bf|ai、shelve 時に決めた値) を渡す。**破壊操作なので host 側で admin 承認を経由する** — 承認後に shelf 側へ削除方向の draft PR が立ち + host の装備源 dir が `fs.rmSync` で物理削除される。装備リストからも全 session で個別削除される (= 次回 spawn 以降の warn ノイズ抑制)。fire-and-forget — PR URL は後続のメッセージで通知される。',
     inputSchema: {
       type: 'object' as const,
       properties: {

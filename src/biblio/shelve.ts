@@ -384,7 +384,7 @@ function buildPrBody(biblioName: string, category: BiblioCategory, reason: strin
     `- [ ] biblio が棚 namespace 4 値の意味合いに沿っているか\n` +
     `- [ ] \`marketplace.json\` の entry が valid (= \`name\` / \`source\` / \`version\`)\n` +
     `- [ ] biblio ファイル群 (SKILL.md / plugin.json) が棚 root から正しい相対パスに配置されている\n\n` +
-    `> このリクエストは biblio-claw 司書が patron (DEN) 承認のもと自動生成しました。\n` +
+    `> このリクエストは biblio-claw 司書が patron 承認のもと自動生成しました。\n` +
     `> Co-Authored-By: Claude (Sonnet 4.6 on Vertex) <noreply@anthropic.com>\n`
   );
 }
@@ -416,7 +416,7 @@ function buildPrBodyMulti(reqs: MultiShelveItem[]): string {
     `- [ ] 各 biblio が棚 namespace 4 値の意味合いに沿っているか\n` +
     `- [ ] \`marketplace.json\` の各 entry が valid (= \`name\` / \`source\` / \`version\`)\n` +
     `- [ ] biblio ファイル群 (SKILL.md / plugin.json) が棚 root から正しい相対パスに配置されている\n\n` +
-    `> このリクエストは biblio-claw 司書が patron (DEN) 承認のもと自動生成しました。\n` +
+    `> このリクエストは biblio-claw 司書が patron 承認のもと自動生成しました。\n` +
     `> Co-Authored-By: Claude (Sonnet 4.6 on Vertex) <noreply@anthropic.com>\n`
   );
 }

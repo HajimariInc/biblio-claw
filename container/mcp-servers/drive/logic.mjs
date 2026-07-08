@@ -85,7 +85,7 @@ export function formatError(err) {
     hint
       = 'Drive フォルダの共有設定を確認。GSA '
       + `\`biblio-orchestrator@${gcpProjectId}.iam.gserviceaccount.com\` に `
-      + '「閲覧者」権限が付いていないと 403 になる。DEN さんに Drive の共有追加を依頼して。';
+      + '「閲覧者」権限が付いていないと 403 になる。patron に Drive の共有追加を依頼して。';
   } else if (status === 404) {
     hint = 'ファイル / フォルダが存在しない (削除済 or 存在しない ID)。';
   }
