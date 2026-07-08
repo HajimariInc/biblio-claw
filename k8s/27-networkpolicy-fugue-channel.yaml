@@ -1,4 +1,4 @@
-# Fugue channel Ingress/Egress NetworkPolicy (M4-E Phase 5)。
+# Fugue channel Ingress/Egress NetworkPolicy。
 #
 # 構成方針:
 # - orchestrator Pod (biblio-orchestrator StatefulSet) に Fugue endpoint (:8080) を露出させる
@@ -8,7 +8,7 @@
 #   (all-allowed) の状態から「明示的に許可した path のみ受ける」に切り替わるため、既存の
 #   cluster 内通信 (agent Pod → OneCLI :10254/:10255) を保つよう同 namespace の Pod からの
 #   ingress も明示追加する。
-# - Egress は目的別に 4 rule 分離 (issue #128 の hardening 済):
+# - Egress は目的別に 4 rule 分離 (hardening 済):
 #   (1) DNS: NodeLocal DNS (169.254.20.10/32) + kube-dns podSelector
 #   (2) Cloud SQL Auth Proxy: VPC peering CIDR + :3307 (cloud-sql-proxy sidecar 専用)
 #   (3) GCE metadata: 169.254.169.254 + :80 (WI 経路、orchestrator の keyless ADC 3 経路が要求)
@@ -16,7 +16,7 @@
 #   詳細は各 rule 直上のコメント参照。metadata (169.254.169.254) は agent Pod と違い
 #   本 orchestrator Pod では WI (Workload Identity) 経路で必須 (fetch-pem gcloud auth /
 #   cloud-sql-proxy sqladmin token / OneCLI Prisma IAM DB auth の 3 経路が要求、
-#   block すると全 keyless ADC が silent に死ぬ = PR #126 直後の broken state の cause)。
+#   block すると全 keyless ADC が silent に死ぬ (実測で判明した制約)。
 #
 # Dataplane V2 (Cilium) の制約:
 # - Pod-to-Pod は `ipBlock` で許可できない = `podSelector` / `namespaceSelector` で許可する
@@ -91,26 +91,26 @@ spec:
         - protocol: TCP
           port: 53
     # Cloud SQL Auth Proxy 経由の DB 接続 (cloud-sql-proxy sidecar → Cloud SQL private IP)
-    # - :3307 = Cloud SQL Admin API tunnel (必須、Phase 5 実 deploy で判明。runbook §罠 12 参照)
-    # - CIDR `10.191.0.0/16` = VPC peering allocation range (`gcloud compute addresses list
-    #   --filter=purpose:VPC_PEERING` で特定、実 instance IP `10.191.0.3` を含む range を issue #128
-    #   実装時に確定)。Cloud SQL の region 移設や peering 再割当で変わる可能性あり = その際は
-    #   再検証 + 本行更新が必要 (runbook §罠 12 の CIDR runtime 特定手順参照)。
+    # - :3307 = Cloud SQL Admin API tunnel (必須、cloud-sql-proxy が接続確立時に使用)
+    # - CIDR `${CLOUD_SQL_PEERING_CIDR}` = VPC peering allocation range (`gcloud compute
+    #   addresses list --filter=purpose:VPC_PEERING` で特定、実 instance IP はこの range 内)。
+    #   Cloud SQL の region 移設や peering 再割当で変わる可能性あり = その際は
+    #   再検証 + 本行更新が必要 (peering CIDR の特定は上記 gcloud コマンドで実施)。
     # 注: :5432 は cloud-sql-proxy の localhost listen 用であり Pod 外 dial 対象外のため rule から
-    #     除去 (issue #128、削除後の動作は 5 assertion で実機立証)。
+    #     除去 (削除後の動作は assertion で実機立証済)。
     - to:
         - ipBlock:
-            cidr: 10.191.0.0/16
+            cidr: ${CLOUD_SQL_PEERING_CIDR}
       ports:
         - protocol: TCP
           port: 3307
     # GCE metadata server (WI proxy 経路、iptables で kube-system/gke-metadata-server にリダイレクト)
     # - fetch-pem initContainer (gcloud secrets versions access) が WI で ADC 解決
     # - cloud-sql-proxy sidecar が sqladmin API token を取得 (instance metadata refresh)
-    # - OneCLI Prisma が IAM DB auth token を取得 (biblio-orchestrator@...iam)
+    # - OneCLI Prisma が IAM DB auth token を取得 (orchestrator GSA 経由)
     # agent Pod (60-netpol-agent-egress.yaml) は OneCLI 経由前提のため block できたが、
-    # orchestrator は WI 直接使うため許可必須 (issue #128 実装時に WI 死のため block 解除、
-    # PR #126 で agent egress pattern から継承した設計ミスの是正、runbook §罠 12 参照)。
+    # orchestrator は WI 直接使うため許可必須 (block すると WI 死のため許可、
+    # agent egress pattern から継承した block を解除する設計判断)。
     - to:
         - ipBlock:
             cidr: 169.254.169.254/32

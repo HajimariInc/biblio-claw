@@ -1,4 +1,4 @@
-# Fugue channel GCE Ingress (M4-E Phase 5)。
+# Fugue channel GCE Ingress。
 #
 # 構成方針:
 # - GCE Ingress + `pre-shared-cert` annotation パターン (Gateway API は Google-managed cert の
@@ -16,10 +16,11 @@
 #     --project=${GCP_PROJECT_ID})
 #   envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
 #
-# 前提: `envsubst` (`gettext` package) がインストール済。WSL2 AlmaLinux 9 では
-#   `sudo dnf install gettext` で導入 (未インストールなら sh error で気付ける)。
+# 前提: `envsubst` (`gettext` package) がインストール済 (未インストールなら sh error で気付ける)。
+#   代表的な導入手順は distro package manager 経由 (Debian/Ubuntu: `apt install gettext` /
+#   RHEL 系: `dnf install gettext` / macOS: `brew install gettext`)。
 #
-# Apply 順序 (docs/operations-runbook.md §M4-E Phase 5、Phase 5 実 deploy で罠 13 判明後の確定順序):
+# Apply 順序 (実 deploy で判明した managed-cert PROVISIONING 制約に基づく確定順序):
 #   1. Terraform apply (static IP + Endpoints Service + cert + Secret Manager 2 個)
 #   2. Cloud Endpoints DNS 反映待ち (.cloud.goog = 通常 5-10 分)
 #   3. K8s Secret 手動 sync (biblio-fugue-shared-token)
@@ -29,7 +30,7 @@
 #   7. Ingress apply (本 file、envsubst 経由) ← NEG + backend health 反映は最大 5 分
 #   8. Cert Active 化待ち (Ingress apply 後の 15-30 分、最大 60 分) ← Ingress apply が
 #      **cert Active の前提条件** (LB backend authorization 経由)、Step 7 より前に待つと
-#      `PROVISIONING` + `FAILED_NOT_VISIBLE` で無限 stuck (runbook §罠 13)
+#      `PROVISIONING` + `FAILED_NOT_VISIBLE` で無限 stuck (managed-cert が DNS 反映を待つ制約)
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
