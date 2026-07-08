@@ -193,7 +193,7 @@ CREATE TABLE container_state (
 **Read consumers** (host 側、readonly open):
 
 - `src/host-sweep.ts:decideStuckAction` — `Bash` 宣言 timeout の間は stuck-detection tolerance を広げる (kill-idle を発火させない)。
-- `src/modules/progress-status/poller.ts:refreshProgressStatus` (M4-F Phase 4 追加) — `src/delivery.ts:pollActive` の 1s tick で `current_tool` を読み `tool-status-map` で日本語文言に変換して `updateTypingStatus` に forward。Slack 進行ステート表示 (`assistant.threads.setStatus`) の駆動源。
+- `src/modules/progress-status/poller.ts:refreshProgressStatus` (Slack 進行ステート表示対応で追加) — `src/delivery.ts:pollActive` の 1s tick で `current_tool` を読み `tool-status-map` で日本語文言に変換して `updateTypingStatus` に forward。Slack 進行ステート表示 (`assistant.threads.setStatus`) の駆動源。
 
 **書き込み契約**: コンテナ内 agent-runner のみ書き込む (host は書かない)。read 失敗 (`no such table` / I/O 障害) は `getContainerState()` が `null` fallback + `log.warn` で報告 (PR #145 review silent-failure CR-2 対応)、呼出側は「tool 未実行」扱いで動作継続する best-effort 契約。
 

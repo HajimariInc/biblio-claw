@@ -442,7 +442,9 @@ Central DB セッション行作成がシリアライゼーションポイント
 
 **システムアクション:** エージェントが MCP ツールを使う(group 登録、セッションリセット、タスクスケジュール 等)。Agent-runner がこれらのツール呼び出しを扱い、`kind: 'system'` 付きの構造化された決定的な messages_out 行を書く。これは自然言語ではない — host が決定的に処理するプログラマティックな構造化ペイロード。Host が権限を検証し、実行し、結果を `system` messages_in 行として書き戻す。
 
-**コンテナライフサイクル:** ウォームプール無し。コンテナはオンデマンド(wakeUpAgent)で spawn され、idle 時に host が外から teardown する。teardown 経路は `src/host-sweep.ts` の `decideStuckAction` に集約され、stuck 検知の `kill-ceiling` (= 30 min、`ABSOLUTE_CEILING_MS`) を最後の砦として温存しつつ、conversation-done container を解放する `kill-idle` (= 既定 5 min、`AGENT_IDLE_THRESHOLD_MS` で上書き可、claims 空 + Bash 未宣言が前提) を直交 path として持つ。`kill-idle` は GKE で agent Pod が orchestrator PVC の zone affinity を継承する制約 (= 同 zone の resident Pod が新規 spawn 要求を memory 枯渇で starve させる) を緩和する目的で biblio-claw が追加した path。
+**コンテナライフサイクル:** ウォームプール無し。コンテナはオンデマンド(wakeUpAgent)で spawn され、idle 時に host が外から teardown する。teardown 経路は `src/host-sweep.ts` の `decideStuckAction` に集約され、stuck 検知の `kill-ceiling` (= 30 min、`ABSOLUTE_CEILING_MS`) を最後の砦として温存しつつ、conversation-done container を解放する `kill-idle` (= 既定 5 min、`AGENT_IDLE_THRESHOLD_MS` で上書き可、claims 空 + Bash 未宣言が前提) を直交 path として持つ。
+
+> **biblio-claw 追加**: `kill-idle` path は biblio-claw が GKE 運用向けに追加したもので、agent Pod が orchestrator PVC の zone affinity を継承する制約 (= 同 zone の resident Pod が新規 spawn 要求を memory 枯渇で starve させる) を緩和する目的で導入した。上流 NanoClaw は `kill-ceiling` のみを持つ。
 
 ## 運用挙動
 

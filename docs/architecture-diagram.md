@@ -70,6 +70,8 @@ flowchart TB
   Provider -.API calls.-> Vault
 ```
 
+> **biblio 系 tool の解説**: `acquire_biblio` / `inspect_biblio` / `categorize_biblio` / `shelve_biblio` / `enkin_biblio` / `shokyaku_biblio` / `list_biblio` は biblio-claw 独自 MCP tool。命名の意味は [`glossary.md`](glossary.md) を参照。
+
 ## メッセージフロー (inbound -> agent -> outbound)
 
 ```mermaid

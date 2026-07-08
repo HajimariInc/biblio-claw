@@ -1,6 +1,6 @@
 # セットアップ配線 — 状況と残作業
 
-最終更新:2026-06-11 (Phase 1 完了反映)
+最終更新:2026-06-11
 
 ## 完了済み
 
@@ -25,8 +25,8 @@
 - `src/index.ts` が `./channels/index.js`(barrel)を import する
 - 上流 NanoClaw: trunk は barrel + Chat SDK ブリッジのみを出荷;`/add-<channel>` skill が adapter ファイルを置いて、barrel スロット経由で登録する
 - 上流 NanoClaw: trunk に channel adapter は同梱されない
-- **biblio-claw**: Slack adapter (`src/channels/slack.ts`) を trunk に直接コミット済 (Phase 1 Task 7-A、PR #4)。`setup/add-slack.sh` 経由で取り込んだ adapter を trunk = `main` にコミットする運用 (CLAUDE.md §チャネルと provider §biblio-claw 流の運用)
-- **biblio-claw (第 2 例)**: Fugue channel adapter (`src/channels/fugue.ts` + `fugue-http.ts` + `fugue-schemas.ts`、M4-E) も同方針で trunk に直接コミット済。ただし Fugue は upstream 由来の channel ではなく biblio-claw 固有の新規 HTTP adapter のため `setup/add-<channel>.sh` に相当する取り込み元は存在しない (= ゼロから実装)
+- **biblio-claw**: Slack adapter (`src/channels/slack.ts`) を trunk に直接コミット済。`setup/add-slack.sh` 経由で取り込んだ adapter を trunk = `main` にコミットする運用 (CLAUDE.md §チャネルと provider §biblio-claw 流の運用)
+- **biblio-claw (第 2 例)**: Fugue channel adapter (`src/channels/fugue.ts` + `fugue-http.ts` + `fugue-schemas.ts`) も同方針で trunk に直接コミット済。ただし Fugue は upstream 由来の channel ではなく biblio-claw 固有の新規 HTTP adapter のため `setup/add-<channel>.sh` に相当する取り込み元は存在しない (= ゼロから実装)
 
 ### セットアップ登録(部分的)
 - `setup/register.ts` が `data/v2.db` にエンティティ(`agent_groups`、`messaging_groups`、`messaging_group_agents`)を作成する
@@ -92,7 +92,7 @@ channel adapter → routeInbound() → messaging_group を解決 → messaging_g
 | ファイル | 役割 |
 |------|---------|
 | `src/index.ts` | エントリーポイント、channel barrel を import |
-| `src/channels/index.ts` | Channel barrel — 上流 NanoClaw ではレジストリ / Chat SDK ブリッジのみ (skill が adapter を置く) / biblio-claw では Slack adapter + Fugue channel adapter (M4-E) を直接コミット済 |
+| `src/channels/index.ts` | Channel barrel — 上流 NanoClaw ではレジストリ / Chat SDK ブリッジのみ (skill が adapter を置く) / biblio-claw では Slack adapter + Fugue channel adapter を直接コミット済 |
 | `src/router.ts` | 受信ルーティング、messaging group を自動作成 |
 | `src/session-manager.ts` | セッションごとに inbound.db + outbound.db を作成 |
 | `src/delivery.ts` | outbound.db を poll、配信、システムアクション処理 |

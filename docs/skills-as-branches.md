@@ -1,5 +1,7 @@
 # ブランチとしての Skill
 
+> **注記**: これは NanoClaw 上流の feature skill 配布モデルの説明。biblio-claw は本モデルを踏襲する。
+
 ## 概要
 
 本ドキュメントは **feature skill** をカバーする — git ブランチの merge 経由で機能を追加する skill。これは最も複雑な skill タイプであり、NanoClaw を拡張する主要な方法である。
