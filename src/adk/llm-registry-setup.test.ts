@@ -1,5 +1,5 @@
 /**
- * llm-registry-setup のユニットテスト (M4-B Phase 0)。
+ * llm-registry-setup のユニットテスト。
  *
  * `LLMRegistry` は ADK の static `Map` を持つ singleton なので、test 間で内部状態が残る。
  * `_testResetRegistration()` を `beforeEach` で呼び module-scope `registered` flag だけ

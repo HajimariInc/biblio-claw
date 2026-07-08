@@ -96,7 +96,7 @@ export async function shutdownOtel(): Promise<void> {
   // 順序が重要 — stopTokenRefresh() を先に呼ぶと cachedToken = null に落ち、
   // BatchSpanProcessor._flushAll() の最終 flush 中に headers factory が空 Bearer を返して
   // 401 → 直近 span (max maxQueueSize=256 件) が silent drop する。sdkInstance.shutdown() で
-  // pending span を flush してから token を破棄する。issue #104 review Wave 1 で発見。
+  // pending span を flush してから token を破棄する (issue #104 で発見)。
   if (!sdkInstance) {
     stopTokenRefresh();
     cachedTokenNullWarned = false;

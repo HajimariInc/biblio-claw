@@ -14,8 +14,7 @@ import { trace } from '@opentelemetry/api';
  *  Console "View trace" リンクが Cloud Trace UI に正常遷移することを目視確認。BQ sink
  *  の top-level `trace` 列も `projects/<PROJECT_ID>/traces/<32-hex>` 形式に自動昇格
  *  される (Fluent Bit / Cloud Logging 取り込み層が projectId を補完)。scripts/verify-m4-a.sh
- *  Section 5.5 で regression 検知。詳細は docs/operations-runbook.md §M4-A Phase 2
- *  log↔trace 連携。 */
+ *  Section 5.5 で regression 検知。詳細は docs/operations-runbook.md §log↔trace 連携。 */
 export function getTraceLogFields(): Record<string, unknown> {
   const span = trace.getActiveSpan();
   if (!span) return {};

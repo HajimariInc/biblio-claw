@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 4 progress-status module 公開 API。
+ * progress-status module 公開 API。
  *
  * 内部モジュール構成:
  *   - `tool-status-map.ts` — tool 名 → 日本語文言 の pure mapper

@@ -1,5 +1,5 @@
 /**
- * dispatcher.ts のユニットテスト (M4-B Phase 3 + Phase 4 HITL 統合).
+ * dispatcher.ts のユニットテスト (HITL 統合).
  *
  * Phase 4 で `runEphemeral` → `sessionService.createSession + runner.runAsync` に切替。
  * mock 対象:

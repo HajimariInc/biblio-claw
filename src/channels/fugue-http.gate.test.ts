@@ -1,5 +1,5 @@
 /**
- * Fugue HTTP server の M4-F Phase 2 gate 挿入 integration test。
+ * Fugue HTTP server の gate 挿入 integration test。
  *
  * fugue-http.test.ts の mock pattern (listBiblio / shelf-gh / fugue-equipped-biblios) を写経し、
  * gate 判定 (`../gate/gate.js`) と notify-admin を追加 mock。実 HTTP fetch で以下を検証:
@@ -256,8 +256,8 @@ describe('Fugue gate - GATE_ENABLED=true + in-secure → 200 + status:error + wa
     expect(body.warnings).not.toContain('input rejected by input gate');
     expect(body.status).toBe('ok');
 
-    // silent-failure-hunter S4 + I5 対応: fail-open が behavior だけでなく observability contract
-    // を守っていることも assert (log.warn + audit error 両方発火)
+    // fail-open が behavior だけでなく observability contract を守っていることも assert
+    // (log.warn + audit error 両方発火)
     expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
       expect.stringContaining('gate unexpected throw'),
       expect.objectContaining({ event: 'fugue.consult.gate_unexpected_throw' }),

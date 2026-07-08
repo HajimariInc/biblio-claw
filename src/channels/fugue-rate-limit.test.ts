@@ -1,9 +1,8 @@
 /**
  * Fugue ask rate limit helper の unit test。
  *
- * M4-H Phase 4 Task 7: sliding window boundary / GC / retryAfterSec / disable escape
- * hatch / Map key 分離 / env override / tokenDigest / isFugueAskRateLimitDisabled の
- * 10 case を assert。
+ * sliding window boundary / GC / retryAfterSec / disable escape hatch / Map key 分離 /
+ * env override / tokenDigest / isFugueAskRateLimitDisabled の 10 case を assert。
  *
  * fake timers を使わない (helper が `nowMs` 引数を受け取る同期関数のため、明示指定で
  * 決定性を確保できる)。beforeEach で必ず `_resetFugueRateLimitForTest()` + env 3 種の

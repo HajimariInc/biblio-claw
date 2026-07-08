@@ -57,13 +57,13 @@ const deliveryAttempts = new Map<string, number>();
 const inflightDeliveries = new Set<string>();
 
 /**
- * M4-F Phase 5: `ncl messages send --stub-outbound` の verify 経路で
+ * `ncl messages send --stub-outbound` の verify 経路で
  * 実 channel deliver を silent skip するための target set。
  *
  * key = `${agentGroupId}:${channelType}:${platformId}` の **3-tuple** (agent_group_id +
  * channel_type + platform_id)。thread_id は key から意図的に除外する。
  *
- * **PR #154 review CR-1 対応**: 従来 4-tuple (thread_id を含む) だったが、hybrid Slack DM
+ * 3-tuple 化の背景: 従来 4-tuple (thread_id を含む) だったが、hybrid Slack DM
  * (`init-hybrid-agent.ts:240`) が `session_mode: 'shared'` で wire されている実運用では、
  * `resolveSession` (`src/session-manager.ts:101,111,174`) が `thread_id = null` に強制する。
  * この `null` が `writeSessionRouting` → agent-runner の `getSessionRouting` → 応答の
@@ -229,7 +229,7 @@ async function pollActive(): Promise<void> {
     const sessions = getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
-      // M4-F Phase 4: container_state.current_tool を 1s poll で読んで typing status を更新。
+      // container_state.current_tool を 1s poll で読んで typing status を更新。
       // deliverSessionMessages と直列で問題ない (inflightDeliveries は delivery 用の別集合、
       // refreshProgressStatus は同期実行 + updateTypingStatus の変化時 no-op で吸収)。
       // best-effort: progress-status failure は delivery を殺さない。
@@ -291,8 +291,8 @@ async function drainSession(session: Session): Promise<void> {
     // それ以外 (EACCES / EMFILE / EIO 等の パーミッション / I/O エラー) は本番
     // LOG_LEVEL=info でも見える warn に倒す。
     // 当初は ENOENT のみ debug 分岐で、SQLITE_CANTOPEN (better-sqlite3 readonly open 特有)
-    // が warn に落ちて cold start ごとにノイズが出ていた (PR #145 review type-design C-4
-    // 実測)。poller.ts の SQLITE_CANTOPEN 判定 (C3) と対称に是正。
+    // が warn に落ちて cold start ごとにノイズが出ていた実測経路。
+    // poller.ts の SQLITE_CANTOPEN 判定と対称に是正。
     const code = (err as NodeJS.ErrnoException)?.code;
     const ctx = { session_id: session.id, agent_group_id: agentGroup.id, err_code: code, err };
     if (isPreSpawnDbOpenError(code)) {
@@ -474,16 +474,16 @@ async function deliverMessage(
     return;
   }
 
-  // M4-F Phase 5: verify 用 stub-outbound の skip 分岐。verify 中に `ncl messages send
+  // verify 用 stub-outbound の skip 分岐。verify 中に `ncl messages send
   // --stub-outbound` から key を仕込むと、この session への実 channel deliver を silent
   // skip する (production 経路は Set 空 = 常に false = 挙動不変)。stub 対象は
   // markDelivered だけ通り、outbox cleanup も走らせる (通常 deliver の副作用と対称)。
-  // PR #154 review CR-1 対応: key は 3-tuple (agent_group_id + channel_type + platform_id)
-  // で thread_id を含めない。詳細は stubTargetKey の JSDoc を参照。
-  // PR #154 review S8 対応: log level を debug → info に格上げ。本番 `LOG_LEVEL=info` でも
-  // Cloud Logging に届くようにして「verify 中に何を skip したか」の運用調査を可能に。
-  // issue #155 案 B/F 対応: 3-tuple (既存) と 2-tuple (新設) の OR 判定で二重防御。
-  // session 経路の agent_group_id 不整合による key mismatch (案 F 症状) を吸収する。
+  // key は 3-tuple (agent_group_id + channel_type + platform_id) で thread_id を
+  // 含めない。詳細は stubTargetKey の JSDoc を参照。
+  // log level は info。本番 `LOG_LEVEL=info` でも Cloud Logging に届くようにして
+  // 「verify 中に何を skip したか」の運用調査を可能にする。
+  // issue #155 で 3-tuple (既存) と 2-tuple (新設) の OR 判定で二重防御。
+  // session 経路の agent_group_id 不整合による key mismatch を吸収する。
   if (
     isStubOutboundTarget(session.agent_group_id, msg.channel_type, msg.platform_id) ||
     isStubDeliveryByMg(msg.channel_type, msg.platform_id)

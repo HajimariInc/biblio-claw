@@ -36,18 +36,16 @@
  *   - 部分失敗経路は consult と対称 = `listBiblio` throw / DB write throw どちらも 200 +
  *     `status:'error'` + `warnings`、5xx は 401/413/500 (uncaught) に限定
  *
- * M4-H Phase 1 の scope (ask skeleton):
+ * ask endpoint skeleton の scope:
  *   - `handleAsk`: `FugueAskRequest` (query + optional intent + optional context_hint) 受理 →
  *     Zod parse (400 validation) → `withFugueEntrySpan('ask', ...)` → 固定 shape reply の 3 段
- *   - Phase 1 skeleton は skeleton_response marker を warnings に含む固定 reply を返す
- *     (backend / rate limit は Phase 3-4 で追加)
  *   - `writeJson` 直前に `FugueAskReply.safeParse` で self-validation を挟み、fail 時は
  *     `status:'error'` + warnings に理由を積んで 200 fallback (AD の本義: 5xx を出さない、
  *     内部整合性欠損を Fugue 側に silent に流さない)
- *   - biblio.<action> 相乗り span は張らない (backend 未接続、TODO(M4-H Phase 3) で
+ *   - biblio.<action> 相乗り span は張らない (backend 未接続、TODO: backend 結線完了時に
  *     withBiblioActionSpan('ask', ...) 追加検討)
  *
- * M4-H Phase 2 の scope (ask gate 統合):
+ * ask gate 統合の scope:
  *   - `handleAsk` の `withFugueEntrySpan('ask', ...)` コールバック先頭に gate 4 層通過ロジック
  *     を挿入 (`handleConsult` / `handleEquip` の gate 挿入ブロック写経、3 つ目の対称コピー)
  *   - in-secure 判定時は 200 + `status:'denied'` + `warnings:[AD_ASK_DENIED_BY_GATE]` +
@@ -146,21 +144,21 @@ const ASK_PATH = '/v1/channels/fugue/ask';
  *   `fugue-http.test.ts` の 3 case で固定化)。
  * - method 分岐なし = LB からの HEAD probe も allow。
  * - attack surface: 応答内容は `"ok"` のみ、path 存在漏洩は health check として業界標準運用。
- * - PR #126 review 対応 (C1+C2+C3): 本 endpoint は GCE LB backend health check 経由 (35.191.0.0/16
- *   + 130.211.0.0/22 から到達) でのみ叩かれる。K8s の readiness/livenessProbe は
- *   `k8s/10-orchestrator-statefulset.yaml` で exec `test -f /tmp/host-ready` に統一済 =
- *   本 endpoint に到達しない (Fugue silent skip 経路の crash loop 転化を防ぐため)。
+ * - 本 endpoint は GCE LB backend health check 経由 (35.191.0.0/16 + 130.211.0.0/22 から到達)
+ *   でのみ叩かれる。K8s の readiness/livenessProbe は `k8s/10-orchestrator-statefulset.yaml` で
+ *   exec `test -f /tmp/host-ready` に統一済 = 本 endpoint に到達しない (Fugue silent skip 経路
+ *   の crash loop 転化を防ぐため)。
  */
 const HEALTHZ_PATH = '/healthz';
 /**
- * Request body の最大バイト数 (1 MiB)。Phase 2 の consult payload は小さい (query 500 char +
- * context_hint dict) ため余裕。TODO(M4-E Phase 5+): 実運用サイズが判明したら見直す。
+ * Request body の最大バイト数 (1 MiB)。consult payload は小さい (query 500 char +
+ * context_hint dict) ため余裕。TODO: 実運用サイズが判明したら見直す。
  * 上限超過は 413 Payload Too Large + log.warn。
  */
 const MAX_BODY_SIZE_BYTES = 1024 * 1024;
 
 /**
- * M4-H Phase 3 ask endpoint 用の agent-container polling 定数。
+ * ask endpoint 用の agent-container polling 定数。
  *
  * - `FUGUE_ASK_POLL_INTERVAL_MS`: outbound.db を poll する tick 間隔 (500ms)。
  *   `src/cli/resources/messages.ts:pollOutbound` の同名定数と揃える (verify での一貫性、
@@ -177,10 +175,10 @@ const FUGUE_ASK_DEFAULT_TIMEOUT_MS = 90_000;
 const ASK_RESPONSE_RE = /<ask-response>([\s\S]*?)<\/ask-response>/;
 
 /**
- * M4-H Phase 3: fugue-ask 用の agent group folder / synthetic messaging_group platform_id。
+ * fugue-ask 用の agent group folder / synthetic messaging_group platform_id。
  * `scripts/init-fugue-ask-agent.ts` の同名 literal と一致させる (drift を防ぐため、次期に
  * `src/config.ts` へ集約するのが理想だが、cross-file 依存の cyclical import 懸念があるため
- * Phase 3 では両 file に literal を持たせる方針)。
+ * 現状は両 file に literal を持たせる方針)。
  */
 const FUGUE_ASK_AGENT_FOLDER = 'fugue-ask-biblio-shisho';
 const FUGUE_ASK_MG_PLATFORM_ID = 'fugue-ask-mg';
@@ -310,9 +308,9 @@ function writeError(res: http.ServerResponse, status: number, body: FugueErrorRe
 /**
  * Fugue endpoint (consult / equip / ask) の request body を読み、Zod で検証し、data を返す共通ヘルパ。
  *
- * 目的 (PR #135 review 提案 10、code-simplifier): consult と equip の冒頭 44 行が operation 名
- * (event log field) と schema 以外は完全に同一実装だった。手書き複製のため片方だけ直す
- * regression の温床 (413/400 分岐が equip 側でテスト対象外だった Important 6 と根同じ)。ヘルパ化で
+ * 目的: consult と equip の冒頭 44 行が operation 名 (event log field) と schema 以外は完全に
+ * 同一実装だった。手書き複製のため片方だけ直す regression の温床 (413/400 分岐が equip 側で
+ * テスト対象外だった問題と根同じ)。ヘルパ化で
  *   - 乖離リスクを構造的に消す (consult / equip / ask の分岐は 1 箇所に集約)
  *   - equip 側の 413/400 テストは `parseFugueRequest` に対して 1 度書けば全 endpoint をカバー
  *   - event 名は `fugue.${operation}.body_too_large` 等の string interpolation で維持 = ランタイム
@@ -387,7 +385,7 @@ async function parseFugueRequest<T>(
 
 /**
  * `query` を `ListBiblioItem` の name + description に case-insensitive substring match
- * する。TODO(M4-E Phase 5+): LLM 経由の意図抽出に切り替え、substring match は fallback に。
+ * する。TODO: LLM 経由の意図抽出に切り替え、substring match は fallback に。
  */
 function queryMatches(item: ListBiblioItem, query: string): boolean {
   const q = query.toLowerCase();
@@ -399,8 +397,8 @@ function queryMatches(item: ListBiblioItem, query: string): boolean {
  *
  * - `manifest_url`: 棚 GitHub tree URL に組み立て (biblio-claw 側で組み立て、Fugue 側は
  *   URL を UI で表示する用途を想定)。
- * - `equipped`: Phase 3 で `fugue_equipped_biblios` (channel-scoped store) の membership に
- *   基づき決定。`equippedNames` に item.name が含まれるかどうかで判定 (Set の O(1) lookup)。
+ * - `equipped`: `fugue_equipped_biblios` (channel-scoped store) の membership に基づき決定。
+ *   `equippedNames` に item.name が含まれるかどうかで判定 (Set の O(1) lookup)。
  *   equip 側からも `equip 対象の 1 件` を単独 SkillRef 化するために再利用される
  *   (`toSkillRefs([item], owner, repo, new Set([item.name]))[0]` の形)。
  * - `limit`: Fugue 側 skills_found の推奨上限 (= 10 件)。10 件で cut off。
@@ -424,15 +422,15 @@ function toSkillRefs(
 /**
  * Fugue LLM 発話素材用の `summary` を生成する (500 字以内、日本語テンプレート)。
  *
- * Phase 2 では LLM は使わず、件数 / カテゴリ内訳 / 上位 3 件名を構造化した日本語文で
+ * 現状は LLM は使わず、件数 / カテゴリ内訳 / 上位 3 件名を構造化した日本語文で
  * 返す。500 字超過は `.slice(0, 497) + '...'` で trim する。
  *
  * NOTE: trim 境界の safety について。テンプレート固定部と `topNames` (= item.name、
  * BIBLIO_NAME_RE で ASCII に制約済) は絵文字を含まないが、`query` は Fugue 側からの
  * 自由入力 (文字種制約なし) なので絵文字を含みうる。500 字超過時に truncation 境界が
  * `query` 由来の surrogate pair 中間に来る可能性は理論上残る (mojibake 応答になるが
- * Fugue 側 UI 表示レベルで問題にならない範囲、Phase 2 では許容)。
- * TODO(M4-E Phase 5+): Fugue LLM 生成に置換して trim ロジック自体を撤去。
+ * Fugue 側 UI 表示レベルで問題にならない範囲、現状は許容)。
+ * TODO: Fugue LLM 生成に置換して trim ロジック自体を撤去。
  */
 function summarizeConsult(
   result: ListBiblioResult,
@@ -496,8 +494,7 @@ export class FugueHttpServer {
     // Note: `this.server = server` は listen 成功後に代入する。listen 失敗時は catch で
     // `this.server` を null 状態に保つ = 再度 `start()` が呼ばれた際に (1)「既に起動済」と
     // 誤判定して偽の成功を返す silent failure 撲滅 + (2) 実際に再試行される (start() の
-    // 冪等契約が listen 失敗後の再呼出でも実質的に成立する、silent-failure-hunter 指摘、
-    // PR #135 review Important 2)。
+    // 冪等契約が listen 失敗後の再呼出でも実質的に成立する)。
     try {
       await new Promise<void>((resolve, reject) => {
         server.once('error', reject);
@@ -521,7 +518,7 @@ export class FugueHttpServer {
     } catch (err) {
       // listen 失敗 (EADDRINUSE / EACCES 等) → server は listen 前の状態のまま。this.server を
       // 「未起動」に戻すことで、次の start() 呼出が「if (this.server)」で早期 return せず、
-      // 実際に listen を再試行できる状態を保つ (silent-failure-hunter 指摘)。
+      // 実際に listen を再試行できる状態を保つ。
       this.server = null;
       throw err;
     }
@@ -567,8 +564,8 @@ export class FugueHttpServer {
     }
 
     // /healthz は auth check + log.info より前に返す (詳細は `HEALTHZ_PATH` の JSDoc)。
-    // try/catch で包む理由 (PR #126 review I3): `writeHead`/`end` 失敗時に
-    // `unhandledRejection` 経由の汎用ログ (`channel:'fugue'` タグなし) に落ちるのを防ぐ。
+    // try/catch で包む理由: `writeHead`/`end` 失敗時に `unhandledRejection` 経由の汎用ログ
+    // (`channel:'fugue'` タグなし) に落ちるのを防ぐ。
     // 応答済 (`headersSent`) なら silent に閉じる (実害なし、他 catch 経路と対称)。
     if (pathname === HEALTHZ_PATH) {
       try {
@@ -643,17 +640,17 @@ export class FugueHttpServer {
       }
       const runInContext = <T>(fn: () => Promise<T>): Promise<T> => context.with(extractedCtx, fn);
 
-      // M4-H Phase 4: rate limit gate (ASK_PATH のみ対象、consult/equip は Phase 4 スコープ外
-      // として構造的 bypass = PRD 意思決定 #7)。auth 通過 + trace 継承済み位置で挿入 = healthz
-      // は影響を受けない (前段の early-return で処理済み、`HEALTHZ_PATH` 分岐)。
+      // rate limit gate (ASK_PATH のみ対象、consult/equip は構造的 bypass = PRD 意思決定 #7)。
+      // auth 通過 + trace 継承済み位置で挿入 = healthz は影響を受けない (前段の early-return
+      // で処理済み、`HEALTHZ_PATH` 分岐)。
       //
-      // **粒度 (review 中 1 対応)**: key として `this.opts.expectedToken` (= server 側 constant、
-      // Fugue と共有する Bearer token 1 つ) を tokenDigest 化するため、認証通過した全 request が
-      // 同一 digest に集約される = 実質「**per biblio-claw instance の global 60 req/min rate
-      // limit**」として動作 (Contract §5.6 の cost 保護意図)。将来 multi-caller / per-tenant 化
-      // する場合は request 由来の Bearer (auth 通過時の `req.headers.authorization`) を渡すよう
-      // 切り替えるだけで helper 本体は無変更で対応可能。詳細は `fugue-rate-limit.ts` の module
-      // docstring §粒度 参照。
+      // **粒度**: key として `this.opts.expectedToken` (= server 側 constant、Fugue と共有する
+      // Bearer token 1 つ) を tokenDigest 化するため、認証通過した全 request が同一 digest に
+      // 集約される = 実質「**per biblio-claw instance の global 60 req/min rate limit**」として
+      // 動作 (Contract §5.6 の cost 保護意図)。将来 multi-caller / per-tenant 化する場合は
+      // request 由来の Bearer (auth 通過時の `req.headers.authorization`) を渡すよう切り替える
+      // だけで helper 本体は無変更で対応可能。詳細は `fugue-rate-limit.ts` の module docstring
+      // §粒度 参照。
       //
       // `Retry-After` header は writeError の前に setHeader = writeError 内の writeHead は
       // 'Content-Type' のみを引数で渡し、setHeader 済み分は Node.js の http.ServerResponse
@@ -734,20 +731,20 @@ export class FugueHttpServer {
       context_hint_keys: Object.keys(context_hint ?? {}),
     });
 
-    // 2 段 span 構造 (Phase 4、review C1 対応で明示):
-    //   fugue.consult (Phase 4 で新設、kind=INTERNAL、channel='fugue')
-    //     └─ biblio.list (既存、kind=INTERNAL、M4-A `biblio.<action>` 集計に channel-agnostic に相乗り)
+    // 2 段 span 構造:
+    //   fugue.consult (kind=INTERNAL、channel='fugue')
+    //     └─ biblio.list (kind=INTERNAL、`biblio.<action>` 集計に channel-agnostic に相乗り)
     // auto HTTP POST server span 層 (kind=SERVER、HttpInstrumentation 経由) は本 repo の ESM
     // + `--import` 起動構成では現状発火せず (require-in-the-middle 依存 + `module.register()`
-    // 未整備)、Phase 5 で ESM フック追加 or 2 段構造を正式仕様として運用の判断予定。
-    // 詳細: `docs/operations-runbook.md` §M4-E Phase 4 §関連する scope 境界。
+    // 未整備)、2 段構造を正式仕様として運用する判断。詳細: `docs/operations-runbook.md`
+    // §Fugue channel 運用 §関連する scope 境界。
     // sessionId は Fugue に session 概念なし = 空文字 (action-helpers.ts の signature が空文字を許容)。
     await withFugueEntrySpan('consult', request_id, async (fugueSpan) => {
       fugueSpan.setAttribute('fugue.mode', mode);
 
-      // M4-F Phase 2 gate 挿入 (consult): query を 4 層評価。in-secure なら 200 + status:'error'
-      // + warnings + raw.reason: 'in_secure' で応答 (AD の本義 契約: 5xx は認可 / 上限超過 /
-      // biblio-claw 自体の応答不能に限定)。gate 未有効時は skip = 従来経路継続。
+      // gate 挿入 (consult): query を 4 層評価。in-secure なら 200 + status:'error' + warnings
+      // + raw.reason: 'in_secure' で応答 (AD の本義 契約: 5xx は認可 / 上限超過 / biblio-claw
+      // 自体の応答不能に限定)。gate 未有効時は skip = 従来経路継続。
       if (isGateEnabled()) {
         let gateResult: GateResult | null = null;
         try {
@@ -1002,16 +999,16 @@ export class FugueHttpServer {
   }
 
   private async handleEquip(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    // Phase 3: equip full spec 実装 (handleConsult の構造を機械踏襲、判断 D-J)。
+    // equip full spec 実装 (handleConsult の構造を機械踏襲)。
     // Fugue 契約 §5.3 の FugueEquipRequest/Reply を満たす。
     const startedAt = performance.now();
 
-    // body 読取り + Zod 検証 + 413/400 応答は `parseFugueRequest` に集約 (提案 10、consult 側と共通)。
+    // body 読取り + Zod 検証 + 413/400 応答は `parseFugueRequest` に集約 (consult 側と共通)。
     const parsed = await parseFugueRequest<FugueEquipRequestT>(req, res, FugueEquipRequest, 'equip');
     if (!parsed) return;
     const { request_id, skill_id } = parsed;
 
-    // BIBLIO_NAME_RE guard (判断 F): safeParse 通過後に fail-closed で 400 REJECT。
+    // BIBLIO_NAME_RE guard: safeParse 通過後に fail-closed で 400 REJECT。
     // 棚 item は shelve 経路で BIBLIO_NAME_RE 適合が保証されているため正当な id は必ず通る。
     // path traversal / DB 汚染への防御線 (inspect-tool.ts の execute 冒頭 guard と同流儀)。
     if (!BIBLIO_NAME_RE.test(skill_id)) {
@@ -1039,22 +1036,22 @@ export class FugueHttpServer {
       skill_id,
     });
 
-    // 2 段 span 構造 (Phase 4、review C1 対応で明示、consult 側と対称):
+    // 2 段 span 構造 (consult 側と対称):
     //   fugue.equip → biblio.equip
-    // auto HTTP POST server span 層は Phase 5 で ESM フック追加後に発火 or 2 段構造を
-    // 正式仕様として運用の判断予定 (詳細: `docs/operations-runbook.md` §M4-E Phase 4)。
+    // auto HTTP POST server span 層は ESM フック追加後に発火する余地を残しつつ、2 段構造を
+    // 正式仕様として運用する判断 (詳細: `docs/operations-runbook.md` §Fugue channel 運用)。
     // sessionId は Fugue に session 概念なし = 空文字 (approval 経路と同慣習)。
-    // **HITL 政策 guard 経路 (defensive path、Phase 4 review M2 = silent-failure #3 対応)**:
-    // withFugueEntrySpan の **内側** に配置し、`fugue.outcome='hitl_required'` を span に刻む。
-    // 現行 matrix では `requiresApproval('equip', 'fugue') === false` (Fugue 契約 §6.2 の HITL
-    // 簡略化) のため到達しない dead path だが、将来 matrix が変わったときに Fugue equip が
+    // **HITL 政策 guard 経路 (defensive path)**: withFugueEntrySpan の **内側** に配置し、
+    // `fugue.outcome='hitl_required'` を span に刻む。現行 matrix では
+    // `requiresApproval('equip', 'fugue') === false` (Fugue 契約 §6.2 の HITL 簡略化) のため
+    // 到達しない dead path だが、将来 matrix が変わったときに Fugue equip が
     // (a) silent に HITL bypass する応答経路の穴、および (b) Cloud Trace 上で完全不可視になる
     // telemetry の穴、の両方を明示的に閉じる。
     await withFugueEntrySpan('equip', request_id, async (fugueSpan) => {
-      // M4-F Phase 2 gate 挿入 (equip): skill_id を 4 層評価。BIBLIO_NAME_RE guard は既に
-      // 通過している (skill_id は正当な形式) が、gate は semantic 判定 (Layer 4) で
-      // exfiltration URL 等 (path traversal を超えた) 追加防御を担う。in-secure 応答経路は
-      // consult と対称に 200 + status:'error' + warnings で運ぶ (AD の本義)。
+      // gate 挿入 (equip): skill_id を 4 層評価。BIBLIO_NAME_RE guard は既に通過している
+      // (skill_id は正当な形式) が、gate は semantic 判定 (Layer 4) で exfiltration URL 等
+      // (path traversal を超えた) 追加防御を担う。in-secure 応答経路は consult と対称に
+      // 200 + status:'error' + warnings で運ぶ (AD の本義)。
       if (isGateEnabled()) {
         let gateResult: GateResult | null = null;
         try {
@@ -1174,7 +1171,7 @@ export class FugueHttpServer {
         try {
           result = await listBiblio({}, { ctx: { requestId: request_id, sessionId: '' } });
         } catch (err) {
-          // 部分失敗経路 (判断 H): 200 + status:'error' + warnings で運ぶ (AD の本義)。
+          // 部分失敗経路: 200 + status:'error' + warnings で運ぶ (AD の本義)。
           const reason = classifyListBiblioError(err);
           const errorRecord = err instanceof Error ? err : new Error(String(err));
           span.recordException(errorRecord);
@@ -1237,12 +1234,12 @@ export class FugueHttpServer {
           return;
         }
 
-        // INSERT OR IGNORE (判断 C): atomic な already_equipped 判定。
+        // INSERT OR IGNORE: atomic な already_equipped 判定。
         let inserted: boolean;
         try {
           inserted = insertFugueEquippedBiblio(skill_id, request_id);
         } catch (err) {
-          // DB write 失敗 (判断 H): consult と同じく 200 + status:'error' + warnings で運ぶ。
+          // DB write 失敗: consult と同じく 200 + status:'error' + warnings で運ぶ。
           const errorRecord = err instanceof Error ? err : new Error(String(err));
           span.recordException(errorRecord);
           span.setStatus({ code: SpanStatusCode.ERROR, message: 'equip_state_write_failed' });
@@ -1276,13 +1273,12 @@ export class FugueHttpServer {
         }
 
         // 成功経路 (equipped or already_equipped): SkillRef 組み立て + reply 返送。
-        // toSkillRefs を再利用して単一 SkillRef を作る (重複実装を避ける、判断 E の consult / equip 対称性)。
+        // toSkillRefs を再利用して単一 SkillRef を作る (重複実装を避ける、consult / equip 対称性)。
         // `[0]` の型は `noUncheckedIndexedAccess` 未設定のため `SkillRef` に narrow されるが、
         // これは「toSkillRefs が `[item].slice(0, limit).map(...)` で必ず 1 件返す」という
         // 呼び出し関数の実装依存の暗黙仮定。将来 toSkillRefs にフィルタ機構が入って空返却しうる形に
         // なると `undefined` が `FugueEquipReply.skill: SkillRef` (non-null 必須) に代入される
-        // silent 破綻を招く。fail-fast + 明示 assertion で contract を型と実装両面で守る
-        // (type-design-analyzer 指摘、PR #135 review 提案 8)。
+        // silent 破綻を招く。fail-fast + 明示 assertion で contract を型と実装両面で守る。
         const env = readListEnv();
         const skills = toSkillRefs([item], env.shelfOwner, env.shelfRepo, new Set([skill_id]));
         const skill = skills[0];
@@ -1330,36 +1326,32 @@ export class FugueHttpServer {
   }
 
   /**
-   * M4-H Phase 1 (skeleton) + Phase 2 (gate 統合): ask endpoint。
+   * ask endpoint。
    *
-   * Contract §5.5 shape で 200 応答を返す。gate 4 層通過 (Phase 2) + backend 未接続 (Phase 3 で
-   * 追加予定) + rate limit なし (Phase 4 で追加予定)。処理段は 5 段: Zod parse →
-   * `withFugueEntrySpan` → **gate 4 層評価** → 固定 skeleton reply 組み立て → self-validation →
-   * 200 応答。
+   * Contract §5.5 shape で 200 応答を返す。gate 4 層通過 + backend agent-container 経路 + rate
+   * limit gate (`ASK_PATH` のみ)。処理段は 6 段: Zod parse → `withFugueEntrySpan` → **gate 4 層
+   * 評価** → agent-container spawn + poll → self-validation → 200 応答。
    *
    * 目的: Fugue 側 `BiblioClawAdvisorService.ask()` の HTTP round-trip + shape validation +
-   * ValidationError 経路のテストを、biblio 側 backend 実装 (Phase 3) 完了を待たずに先行させる
-   * (Phase 1) + injection 疑い発話の遮断 + intent hint と gate 分類の不一致検出 (Phase 2)。
+   * ValidationError 経路のテスト + injection 疑い発話の遮断 + intent hint と gate 分類の
+   * 不一致検出。
    *
    * `status` の 4 status 意味論は `FugueAskReply` の JSDoc を参照 (schema 側を正本として重複を回避)。
-   * 現状の応答分岐:
-   *   - gate `in-secure` → 200 + `status:'denied'` + `warnings:[AD_ASK_DENIED_BY_GATE]` (Phase 2)
-   *   - gate 通常経路 (or GATE_ENABLED=false or gate throw fail-open) → 200 + `status:'not_available'`
-   *     + `warnings:['skeleton_response', ...gateWarnings]` (Phase 1 skeleton の継続)
+   * 応答分岐:
+   *   - gate `in-secure` → 200 + `status:'denied'` + `warnings:[AD_ASK_DENIED_BY_GATE]`
+   *   - gate 通常経路 (or GATE_ENABLED=false or gate throw fail-open) → agent-container 経路 →
+   *     200 + `status:'ok'` (成功時) or `status:'not_available'` (backend 未応答時) +
+   *     `warnings:[...gateWarnings]`
    *   - self-validation fail → 200 + `status:'error'` + `warnings` に理由 (両分岐で fallback)
    *
-   * `warnings: ['skeleton_response']` は本 PRD で新設した Phase 1 限定の marker (非 Contract 語彙、
-   * unknown warning code は Fugue 側で log-only 扱い)。`AD_ASK_DENIED_BY_GATE` / `INTENT_GATE_MISMATCH`
-   * (Phase 2 で追加) は Contract §5.5 語彙、Fugue 側の分岐判定に使われる (`fugue-schemas.ts` の
-   * named export 定数を参照)。
-   * TODO(M4-H Phase 3): backend 結線完了時に (a) 通常経路の `status` を `'ok'` に切替、(b) `warnings`
-   * から `'skeleton_response'` を除去、(c) `summary` / `findings` / `sources` を実データで埋める。
+   * `AD_ASK_DENIED_BY_GATE` / `INTENT_GATE_MISMATCH` は Contract §5.5 語彙、Fugue 側の分岐判定に
+   * 使われる (`fugue-schemas.ts` の named export 定数を参照)。
    *
-   * **self-validation (A3-2)**: 応答直前に `FugueAskReply.safeParse(reply)` を挟み、内部整合性
-   * 欠損 (Phase 3 以降で summary 動的生成時に .max(600) 超過等) を fail-closed で捕捉する。
-   * denied reply / skeleton reply の両分岐で self-validation を経由する (Phase 2 で対称化、
-   * consult/equip の in-secure 分岐は safeParse を経由しないため ask は一段防御が厚い)。
-   * fail 時は AD の本義契約に従い 200 + `status:'error'` + `warnings` で運ぶ (5xx 出さない)。
+   * **self-validation**: 応答直前に `FugueAskReply.safeParse(reply)` を挟み、内部整合性欠損
+   * (summary 動的生成時に .max(600) 超過等) を fail-closed で捕捉する。denied reply / 通常 reply
+   * の両分岐で self-validation を経由する (consult/equip の in-secure 分岐は safeParse を
+   * 経由しないため ask は一段防御が厚い)。fail 時は AD の本義契約に従い 200 + `status:'error'`
+   * + `warnings` で運ぶ (5xx 出さない)。
    */
   private async handleAsk(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const startedAt = performance.now();
@@ -1379,26 +1371,24 @@ export class FugueHttpServer {
       context_hint_keys: Object.keys(context_hint ?? {}),
     });
 
-    // 2 段 span 構造 (Phase 4 で正式化、consult / equip と対称):
+    // 2 段 span 構造 (consult / equip と対称):
     //   fugue.ask (この helper、kind=INTERNAL)
-    // Phase 1 skeleton では biblio.<action> 相乗り span は張らない (backend 未接続)。
-    // TODO(M4-H Phase 3): backend 結線時に withBiblioActionSpan('ask', ...) の追加検討
-    // (`BiblioActionName` union に 'ask' 追加要、M4-A biblio.<action> 集計への相乗り妥当性を判定)。
-    // auto SERVER span 層は ESM フック未整備で現状発火せず (Phase 5 判断で 2 段構造を正式仕様として
-    // 運用、詳細: `docs/operations-runbook.md` §M4-E Phase 4 §ESM フック判断)。
+    // 現状は biblio.<action> 相乗り span は張らない (backend agent-container 経路は fugue.ask
+    // 内で完結)。TODO: `BiblioActionName` union に 'ask' 追加した上で withBiblioActionSpan 相乗り
+    // の要否を判定する。
+    // auto SERVER span 層は ESM フック未整備で現状発火せず、2 段構造を正式仕様として運用する
+    // (詳細: `docs/operations-runbook.md` §Fugue channel 運用 §ESM フック判断)。
     await withFugueEntrySpan('ask', request_id, async (fugueSpan) => {
       // intent 属性は string で刻む (`.optional().nullable()` の 2 パスを 'null' に集約 =
       // Cloud Trace の属性検索で `fugue.intent='null'` 一択で見つけられる)。
       fugueSpan.setAttribute('fugue.intent', intent ?? 'null');
 
-      // M4-H Phase 2 gate 挿入 (ask): query を 4 層評価。in-secure なら 200 + status:'denied'
+      // gate 挿入 (ask): query を 4 層評価。in-secure なら 200 + status:'denied'
       // + warnings:[AD_ASK_DENIED_BY_GATE] + raw.reason:'in_secure' で応答 (AD の本義 契約: 5xx は
-      // 認可 / 上限超過 / biblio-claw 自体の応答不能に限定)。gate 未有効時は skip = skeleton 経路
+      // 認可 / 上限超過 / biblio-claw 自体の応答不能に限定)。gate 未有効時は skip = 通常経路
       // 継続。intent 指定あり + gate 分類 = 'biblio-adk' なら INTENT_GATE_MISMATCH を warnings に
       // append (通常経路継続、Contract §5.5 運用規約)。写経元: `handleConsult` / `handleEquip` の
-      // 同名 gate 挿入ブロック (`if (isGateEnabled()) { ... }` の 90 行構造)。ask 固有差分は plan
-      // §Patterns to Mirror「in-secure denial 分岐」参照 (line 番号は Phase 2 の import 追加で
-      // シフトするためシンボル参照に統一)。
+      // 同名 gate 挿入ブロック (`if (isGateEnabled()) { ... }` の 90 行構造)。
       const gateWarnings: string[] = [];
       if (isGateEnabled()) {
         let gateResult: GateResult | null = null;
@@ -1540,7 +1530,7 @@ export class FugueHttpServer {
           // drive-lookup / general) はいずれも「汎用 AI Agent 経路」を意味し、biblio-adk (ADK
           // 装備 skill 経路) とは意味論的に食い違う = intent literal 値によらず biblio-adk なら
           // mismatch。intent 未指定 (null/undefined) は「gate 完全委任」で常に一致扱い、warnings
-          // なし。詳細は plan §判断 A 参照。
+          // なし (intent 未指定は「gate 完全委任」の運用契約)。
           if (intent && gateResult.classification === 'biblio-adk') {
             gateWarnings.push(INTENT_GATE_MISMATCH);
             log.info('Fugue ask intent-gate classification mismatch', {
@@ -1558,14 +1548,13 @@ export class FugueHttpServer {
       }
 
       // ================================================================
-      // M4-H Phase 3: gate 通過後 → agent-container spawn 経路
+      // gate 通過後 → agent-container spawn 経路
       // ================================================================
-      // Phase 1-2 の skeleton block (`status:'not_available'` + `warnings:['skeleton_response']`)
-      // は Phase 3 で完全廃止。今後は agent-container 経由の実データ (`status:'ok'`) or
-      // `status:'error'` + 明示 warnings で運ぶ (AD の本義契約: 5xx を出さない、Contract §5.5)。
-      // in-secure denial / gate throw fail-open / intent mismatch (Phase 2 経路) は上流で処理
-      // 済み = 本 block には流れてこない (denial は先行 return、fail-open は gateResult=null +
-      // gateWarnings=[] で継続、mismatch は gateWarnings に append で継続)。
+      // agent-container 経由の実データ (`status:'ok'`) or `status:'error'` + 明示 warnings で運ぶ
+      // (AD の本義契約: 5xx を出さない、Contract §5.5)。in-secure denial / gate throw fail-open /
+      // intent mismatch は上流で処理済み = 本 block には流れてこない (denial は先行 return、
+      // fail-open は gateResult=null + gateWarnings=[] で継続、mismatch は gateWarnings に
+      // append で継続)。
       const askCtx = { request_id, startedAt };
 
       // Step 0: config 解決 (env override → DB lookup)
@@ -1599,11 +1588,10 @@ export class FugueHttpServer {
 
       // Step 1: session 都度作成 (per-thread mode = thread_id=request_id で自動新規化)
       //
-      // **C1 修正 (silent-failure-hunter + code-reviewer HIGH)**: resolveSession は SQLite
-      // INSERT + `fs.mkdirSync` + `ensureSchema` を伴い、SQLITE_BUSY / PVC I/O 障害で throw
-      // しうる。無防備なままだと `withFugueEntrySpan` の catch → outer 500 経路に落ち、AD 本義
-      // 契約 (5xx は認可・上限超過のみ) に反する。ここでは session 未作成 = cleanup 不要なので
-      // 単純に 200 + status:'error' + ask_session_resolve_failed で運ぶ。
+      // resolveSession は SQLite INSERT + `fs.mkdirSync` + `ensureSchema` を伴い、SQLITE_BUSY /
+      // PVC I/O 障害で throw しうる。無防備なままだと `withFugueEntrySpan` の catch → outer 500
+      // 経路に落ち、AD 本義契約 (5xx は認可・上限超過のみ) に反する。ここでは session 未作成 =
+      // cleanup 不要なので単純に 200 + status:'error' + ask_session_resolve_failed で運ぶ。
       let session: Session;
       let created: boolean;
       try {
@@ -1636,7 +1624,7 @@ export class FugueHttpServer {
       if (!created) {
         // request_id は idempotency key = request ごとに unique であるべき。既存 session を
         // 拾った = Fugue Cloud Run の再送 or clock skew。fail-open で既存 session を使い続ける
-        // (session dir 汚染リスクは receive 動作より優先、Phase 3 論点 C の fallback)。
+        // (session dir 汚染リスクは receive 動作より優先、fallback 経路)。
         log.warn('Fugue ask session reuse detected (unexpected, using existing)', {
           event: 'fugue.ask.spawn.session_reuse',
           channel: 'fugue',
@@ -1646,27 +1634,27 @@ export class FugueHttpServer {
         });
       }
 
-      // **P2 修正 (type-design-analyzer 発見 4)**: session が作られた = cleanup 責任が発生。
-      // 以降の全経路 (writeSessionMessage 失敗 / spawn 失敗 / timeout / parse 失敗 / self-validation
-      // 失敗 / ok / 未想定 throw) を try/finally で包み、finally で **必ず** cleanupAskSession を
-      // 呼ぶ設計に統一する。各分岐は cleanupReason 変数を設定して return する (手動 cleanup 呼出は
-      // 削除)。将来 5 個目の早期 return が追加された際も、cleanupReason を設定するだけで silent
-      // drop を防げる (cleanupAskSession は idempotent = 二重呼出 safe)。
+      // session が作られた = cleanup 責任が発生。以降の全経路 (writeSessionMessage 失敗 / spawn
+      // 失敗 / timeout / parse 失敗 / self-validation 失敗 / ok / 未想定 throw) を try/finally で
+      // 包み、finally で **必ず** cleanupAskSession を呼ぶ設計に統一する。各分岐は cleanupReason
+      // 変数を設定して return する (手動 cleanup 呼出は削除)。将来 5 個目の早期 return が追加
+      // された際も、cleanupReason を設定するだけで silent drop を防げる (cleanupAskSession は
+      // idempotent = 二重呼出 safe)。
       let cleanupReason = 'fugue-ask-completed';
       try {
         // Step 2: query prompt を messages_in に書込
         //
-        // kind='chat' 必須 (M4-H Phase 3.5 で判明、2026-07-08): agent-runner の formatMessages
-        // (container/agent-runner/src/formatter.ts:129) は kind === 'chat' | 'chat-sdk' | 'task'
-        // | 'webhook' | 'system' のみを拾い、それ以外の kind (e.g. 'user') は完全に drop する
-        // (context timezone header だけが agent に届く)。kind='chat' で formatChatMessages 経路に
-        // 乗り、`<message id="..." from="..." sender="..." time="...">{text}</message>` として
-        // agent に prompt が届く。sender は content.sender で "Fugue Director" 固定。
+        // kind='chat' 必須: agent-runner の formatMessages (container/agent-runner/src/formatter.ts:129)
+        // は kind === 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system' のみを拾い、それ以外の
+        // kind (e.g. 'user') は完全に drop する (context timezone header だけが agent に届く)。
+        // kind='chat' で formatChatMessages 経路に乗り、`<message id="..." from="..." sender="..."
+        // time="...">{text}</message>` として agent に prompt が届く。sender は content.sender で
+        // "Fugue Director" 固定。
         //
-        // **C1 修正 (silent-failure-hunter + code-reviewer HIGH)**: writeSessionMessage は
-        // inbound.db への INSERT + 中央 DB `sessions.last_active` UPDATE を伴い、resolveSession
-        // と同種の I/O 障害で throw しうる。cleanupReason を明示的に更新することで、finally 経路
-        // で session dir + Job + `sessions` row を確実に片付ける (孤児化 silent 部分を撲滅)。
+        // writeSessionMessage は inbound.db への INSERT + 中央 DB `sessions.last_active` UPDATE を
+        // 伴い、resolveSession と同種の I/O 障害で throw しうる。cleanupReason を明示的に更新する
+        // ことで、finally 経路で session dir + Job + `sessions` row を確実に片付ける (孤児化
+        // silent 部分を撲滅)。
         try {
           const prompt = this.buildAskPrompt(query, intent, context_hint);
           writeSessionMessage(session.agent_group_id, session.id, {
@@ -1840,10 +1828,10 @@ export class FugueHttpServer {
           const validSourceIds = f.source_indexes
             .map((i) => sources[i]?.id)
             .filter((id): id is string => id !== undefined);
-          // **agent LLM が out-of-range な source_indexes を返した経路の observability**
-          // (PR #178 review 対応、中優先度 M2): silent fallback ('unknown' / 'web' で継続)
-          // で response 成立は優先するが、agent bug の検出のため log emit。BQ 集計で
-          // agent instruction 精度 (invalid index 頻度) の追跡源となる。
+          // **agent LLM が out-of-range な source_indexes を返した経路の observability**:
+          // silent fallback ('unknown' / 'web' で継続) で response 成立は優先するが、agent bug
+          // の検出のため log emit。BQ 集計で agent instruction 精度 (invalid index 頻度) の
+          // 追跡源となる。
           if (f.source_indexes.length > validSourceIds.length) {
             log.info('Fugue ask finding source_indexes out-of-range (silent fallback applied)', {
               event: 'fugue.ask.response.invalid_source_index',
@@ -1879,12 +1867,12 @@ export class FugueHttpServer {
           warnings: gateWarnings,
         };
 
-        // Step 7: self-validation (Phase 2 と同流儀、silent contract violation を Fugue 側に流さない)
+        // Step 7: self-validation (silent contract violation を Fugue 側に流さない)
         //
-        // 注意: 従来ここに手動 cleanupAskSession 呼出があったが、P2 修正で finally 経路に統一済み
-        // (cleanupReason 変数で理由を伝える、二重呼出は idempotent で safe)。self-validation
-        // 失敗経路は cleanupReason='fugue-ask-completed' のまま (agent は正常応答完了、失敗は
-        // biblio-claw 内部 schema drift = agent 側 cleanup 理由には該当しない)。
+        // 注意: cleanupAskSession 呼出は finally 経路に統一済み (cleanupReason 変数で理由を伝える、
+        // 二重呼出は idempotent で safe)。self-validation 失敗経路は cleanupReason='fugue-ask-completed'
+        // のまま (agent は正常応答完了、失敗は biblio-claw 内部 schema drift = agent 側 cleanup
+        // 理由には該当しない)。
         const validated = FugueAskReply.safeParse(okReply);
         if (!validated.success) {
           fugueSpan.setAttribute('fugue.outcome', 'error');
@@ -1915,11 +1903,11 @@ export class FugueHttpServer {
         }
 
         fugueSpan.setAttribute('fugue.outcome', 'ok');
-        // review 中 2 対応: 二重 recordFugueProcessingTime 呼出しを除去。親スコープの
-        // `processing_time_ms` (ok reply 組立時の line 1803 で確定) と `fugue.processing_time_ms`
-        // span attribute をそのまま再利用する = span attr と response body が同値のまま維持され、
-        // silent inconsistency (~ms ずれ) が消える。対称性契約は pattern-match 化した (詳細は
-        // denied 経路の同コメント + ad-honji.test.ts の該当 assertion を参照)。
+        // 二重 recordFugueProcessingTime 呼出しを除去。親スコープの `processing_time_ms`
+        // (ok reply 組立時の line 1803 で確定) と `fugue.processing_time_ms` span attribute を
+        // そのまま再利用する = span attr と response body が同値のまま維持され、silent
+        // inconsistency (~ms ずれ) が消える。対称性契約は pattern-match 化した (詳細は denied
+        // 経路の同コメント + ad-honji.test.ts の該当 assertion を参照)。
         log.info('Fugue ask completed', {
           event: 'fugue.ask.completed',
           channel: 'fugue',
@@ -1935,8 +1923,8 @@ export class FugueHttpServer {
         });
         writeJson(res, 200, validated.data);
       } finally {
-        // P2: 全経路 (成功/失敗/writeSessionMessage throw/自 return 手前の handler throw) で
-        // cleanup を必ず実行する。cleanupReason は各分岐で明示更新済 (初期値 = 'fugue-ask-completed')。
+        // 全経路 (成功/失敗/writeSessionMessage throw/自 return 手前の handler throw) で cleanup を
+        // 必ず実行する。cleanupReason は各分岐で明示更新済 (初期値 = 'fugue-ask-completed')。
         // cleanupAskSession 自体は fire-and-forget (応答遅延防止) で catch は
         // 内側 (`cleanupAskSession` 内部) の 3 段独立 catch に加えて外側 promise chain の
         // catch でも保険を掛ける。二重発火は cleanupAskSession の各段が idempotent なので safe。
@@ -1953,9 +1941,9 @@ export class FugueHttpServer {
   }
 
   /**
-   * M4-H Phase 3: outbound.db から `MAX(seq)` を安全に取得 (session が未作成 or DB open 失敗
-   * 時は 0 を返す)。`src/cli/resources/messages.ts:currentMaxOutboundSeq` と同流儀の pre-spawn
-   * silent fallback = 0 = 「まだ何も出ていない」= poll の fromSeq として妥当。
+   * outbound.db から `MAX(seq)` を安全に取得 (session が未作成 or DB open 失敗時は 0 を返す)。
+   * `src/cli/resources/messages.ts:currentMaxOutboundSeq` と同流儀の pre-spawn silent fallback
+   * = 0 = 「まだ何も出ていない」= poll の fromSeq として妥当。
    */
   private currentMaxOutboundSeq(agentGroupId: string, sessionId: string): number {
     try {
@@ -1988,14 +1976,13 @@ export class FugueHttpServer {
   }
 
   /**
-   * M4-H Phase 3: outbound.db を polling して from_seq 超えの chat 経路 first message を集める。
+   * outbound.db を polling して from_seq 超えの chat 経路 first message を集める。
    * `src/cli/resources/messages.ts:pollOutbound` の写経。Fugue ask 版の追加要件:
    *
    *   - `kind === 'chat'` の first message のみ抽出 (system message は無視 = agent-runner の
    *     ephemeral state 通知が混じらないよう filter)
-   *   - hit 直後 `markDelivered(outDb, msg.id, null)` を呼ぶ (pollActive race 対策、
-   *     Phase 3 論点 E = handleAsk が response を運ぶので `fugue.ts:deliver()` の
-   *     silent throw 経路には流さない)
+   *   - hit 直後 `markDelivered(outDb, msg.id, null)` を呼ぶ (pollActive race 対策、handleAsk が
+   *     response を運ぶので `fugue.ts:deliver()` の silent throw 経路には流さない)
    *   - env `FUGUE_ASK_TIMEOUT_MS` で上限 override 可 (test / smoke で短縮)
    *
    * 都度 `openOutboundDb + close` (long-lived connection にしない、cross-mount visibility
@@ -2009,11 +1996,11 @@ export class FugueHttpServer {
     fromSeq: number,
     waitMs: number,
   ): Promise<{ message: OutboundMessage | null; timedOut: boolean }> {
-    // silent-failure-hunter MEDIUM 1 (PR #195 review): 壁時計 (`Date.now()`) 依存だと
-    // NTP 後退補正で deadline に実時間で到達するまでに waitMs を超えてハングする経路が
-    // 検知・warn なく発生する。単調時計 (`performance.now()`) に統一することで clock skew
-    // 起因のハングを構造的に消す (前進補正で早期 timeout は既存の timedOut 分岐で 200 化)。
-    // 他の経過時間計測 (startedAt / spawnStartAt / recordFugueProcessingTime) との統一。
+    // 壁時計 (`Date.now()`) 依存だと NTP 後退補正で deadline に実時間で到達するまでに waitMs を
+    // 超えてハングする経路が検知・warn なく発生する。単調時計 (`performance.now()`) に統一する
+    // ことで clock skew 起因のハングを構造的に消す (前進補正で早期 timeout は既存の timedOut
+    // 分岐で 200 化)。他の経過時間計測 (startedAt / spawnStartAt / recordFugueProcessingTime)
+    // との統一。
     const deadline = performance.now() + waitMs;
     while (performance.now() < deadline) {
       let hit: OutboundMessage | null = null;
@@ -2025,15 +2012,14 @@ export class FugueHttpServer {
             .all(fromSeq) as OutboundMessage[];
           const first = rows.find((r) => r.kind === 'chat');
           if (first) {
-            // hit 直後 markDelivered = pollActive race 対策 (Phase 3 論点 E)。
-            // outbound.db の delivered table に `INSERT OR IGNORE` (idempotent、
-            // `session-db.ts:310` の SQL 参照)。同一 tick 内で hit → mark 完了するため
-            // 500ms 分の race window が構造的にゼロになる。
+            // hit 直後 markDelivered = pollActive race 対策。outbound.db の delivered table に
+            // `INSERT OR IGNORE` (idempotent、`session-db.ts:310` の SQL 参照)。同一 tick 内で
+            // hit → mark 完了するため 500ms 分の race window が構造的にゼロになる。
             //
-            // **markDelivered 独立 try/catch** (PR #178 review 対応、中優先度 M1):
-            // markDelivered は通常 throw しないが (INSERT OR IGNORE は constraint miss で silent)、
-            // db 接続破壊 / IO error 時に throw する経路が理論上存在する。outer catch に流すと
-            // `fugue.ask.poll.open_error` に misclassify されて observability を失うため、独立
+            // **markDelivered 独立 try/catch**: markDelivered は通常 throw しないが (INSERT OR
+            // IGNORE は constraint miss で silent)、db 接続破壊 / IO error 時に throw する経路が
+            // 理論上存在する。outer catch に流すと `fugue.ask.poll.open_error` に misclassify
+            // されて observability を失うため、独立
             // catch で明示 event 化 (`fugue.ask.mark_delivered.throw`)。throw 時も `hit = first`
             // は継続 (response 成立を優先、pollActive race window が復活する副作用は許容 =
             // 5xx を出さない + observability を確保する trade-off)。
@@ -2195,7 +2181,7 @@ export class FugueHttpServer {
     }
     // 応答フォーマット指示は CLAUDE.local.md §2 に集約 (2 段包み = `<message to="fugue-ask-synthetic">
     // <ask-response>{JSON}</ask-response></message>`)。ここで別 instruction を書くと agent が
-    // 混乱して empty response を返す (2026-07-08 実測、PR #178 Option 1 hotfix)。
+    // 混乱して empty response を返す (実測で判明)。
     return parts.join('');
   }
 }

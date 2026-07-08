@@ -218,11 +218,10 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
   });
 });
 
-// PR #145 review pr-test-analyzer IM-11 対応: bridge.setTyping の status forward
-// が既存 test に一度も含まれていなかった。M4-F Phase 4 で追加した `status ?? undefined`
-// 正規化 (vendor 側 `"Typing..."` fallback 温存の要) が silent regression する経路を
-// 塞ぐ最小の contract test。
-describe('createChatSdkBridge.setTyping (M4-F Phase 4 IM-11)', () => {
+// bridge.setTyping の status forward の contract test。`status ?? undefined` 正規化
+// (vendor 側 `"Typing..."` fallback 温存の要) が silent regression する経路を塞ぐ
+// 最小の contract test。
+describe('createChatSdkBridge.setTyping (status forward)', () => {
   interface TypingCall {
     tid: string;
     status: string | undefined;
@@ -281,10 +280,10 @@ describe('createChatSdkBridge.setTyping (M4-F Phase 4 IM-11)', () => {
   });
 });
 
-// M4-F Phase 5: chat-sdk-bridge の setTyping は vendor `startTyping()` 呼出時に
+// chat-sdk-bridge の setTyping は vendor `startTyping()` 呼出時に
 // `progress.status.transition` info emit で「送信を試みた事実」を確定的に記録する。
 // vendor 内部の 401/429 は本 code から取れないため outcome='triggered' で統一。
-describe('createChatSdkBridge.setTyping progress.status.transition emit (M4-F Phase 5)', () => {
+describe('createChatSdkBridge.setTyping progress.status.transition emit', () => {
   it('emits progress.status.transition with vendor call params (source=chat-sdk-bridge.setTyping)', async () => {
     vi.mocked(log.info).mockClear();
     const startTyping = async (): Promise<void> => {};

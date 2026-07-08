@@ -3,10 +3,10 @@
  *
  * - `shelf-gh.ts` の `fetchMarketplace` + `readShelveEnv` のみを vi.mock で差し替え
  * - `pluginsOf` は **`vi.importActual` で本物を取り込む** (= shelf-gh.ts の実装変更に追従、
- *   インライン再実装によるコピー乖離リスクを除去、code-reviewer PR #17 指摘)
+ *   インライン再実装によるコピー乖離リスクを除去)
  * - 6 ケースで分岐を網羅: 404 / 全件 / category フィルタ / 不正 source / name 空 skip / plugins 非配列
  *
- * 実 GitHub への到達は scripts/biblio-list.ts (CLI ハーネス) + Phase 5 verify-m3.sh
+ * 実 GitHub への到達は scripts/biblio-list.ts (CLI ハーネス) + verify-m3.sh
  * で担保する。本テストは projectItem + filter + counts ロジックのみ。
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';

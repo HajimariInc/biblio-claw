@@ -7,9 +7,9 @@
  * clear the recurrence on the original so it isn't re-cloned next tick.
  *
  * Called from `src/host-sweep.ts` inside `MODULE-HOOK:scheduling-recurrence`.
- * When scheduling ships inline (current state through PR #7), the hook is a
- * direct dynamic import. When scheduling moves to the modules branch in
- * PR #8, the install skill re-fills the marker on install.
+ * When scheduling ships inline (current in-tree state), the hook is a direct
+ * dynamic import. When scheduling later moves to the modules branch, the
+ * install skill re-fills the marker on install.
  */
 import type Database from 'better-sqlite3';
 

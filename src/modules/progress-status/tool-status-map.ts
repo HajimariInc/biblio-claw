@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 4: tool 名 → 日本語 progress-status 文言 の pure mapper。
+ * tool 名 → 日本語 progress-status 文言 の pure mapper。
  *
  * agent-runner 側 `container_state.current_tool` (SDK 組み込み tool 名 or MCP
  * `mcp__<server>__<tool>` 形式) と、ADK dispatcher が扱う `functionCall.name` (mcp__ prefix
@@ -11,9 +11,9 @@
  *   - `nanoclaw` = **container/agent-runner/src/index.ts:88-93 の built-in MCP server**
  *     (host 側 biblio 9 tool = acquire/inspect/categorize/shelve 系)
  *   - `tavily` / `drive` = `scripts/init-hybrid-agent.ts:seedMcpServers()` の DB seed 登録
- *     (M4-F Phase 3 で追加、`container_config.mcp_servers` 経由で agent-runner に注入)
- * (PR #145 review I5 で誤帰属を訂正 = 全 3 サーバを `seedMcpServers()` としていたが、
- *  `seedMcpServers()` は tavily/drive の 2 サーバのみ扱う)
+ *     (生活機能として追加、`container_config.mcp_servers` 経由で agent-runner に注入)
+ * (`seedMcpServers()` は tavily/drive の 2 サーバのみ扱う点に注意 = nanoclaw は
+ *  agent-runner 内蔵で seed 経路とは別建て)
  * 運用上、server 名側に `_` を含めない = 上記正規表現の match 前提が成立する慣習を継続。
  */
 
@@ -24,7 +24,7 @@
  * 別枠 = gate 分類中 / container 起動中は「tool」ではなく「pipeline stage」。
  * `as const` で literal 型で export し、router.ts の呼出箇所と単一源化する
  * (typo による表記ゆれ + runbook「既知の罠」記述の行番号 hardcode リスクを
- * 構造的に削減、PR #145 review comment-analyzer C-2 対応)。
+ * 構造的に削減する)。
  *
  * テスト側 (typing/index.test.ts 等) はあえてこの定数を import せず独立した
  * 文字列 literal (`'container 起動中'`) を書くこと = 本番文言が silent に変わっても
@@ -40,8 +40,8 @@ export const PIPELINE_STATUS = {
  *
  * `container/agent-runner/src/providers/claude.ts` の `TOOL_ALLOWLIST` (18 種) と対称。
  * 当初は主要 9 種のみだったが、高頻度 tool (`TodoWrite` 等) が generic fallback に落ちて
- * patron に「作業中 (TodoWrite)」表示されていた (PR #145 review pr-test-analyzer IM-10
- * 実測: test 自身が `TodoWrite` を未知 tool の例として使い網羅性不足を固定化していた)。
+ * patron に「作業中 (TodoWrite)」表示されていた (test 自身が `TodoWrite` を未知 tool の
+ * 例として使い網羅性不足を固定化していた実測経路)。
  * 全 18 種を明示マップし、fallback は本当に未知の tool 名だけに限定する。
  */
 const BUILTIN_STATUS: Record<string, string> = {
@@ -115,7 +115,7 @@ export function toolNameToStatus(toolName: string | null | undefined): string | 
       const biblio = MCP_NANOCLAW_STATUS[tool];
       if (biblio) return biblio;
     }
-    // 生活機能 (M4-F Phase 3): tavily = Web 検索、drive = ファイル参照
+    // 生活機能: tavily = Web 検索、drive = ファイル参照
     if (server === 'tavily') return 'Web 検索中';
     if (server === 'drive') return 'ファイル参照中';
     // 未知 MCP server は server 名を提示 (silent 化しない)

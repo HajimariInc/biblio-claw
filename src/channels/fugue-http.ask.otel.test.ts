@@ -1,5 +1,5 @@
 /**
- * Fugue HTTP server `handleAsk` の OTel integration test (M4-H Phase 4 Task 8)。
+ * Fugue HTTP server `handleAsk` の OTel integration test。
  *
  * 検証対象:
  *   - span 名 = `fugue.ask` (kind=INTERNAL)
@@ -241,7 +241,7 @@ async function postAsk(body: unknown): Promise<Response> {
   });
 }
 
-describe('handleAsk OTel span attributes (M4-H Phase 4)', () => {
+describe('handleAsk OTel span attributes', () => {
   it('emits fugue.ask span with kind INTERNAL and channel/operation/request_id attributes', async () => {
     const sessionMgrModule = await import('../session-manager.js');
     const askText = buildValidAskResponseText({ summary: 'test summary' });
@@ -383,12 +383,11 @@ describe('handleAsk OTel span attributes (M4-H Phase 4)', () => {
     expect(askSpans).toHaveLength(2); // r1 + r2 のみ、r3 は span なし
   });
 
-  // PR #195 review 提案 P1a (pr-test-analyzer 評価 5): consult / equip endpoint が
-  // rate limit の path 分岐 (`if (pathname === ASK_PATH)`) を **構造的に bypass** する
-  // ことを規約テストで固定化する。実装は `fugue-http.ts:661` の 1 行 if 文で、書き間違い
-  // (例: `pathname.startsWith('/v1/channels/fugue')` に変わる) すると consult / equip も
-  // 429 で拒否されうる silent regression が発生するため、PRD 意思決定 #7 の契約を
-  // programmatically 固定化する。
+  // consult / equip endpoint が rate limit の path 分岐 (`if (pathname === ASK_PATH)`) を
+  // **構造的に bypass** することを規約テストで固定化する。実装は `fugue-http.ts:661` の
+  // 1 行 if 文で、書き間違い (例: `pathname.startsWith('/v1/channels/fugue')` に変わる)
+  // すると consult / equip も 429 で拒否されうる silent regression が発生するため、
+  // PRD 意思決定 #7 の契約を programmatically 固定化する。
   it('consult / equip endpoint は rate limit を構造的に bypass する (PRD 意思決定 #7)', async () => {
     process.env.FUGUE_ASK_RATE_POINTS = '2';
     _resetFugueRateLimitForTest();

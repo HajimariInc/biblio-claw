@@ -77,7 +77,7 @@ vi.mock('undici', async () => {
 });
 
 // ghFetch のみ mock し GhHttpError クラスは実物のまま使う。acquire 内の存在確認経路
-// (= `ghFetch('acquire.check-repo', ...)`, PR #33 hotfix で gh CLI 撤廃) のテストに使う。
+// (= `ghFetch('acquire.check-repo', ...)`) のテストに使う。
 // vi.mock で全上書きすると GhHttpError が別参照になり、acquire.ts の `err instanceof GhHttpError`
 // 判定がテスト環境で壊れるため、importActual で実物 module を取り込んで部分上書きする。
 vi.mock('./shelf-gh.js', async () => {
@@ -296,11 +296,11 @@ describe('acquire', () => {
       fs.writeFileSync(path.join(dest, '.claude-plugin', 'marketplace.json'), '{}');
       return spawnResult(0);
     });
-    const result = await acquire({ repo: 'example-org/test-biblio-minimal' });
+    const result = await acquire({ repo: 'HajimariInc/test-biblio-minimal' });
     expect(result.ok).toBe(true);
     expect(mockGhFetch).toHaveBeenCalledWith(
       'acquire.check-repo',
-      expect.stringMatching(/\/repos\/example-org\/test-biblio-minimal$/),
+      expect.stringMatching(/\/repos\/HajimariInc\/test-biblio-minimal$/),
       {},
       expect.objectContaining({ noAuth: true }),
     );
@@ -840,7 +840,7 @@ describe('acquire — Phase 2 threshold-promote', () => {
     expect(result.detail).toContain('12 個');
   });
 
-  // ===== レビュー指摘対応 (PR #19) — 境界値 + degraded 経路カバレッジ =====
+  // ===== 境界値 + degraded 経路カバレッジ =====
 
   it('境界値 — ちょうど閾値 (10 skill) なら clone 経路に進む (> は exclusive)', async () => {
     // `count > threshold` 判定の境界仕様の明示化 (= 10 ちょうどは通る、11 で promote)。
@@ -1044,7 +1044,6 @@ describe('acquire — Phase 2 threshold-promote', () => {
 
   // resolveSkillThreshold の DB throw 時 degraded fallback (= DB 未初期化 / SQLITE_BUSY 等)。
   // try/catch (acquire.ts:556-568) で囲って DEFAULT に倒れることを unit で固定する。
-  // PR #48 review-agents (pr-test-analyzer 改善 1、6/10) 対応。
   it('getBiblioSetting throw (= DB 未初期化等) → warn (acquire.threshold_resolve_failed) + DEFAULT(10) に degraded fallback', async () => {
     setupCloneSuccess();
     setupExistenceCheckSuccess();

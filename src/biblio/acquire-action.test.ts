@@ -4,17 +4,17 @@
  * action handler は `writeBackMessage` で patron に応答する形式。
  * `registerDeliveryAction` を mock して module load 時の handler を抜き、直接呼ぶ。
  *
- * カバレッジ (= 個別 skill 仕入れ Phase 1-3 + PR #37 review-agents I5 統合):
+ * カバレッジ (= 個別 skill 仕入れ + 統合):
  *  入口 validate
  *   - repo 空 → invalid_input writeBack (acquire を呼ばない)
- *  Phase 1-2 既存経路 (skill 未指定)
+ *  既存経路 (skill 未指定)
  *   - happy: repo 単独 → 仕入れ完了 + quarantinePath
  *     - 同時検証: acquire 呼出に ctx (= { requestId, sessionId }) が渡されている (I1 回帰防止)
  *   - reason=not_found → 仕入れエラー (not_found)
  *   - reason=internal → システム構成エラー (= 専用文言、再試行誘発しない)
  *   - reason=clone_failed → 仕入れエラー (clone_failed)
  *   - threshold_exceeded → detail (動的 promote 文言) を素通し
- *  Phase 3 個別 skill 経路 (skill 指定)
+ *  個別 skill 経路 (skill 指定)
  *   - happy: skill 指定 → target = repo/skill 形式
  *   - 空文字 / 空白のみ skill → undefined 扱い (= 全体仕入れに退化)
  *   - skill 指定で clone_failed → detail を素通し

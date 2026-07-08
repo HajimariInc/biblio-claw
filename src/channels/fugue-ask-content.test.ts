@@ -1,5 +1,5 @@
 /**
- * M4-H Phase 3 `wrapExternalContent` の pure 関数 test。
+ * `wrapExternalContent` の pure 関数 test。
  *
  * layer3-xml.test.ts の pattern を写経 + Fugue ask 固有の 4 case:
  * (1) 属性 (source-id + kind) 付き通常 wrap
@@ -80,7 +80,7 @@ describe('wrapExternalContent', () => {
     );
   });
 
-  describe('defensive strip (二重 wrap 防止、M4-H Phase 3.5 で追加)', () => {
+  describe('defensive strip (二重 wrap 防止)', () => {
     it('外側 wrap で囲まれた text は 1 段剥がして新 attribute で wrap する', () => {
       const alreadyWrapped =
         '<external-content source-id="src-99" kind="drive">Next.js 15 は 2024-10-21 リリース。</external-content>';

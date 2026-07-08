@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 2 gate 全 4 層合成 + `withGateSpan` + `GATE_ENABLED` 判定 helper。
+ * gate 全 4 層合成 + `withGateSpan` + `GATE_ENABLED` 判定 helper。
  *
  * `evaluateGate(text)` は Layer 1 → Layer 2 → Layer 3 → Layer 4 の順で cheap-to-expensive
  * に呼び、Layer 1 で pattern matched なら Layer 4 を待たず早期 `in-secure` return。
@@ -10,7 +10,7 @@
  * `gate.text_digest`) を trace 上で可視化する。
  *
  * `isGateEnabled()` は env boolean 判定 (`GATE_ENABLED === '1' | 'true'`)。既定 false =
- * gate 無効化のまま main 合流可能な退路 (PRD Phase 単位リリース型 継承)。
+ * gate 無効化のまま main 合流可能な退路。
  */
 import { SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
 
@@ -109,7 +109,7 @@ export async function withGateSpan<T>(text: string, fn: (span: Span) => Promise<
         const errorRecord = err instanceof Error ? err : new Error(String(err));
         span.recordException(errorRecord);
         span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
-        // M4-E Phase 4 review I1 の silent-failure 撲滅原則を継承 (fugue-entry-span.ts と同流儀)
+        // silent-failure 撲滅原則を継承 (fugue-entry-span.ts と同流儀)
         span.setAttribute('gate.outcome', 'error');
         throw err;
       } finally {

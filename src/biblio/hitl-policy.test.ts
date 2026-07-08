@@ -1,11 +1,11 @@
 /**
- * `hitl-policy.ts` の matrix 全 8 組合せを固定するテスト (M4-E Phase 3 equip-hitl)。
+ * `hitl-policy.ts` の matrix 全 8 組合せを固定するテスト。
  *
  * Fugue 契約 §6.2 の `requires_approval(operation, channel)` matrix と 1:1 の対応を
  * コードで担保する。matrix が Fugue 側と齟齬すると、biblio-claw / Fugue の HITL 期待が
  * 食い違って「Fugue Director が装備したのに Slack で承認カードが飛ぶ」等の混乱を招く。
  *
- * `equip@fugue = false` (簡略化) は本 Phase の中核意思決定なので、独立した it で明示する。
+ * `equip@fugue = false` (簡略化) は本 policy の中核意思決定なので、独立した it で明示する。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -16,7 +16,7 @@ describe('requiresApproval matrix (Fugue 契約 §6.2)', () => {
     expect(requiresApproval('equip', 'fugue')).toBe(false);
   });
 
-  it('equip@slack = true (Slack 経由 equip は現状経路なし、M3 Phase 3.5 で実効化される)', () => {
+  it('equip@slack = true (Slack 経由 equip は現状経路なし、将来実装されたら実効化される)', () => {
     expect(requiresApproval('equip', 'slack')).toBe(true);
   });
 

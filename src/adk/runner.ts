@@ -1,16 +1,15 @@
 /**
- * `InMemoryRunner` factory — Phase 1/2/3 共通 + Phase 4 で sessionService を expose (M4-B Phase 4)。
+ * `InMemoryRunner` factory — sessionService を expose する形式。
  *
  * `InMemoryRunner` は in-process な `SessionService` / `ArtifactService` / `MemoryService` を
- * 自動セットアップする (= 外部依存ゼロ)。Phase 4 で HITL 承認機構を統合するために、内部の
+ * 自動セットアップする (= 外部依存ゼロ)。HITL 承認機構を統合するために、内部の
  * `InMemorySessionService` を dispatcher / approval-dispatcher から touch できる必要があり、
  * `buildRunner` の戻り値を `SharedRunnerContext = { runner, sessionService }` に拡張した。
  *
  * # 経緯: なぜ sessionService を expose する必要があるか
  *
- * Phase 3 までは `InMemoryRunner.runEphemeral()` を使い、都度 ephemeral session を作って
- * 都度捨てる pattern だった (multi-turn 不要 / session 保持不要)。しかし Phase 4 の HITL
- * 承認機構 (enkin/shokyaku) では:
+ * 素朴には `InMemoryRunner.runEphemeral()` で都度 ephemeral session を作って都度捨てる
+ * pattern (multi-turn 不要 / session 保持不要) で良いが、HITL 承認機構 (enkin/shokyaku) では:
  *
  *   1. LLM が `enkin_biblio` tool を呼ぶ → `tool_context.requestConfirmation()` → runner pause
  *   2. Slack DM で admin が Approve / Reject 押下 (~秒〜分)

@@ -1,12 +1,12 @@
 /**
- * PR #145 review type-design-analyzer CR-3 対応 = 回帰テスト。
+ * deliveryAdapter 引数 forward の static grep 回帰テスト。
  *
  * `src/index.ts` の main() 内で組み立てられる deliveryAdapter (`setTyping` / `deliver`)
  * が受け取った引数を漏らさず vendor 側 (`getChannelAdapter(...).setTyping` /
  * `.deliver`) に forward していることを **static grep** で機械的に固定化する。
  *
  * なぜ必要か:
- * - PR #145 Wave 1 の C1 で発現した「setTyping wrapper の 4 引数目 `status` を落として
+ * - 過去に発現した「setTyping wrapper の 4 引数目 `status` を落として
  *   書いたが TS の余剰引数無視で型検査が素通り、silent drop」の再発防止。
  * - `tsc --strict --noEmit` で実測: 「宣言引数が少ない実装」を関数部分型付けが常に
  *   許すため、`ChannelDeliveryAdapter.setTyping` 型を締めても検知できない。

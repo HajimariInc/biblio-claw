@@ -4,7 +4,7 @@
  * `unshelve()` で shelf PR を作った後、`<DATA_DIR>/biblio-equipped/<biblioName>/` を `fs.rmSync` で
  * 物理削除し、`session_equipped_biblios` から該当 biblio を **全 session** で個別削除する
  * (= `equip.ts` の `equipped biblio dir not found, skipping` warn が次回 spawn 以降に再発しないようにする)。
- * M4-E Phase 3 追加: `fugue_equipped_biblios` (channel-scoped store) からも並置削除する
+ * `fugue_equipped_biblios` (channel-scoped store) からも並置削除する
  * (= 焼却→再仕入れ→再 shelve 後の Fugue equip が `already_equipped` を誤返答する ghost row 問題の防止)。
  *
  * 設計方針:
@@ -14,7 +14,7 @@
  *     後処理失敗を ok=false に倒すと patron 体験が「禁書/焼却の区別が曖昧」になる。
  *   - **ただし cleanup 失敗を patron に隠さない**: `ShokyakuResult.cleanupWarning` に失敗内容を
  *     立てて action handler 側で通知文言を切替える (= 「物理削除しました」と無条件通知すると
- *     焼却の意味 = 再装備不可 を誤認させるため。PR #15 silent-failure-hunter HIGH 2 対応)。
+ *     焼却の意味 = 再装備不可 を誤認させるため。silent failure 撲滅)。
  *   - `BIBLIO_NAME_RE` 通過済の `biblioName` は `/` を含まないため `path.join(equipRoot, name)` は
  *     equipRoot の prefix 内で確定する。paranoid な startsWith assert は入れない
  *     (= 既存コードとの整合性 + 同じ正規表現防御が他箇所でも採用されているため余剰防御になる)。
@@ -45,7 +45,7 @@ export interface ShokyakuOptions {
 }
 
 /**
- * 装備ストア (session 側 / Fugue 側) から個別 biblio を削除する共通ヘルパ (提案 11、code-simplifier)。
+ * 装備ストア (session 側 / Fugue 側) から個別 biblio を削除する共通ヘルパ。
  *
  * session 側 (`deleteEquippedBiblioByName`) と Fugue 側 (`deleteFugueEquippedBiblioByName`) は
  * 呼出先 DB 関数と log message / warn 文言以外は同型の try/catch。ヘルパ化することで:
@@ -114,7 +114,7 @@ function removeEquipDir(equipDir: string, biblioName: string): string | null {
  * 1. `unshelve()` で shelf PR を作る (= 失敗なら早期 return、host 側 cleanup は走らない)
  * 2. 装備源 dir を物理削除 (= 失敗しても warn のみで続行、`cleanupWarning` に蓄積)
  * 3. 全 session の装備リストから該当 biblio を消す (= equip.ts skip warn ノイズ抑制、失敗時は `cleanupWarning` に追記)
- * 4. Fugue channel-scoped 装備状態からも削除する (M4-E Phase 3、ghost row 問題防止、失敗時は `cleanupWarning` に追記)
+ * 4. Fugue channel-scoped 装備状態からも削除する (ghost row 問題防止、失敗時は `cleanupWarning` に追記)
  *
  * 2-4 の失敗は ok=true を維持しつつ `cleanupWarning` で patron に伝える。
  */
@@ -161,9 +161,9 @@ export async function shokyaku(req: ShokyakuRequest, opts?: ShokyakuOptions): Pr
   );
   if (sessionWarning) warnings.push(sessionWarning);
 
-  // Fugue channel-scoped 装備状態からも除去 (M4-E Phase 3 判断 J、session 側と対称)。
-  // 焼却 = 物理削除 + 全装備リストからの除去、が M3 で確立した意味論。fugue store に ghost 行が
-  // 残ると、焼却→再仕入れ→再 shelve 後の equip が already_equipped を誤返答する問題を防ぐ。
+  // Fugue channel-scoped 装備状態からも除去 (session 側と対称)。
+  // 焼却 = 物理削除 + 全装備リストからの除去。fugue store に ghost 行が残ると、
+  // 焼却→再仕入れ→再 shelve 後の equip が already_equipped を誤返答する問題を防ぐ。
   // enkin (禁書) には追加しない = 装備状態残置で再装備可の対称性 (session 側と同じ)。
   const fugueWarning = deleteFromEquipStore(
     biblioName,

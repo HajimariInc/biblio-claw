@@ -1,9 +1,9 @@
 /**
- * router.ts の M4-F Phase 2 gate 挿入 integration test (pr-test-analyzer I8 + silent-failure I7 対応)。
+ * router.ts の gate 挿入 integration test。
  *
  * 従来 `router.ts` 自体には専用テストが不在で、gate 挿入部 (in-secure 3 点セット + fan-out
- * loop 直前の evaluateGate + deliverToAgent 冒頭の provider mismatch skip + C1/C2/I4/I5/I6/I7
- * 修正) は `GATE_ENABLED=true` 環境下で `routeInbound` を通す test が repo 全体でゼロだった。
+ * loop 直前の evaluateGate + deliverToAgent 冒頭の provider mismatch skip + silent-failure 撲滅)
+ * は `GATE_ENABLED=true` 環境下で `routeInbound` を通す test が repo 全体でゼロだった。
  *
  * 本 test は `host-core.test.ts` の router describe pattern を写経しつつ、gate/gate.js と
  * gate/audit-log.js と notify-admin.js を vi.mock で差し替え、`GATE_ENABLED=true` 環境で

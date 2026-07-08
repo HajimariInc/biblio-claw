@@ -30,7 +30,7 @@ function resultText(biblioName: string, result: ShelveResult): string {
 
 registerDeliveryAction('shelve_biblio', async (content, session, inDb) => {
   // validate ブロックは action-helpers.ts の validateBiblioInput に集約 (= enkin/shokyaku/shelve
-  // で 40 行 × 3 ファイル重複していたものを 1 箇所に、PR #21 code-simplifier 推奨)。
+  // で 40 行 × 3 ファイル重複していたものを 1 箇所に集約)。
   const validated = await validateBiblioInput(content, inDb, session, 'shelve-resp', 'shelve_biblio', '陳列');
   if (!validated) return;
   const { biblioName, category } = validated;
@@ -66,7 +66,7 @@ registerDeliveryAction('shelve_biblio', async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // shelve() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });

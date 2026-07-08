@@ -1,5 +1,5 @@
 /**
- * Fugue HTTP server の M4-H Phase 3 agent-container wiring test (ask endpoint 専用)。
+ * Fugue HTTP server の agent-container wiring test (ask endpoint 専用)。
  *
  * fugue-http.ask.gate.test.ts の mock pattern を継承 + spawn 経路の全 mock を追加:
  *   - `resolveSession` / `writeSessionMessage` / `openOutboundDb` / `sessionDir` /
@@ -246,7 +246,7 @@ async function postAsk(body: unknown): Promise<Response> {
 // happy path
 // =============================================================================
 
-describe('handleAsk wiring (M4-H Phase 3) — happy path', () => {
+describe('handleAsk wiring — happy path', () => {
   it('spawn 経路 全 8 assert (session resolve / write / wake / poll hit / parse / 3 payload / wrap / markDelivered / completed event)', async () => {
     const sessionMgrModule = await import('../session-manager.js');
     const containerModule = await import('../container-runner.js');
@@ -327,7 +327,7 @@ describe('handleAsk wiring (M4-H Phase 3) — happy path', () => {
       'sess-mock-1',
       expect.objectContaining({
         id: 'fugue-ask-req-happy-1',
-        // M4-H Phase 3.5 動作検証で判明: formatMessages (container/agent-runner/src/formatter.ts:129)
+        // 動作検証で判明: formatMessages (container/agent-runner/src/formatter.ts:129)
         // は kind === 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system' のみを拾う。'user' は
         // drop されて agent に届かないため 'chat' に統一 (fugue-http.ts:1548)。
         kind: 'chat',
@@ -391,10 +391,10 @@ describe('handleAsk wiring (M4-H Phase 3) — happy path', () => {
     expect(body.summary).toContain('一般対話で答えます。');
   });
 
-  // PR #195 review 提案 P1c (pr-test-analyzer 評価 5): agent LLM が out-of-range な
-  // `source_indexes` (例: 空 sources[] に対して `[99]` を返す) を返した経路の silent fallback
-  // (`repSourceId='unknown'` / `repKind='web'`) + `fugue.ask.response.invalid_source_index` log
-  // event の regression 検知。fugue-http.ts:1781-1807 を機械化。
+  // agent LLM が out-of-range な `source_indexes` (例: 空 sources[] に対して `[99]` を返す)
+  // を返した経路の silent fallback (`repSourceId='unknown'` / `repKind='web'`) +
+  // `fugue.ask.response.invalid_source_index` log event の regression 検知。fugue-http.ts:1781-1807
+  // を機械化。
   it('agent が out-of-range な source_indexes を返した経路 → fallback + invalid_source_index log', async () => {
     const sessionMgrModule = await import('../session-manager.js');
     const logModule = await import('../log.js');
@@ -452,7 +452,7 @@ describe('handleAsk wiring (M4-H Phase 3) — happy path', () => {
 // timeout
 // =============================================================================
 
-describe('handleAsk wiring (M4-H Phase 3) — timeout', () => {
+describe('handleAsk wiring — timeout', () => {
   it('90s (env=2s) 内に response 未到達 → 200 + status:error + warnings:[ask_backend_timeout] + cleanup 呼出 + spawn.timeout event', async () => {
     const sessionMgrModule = await import('../session-manager.js');
     const containerModule = await import('../container-runner.js');
@@ -499,7 +499,7 @@ describe('handleAsk wiring (M4-H Phase 3) — timeout', () => {
 // spawn failure
 // =============================================================================
 
-describe('handleAsk wiring (M4-H Phase 3) — spawn failure', () => {
+describe('handleAsk wiring — spawn failure', () => {
   it('wakeContainer=false → 200 + status:error + warnings:[ask_spawn_failed] + cleanup + spawn.failed event', async () => {
     const containerModule = await import('../container-runner.js');
     const sessionsModule = await import('../db/sessions.js');
@@ -537,7 +537,7 @@ describe('handleAsk wiring (M4-H Phase 3) — spawn failure', () => {
 // response parse failure
 // =============================================================================
 
-describe('handleAsk wiring (M4-H Phase 3) — parse failure', () => {
+describe('handleAsk wiring — parse failure', () => {
   it('regex miss (<ask-response> タグ不在) → 200 + status:error + warnings:[ask_response_malformed] + parse_reason:tag_missing', async () => {
     const sessionMgrModule = await import('../session-manager.js');
     const containerModule = await import('../container-runner.js');
@@ -611,10 +611,10 @@ describe('handleAsk wiring (M4-H Phase 3) — parse failure', () => {
     expect(body.raw).toMatchObject({ parse_reason: 'zod_validate' });
   });
 
-  // PR #195 review 提案 P1b (pr-test-analyzer 評価 6): `parseAgentAskResponse` の 4 失敗理由
-  // (`content_shape` / `tag_missing` / `json_parse` / `zod_validate`) のうち未検証だった 2
-  // (`content_shape` / `json_parse`) を追加。silent fallback (raw.parse_reason に理由を残す)
-  // + AD 本義契約 (200 + status:'error') の regression 検知源として機械化する。
+  // `parseAgentAskResponse` の 4 失敗理由 (`content_shape` / `tag_missing` / `json_parse` /
+  // `zod_validate`) のうち未検証だった 2 (`content_shape` / `json_parse`) を追加。silent
+  // fallback (raw.parse_reason に理由を残す) + AD 本義契約 (200 + status:'error') の regression
+  // 検知源として機械化する。
   it('content 自体が JSON parse 不能 → 200 + status:error + warnings:[ask_response_malformed] + parse_reason:content_shape', async () => {
     const sessionMgrModule = await import('../session-manager.js');
     const containerModule = await import('../container-runner.js');
@@ -733,10 +733,10 @@ describe('handleAsk wiring (M4-H Phase 3) — parse failure', () => {
 // cleanup exception isolation
 // =============================================================================
 
-describe('handleAsk wiring (M4-H Phase 3) — cleanup exception isolation', () => {
-  // PR #178 review 対応、提案 S4: cleanup 3 段独立 try/catch (killContainer / deleteSession / fs.rmSync)
-  // の各段独立発火を assert。1 段目失敗しても後続段が呼ばれる不変条件 = future refactor で「try/catch を
-  // 統合して簡素化」等の regression を検知する。
+describe('handleAsk wiring — cleanup exception isolation', () => {
+  // cleanup 3 段独立 try/catch (killContainer / deleteSession / fs.rmSync) の各段独立発火を
+  // assert。1 段目失敗しても後続段が呼ばれる不変条件 = future refactor で「try/catch を統合
+  // して簡素化」等の regression を検知する。
   it.each([
     {
       name: 'killContainer throw',
@@ -836,7 +836,7 @@ describe('handleAsk wiring (M4-H Phase 3) — cleanup exception isolation', () =
 // regression (Phase 1-2 経路)
 // =============================================================================
 
-describe('handleAsk wiring (M4-H Phase 3) — regression (Phase 1-2)', () => {
+describe('handleAsk wiring — regression (gate + skeleton)', () => {
   it('in-secure denial は spawn しない (denied 経路先行 return、Phase 2 と同流儀)', async () => {
     const gateModule = await import('../gate/gate.js');
     const sessionMgrModule = await import('../session-manager.js');
@@ -859,17 +859,15 @@ describe('handleAsk wiring (M4-H Phase 3) — regression (Phase 1-2)', () => {
     expect(body.status).toBe('denied');
     expect(body.warnings).toEqual([AD_ASK_DENIED_BY_GATE]);
 
-    // spawn 経路 未呼出 (Phase 2 の denied 経路先行 return を Phase 3 で維持)
+    // spawn 経路 未呼出 (denied 経路の先行 return を維持)
     expect(vi.mocked(sessionMgrModule.resolveSession)).not.toHaveBeenCalled();
     expect(vi.mocked(sessionMgrModule.writeSessionMessage)).not.toHaveBeenCalled();
     expect(vi.mocked(containerModule.wakeContainer)).not.toHaveBeenCalled();
   });
 
-  // PR #178 review 対応、提案 S2 (再定義): plan §Test 構造の「gate throw fail-open は spawn しない」
-  // は Phase 3 で意味変化した (skeleton block 廃止で fail-open 継続 → spawn 経路に進む)。
-  // 代わりに end-to-end 経路 (gate throw fail-open → spawn 経路完走 → 200 応答) が outer catch
-  // まで抜けず継続する不変条件を wiring level で assert する。silent-failure-hunter 観点で
-  // 「gate throw を outer catch に抜けさせる誤修正」= 500 化 = AD の本義違反、の regression 防止。
+  // end-to-end 経路 (gate throw fail-open → spawn 経路完走 → 200 応答) が outer catch まで抜けず
+  // 継続する不変条件を wiring level で assert する。silent failure 観点で「gate throw を outer
+  // catch に抜けさせる誤修正」= 500 化 = AD の本義違反、の regression 防止。
   it('gate throw fail-open は outer catch まで抜けず 200 応答 + spawn 経路継続 (gate 由来 warning なし)', async () => {
     const gateModule = await import('../gate/gate.js');
     const sessionMgrModule = await import('../session-manager.js');

@@ -1,5 +1,5 @@
 /**
- * schema-conversion のユニットテスト (M4-B Phase 2)。
+ * schema-conversion のユニットテスト。
  *
  * `normalizeSchema` + `toAnthropicTools` の純粋関数 2 つを検証する。`@google/adk` の
  * `simple_zod_to_json.ts` が出す UPPERCASE Schema → Anthropic Messages API の lowercase
@@ -268,7 +268,7 @@ describe('toAnthropicTools — ADK config.tools → Anthropic Tool[] 変換', ()
     expect(result[0].input_schema).toEqual({ type: 'object' });
   });
 
-  it('parameters が不正な型 (= string) でも {type: "object"} で fallback + log.warn (silent-failure-hunter #4)', () => {
+  it('parameters が不正な型 (= string) でも {type: "object"} で fallback + log.warn (silent failure 撲滅)', () => {
     const input = [
       {
         functionDeclarations: [{ name: 'bad_params', parameters: 'not a schema' }],

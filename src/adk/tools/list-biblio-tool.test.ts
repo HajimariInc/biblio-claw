@@ -1,5 +1,5 @@
 /**
- * list-biblio-tool のユニットテスト (M4-B Phase 4)。
+ * list-biblio-tool のユニットテスト。
  *
  * inspect-tool.test.ts と同流儀。`category` は optional (Zod enum optional)、
  * undefined 時は全件取得を意味する。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。

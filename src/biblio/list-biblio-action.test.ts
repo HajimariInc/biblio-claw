@@ -142,7 +142,7 @@ describe('list_biblio handler', () => {
   it('unknown カテゴリが混在するとき "source 解析不能、要確認" 行が出力される', async () => {
     // `formatResult` の `counts.unknown > 0` 分岐を action test レベルで通す。
     // list-biblio.test.ts は projectItem の unknown bucket を検証するが、
-    // formatResult の表示分岐は本テストで担保する (pr-test-analyzer PR #17 指摘)。
+    // formatResult の表示分岐は本テストで担保する。
     listBiblioMock.mockResolvedValue({
       ok: true,
       items: [

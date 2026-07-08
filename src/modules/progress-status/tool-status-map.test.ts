@@ -1,10 +1,10 @@
 /**
- * M4-F Phase 4: tool-status-map の unit test。
+ * tool-status-map の unit test。
  *
  * カバー範囲:
- *   - SDK 組み込み 18 種 (TOOL_ALLOWLIST 全種) の完全 case (PR #145 review IM-10)
+ *   - SDK 組み込み 18 種 (TOOL_ALLOWLIST 全種) の完全 case
  *   - MCP nanoclaw (biblio) 9 種の完全 case
- *   - MCP tavily + drive (M4-F Phase 3 生活機能)
+ *   - MCP tavily + drive (生活機能)
  *   - ADK ネイティブ tool 名 (mcp__ prefix なし) の biblio 9 種
  *   - 未知 SDK / 未知 MCP server / malformed regex の generic fallback (silent 化しない)
  *   - null / undefined / 空文字入力
@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 
 import { toolNameToStatus } from './tool-status-map.js';
 
-describe('toolNameToStatus (M4-F Phase 4)', () => {
+describe('toolNameToStatus', () => {
   it('returns null for null / undefined / empty string', () => {
     expect(toolNameToStatus(null)).toBeNull();
     expect(toolNameToStatus(undefined)).toBeNull();
@@ -77,7 +77,7 @@ describe('toolNameToStatus (M4-F Phase 4)', () => {
     });
   });
 
-  describe('MCP life tools (Phase 3)', () => {
+  describe('MCP life tools', () => {
     it('tavily -> Web 検索中', () => {
       expect(toolNameToStatus('mcp__tavily__tavily_search')).toBe('Web 検索中');
     });
@@ -91,9 +91,9 @@ describe('toolNameToStatus (M4-F Phase 4)', () => {
 
   describe('generic fallback (silent 化しない)', () => {
     it('unknown SDK tool falls back to 作業中 (${name})', () => {
-      // PR #145 review IM-10: 旧 test は `TodoWrite` を「未知 tool」の例として使い
-      // 網羅性不足を固定化していたが、TOOL_ALLOWLIST 全 18 種を BUILTIN_STATUS に取り込んだ
-      // ため、真に未知の tool 名 (SDK / MCP どちらの管理下にもない) に例を差し替える。
+      // 旧 test は `TodoWrite` を「未知 tool」の例として使い網羅性不足を固定化していたが、
+      // TOOL_ALLOWLIST 全 18 種を BUILTIN_STATUS に取り込んだため、真に未知の tool 名
+      // (SDK / MCP どちらの管理下にもない) に例を差し替える。
       expect(toolNameToStatus('FutureUnmappedTool')).toBe('作業中 (FutureUnmappedTool)');
     });
     it('unknown MCP server exposes server name', () => {

@@ -10,9 +10,9 @@
 import { z } from 'zod';
 
 /**
- * Fugue Director round mode の literal union。Phase 2 では受理のみで検索ロジックには
- * 反映しない (log field + `raw.mode` に emit のみ)。TODO(M4-E Phase 4+): mode 別に
- * 検索経路を分岐する (Fugue Stage 5+ の Director 挙動に合わせる)。
+ * Fugue Director round mode の literal union。現状は受理のみで検索ロジックには反映しない
+ * (log field + `raw.mode` に emit のみ)。TODO: mode 別に検索経路を分岐する (Fugue Stage 5+ の
+ * Director 挙動に合わせる)。
  */
 export const FUGUE_CONSULT_MODES = ['brainstorm-with-ad', 'review-with-ad', 'ask-ad', 'coaching-with-ad'] as const;
 export type FugueConsultMode = (typeof FUGUE_CONSULT_MODES)[number];
@@ -65,19 +65,15 @@ export const FugueEquipRequest = z.object({
 export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 
 /**
- * Fugue ask endpoint (M4-H) の intent literal union。Phase 1 では受理のみ (Zod validation
- * pass 後は log field に emit するだけ、skeleton response には反映しない)。
- *
- * TODO(M4-H Phase 2): gate 4 層と `INTENT_GATE_MISMATCH` 検出に再利用する。定数化しておく
- * ことで Phase 2 で inline enum を export し直す手戻りを防ぐ。
+ * Fugue ask endpoint の intent literal union。gate 4 層と `INTENT_GATE_MISMATCH` 検出に
+ * 再利用する定数 (`handleAsk` の gate 挿入ブロックが本定数を参照)。
  */
 export const FUGUE_ASK_INTENTS = ['search-web', 'drive-lookup', 'general'] as const;
 export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
 
 /**
- * Fugue ask endpoint (M4-H) の source kind literal union (single-source of truth)。
+ * Fugue ask endpoint の source kind literal union (single-source of truth)。
  *
- * `FUGUE_ASK_INTENTS` の模範解答を横展開 (type-design-analyzer 発見 1、2026-07-08 PR #195 review)。
  * 従来 `Source.kind` / `AgentAskSource.kind` / `wrapExternalContent` の kind 引数 / `handleAsk`
  * の repKind 型注釈の 4 箇所に `'web' | 'drive'` (or `z.enum(['web', 'drive'])`) が直書きされて
  * いたのを本定数に集約する。将来 Fugue 契約側で kind literal を拡張する場合、本 1 箇所を
@@ -89,22 +85,22 @@ export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
 export const FUGUE_SOURCE_KINDS = ['web', 'drive'] as const;
 export type FugueSourceKind = (typeof FUGUE_SOURCE_KINDS)[number];
 
-// M4-H Phase 2: ask endpoint 向け warnings 定数 (Contract §5.5 準拠、named export で test 済みの厳格な文字列契約)。
+// ask endpoint 向け warnings 定数 (Contract §5.5 準拠、named export で test 済みの厳格な文字列契約)。
 // consult/equip の inline literal (`'input rejected by input gate'`) との書き味の混在は許容 (Fugue 側実装が塊で疎通
-// 取れた時点で fix 方針、DEN さん判断 2026-07-06)。
+// 取れた時点で fix 方針)。
 export const AD_ASK_DENIED_BY_GATE = 'AD_ASK_DENIED_BY_GATE' as const;
 export const INTENT_GATE_MISMATCH = 'INTENT_GATE_MISMATCH' as const;
 
 /**
- * Fugue ask endpoint (M4-H) の Request full spec (Phase 1 skeleton)。
+ * Fugue ask endpoint の Request full spec。
  *
  * consult より広い `query` 上限 (2000 char) は PRD §5.5 に準拠 (Fugue Director が Web
- * 検索・Drive lookup を要求する自然文は長くなりうる)。`intent` は将来 gate 4 層で
- * `INTENT_GATE_MISMATCH` 検出に使う (Phase 2 以降)、Phase 1 では受理のみで応答には反映しない。
- * `context_hint` は consult 側と同一 shape (`.optional().nullable()` 順を統一)。
+ * 検索・Drive lookup を要求する自然文は長くなりうる)。`intent` は gate 4 層で
+ * `INTENT_GATE_MISMATCH` 検出に使う。`context_hint` は consult 側と同一 shape
+ * (`.optional().nullable()` 順を統一)。
  */
 export const FugueAskRequest = z.object({
-  schema_version: z.literal('1').describe('Schema version. Phase 1 accepts "1" only.'),
+  schema_version: z.literal('1').describe('Schema version. Contract §5.5 accepts "1" only.'),
   request_id: z.string().min(1).max(64).describe('Client-provided idempotency key (max 64 chars).'),
   query: z
     .string()
@@ -162,7 +158,7 @@ export const Finding = z.object({
 export type FindingT = z.infer<typeof Finding>;
 
 /**
- * ask endpoint 内部の agent-container protocol (M4-H Phase 3)。
+ * ask endpoint 内部の agent-container protocol。
  *
  * agent-container が `<ask-response>{JSON}</ask-response>` タグ内に書く JSON の型。
  * Contract §5.5 の `Source` / `Finding` (handleAsk 応答型) とは別:
@@ -182,7 +178,7 @@ export const AgentAskSource = z.object({
   title: z.string().min(1).max(400),
   url: z.string().min(1).max(1000),
   snippet: z.string().min(1).max(1100),
-  // 既存 `Source.metadata` (line 124) と consistency 統一 (PR #178 review 対応、提案 S1)。
+  // 既存 `Source.metadata` (line 124) と consistency 統一。
   // `.default({})` 単体で「input=undefined → {} 置換」が成立するため `.optional()` は不要。
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
@@ -202,28 +198,22 @@ export const AgentAskResponse = z.object({
 export type AgentAskResponseT = z.infer<typeof AgentAskResponse>;
 
 /**
- * Fugue ask endpoint の Reply body (Phase 1 skeleton)。
+ * Fugue ask endpoint の Reply body。
  *
  * status の意味 (Contract §5.5):
  *
- * - `ok` — 正常応答 (summary / findings / sources のいずれかが埋まる、Phase 3 完了時点で発火)
- * - `denied` — gate `in-secure` 判定 (Phase 2 で扱う)
- * - `not_available` — バックエンド未接続 (backend が Phase 3 で結線されるまで発火)。**Phase 1
- *   skeleton の意味と一致** — agent-container backend を呼ばない = Contract 上「未接続状態」の
- *   semantics。Fugue 側 AD は `not_available` を「AD ラウンド省略」の signal として静かに fallback する。
+ * - `ok` — 正常応答 (summary / findings / sources のいずれかが埋まる)
+ * - `denied` — gate `in-secure` 判定
+ * - `not_available` — バックエンド未接続 (agent-container backend が応答不能な場合)。Contract 上
+ *   「未接続状態」の semantics。Fugue 側 AD は `not_available` を「AD ラウンド省略」の signal として
+ *   静かに fallback する。
  * - `error` — timeout / 部分失敗
  *
- * Phase 1 skeleton は必ず `status: 'not_available'` + `warnings: ['skeleton_response']` を返す。
- * TODO(M4-H Phase 3): backend 結線完了時に (a) `status` を `'ok'` に切替、(b) `warnings` から
- * `'skeleton_response'` を除去、(c) `summary` / `findings` / `sources` の 3 並列 payload を実データで埋める。
- *
- * **discriminated union 設計 (A3-1)**: Phase 3 で status ごとの分岐が実装される時点で `FugueEquipReply`
- * (PR #117) と同型の discriminated union 化を予告している。Phase 1 skeleton では常に `status:'not_available'`
- * だが、Contract §5.5 の 4 status を型で明示することで、Phase 2/3 実装時に status × payload 相関の
- * silent 不整合を compile-time で検知する。
+ * **discriminated union 設計**: `FugueEquipReply` と同型の discriminated union 化。Contract §5.5 の
+ * 4 status を型で明示することで、status × payload 相関の silent 不整合を compile-time で検知する。
  */
 export const FugueAskReply = z.discriminatedUnion('status', [
-  // 'ok': backend 結線後の正常応答 (Phase 3)
+  // 'ok': agent-container 経由の正常応答
   z.object({
     schema_version: z.literal('1'),
     request_id: z.string(),
@@ -306,8 +296,8 @@ export interface SkillRef {
  *   Fugue 側の AD ラウンド継続判断を許容する (5xx を出さない設計、PRD「AD の本義」節)。
  *
  * 4xx/5xx (401 / 413 / 500) は認可 / 上限超過 / biblio-claw 自体の応答不能に限定。
- * `raw` は Phase 2 では listBiblio 結果の一部 (total / counts / appliedFilter) +
- * query + mode。TODO(M4-E Phase 5+): NanoClaw response を含める。
+ * `raw` は listBiblio 結果の一部 (total / counts / appliedFilter) + query + mode。
+ * TODO: 上流由来の response を含める。
  */
 export interface FugueConsultReply {
   schema_version: '1';
@@ -322,7 +312,7 @@ export interface FugueConsultReply {
 }
 
 /**
- * Fugue equip endpoint の Reply body (Phase 3)。
+ * Fugue equip endpoint の Reply body。
  *
  * status の意味:
  *
@@ -336,12 +326,11 @@ export interface FugueConsultReply {
  *
  * 5xx (401 / 413 / 500) は認可 / 上限超過 / biblio-claw 自体の応答不能 (uncaught exception) に限定。
  *
- * **型設計 (PR #117 review、type-design-analyzer)**: `status` × `skill` の相関 (equipped/
- * already_equipped は skill 非 null、not_found/error は skill: null) を discriminated union で
- * 型レベル強制する。5 か所の object literal (fugue-http.ts の handleEquip 内) は既に正しく
- * ペア化されているため object literal 自体は無変更で narrowing が成立する。将来 status/skill
- * の不整合 (例: `status:'not_found'` で skill を書く / `status:'equipped'` で skill:null にする)
- * は compile error として検知される。
+ * **型設計**: `status` × `skill` の相関 (equipped/already_equipped は skill 非 null、
+ * not_found/error は skill: null) を discriminated union で型レベル強制する。5 か所の object
+ * literal (fugue-http.ts の handleEquip 内) は既に正しくペア化されているため object literal
+ * 自体は無変更で narrowing が成立する。将来 status/skill の不整合 (例: `status:'not_found'`
+ * で skill を書く / `status:'equipped'` で skill:null にする) は compile error として検知される。
  */
 export type FugueEquipReply =
   | {
@@ -375,16 +364,15 @@ export type FugueEquipReply =
  *   (現状 `writeError()` の 5xx path は 500 `error:'internal'` のみ発火、`unavailable` variant
  *   は未実装の予備 = discriminated union で reason を持てる契約だけ用意している)
  *
- * 5 分類 (M4-F Phase 2 で `in_secure` を追加):
+ * 5 分類:
  *
- * - `env_missing`: 棚 owner/repo の env 未設定 = biblio-claw 設定不備 (Phase 5 の Prod
- *   deploy で解消予定、Phase 2 development 期は起こりうる)
+ * - `env_missing`: 棚 owner/repo の env 未設定 = biblio-claw 設定不備
  * - `github_http`: GitHub API が 5xx / rate limit / auth failure を返した (transient)
  * - `marketplace_parse`: `marketplace.json` が壊れている (shelve PR の途中状態等、transient
  *   になりうる)
- * - `in_secure`: **M4-F Phase 2 追加**。gate 4 層で prompt injection と判定された発話
- *   (`raw.reason: 'in_secure'` として consult reply に emit)。Fugue Director consumer は
- *   `warnings` の `'input rejected by input gate'` と併せて「入力が拒否された」を認識する。
+ * - `in_secure`: gate 4 層で prompt injection と判定された発話 (`raw.reason: 'in_secure'` として
+ *   consult reply に emit)。Fugue Director consumer は `warnings` の `'input rejected by input
+ *   gate'` と併せて「入力が拒否された」を認識する。
  * - `other`: 未分類の Error / 非 Error 値
  */
 export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplace_parse' | 'in_secure' | 'other';
@@ -400,7 +388,7 @@ export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplac
  * 内部例外)。listBiblio() の部分失敗は 200 + `FugueConsultReply.status='error'` で運ぶため
  * `unavailable` variant は現状 uncaught exception 経路の予備 (現行 code path で明示発火なし)。
  *
- * `error='rate_limited'` は M4-H Phase 4 で追加。Contract §5.6 の `RATE_LIMITED` semantics
+ * `error='rate_limited'` は Contract §5.6 の `RATE_LIMITED` semantics
  * に対応し、`writeError(res, 429, {error:'rate_limited'})` で使用する。`Retry-After`
  * header は呼び出し側で `res.setHeader('Retry-After', <sec>)` として明示送出 (writeError/
  * writeJson の signature は無変更、PRD 意思決定 #E)。AD の本義契約の 5xx catch-all only

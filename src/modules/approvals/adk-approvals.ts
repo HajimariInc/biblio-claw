@@ -180,7 +180,7 @@ function shortAdkApprovalId(): string {
  * patron に既に「失敗」通知を deliver した状態で `false` を返す。**呼び出し元 (dispatcher.ts)
  * は false を「pending row 未作成 = 承認要求は成立していない」と解釈**し、`dispatched` を
  * インクリメントせず、中間応答「承認を admin にお願いしました」を送らない (= 内部失敗と
- * 「成功しました」の矛盾する 2 通のメッセージ配信を防ぐ、silent-failure-hunter C2)。
+ * 「成功しました」の矛盾する 2 通のメッセージ配信を防ぐ)。
  *
  * **issue #106 対応**: 正常経路で `expires_at` を設定 (Layer 1) + `setTimeout` で expiry timer
  * を仕込む (Layer 2)。timer 発火時は `expireAdkApproval` に委譲。
@@ -349,7 +349,7 @@ export function clearAdkApprovalTimer(approvalId: string): boolean {
  * 順序: (1) row lookup → (2) status='expired' 更新 → (3) Slack card edit →
  *      (4) patron 通知 → (5) sessionService.deleteSession → (6) row delete。
  *
- * 途中の失敗は log.warn / log.error で拾って swallow (= throw しない、silent-failure-hunter 対策)。
+ * 途中の失敗は log.warn / log.error で拾って swallow (= throw しない、silent failure 撲滅)。
  * 特に (5) sessionService の失敗は Pod メモリ状態に関する話で、row は必ず (6) で消す。
  *
  * Pod 再起動 sweep 経路 (`reason === 'host restarted'`) では sessionService が空のため

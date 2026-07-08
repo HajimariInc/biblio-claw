@@ -184,7 +184,7 @@ describe('OTel exporter headers factory (issue #104 fix)', () => {
   });
 });
 
-// issue #104 review Wave 1 対応 — shutdownOtel の呼び出し順序 regression 検知。
+// issue #104 対応 — shutdownOtel の呼び出し順序 regression 検知。
 // stopTokenRefresh() を sdkInstance.shutdown() より先に呼ぶと、BatchSpanProcessor._flushAll()
 // の最終 flush 中に headers factory が空 Bearer を返して 401 → 直近 span が silent drop する。
 describe('OTel shutdown flush order (issue #104 review)', () => {
@@ -225,7 +225,7 @@ describe('OTel shutdown flush order (issue #104 review)', () => {
   });
 });
 
-// issue #104 review Wave 1 対応 — cachedToken null 時の警告経路。
+// issue #104 対応 — cachedToken null 時の警告経路。
 // 旧 _headers hack と同じ「無音で 401 drop」を再現する経路になり得るため、
 // factory が空 Bearer を返す条件で 1 回だけ warn を発火する最終防衛線。
 describe('OTel headers factory null cachedToken warn (issue #104 review)', () => {

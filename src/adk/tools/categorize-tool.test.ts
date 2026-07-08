@@ -1,5 +1,5 @@
 /**
- * categorize-tool のユニットテスト (M4-B Phase 4)。
+ * categorize-tool のユニットテスト。
  *
  * inspect-tool.test.ts と同流儀。`BIBLIO_NAME_RE` guard による path-traversal 防御 + execute 委譲を
  * 1 path で検証。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。

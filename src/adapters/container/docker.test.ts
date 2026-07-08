@@ -240,7 +240,7 @@ describe('DockerAgentHandle.waitForExit', () => {
 });
 
 describe('DockerAgentHandle stderr capture on unexpected exit', () => {
-  // PR #20 で導入した silent fail 隠蔽解消 (= docker run の exit !=0 / signal 終了で
+  // silent fail 隠蔽解消 (= docker run の exit !=0 / signal 終了で
   // stderr buffer を warn として吐く設計) の回帰テスト。旧実装は child stderr を
   // log.debug にのみ流していたため LOG_LEVEL=info で完全に隠蔽されていた
   // (docker run exit 125 の "invalid characters for local volume name" 等)。
@@ -290,7 +290,7 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
 
   it('code === null (= signal 終了) かつ kill 経由でないとき、stderr 空でも warn を吐く', async () => {
     // 想定経路: OOM killer / GKE node eviction / 外部 SIGKILL 等。旧実装は
-    // `code !== null` ガードでこの経路を黙っていた (silent-failure-hunter Important #3)。
+    // `code !== null` ガードでこの経路を黙っていた。
     const child = makeChild();
     spawnMock.mockReturnValueOnce(child);
     const p = new DockerContainerRuntimeProvider();

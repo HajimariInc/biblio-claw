@@ -1,7 +1,6 @@
 /**
  * ca-secret-sync — OneCLI sidecar が emptyDir 経由で生成する root CA bundle を
- * 読み、agent Pod 用 K8s Secret `biblio-onecli-ca` に自動 upsert する (M2 PRD A
- * Phase 3、`TODO(phase-2.6)` 解消)。
+ * 読み、agent Pod 用 K8s Secret `biblio-onecli-ca` に自動 upsert する。
  *
  * 配置と起動:
  *   orchestrator Pod 内の本体 container にバンドルされ、`DSN_PROVIDER === 'gke'`
@@ -10,7 +9,7 @@
  *   を維持するため起動しない。
  *
  * 読み元:
- *   OneCLI sidecar が `/app/data/gateway/ca.pem` を生成する (PoC-5 写経)。同 Pod 内
+ *   OneCLI sidecar が `/app/data/gateway/ca.pem` を生成する (別経路の設計知見を写経)。同 Pod 内
  *   の本体 container は同じ emptyDir を `/etc/ssl/certs/onecli/ca.pem` で readOnly
  *   mount し、本モジュールはここから読む。
  *

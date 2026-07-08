@@ -1,15 +1,15 @@
 /**
- * `inspect_biblio` FunctionTool — ADK Runner 配下から既存 host action `inspect()` を呼ぶ wrap (M4-B Phase 1)。
+ * `inspect_biblio` FunctionTool — ADK Runner 配下から既存 host action `inspect()` を呼ぶ wrap。
  *
  * `acquire_biblio` で quarantine に置かれた biblio を 3 軸 (schema → license → dangerous) で検査し、
  * ACCEPT / HOLD / REJECT を返す。設計理念は `acquire-tool.ts` 冒頭ドキュメント参照。
  *
- * **`BIBLIO_NAME_RE` 防御線** (= M4-B Phase 3 で tool 層に追加):
+ * **`BIBLIO_NAME_RE` 防御線** (= tool 層への追加):
  *   `BIBLIO_NAME_RE` (path traversal 防御線) は `src/biblio/inspect.ts` 内部には存在せず、
  *   従来は `src/biblio/inspect-action.ts:50` (= MCP delivery handler 経路) と
  *   `src/biblio/equip.ts:71` のみが持っていた。ADK tool 経路 (= LLM 自律呼出) は
  *   acquire_biblio の戻り値 `biblioName` をそのまま inspect_biblio に渡す前提だが、
- *   Phase 3 で CLI/Slack 経路が本番化した以降、LLM が不正 `biblioName` を直接構成して
+ *   CLI/Slack 経路が本番化した以降、LLM が不正 `biblioName` を直接構成して
  *   投入する経路が現実的な攻撃面になる。ここで `execute` 冒頭に BIBLIO_NAME_RE guard を
  *   追加して fail-closed に REJECT + schema_invalid を返す (= inspect-action.ts の
  *   validation と同等)。
@@ -43,8 +43,8 @@ export const inspectBiblioTool = new FunctionTool({
   parameters: InspectBiblioInput,
   execute: async ({ biblioName }, tool_context): Promise<InspectResult> => {
     const { requestId, sessionId } = resolveToolCtx(tool_context);
-    // Path-traversal 防御 (M4-B Phase 3): CLI/Slack 経路 + LLM 自律呼出が本番化した Phase 3
-    // 以降、`biblioName` は LLM 生成の未検証文字列として扱う必要がある。`inspect-action.ts:50`
+    // Path-traversal 防御: CLI/Slack 経路 + LLM 自律呼出が本番化して以降、
+    // `biblioName` は LLM 生成の未検証文字列として扱う必要がある。`inspect-action.ts:50`
     // と同じ regex で fail-closed に REJECT + schema_invalid を返す。
     if (!BIBLIO_NAME_RE.test(biblioName)) {
       log.warn('ADK tool: inspect_biblio invalid name (path-traversal guard)', {
@@ -70,7 +70,7 @@ export const inspectBiblioTool = new FunctionTool({
       return await inspect({ biblioName }, { ctx: { requestId, sessionId } });
     } catch (err) {
       // `inspect()` は throw しない契約 (= HOLD/inspect_error に倒す)。万一の unexpected throw を
-      // server-side log で可視化してから rethrow する (= silent-failure-hunter I1)。
+      // server-side log で可視化してから rethrow する (= silent failure 撲滅)。
       log.error('ADK tool: inspect_biblio unexpected throw', {
         event: 'adk.tool.inspect.unexpected_error',
         request_id: requestId,

@@ -1,19 +1,19 @@
 /**
- * Fugue HTTP server の M4-H Phase 1 `POST /v1/channels/fugue/ask` skeleton test。
+ * Fugue HTTP server の `POST /v1/channels/fugue/ask` skeleton test。
  *
  * fugue-http.gate.test.ts の mock pattern を写経 (listBiblio / shelf-gh / fugue-equipped-biblios
  * は ask 経路では使わないが、既存 test file 側の mock 慣習に合わせて空 mock を張っておく =
  * import 副作用が同一状態で走ることを保証)。実 HTTP fetch で以下を検証:
  *
- * **Phase 3 更新**: skeleton reply (Phase 1) は廃止され、backend (agent-container) 未接続時は
+ * skeleton reply は廃止され、backend (agent-container) 未接続時は
  * `resolveFugueAskConfig()` の DB lookup も throw する (initDb 未実行のテスト env)。fail-open で
  * `status:'error'` + `warnings:['ask_config_missing']` + `summary:'ask backend failed:
  * ask_config_missing'` の errorReply を 200 で返す (AD の本義契約: 5xx を出さない)。
- * spawn 経路の完全 test は `fugue-http.ask.wiring.test.ts` (Phase 3 新設) を参照。本 test file は:
- *   - 200 errorReply (Phase 3 config missing shape)
- *   - Zod validation (400) は Phase 1 と同じ
- *   - 401 no-auth path enumeration guard も Phase 1 と同じ
- *   - span 属性 (fugue.ask + intent/outcome) は Phase 3 の error outcome で検証
+ * spawn 経路の完全 test は `fugue-http.ask.wiring.test.ts` を参照。本 test file は:
+ *   - 200 errorReply (config missing shape)
+ *   - Zod validation (400)
+ *   - 401 no-auth path enumeration guard
+ *   - span 属性 (fugue.ask + intent/outcome) は error outcome で検証
  */
 import * as otelApi from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
@@ -92,7 +92,7 @@ async function postAsk(body: unknown, options: { auth?: boolean } = { auth: true
   });
 }
 
-describe('handleAsk (M4-H Phase 3 config missing errorReply)', () => {
+describe('handleAsk (config missing errorReply)', () => {
   it('200 errorReply with minimum valid body (config missing = DB lookup throw, fail-open)', async () => {
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-1', query: 'test query' });
     expect(res.status).toBe(200);
@@ -255,17 +255,17 @@ describe('handleAsk (M4-H Phase 3 config missing errorReply)', () => {
 });
 
 /**
- * C6 (pr-test-analyzer Important 1): `handleAsk` の span 属性 (`fugue.ask` 名 + channel /
- * fugue.operation / fugue.request_id / fugue.intent / fugue.outcome) を実 HTTP 経由で検証する。
+ * `handleAsk` の span 属性 (`fugue.ask` 名 + channel / fugue.operation / fugue.request_id /
+ * fugue.intent / fugue.outcome) を実 HTTP 経由で検証する。
  *
  * intent の `undefined`/`null`/リテラルの 3 パスを文字列 `'null'` / literal 名に畳み込む正規化
  * (`fugue-http.ts:1207`) は handleAsk 固有の新規ドメインロジックであり、typo や setAttribute 漏れ
- * があっても 200 応答自体は正しく返るため通常の response body test では検知不能。Phase 2 で
- * `INTENT_GATE_MISMATCH` 判定の入力になるため、Phase 1 で HTTP 経由の実結合 assertion を固める。
+ * があっても 200 応答自体は正しく返るため通常の response body test では検知不能。
+ * `INTENT_GATE_MISMATCH` 判定の入力になるため、HTTP 経由の実結合 assertion を固める。
  *
  * `fugue-http.otel.test.ts` の consult / equip パターンを写経。
  */
-describe('handleAsk span attributes (M4-H Phase 3)', () => {
+describe('handleAsk span attributes', () => {
   let memoryExporter: InMemorySpanExporter;
   let provider: BasicTracerProvider;
   let server: FugueHttpServer;

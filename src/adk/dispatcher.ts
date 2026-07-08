@@ -1,5 +1,5 @@
 /**
- * ADK Runner → channel adapter dispatcher (M4-B Phase 3 + Phase 4 HITL 統合).
+ * ADK Runner → channel adapter dispatcher (HITL 統合).
  *
  * 本 module は `src/router.ts:deliverToAgent()` の `provider === 'adk'` 分岐から呼ばれ、
  * patron 命令 (CLI / Slack / 他 channel いずれか) を root `LlmAgent` に流し込み、
@@ -8,11 +8,11 @@
  * **channel adapter agnostic**: `channelType` を parameter で受け、`getChannelAdapter()` で
  * 動的に adapter を解決するだけ。CLI (`cli.ts`) でも Slack (`slack.ts`) でも同一 code path。
  *
- * # Phase 3 → Phase 4 の切替: `runEphemeral` → `runAsync` + 明示 session 管理
+ * # `runEphemeral` → `runAsync` + 明示 session 管理の設計
  *
- * Phase 3 は `InMemoryRunner.runEphemeral({userId, newMessage})` を使い ephemeral session を
- * 都度使い捨てだった。Phase 4 で HITL 承認機構 (enkin/shokyaku) を統合するため、明示的な
- * `sessionService.createSession → runner.runAsync → 保持 or deleteSession` に切り替えた。
+ * `InMemoryRunner.runEphemeral({userId, newMessage})` は ephemeral session を都度使い捨てだが、
+ * HITL 承認機構 (enkin/shokyaku) 統合のため、明示的な
+ * `sessionService.createSession → runner.runAsync → 保持 or deleteSession` を採用している。
  *
  * # HITL pending 経路 (event.content.parts 内の adk_request_confirmation を検知)
  *
@@ -249,7 +249,7 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
         }
       }
 
-      // M4-F Phase 4: 通常 tool 呼出 (HITL 以外) を event.content.parts から検知し、
+      // 通常 tool 呼出 (HITL 以外) を event.content.parts から検知し、
       // Slack assistant status 欄を tool 名の日本語文言に書き換える。ADK は session 概念なし =
       // adapter 直呼びで一発発射 (event 間隔は数秒 = Slack 2 分自動クリア余裕内、refresh loop 不要)。
       //
@@ -261,8 +261,8 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       for (const part of eventParts) {
         const fc = part.functionCall;
         if (!fc?.name || fc.name === 'adk_request_confirmation') continue;
-        // PR #145 review S3: 現状 emitAdkToolStatus は内部 try/catch で保護され reject
-        // しない契約だが、将来 toolNameToStatus / getChannelAdapter に throw が入った場合の
+        // 現状 emitAdkToolStatus は内部 try/catch で保護され reject しない契約だが、
+        // 将来 toolNameToStatus / getChannelAdapter に throw が入った場合の
         // 保険として明示 `.catch()` を挿入。unhandledRejection に落ちて event 名 / request_id
         // 欠落のログになる経路を撲滅。
         const toolName = fc.name;
@@ -276,9 +276,9 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
         });
       }
 
-      // Phase 4: HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)
+      // HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)
       //
-      // **adk-js@1.3.0 実装契約** (Phase 4 review C1 対応):
+      // **adk-js@1.3.0 実装契約**:
       // `longRunningToolIds` に入るのは `generateRequestConfirmationEvent` (`agents/functions.js:129`)
       // が新規採番した wrapper (`adk_request_confirmation` 名) の function call id。一方
       // `event.actions.requestedToolConfirmations` のキーは元 tool call (`enkin_biblio` 等) の
@@ -286,9 +286,8 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       // 引き経路は使えない。`event.content.parts` を直接走査して `adk_request_confirmation`
       // function call を見つける方式に統一する。
       //
-      // PR #145 review code-simplifier P-5 対応: 上の tool status ループが評価した
-      // `eventParts` を再利用する (元は同一 event の parts を「eventParts」と「parts」
-      // で 2 度計算していた = 別名で同じ配列を指していた)。
+      // 上の tool status ループが評価した `eventParts` を再利用する (以前は同一 event の
+      // parts を「eventParts」と「parts」で 2 度計算していた = 別名で同じ配列を指していた)。
       const longRunningIds = event.longRunningToolIds;
       if (longRunningIds && longRunningIds.length > 0) {
         pending = true;
@@ -338,7 +337,7 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
 
           const hint = typeof toolConfirmation.hint === 'string' ? toolConfirmation.hint : undefined;
 
-          // requestAdkApproval は Phase 4 review C3 対応で Promise<boolean> を返す。
+          // requestAdkApproval は Promise<boolean> を返す。
           // 内部 fallback 通知 (approver 不在 / DM 不在 / deliver throw) 時は false を返し、
           // dispatcher は「成功」と誤認しない = 中間応答「承認申請しました」を送らない。
           let created = false;
@@ -356,9 +355,9 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
               payload: toolPayload,
             });
           } catch (err) {
-            // requestAdkApproval は throw しない契約だが、防御的に catch (Phase 4 review C2、
-            // silent-failure-hunter I1 pattern 継承)。ここで throw が抜けると outer catch に
-            // 到達して pending リセット + patron に system error が届く。
+            // requestAdkApproval は throw しない契約だが、防御的に catch (silent failure 撲滅
+            // pattern 継承)。ここで throw が抜けると outer catch に到達して pending リセット +
+            // patron に system error が届く。
             log.error('ADK dispatcher: requestAdkApproval unexpectedly threw', {
               event: 'adk.dispatcher.request_approval_error',
               request_id: requestId,
@@ -398,7 +397,7 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
       err: err instanceof Error ? err.message : String(err),
     });
     finalText = 'エラー: LLM 呼び出しに失敗しました。しばらくして再度お試しください。';
-    // Phase 4 review C2 対応: catch 経路では必ず pending をリセットして通常経路 (finally で
+    // catch 経路では必ず pending をリセットして通常経路 (finally で
     // deleteSession + finalText で adapter.deliver) に落とす。pending=true のまま抜けると
     // finalText が deliver されず + session がリークする silent failure になる。
     pending = false;
@@ -406,7 +405,7 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     // 通常経路のみ deleteSession、pending は resume 側 (approval-dispatcher.ts) が cleanup。
     if (!pending) {
       await deleteSessionSafe();
-      // PR #145 review IM-1: emitAdkToolStatus の rate-limit ガード用の per-target
+      // emitAdkToolStatus の rate-limit ガード用の per-target
       // 直近 status Map を明示解放。次 invocation で同 tool の初回発火が通り、
       // Map の key 累積 (メモリリーク) も防ぐ。pending 経路は resume 時に continuous
       // な同 invocation として扱うため clear しない (resume 側 approval-dispatcher が
@@ -437,7 +436,7 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
  * - deliver throw: log.error で拾って swallow (= dispatchToAdk contract を守る)
  * - deliver return undefined: CLI adapter が client 未接続時に `undefined` を返す仕様 =
  *   実 delivery なし。`delivered` ではなく `not_delivered` ログを残して silent 化を防ぐ
- *   (silent-failure-hunter C1 対処)
+ *   (silent failure 撲滅)
  */
 async function deliverFallback(
   channelType: string,

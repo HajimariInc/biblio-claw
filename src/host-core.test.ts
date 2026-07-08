@@ -39,7 +39,7 @@ vi.mock('./container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
-// Mock ADK dispatcher for the M4-B Phase 3 provider='adk' branch tests (I8 = PR #101 review 追加)。
+// Mock ADK dispatcher for the provider='adk' branch tests.
 vi.mock('./adk/dispatcher.js', () => ({
   dispatchToAdk: vi.fn().mockResolvedValue(undefined),
 }));
@@ -1036,12 +1036,12 @@ describe('delivery', () => {
   });
 });
 
-// I8 = PR #101 review 追加: router.ts の provider='adk' 分岐 unit test。
+// router.ts の provider='adk' 分岐 unit test。
 // dispatcher 側 (dispatcher.test.ts) では dispatchToAdk 単体の contract を、
-// verify-m4-b.sh では E2E を carrier しているが、その中間 = router.ts 側の
+// verify-adk.sh 系では E2E を carrier しているが、その中間 = router.ts 側の
 // 「container_configs.provider を見て dispatchToAdk に委譲する / claude 経路に戻す /
 // wake=false drop する / dispatcher throw 時に patron fallback を送る」を独立検証する。
-describe('router: ADK provider branch (M4-B Phase 3)', () => {
+describe('router: ADK provider branch', () => {
   beforeEach(() => {
     createAgentGroup({
       id: 'ag-adk',

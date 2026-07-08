@@ -1,5 +1,5 @@
 /**
- * `fugue_equipped_biblios.ts` CRUD のユニットテスト (M4-E Phase 3 equip-hitl)。
+ * `fugue_equipped_biblios.ts` CRUD のユニットテスト (Fugue channel equip-hitl 経路)。
  *
  * - insert 新規 → true / 既存同名 → false (`already_equipped` atomic 判定)
  * - getNames が装備中の biblio_name を全て返す

@@ -89,8 +89,8 @@ import { shutdownOtel } from './observability/index.js';
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
-  // M4-B Phase 0: ADK `LLMRegistry` に `AnthropicVertexLlm` を登録。`LlmAgent({model:
-  // 'claude-sonnet-4-6'})` の文字列モデル ID 解決経路を成立させる (Phase 1 sub-agent 化の前提)。
+  // ADK `LLMRegistry` に `AnthropicVertexLlm` を登録。`LlmAgent({model:
+  // 'claude-sonnet-4-6'})` の文字列モデル ID 解決経路を成立させる (sub-agent 化の前提)。
   // OTel init は `--import` 経路で main() より前に完了済 = ここでは register のみ。
   registerAnthropicVertexLlm();
 
@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   // migration 完了の checkpoint として debug 用に残す。synchronous write =
   // log と一貫した書き込み順序を保証。/tmp は Pod tmpfs = 再起動で消えるが、boot ごとの
   // 再作成が期待挙動。log には構造化 context (`sentinel` + `path`) を付与 = trace 相関
-  // 経路 / BQ sink 集計での grep が可能 (PR #126 review W1 対応)。
+  // 経路 / BQ sink 集計での grep が可能。
   writeFileSync('/tmp/boot-complete', new Date().toISOString());
   log.info('sentinel written', {
     event: 'sentinel.boot_complete.written',
@@ -145,13 +145,13 @@ async function main(): Promise<void> {
   migrateGroupsToClaudeLocal();
 
   // 1d. host proxy bootstrap — host を OneCLI agent 登録し、`git`/`gh` 子プロセス用の
-  // proxy env (HTTPS_PROXY + CA) を解決する (M2 PRD B Phase 1 仕入れの基盤)。
+  // proxy env (HTTPS_PROXY + CA) を解決する (仕入れの基盤)。
   // fail-open: OneCLI 未到達でも起動は止めず、仕入れ実行時に失敗を検知する。
   // agent spawn より前に host agent を登録しておくことで、後続の
   // `scripts/onecli-gh-secret.sh` の mode=all 昇格が host agent にも効く。
   await initHostProxy();
 
-  // 1e. Vertex 用 ProxyAgent (undici) を global dispatcher に登録 (M2 PRD B Phase 2 検品の基盤)。
+  // 1e. Vertex 用 ProxyAgent (undici) を global dispatcher に登録 (検品の基盤)。
   // initHostProxy() で解決した proxy URL + CA を host 側 fetch (= 検品 dangerous 軸の
   // Vertex × Gemini 呼び出し、モデルは `INSPECT_DANGEROUS_MODEL` env で指定) に効かせる。
   // proxy 未解決でも warn のみで起動は継続 (vertex-client.callVertexGemini が呼ばれた時点で
@@ -167,7 +167,7 @@ async function main(): Promise<void> {
   log.info(`container runtime = ${containerRuntime.name}`);
 
   // 3. Channel adapters — CLI/Slack/etc. のメッセージが `routeInbound` に届くようになる。
-  // M4-B Phase 3 で router.ts:deliverToAgent が `provider='adk'` を検知した場合、
+  // router.ts:deliverToAgent が `provider='adk'` を検知した場合、
   // `src/adk/dispatcher.ts` の `getSharedRunner()` が初回呼出時に lazy 初期化される。
   // ここに到達する時点で `registerAnthropicVertexLlm()` + `initHostProxy()` +
   // `setupVertexProxy()` は全て完了済 = dispatcher の Vertex SDK 認証は解決可能な状態。
@@ -248,9 +248,9 @@ async function main(): Promise<void> {
       threadId: string | null,
       status?: TypingStatus,
     ): Promise<void> {
-      // M4-F Phase 4: `status` を forward しないと updateTypingStatus 経由の
+      // `status` を forward しないと updateTypingStatus 経由の
       // 「container 起動中」+ tool 名遷移が silent drop する (TS の余剰引数無視で
-      // 型検査を素通りする経路。PR #145 review C1 で発見、C-3 回帰テストで防衛)。
+      // 型検査を素通りする経路。過去実測、`index.test.ts` の static grep で防衛)。
       const adapter = getChannelAdapter(channelType);
       await adapter?.setTyping?.(platformId, threadId, status);
     },
@@ -269,7 +269,7 @@ async function main(): Promise<void> {
   // 6b. Start ca-secret-sync (GKE only) — OneCLI sidecar が emptyDir 経由で生成
   // する CA bundle を K8s Secret `biblio-onecli-ca` に自動 upsert するループ。
   // local docker compose 経路 (DSN_PROVIDER=local) では `scripts/onecli-*-secret.sh`
-  // 手叩き経路を維持するため起動しない。M2 PRD A Phase 3 で導入 (旧 `TODO(phase-2.6)`)。
+  // 手叩き経路を維持するため起動しない。
   if (process.env.DSN_PROVIDER === 'gke') {
     await startCaSecretSync();
   }
@@ -284,7 +284,7 @@ async function main(): Promise<void> {
   // が exec `test -f /tmp/host-ready` で読み、Pod ready 判定 = LB backend healthy になる境界。
   // writeFileSync が throw する場合 (permission denied 等) は main() が crash → Pod 再起動 →
   // 再試行の Kubernetes 経路で対処。log には構造化 context (`sentinel` + `path`) を付与
-  // (PR #126 review W1 対応、boot-complete と対称)。
+  // (boot-complete と対称)。
   writeFileSync('/tmp/host-ready', new Date().toISOString());
   log.info('sentinel written', {
     event: 'sentinel.host_ready.written',

@@ -5,7 +5,7 @@ import type { Migration } from './index.js';
 /**
  * boots テーブル + 初期行 (id=1, count=0) を作成する。
  *
- * Phase 2 verify 用の決定的指紋 (PoC-13 写経): Pod 再作成跨ぎで count が
+ * verify 用の決定的指紋 (別経路の設計知見を写経): Pod 再作成跨ぎで count が
  * monotonic increment することで PVC + SQLite の永続化が機能していることを
  * assertion する。テーブルは「同 PVC を再 attach した orchestrator が必ず
  * 1 行だけ持つ」ように id を CHECK で 1 固定にする。

@@ -1,6 +1,6 @@
 /**
  * Tests for pickApprover + pickApprovalDelivery — the approver-selection
- * half of what used to live in src/access.ts. Moved here in PR #7 alongside
+ * half of what used to live in src/access.ts. Moved here alongside
  * the approvals re-tier.
  */
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';

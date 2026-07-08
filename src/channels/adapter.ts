@@ -94,7 +94,7 @@ export interface OutboundFile {
 }
 
 /**
- * `setTyping` の `status` 引数が取りうる値 (M4-F Phase 4)。
+ * `setTyping` の `status` 引数が取りうる値。
  *
  * 3 状態を意味的に区別する:
  *   - `undefined` — 呼出側で status を指定しない (typing indicator は生存だが表示文言未指定)
@@ -108,10 +108,10 @@ export interface OutboundFile {
  * undefined の意味区別は内部 API 契約 (`updateTypingStatus` の状態遷移) のみで、
  * vendor 到達時には失われる = 内部の設計語彙。
  *
- * PR #145 review C-1: signature の 4 引数目を `TypingStatus` 必須化しても
- * TypeScript 関数部分型付けが余剰引数無視で素通りするため、境界通過は
- * 回帰テスト (`src/index.test.ts` の `setTyping` wrapper 引数 forward test) で
- * 保証する。型は「意味の source of truth」を集約する役割のみで検知能力を持たない。
+ * signature の 4 引数目を `TypingStatus` 必須化しても TypeScript 関数部分型付けが
+ * 余剰引数無視で素通りするため、境界通過は回帰テスト (`src/index.test.ts` の
+ * `setTyping` wrapper 引数 forward test) で保証する。型は「意味の source of truth」を
+ * 集約する役割のみで検知能力を持たない。
  */
 export type TypingStatus = string | null;
 

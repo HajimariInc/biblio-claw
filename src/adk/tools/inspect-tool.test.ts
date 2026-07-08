@@ -1,5 +1,5 @@
 /**
- * inspect-tool のユニットテスト (M4-B Phase 1)。
+ * inspect-tool のユニットテスト。
  *
  * acquire-tool.test.ts と同流儀: `runAsync({args, toolContext})` 経由で Zod 検証 +
  * execute 委譲を 1 path で検証。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。
@@ -64,7 +64,7 @@ describe('inspectBiblioTool — 正常系 (execute → inspect 委譲)', () => {
     expect(result).toMatchObject({ verdict: 'REJECT', reason: 'dangerous_code' });
   });
 
-  it('inspect() が HOLD を返したらそのまま中継する (= verdict 3 通り網羅、pr-test-analyzer S6)', async () => {
+  it('inspect() が HOLD を返したらそのまま中継する (= verdict 3 通り網羅)', async () => {
     inspectMock.mockResolvedValue({
       verdict: 'HOLD',
       biblioName: 'wf--license-unknown',
@@ -128,7 +128,7 @@ describe('inspectBiblioTool — 異常系 (inspect throw 経路)', () => {
   });
 });
 
-describe('inspectBiblioTool — BIBLIO_NAME_RE guard (M4-B Phase 3)', () => {
+describe('inspectBiblioTool — BIBLIO_NAME_RE guard', () => {
   // Zod は string type check のみ = 内容は制約しない。BIBLIO_NAME_RE guard 側で
   // fail-closed に REJECT + schema_invalid を返し、inspect() が呼ばれないことを確認する。
   const invalidNames: Array<[string, string]> = [

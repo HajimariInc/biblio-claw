@@ -1,5 +1,5 @@
 /**
- * `withGateSpan` の OTel span 属性値検証 (pr-test-analyzer I10 対応)。
+ * `withGateSpan` の OTel span 属性値検証。
  *
  * `fugue-entry-span.test.ts` の `InMemorySpanExporter` パターンを写経し、`withGateSpan` の中で
  * 呼出側が `span.setAttribute` で刻んだ値が実際に finished span の attributes に載ることを

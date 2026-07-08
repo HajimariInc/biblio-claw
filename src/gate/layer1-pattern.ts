@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 2 gate Layer 1: pattern detection (pure 正規表現)。
+ * gate Layer 1: pattern detection (pure 正規表現)。
  *
  * cheap-to-expensive の最上流、副作用なし・依存なし・LLM 呼出なしで
  * 「明らかな英語 prompt injection」を早期 in-secure に落とす。日本語 pattern は

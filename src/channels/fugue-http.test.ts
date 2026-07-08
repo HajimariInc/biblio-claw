@@ -1,5 +1,5 @@
 /**
- * Fugue HTTP server unit tests (M4-E Phase 2/3/5 継承)。
+ * Fugue HTTP server unit tests。
  *
  * ephemeral port (`port: 0`) を bind して実 HTTP request を fetch で叩く構成。
  * `port: 0` を bind すると Node が空き port を自動で割り当てる = test 間の衝突なし。
@@ -7,18 +7,18 @@
  * 検証カテゴリ (件数は増減する = 列挙をやめて陳腐化を構造的に回避、実件数は
  * `pnpm test src/channels/fugue-http.test.ts` の Tests 出力を正本とする):
  *
- *   - Phase 1 骨格: lifecycle (start/stop 冪等) + Bearer auth 3 分岐 (no_header /
+ *   - 骨格: lifecycle (start/stop 冪等) + Bearer auth 3 分岐 (no_header /
  *     bad_scheme / bad_token) + 404 unknown path + Zod validation 400 + body edge cases
  *     (JSON parse 失敗 / body too large) + security invariant (auth-before-routing = 未認証
  *     クライアントに path 存在漏洩しない不変条件)
- *   - Phase 2 consult full spec: query match 200 / not_found 200 / SkillRef shape /
+ *   - consult full spec: query match 200 / not_found 200 / SkillRef shape /
  *     mode (4 enum) / query 境界 (max 500 char) / context_hint (optional + nullable、PII 非ログ) /
  *     部分失敗 4 分類 (env_missing / github_http / marketplace_parse / other) / top 10 truncate
  *     warning / unknown category 除外 warning
- *   - Phase 3 equip full spec: 4 status 応答 (equipped / already_equipped / not_found / error) /
+ *   - equip full spec: 4 status 応答 (equipped / already_equipped / not_found / error) /
  *     BIBLIO_NAME_RE guard / HITL defensive path / 部分失敗 (listBiblio throw / DB write throw) /
  *     consult 側 equipped flag 継承
- *   - Phase 5 health check: `/healthz` の 3 case (auth check の前で 200 "ok" / malformed
+ *   - health check: `/healthz` の 3 case (auth check の前で 200 "ok" / malformed
  *     Authorization で 200 = auth bypass 証拠 / POST /healthz で 200 = method 非依存)
  */
 import http from 'node:http';
@@ -32,7 +32,7 @@ import { FugueHttpServer } from './fugue-http.js';
 
 const TOKEN = 'test-token-abcdef0123456789abcdef0123456789abcdef01';
 
-// Phase 2 consult 実装は `listBiblio` を in-process で呼ぶ。実 marketplace 到達は
+// consult 実装は `listBiblio` を in-process で呼ぶ。実 marketplace 到達は
 // CI 環境で rate limit / flaky の原因になる (SHELF_REPO_OWNER / SHELF_REPO_NAME 未設定
 // で partial_failure になるケースも含む) ため、`vi.mock` で fixture 化する。実 API 疎通は
 // 手動 E2E (Fake Fugue Client + pnpm run dev) で確認する mixed strategy。
@@ -50,8 +50,8 @@ vi.mock('../biblio/shelf-gh.js', async (importOriginal) => {
   };
 });
 
-// Phase 3: fugue_equipped_biblios の DB 実体を mock 化。channel test は DB 疎通を触らない
-// (DB 実体は fugue-equipped-biblios.test.ts で担保、判断 K の layering)。
+// fugue_equipped_biblios の DB 実体を mock 化。channel test は DB 疎通を触らない
+// (DB 実体は fugue-equipped-biblios.test.ts で担保、layering の判断)。
 // default は [] / true を返し、既存 test case (lifecycle / auth / 404 / port + consult 実装 +
 // port release probe を含む合計 24 case) が壊れない。
 vi.mock('../db/fugue-equipped-biblios.js', () => ({
@@ -60,7 +60,7 @@ vi.mock('../db/fugue-equipped-biblios.js', () => ({
   deleteFugueEquippedBiblioByName: vi.fn(() => 0),
 }));
 
-// Phase 3 HITL regression 用: Slack HITL 経路の requestApproval が Fugue equip から呼ばれない
+// HITL regression 用: Slack HITL 経路の requestApproval が Fugue equip から呼ばれない
 // ことを spy で固定する。fugue-http.ts が import していないので default で never called、
 // リファクタで誤って呼び込んだら test が fail する保険。
 vi.mock('../modules/approvals/primitive.js', async (importOriginal) => {
@@ -71,10 +71,9 @@ vi.mock('../modules/approvals/primitive.js', async (importOriginal) => {
   };
 });
 
-// Phase 3 HITL defensive guard 用: requiresApproval の実装 (Fugue 契約 §6.2) を保ちつつ、
+// HITL defensive guard 用: requiresApproval の実装 (Fugue 契約 §6.2) を保ちつつ、
 // test でだけ mockReturnValueOnce(true) で defensive branch を発火させ、handleEquip が
-// 200 + status:'error' + skill:null + warnings に HITL required 文言で閉じる挙動を検証する
-// (PR #117 review、silent-failure-hunter MEDIUM 2 + pr-test-analyzer sev 6 対応)。
+// 200 + status:'error' + skill:null + warnings に HITL required 文言で閉じる挙動を検証する。
 // default では現行 matrix 通り false を返し、既存の 12 equip case は無変更で PASS する。
 vi.mock('../biblio/hitl-policy.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../biblio/hitl-policy.js')>();
@@ -861,9 +860,9 @@ describe('handleEquip (Phase 3 implementation)', () => {
     expect(body.skill).toBeNull();
   });
 
-  // PR #135 review Important 6 対応: consult 側は L272-304 で 413 / 400 分岐がテスト済だったが、
-  // equip 側は同型実装 (元は複製、`parseFugueRequest` ヘルパ化後は共通経路) にもかかわらず
-  // 分岐発火が未検証だった。`parseFugueRequest` 経由でも event 名 (`fugue.equip.body_too_large` /
+  // consult 側は L272-304 で 413 / 400 分岐がテスト済だったが、equip 側は同型実装
+  // (元は複製、`parseFugueRequest` ヘルパ化後は共通経路) にもかかわらず分岐発火が未検証だった。
+  // `parseFugueRequest` 経由でも event 名 (`fugue.equip.body_too_large` /
   // `fugue.equip.body_read_failed`) と応答 body は operation 依存で構築されるため、equip 経路を
   // 独立 test で固定化する = ヘルパの operation 引数書換 regression を検知する。
   it('413 payload_too_large when equip body exceeds MAX_BODY_SIZE_BYTES', async () => {
@@ -1011,7 +1010,7 @@ describe('handleEquip (Phase 3 implementation)', () => {
   });
 
   it('HITL regression: Fugue equip returns sync 200 without invoking Slack requestApproval', async () => {
-    // 判断 K の代替データ証明: Fugue equip = HITL 簡略化 → Slack primitive.requestApproval が
+    // Fugue equip = HITL 簡略化 → Slack primitive.requestApproval が
     // never called。fugue-http.ts が import しないので default で 0 回、リファクタで呼び込んだら fail する。
     const { requestApproval } = await import('../modules/approvals/primitive.js');
     const res = await postEquip({
@@ -1025,11 +1024,10 @@ describe('handleEquip (Phase 3 implementation)', () => {
   });
 
   it('HITL defensive guard: requiresApproval が true を返すと 200 + status:error + skill:null + HITL required warning で閉じる', async () => {
-    // Phase 3 判断 D: 現行 matrix では `requiresApproval('equip','fugue') === false` のため
-    // 到達しない defensive 経路。将来 matrix が変わったときに Fugue equip が silent に HITL bypass
-    // しないよう明示的に閉じているコード (fugue-http.ts:663) をリグレッションから守るため、
-    // mock で true にして応答形状を assert する
-    // (PR #117 review、silent-failure-hunter MEDIUM 2 + pr-test-analyzer sev 6 対応)。
+    // 現行 matrix では `requiresApproval('equip','fugue') === false` のため到達しない defensive
+    // 経路。将来 matrix が変わったときに Fugue equip が silent に HITL bypass しないよう
+    // 明示的に閉じているコード (fugue-http.ts:663) をリグレッションから守るため、mock で true
+    // にして応答形状を assert する。
     const { requiresApproval } = await import('../biblio/hitl-policy.js');
     vi.mocked(requiresApproval).mockReturnValueOnce(true);
     // listBiblio / DB は本経路に到達しない (guard で早期 return) が、default mock は temp 有効。

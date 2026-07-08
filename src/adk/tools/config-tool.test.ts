@@ -1,5 +1,5 @@
 /**
- * config-tool のユニットテスト (M4-B Phase 4)。
+ * config-tool のユニットテスト。
  *
  * shelve-tool.test.ts と同流儀。`BIBLIO_SETTING_KEYS` allowlist Zod enum 検証 +
  * `validateValueForKey` の value 意味検証 + `setBiblioSetting` 委譲を検証。

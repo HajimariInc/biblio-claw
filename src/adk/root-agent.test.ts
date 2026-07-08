@@ -1,11 +1,10 @@
 /**
- * root-agent + runner の integration test (M4-B Phase 1)。
+ * root-agent + runner の integration test。
  *
  * Anthropic SDK + 既存 host action を全て mock した上で `InMemoryRunner.runEphemeral` を
  * 起動し、root `LlmAgent` の構造 + event 列消費 (= text-only スモーク) を検証する。
  *
- * **scope の境界** (= Phase 1 plan §逸脱判断、実装中に確定。`.claude/` は gitignore のため
- * plan 本体を辿れないので、逸脱内容を以下にインライン要約する = comment-analyzer S5 推奨):
+ * **scope の境界**:
  *
  *   **検証する**:
  *     - `buildRootAgent()` / `buildRunner()` の構造 (= name / model / tools / appName)
@@ -13,21 +12,12 @@
  *     - `runEphemeral` の **text-only 経路** (= LLM が tool を呼ばずに text を返却する経路、
  *       final event yield 確認)
  *
- *   **検証しない (= Phase 1 plan からの scope 縮小)**:
- *     - **LLM が tool を自律呼出する経路**: Phase 0 の `AnthropicVertexLlm` 経路に 2 つの構造的
- *       制約があり、unit test mock で integration できない:
- *         (1) `generateContentAsync` が `llmRequest.config.tools` を読まないため Anthropic API に
- *             tool 定義 (`FunctionDeclaration[]`) が届かない (= `AnthropicVertexLlm.ts:199-201`)
- *         (2) `toLlmResponse` が `content[].find(c => c.type === 'text')` で text block のみ抽出
- *             するため `tool_use` block を ADK `functionCall` event に変換しない (= 同 `:349-367`)
- *       → 両者を Phase 2 で拡張するまでは LLM 自律 tool 呼出は scaffolding 段階。本 test では
- *       text-only 経路で「scaffolding が壊れていない」ことを smoke 検証する
- *     - **実機 Vertex 経由の検証**: `scripts/verify-phase-1-adk-local.ts` も同じ構造制約により
- *       `TOOL_CALLED=true` には到達しない (= scaffolding 構造 + OTel 流出の smoke のみ)。
- *       Phase 2 で `AnthropicVertexLlm` 拡張後に tool 自律呼出経路の自動回帰検証を本 test に追加
- *     - **ADK 自動 span 確認**: Phase 2 へ送る (= Phase 1 では runner 構造の smoke で十分)
+ *   **検証しない**:
+ *     - **実機 Vertex 経由の検証**: `scripts/verify-phase-1-adk-local.ts` (scaffolding 構造 +
+ *       OTel 流出の smoke) 側で担保
+ *     - **ADK 自動 span 確認**: runner 構造の smoke に絞る
  *
- * mock パターン: Phase 0 `AnthropicVertexLlm.test.ts` / `llm-registry-setup.test.ts` 流儀。
+ * mock パターン: `AnthropicVertexLlm.test.ts` / `llm-registry-setup.test.ts` 流儀。
  * `LLMRegistry` 内部 `Map` への登録は idempotent (= 同 class 上書き) なので、`beforeEach` で
  * `_testResetRegistration()` + `registerAnthropicVertexLlm()` を呼んで「register 直後の状態」を
  * 各 test で再現する。

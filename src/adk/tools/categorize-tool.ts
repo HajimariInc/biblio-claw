@@ -1,5 +1,5 @@
 /**
- * `categorize_biblio` FunctionTool — ADK Runner 配下から既存 host action `categorize()` を呼ぶ wrap (M4-B Phase 4)。
+ * `categorize_biblio` FunctionTool — ADK Runner 配下から既存 host action `categorize()` を呼ぶ wrap。
  *
  * ACCEPT 済 biblio を 4 namespace (biblio-dev/art/bf/ai) に判定する。Vertex × Anthropic Claude
  * が判定し、`CategoryResult` を返す。設計理念は `acquire-tool.ts` / `inspect-tool.ts` 冒頭
@@ -31,7 +31,7 @@ export const categorizeBiblioTool = new FunctionTool({
   parameters: CategorizeBiblioInput,
   execute: async ({ biblioName }, tool_context): Promise<CategoryResult> => {
     const { requestId, sessionId } = resolveToolCtx(tool_context);
-    // Path-traversal 防御 (inspect-tool.ts Phase 3 と同流儀): categorize.ts 内部で
+    // Path-traversal 防御 (inspect-tool.ts と同流儀): categorize.ts 内部で
     // `path.join(quarantineRoot, biblioName)` が走るため、不正 name は fail-closed に。
     // `CategoryFailureReason` には `schema_invalid` がないため `quarantine_missing` に集約
     // する (= 実質「不正 name の quarantine dir は存在し得ない」意味合いで一致)。
@@ -59,7 +59,7 @@ export const categorizeBiblioTool = new FunctionTool({
       return await categorize({ biblioName }, { ctx: { requestId, sessionId } });
     } catch (err) {
       // `categorize()` は throw しない契約 (= CategoryResult.ok=false に倒す)。万一の unexpected throw
-      // を server-side log で可視化してから rethrow する (= silent-failure-hunter I1)。
+      // を server-side log で可視化してから rethrow する (= silent failure 撲滅)。
       log.error('ADK tool: categorize_biblio unexpected throw', {
         event: 'adk.tool.categorize.unexpected_error',
         request_id: requestId,

@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 2 gate Layer 4: LLM evaluator (Vertex Gemini + JSON schema)。
+ * gate Layer 4: LLM evaluator (Vertex Gemini + JSON schema)。
  *
  * `evaluateInput(text)` は Layer 3 (`wrapUntrustedInput`) 済の text を Prompt 内
  * `<untrusted-input>...</untrusted-input>` 位置に埋込、`gemini-3.1-flash-lite` の
@@ -38,7 +38,7 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
 
 /**
  * 応答 JSON の Zod validator。**`reason` は `.transform()` で 300 chars に truncate する**
- * (comment-analyzer C5 対応: 以前は `.max(300)` で validation 失敗 → classification 含む
+ * (以前は `.max(300)` で validation 失敗 → classification 含む
  * GateResult 全体が biblio-other fallback に落ちる = **300 chars 超えの reason 単体で
  * in-secure 判定が握りつぶされる**セキュリティ機能の穴があった)。`transform` は先に長さを
  * 詰めてから通すため、reason が長くても classification は保持される。
@@ -134,8 +134,8 @@ function readGateModel(): string {
 /**
  * fallback GateResult を生成する pure helper。log は呼出元で発火 (context 情報を持つため)。
  *
- * silent-failure-hunter I6 対応: `degraded: true` を刻んで「evaluator failed 経由の fallback」
- * を「genuine LLM 判定の biblio-other」と structured field で区別可能にする (M4-E
+ * silent-failure 撲滅: `degraded: true` を刻んで「evaluator failed 経由の fallback」
+ * を「genuine LLM 判定の biblio-other」と structured field で区別可能にする (Fugue channel の
  * `fugue.degraded=true` pattern と対称、BQ 上で誤検知率 / evaluator 障害率を集計可能)。
  */
 function fallbackToBiblioOther(reason: string, latencyMs: number, model: string): GateResult {

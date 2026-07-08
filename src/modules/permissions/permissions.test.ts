@@ -1,6 +1,6 @@
 /**
  * Tests for the permissions module — canAccessAgentGroup, role helpers, and
- * ensureUserDm. Moved here from src/access.test.ts in PR #7 alongside the
+ * ensureUserDm. Moved here from src/access.test.ts alongside the
  * approvals re-tier that deleted src/access.ts.
  */
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';

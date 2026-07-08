@@ -33,7 +33,7 @@ const APPROVAL_ACTION = 'enkin_confirm';
 // 承認後の処理は register at module-import-time (= side-effect import で `src/index.ts` から)。
 registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
   // payload.biblioName + category の型強制 + includes 検証を集約 helper に委譲
-  // (= PR #37 code-simplifier S2、shokyaku-action.ts と逐語コピー解消)。
+  // (= shokyaku-action.ts と逐語コピーになるのを避けるため 1 箇所に集約)。
   const { biblioName, category } = parseApprovalPayload(payload);
   // approval 後の実処理は「承認申請」とは別境界 → 独立 request_id を生成。
   const requestId = crypto.randomUUID();
@@ -64,9 +64,9 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     }
     try {
       const result = await enkin({ biblioName, category }, { ctx: { requestId } });
-      // PR #78 review-agents I2: success / 業務失敗の両 path で biblio.outcome を必ず立てる
-      // (= 旧実装は catch のみで設定していたため、HITL 承認 = 本番多数派オペレーションが
-      // BQ の `WHERE attributes['biblio.outcome']='success'` から消えていた)。
+      // success / 業務失敗の両 path で biblio.outcome を必ず立てる (silent failure 撲滅)。
+      // catch のみで設定すると HITL 承認 = 本番多数派オペレーションが BQ の
+      // `WHERE attributes['biblio.outcome']='success'` から漏れるため、明示的に両分岐で立てる。
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
       if (result.ok) {
         safeNotify(
@@ -99,7 +99,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
       }
     } catch (err) {
       // enkin() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
@@ -152,7 +152,7 @@ registerDeliveryAction('enkin_biblio', async (content, session, inDb) => {
       );
       span.setAttribute('biblio.outcome', 'success');
     } catch (err) {
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });

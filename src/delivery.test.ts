@@ -272,12 +272,12 @@ describe('deliverSessionMessages — permission check', () => {
   });
 });
 
-// PR #154 review CR-1 対応の回帰防止 integration test。stub-outbound Set は 4-tuple ではなく
+// 回帰防止 integration test。stub-outbound Set は 4-tuple ではなく
 // 3-tuple (agent_group_id + channel_type + platform_id) で照合する契約を持ち、session の
 // thread_id が null であっても production hybrid セッション (`session_mode='shared'`) で正しく
-// skip されなければならない。従来 messages.test.ts は routeInbound を mock していたため
-// `deliverMessage` の skip 分岐が一度も走らず、C1 の bug が unit test を素通りしていた。
-describe('stub-outbound skip (PR #154 review CR-1 / IM-9)', () => {
+// skip されなければならない。過去 messages.test.ts は routeInbound を mock していたため
+// `deliverMessage` の skip 分岐が一度も走らず、実バグが unit test を素通りしていた。
+describe('stub-outbound skip (3-tuple key 契約)', () => {
   it('skips real deliver when target is in stubOutboundTargets (thread_id=null shared session)', async () => {
     seedAgentAndChannel();
     // shared session → thread_id=null で作成される (session_mode='shared' の resolveSession)

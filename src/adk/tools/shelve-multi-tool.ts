@@ -1,12 +1,12 @@
 /**
- * `shelve_biblio_multi` FunctionTool — ADK Runner 配下から既存 host action `shelveMulti()` を呼ぶ wrap (M4-B Phase 4)。
+ * `shelve_biblio_multi` FunctionTool — ADK Runner 配下から既存 host action `shelveMulti()` を呼ぶ wrap。
  *
  * 複数 (biblioName, category, reason) を 1 PR にまとめて陳列する。単一 skill / 単一 category
  * なら `shelve_biblio` を使う (= 単一経路は既存の branch 名 / commit message / PR body を維持する
  * shelveMulti 内の分岐で完全互換)。設計理念は `acquire-tool.ts` / `shelve-tool.ts` 冒頭
  * ドキュメント参照。
  *
- * **GOTCHA (plan Task 4)**:
+ * **GOTCHA**:
  *   1. 各 `biblioName` に対して execute 冒頭で `BIBLIO_NAME_RE` guard を loop で走らせる
  *      (= per-req 物理移動が `path.join(shelfRoot, category, biblioName)` を通るため path-traversal 防御)。
  *      reject 時は `failMulti` 相当の `MultiShelveResult.ok=false` を return。
@@ -93,7 +93,7 @@ export const shelveBiblioMultiTool = new FunctionTool({
       return await shelveMulti(items, { ctx: { requestId, sessionId } });
     } catch (err) {
       // `shelveMulti()` は throw しない契約 (= MultiShelveResult.ok=false に倒す)。
-      // 万一の unexpected throw を server-side log で可視化してから rethrow (= silent-failure-hunter I1)。
+      // 万一の unexpected throw を server-side log で可視化してから rethrow (= silent failure 撲滅)。
       log.error('ADK tool: shelve_biblio_multi unexpected throw', {
         event: 'adk.tool.shelve_multi.unexpected_error',
         request_id: requestId,

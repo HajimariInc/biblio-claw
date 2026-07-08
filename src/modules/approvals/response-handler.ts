@@ -77,7 +77,7 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
     try {
       await resolveAdkApproval(adkPayload, payload.value);
     } catch (err) {
-      // resolveAdkApproval は throw しない契約だが、防御的に catch (silent-failure-hunter I1)
+      // resolveAdkApproval は throw しない契約だが、防御的に catch (silent failure 撲滅)
       log.error('resolveAdkApproval unexpectedly threw', {
         event: 'adk.approval.resolve_unexpected_throw',
         approval_id: approval.approval_id,

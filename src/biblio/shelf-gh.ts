@@ -3,8 +3,8 @@
  * 全 GitHub API 経路が使う raw fetch wrapper + env 読み込み + marketplace.json fetch +
  * commit 作成 helper を集約する。
  *
- * 切り出し方針 (Phase 3 Task 1 で初出、その後 Phase 4 で list-biblio、PR #33 hotfix で
- * acquire の `ghFetch` 流用が追加されて 4 caller に拡張):
+ * 切り出し方針 (共通経路の集約 — shelve / unshelve / list-biblio / acquire の 4 caller が
+ * `ghFetch` を共有し、Authorization / MITM / エラー変換の重複実装を防ぐ):
  *   - `ghFetch` は OneCLI MITM 経由で Authorization を載せ、non-2xx は `GhHttpError` に変換
  *   - `fetchMarketplace` は marketplace.json を取得 (404 → null、それ以外は throw)
  *   - `pluginsOf` は plugins[] 配列を型保護して取り出す (= shelve の重複検知 + unshelve の entry 除去で共有)
@@ -62,8 +62,8 @@ export class GhHttpError extends Error {
  * 互換維持のため `extends GhHttpError` (= status=200 固定)。既存の caller が `instanceof
  * GhHttpError` で catch している経路 (`shelve.ts` / `unshelve.ts` / `list-biblio.ts`) は
  * 引き続き同経路で動く。新規 caller では `instanceof MarketplaceParseError` で別分岐
- * できる (= 「HTTP 200 なのに GitHub API エラー?」と読者を混乱させない設計、PR #37
- * review-agents silent-failure-hunter SH4 提案)。
+ * できる (= 「HTTP 200 なのに GitHub API エラー?」と読者を混乱させない設計、
+ * silent failure 撲滅)。
  */
 export class MarketplaceParseError extends GhHttpError {
   constructor(step: string, body: string) {
@@ -195,7 +195,7 @@ function parseAuthorString(s: string): { name: string; email: string } | null {
 
 /**
  * env キー定数 — 必須キー配列の逐語コピーを集約 (= `readListEnv` / `readShelveEnv` で 2 回登場)。
- * 将来キー追加時の修正箇所を 1 箇所に絞る (= PR #37 code-simplifier S3 提案)。
+ * 将来キー追加時の修正箇所を 1 箇所に絞る。
  *
  * `SHELVE_ENV_KEYS_REQUIRED` は `LIST_ENV_KEYS` + author 2 件で、`SHELF_PR_AUTHOR_FALLBACK`
  * は optional のため別配列。`readEnvFile` に渡す全キー集合は `[...SHELVE_ENV_KEYS_REQUIRED,

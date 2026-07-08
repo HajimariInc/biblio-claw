@@ -61,7 +61,7 @@ interface TypingTarget {
   startedAt: number;
   pausedUntil: number; // epoch ms; 0 = not paused
   /**
-   * M4-F Phase 4: 現在の progress-status 文言。updateTypingStatus で書き換えられ、
+   * 現在の progress-status 文言。updateTypingStatus で書き換えられ、
    * refresh loop の 4s tick が毎回 vendor に forward する (Slack 側 2 分自動クリア回避 +
    * status 継続表示)。null = 未設定 (vendor 側 default 文言に fallback)。
    */
@@ -96,10 +96,10 @@ async function triggerTyping(
     // undefined (未指定) を区別するが、vendor 境界では両者とも `"Typing..."` fallback に
     // 収束する。`status ?? undefined` で null → undefined 正規化して vendor 実装契約に合わせる。
     await adapter?.setTyping?.(channelType, platformId, threadId, status ?? undefined);
-    // M4-F Phase 5: 成功パス observability。「送信を試みた事実」を確定的に記録する。
+    // 成功パス observability。「送信を試みた事実」を確定的に記録する。
     // vendor 内部 catch (rate limit / 401) は本 code から観測不能なため outcome='triggered'
     // に統一 (握りつぶし事案は vendor 生ログ `[chat-sdk:slack]` prefix と timestamp 突合で
-    // 復元、runbook §M4-F Phase 5 罠に手順集約)。
+    // 復元、runbook § typing/setTyping の握りつぶし復元手順 に手順集約)。
     logProgressStatusTransition({
       source: 'triggerTyping',
       session_id: sessionId,
@@ -113,17 +113,17 @@ async function triggerTyping(
     });
   } catch (err) {
     // Typing is best-effort — don't let it fail delivery or routing.
-    // ただし PR #145 review C2 で判明: vendor (@chat-adapter/slack) が `logger:'silent'`
-    // で初期化されているため vendor 側の warn log も出ない = 完全不可視化。既定 4s refresh +
-    // 1s poller の高頻度呼出しなので同一 error は multiplicative に鳴りうる = log flooding
-    // 防止のため warn 発火は本来 debounce したいが、まず可視化を優先 (重要度は Slack scope 剥奪
-    // + rate limit 429 の検知 > 大量ノイズの回避)。debounce は将来 issue 化。
+    // vendor (@chat-adapter/slack) が `logger:'silent'` で初期化されているため vendor 側の
+    // warn log も出ない = 完全不可視化。既定 4s refresh + 1s poller の高頻度呼出しなので
+    // 同一 error は multiplicative に鳴りうる = log flooding 防止のため warn 発火は本来
+    // debounce したいが、まず可視化を優先 (重要度は Slack scope 剥奪 + rate limit 429 の検知
+    // > 大量ノイズの回避)。debounce は将来 issue 化。
     log.warn('setTyping failed (best-effort, routing continues)', {
       event: 'progress.status.set_typing_failed',
       channel_type: channelType,
       err: err instanceof Error ? err.message : String(err),
     });
-    // M4-F Phase 5: 失敗パスも progress.status.transition に含めて集計を dashboard 化可能に。
+    // 失敗パスも progress.status.transition に含めて集計を dashboard 化可能に。
     logProgressStatusTransition({
       source: 'triggerTyping',
       session_id: sessionId,
@@ -164,11 +164,11 @@ export function startTypingRefresh(
     // post-delivery pause: a new inbound means the user expects
     // typing to show immediately.
     //
-    // M4-F Phase 4: 直近 status を維持したまま refresh 再開 (新 inbound で status を
+    // 直近 status を維持したまま refresh 再開 (新 inbound で status を
     // リセットしない = poller が次 tick で新しい tool 名を反映する)。
     // initialStatus 引数は re-inbound では無視 (既存 currentStatus を優先)。
     // .catch は on-purpose dead: triggerTyping は内部で全 error を catch + log.warn 化
-    // (C2 対応、event: 'progress.status.set_typing_failed') するため契約上 reject しない。
+    // (event: 'progress.status.set_typing_failed') するため契約上 reject しない。
     // 将来 triggerTyping が rethrow に変わったら unhandledRejection 撲滅の保険として残す。
     triggerTyping(channelType, platformId, threadId, existing.currentStatus, sessionId, agentGroupId).catch(() => {});
     existing.startedAt = Date.now();
@@ -178,7 +178,7 @@ export function startTypingRefresh(
 
   // Immediate tick + periodic refresh. initialStatus を渡すと最初の発火から
   // その status で送る = 直後の updateTypingStatus 呼出との race を撲滅する
-  // (PR #145 実機で発見: startTypingRefresh(null) + updateTypingStatus('container 起動中')
+  // (実機で発見: startTypingRefresh(null) + updateTypingStatus('container 起動中')
   //  の 2 発 fire-and-forget が Slack API 到達順で「Typing...」が後勝ちする経路あり)。
   // .catch on-purpose dead (triggerTyping contract: never rejects、上の説明参照)。
   triggerTyping(channelType, platformId, threadId, initialStatus, sessionId, agentGroupId).catch(() => {});
@@ -194,7 +194,7 @@ export function startTypingRefresh(
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      // .catch on-purpose dead (triggerTyping contract: never rejects、C2 対応済)。
+      // .catch on-purpose dead (triggerTyping contract: never rejects)。
       triggerTyping(
         entry.channelType,
         entry.platformId,
@@ -225,7 +225,7 @@ export function startTypingRefresh(
 }
 
 /**
- * M4-F Phase 4: active な typing refresh の現在 status を書き換える。
+ * active な typing refresh の現在 status を書き換える。
  *
  * refresh loop の次 4s tick が新 status を vendor に forward するが、UX 反応性のため
  * 「変化検知点で 1 回即発火」も併用する。**同値時 no-op は rate limit ガードの主機構** =
@@ -236,9 +236,9 @@ export function startTypingRefresh(
  *   - 前値と同一 status は no-op (rate limit 節約)
  *   - null → 非 null、非 null → null、A → B の遷移は即 1 回発火
  *   - **pause 中 (pausedUntil > Date.now()) は状態更新のみで即発火は skip**、次 pause 明け
- *     tick が forward する (PR #145 review code-reviewer IM-2 対応: 実応答直後 10 秒間の
- *     `pauseTypingRefreshAfterDelivery` が周期 tick 側では尊重されているのに、poller の
- *     1s tick から呼ばれる updateTypingStatus が pause を無視して発火する race を解消)
+ *     tick が forward する (実応答直後 10 秒間の `pauseTypingRefreshAfterDelivery` が
+ *     周期 tick 側では尊重されているのに、poller の 1s tick から呼ばれる updateTypingStatus
+ *     が pause を無視して発火する race を解消するため)
  *   - refresh loop の 4s tick が currentStatus を毎回 forward (Slack 2 分自動クリア回避)
  */
 export function updateTypingStatus(sessionId: string, status: TypingStatus): void {
@@ -247,7 +247,7 @@ export function updateTypingStatus(sessionId: string, status: TypingStatus): voi
   const previousStatus = entry.currentStatus;
   if (previousStatus === status) return;
   entry.currentStatus = status;
-  // M4-F Phase 5: 遷移点の観測 log。previousStatus を含めることで status 履歴を復元可能に。
+  // 遷移点の観測 log。previousStatus を含めることで status 履歴を復元可能に。
   // pause 中の状態変更 (即発火 skip) と 実発火の両ケースで emit (「状態は遷移した」事実の記録)、
   // 実発火の outcome は triggerTyping 側 emit に載る (source='triggerTyping')。
   logProgressStatusTransition({

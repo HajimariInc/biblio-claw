@@ -227,9 +227,9 @@ export interface ContainerState {
  * active. Host sweep reads this to widen stuck-detection tolerance while
  * Bash is running with a long declared timeout.
  *
- * PR #145 review silent-failure CR-2 対応: 当初は bare catch で「テーブル未存在」
+ * silent-failure 対応: 当初は bare catch で「テーブル未存在」
  * のみ想定していたが、I/O 障害 (EIO / SQLITE_BUSY / SQLITE_CORRUPT 等) も同じく
- * silent 消失させていた。M4-F Phase 4 で `refreshProgressStatus` が read consumer
+ * silent 消失させていた。progress-status refresh が read consumer
  * に追加され silent 消失時 `progress.status.refresh_failed` 監視イベントに到達しない
  * 経路が判明したため、`no such table` のみ debug 抑制、それ以外は `log.warn` に
  * 昇格して観察可能にする (返り値の null contract は不変 = 呼出側は「tool 未実行」
@@ -272,7 +272,7 @@ export interface OutboundMessage {
   id: string;
   /**
    * host が偶数 / container が奇数 (CLAUDE.md「Two-DB セッション分割」で定義された不変条件)。
-   * PR #154 review IM-6: 従来この型に無かったため呼出側 (M4-F Phase 5 `messages.ts`) で
+   * 従来この型に無かったため呼出側 (`messages.ts`) で
    * 二重 cast (`as OutboundMessage & { seq?: number }`) の温床になっていた。schema には
    * 確実に存在する column (`schema.ts:225`) なので明示。
    */

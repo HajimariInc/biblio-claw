@@ -1,10 +1,10 @@
 /**
- * Fugue channel adapter factory unit tests (M4-E Phase 1)。
+ * Fugue channel adapter factory unit tests。
  *
  * `createFugueAdapter` の credential 分岐 + default port + deliver throw + setup/teardown
  * lifecycle 配線を検証する。`registerChannelAdapter('fugue', ...)` は import で発火するため、
  * mock で factory 参照を取り出して直接呼ぶ (Slack test `src/channels/slack.test.ts` の写経、
- * S9 対応で行番号参照を削除して関数名ベースに緩和)。
+ * 行番号参照を削除して関数名ベースに緩和)。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

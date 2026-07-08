@@ -370,11 +370,11 @@ export function openOutboundDb(agentGroupId: string, sessionId: string): Databas
  *
  * - `ENOENT` — fs レベルで file open 自体が失敗 (write-mode open で fs 経由の open が先に失敗)
  * - `SQLITE_CANTOPEN` — better-sqlite3 readonly open 特有 (fs stat は通るが sqlite level
- *   で open が失敗、PR #145 review C3 実測、readonly=true 経路で発生)
+ *   で open が失敗、実測経路、readonly=true 経路で発生)
  *
  * 呼出元 (`refreshProgressStatus` / `drainSession`) はこの判定で「pre-spawn 正常経路
  * = debug 抑制」と「I/O 障害 = warn 昇格」を分岐する。SQLITE_CANTOPEN は当初 poller.ts
- * にのみ適用され drainSession に未展開だった (PR #145 review type-design C-4 で発見)
+ * にのみ適用され drainSession に未展開だった (実測経路で発見)
  * ため helper 化して両経路で共通化した。
  */
 export function isPreSpawnDbOpenError(code: string | undefined): boolean {

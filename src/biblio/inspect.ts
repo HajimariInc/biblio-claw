@@ -17,7 +17,7 @@
  *   - ハードコードは不可 (DEN さん指示): モデル ID をコードに埋め込まず env / secret manager 経由
  *
  * 設計判断 (plan §補足):
- *   - host に claude CLI が無いため PoC-14 の `claude plugin validate --strict` 写経は不採用、
+ *   - host に claude CLI が無いため `claude plugin validate --strict` は使えず、
  *     必須フィールド検証で代替。
  *   - schema 軸を独立ゲートとして残すのは「LLM に答えさせる前に構造的に成立しているかを確かめる」
  *     fail-fast 設計 (= 計算コスト最適化ではなく早期切上げ)。
@@ -34,11 +34,11 @@ import { callVertexGemini } from './vertex-client.js';
 /** 本文集約時の再帰深さ上限 (`acquire.ts` の MANIFEST_SCAN_MAX_DEPTH と同値で揃える)。 */
 const FILE_SCAN_MAX_DEPTH = 6;
 
-/** dangerous 軸で集約対象とするファイル名パターン (PoC-14 inspect.sh:62 と同セット)。 */
+/** dangerous 軸で集約対象とするファイル名パターン。 */
 const DANGEROUS_SCAN_EXTENSIONS = new Set(['.sh', '.py', '.js']);
 const DANGEROUS_SCAN_NAMES = new Set(['SKILL.md']);
 
-/** allow ライセンス (改変可)。PoC-14 inspect.sh:44 と同セット。 */
+/** allow ライセンス (改変可)。 */
 const ALLOW_LICENSES = new Set([
   'MIT',
   'Apache-2.0',
@@ -50,7 +50,7 @@ const ALLOW_LICENSES = new Set([
   'Unlicense',
 ]);
 
-/** deny ライセンス検出パターン (改変不可)。PoC-14 inspect.sh:36 と同セット。 */
+/** deny ライセンス検出パターン (改変不可)。 */
 const DENY_LICENSE_PATTERNS = ['-ND', 'NoDerivatives', 'Proprietary'];
 
 /**
@@ -65,7 +65,7 @@ const DANGEROUS_MAX_TOKENS = 256;
 /** dangerous 軸 LLM の temperature (決定性目的で 0 固定)。 */
 const DANGEROUS_TEMPERATURE = 0;
 
-/** dangerous プロンプト (PoC-14 inspect.sh:64-76 写経)。 */
+/** dangerous プロンプト。 */
 const DANGEROUS_PROMPT = `あなたは biblio-shelf の検品官です。以下に配布候補の skill/plugin の本文を示します。
 次の危険パターンのいずれかが本文に含まれているかを判定してください:
   - 破壊的操作 (例: rm -rf, ファイル/ディレクトリの一括削除)
@@ -375,7 +375,7 @@ export async function inspect(req: { biblioName: string }, opts: InspectOptions 
     return fail('HOLD', biblioName, 'inspect_error', `dangerous 軸の LLM 呼び出しに失敗: ${detail}`);
   }
 
-  // VERDICT 行を抽出 (PoC-14 と同じく最終行に近い `VERDICT: DANGEROUS|CLEAN` を期待)。
+  // VERDICT 行を抽出 (最終行に近い `VERDICT: DANGEROUS|CLEAN` を期待)。
   // 末尾優先 = LLM が前置きを出した後に最終 VERDICT を出すケース、または複数 VERDICT を
   // 出すケース (test ケース「VERDICT 行が複数あれば末尾を優先する」) で正しく動く。
   // ES2023 `findLast` が使えれば 1 メソッドで書けるが、tsconfig が ES2022 のため
