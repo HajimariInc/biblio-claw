@@ -135,7 +135,7 @@ export class DockerContainerRuntimeProvider implements ContainerRuntimeProvider 
       console.error('║  Agents cannot run without a container runtime. To fix:        ║');
       console.error('║  1. Ensure Docker is installed and running                     ║');
       console.error('║  2. Run: docker info                                           ║');
-      console.error('║  3. Restart NanoClaw                                           ║');
+      console.error('║  3. Restart the host process                                   ║');
       console.error('╚════════════════════════════════════════════════════════════════╝\n');
       return Promise.reject(new Error('Container runtime is required but failed to start', { cause: err }));
     }

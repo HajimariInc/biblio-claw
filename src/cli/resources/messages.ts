@@ -1,7 +1,7 @@
 /**
  * ncl `messages send` — verify / debug 用の発話注入 verb (host-only)。
  *
- * M4-F Phase 5 で新設。verify-m4-f.sh から任意の messaging_group に対して patron 命令を
+ * verify script から任意の messaging_group に対して patron 命令を
  * programmatic に発火するために routeInbound を直呼びする。CLI channel (`cli.sock` +
  * `pnpm run chat`) は platformId が `local` に固定されるため hybrid wire (Slack DM MG)
  * を発火できないという構造制約を、host 側 ncl 経路のバックドアで解消する設計。
@@ -141,7 +141,7 @@ registerResource({
   plural: 'messages',
   table: 'messages_in',
   description:
-    'Inbound messages (host-owned inbound.db per session). host-only debug 経路として `send` verb のみ露出 = 任意の messaging_group への発話を routeInbound 直呼びで注入し、outbound.db を polling して応答を stdout に返す。verify script (verify-m4-f.sh) が本 verb で hybrid Slack DM MG を programmatic に発火する。generic list/get/create/update/delete は提供しない。',
+    'Inbound messages (host-owned inbound.db per session). host-only debug 経路として `send` verb のみ露出 = 任意の messaging_group への発話を routeInbound 直呼びで注入し、outbound.db を polling して応答を stdout に返す。generic list/get/create/update/delete は提供しない。',
   idColumn: 'id',
   columns: [],
   operations: {},
