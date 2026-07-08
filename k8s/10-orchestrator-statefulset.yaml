@@ -217,6 +217,19 @@ spec:
             # LB 到達不能 (local dev の安全側デフォルト = `.env.example` 参照)。
             - { name: FUGUE_HTTP_HOST, value: '0.0.0.0' }
             - { name: FUGUE_HTTP_PORT, value: '8080' }
+            # === M4-H ask endpoint (Phase 5: rate limit) ===
+            # Phase 4 で fugue-rate-limit.ts に実装済の sliding window Map。
+            # 未設定でも default (60 req/min) が効くが、drift 防止のため manifest 明示。
+            # FUGUE_ASK_RATE_DISABLE は Prod では含めない (default = 有効、cost 保護恒久化)。
+            - { name: FUGUE_ASK_RATE_POINTS, value: '60' }
+            - { name: FUGUE_ASK_RATE_WINDOW_MS, value: '60000' }
+            # === M4-H ask endpoint (Phase 5: agent group / messaging group ID) ===
+            # kubectl exec biblio-orchestrator-0 -- pnpm exec tsx scripts/init-fugue-ask-agent.ts
+            # を実行して stdout から取得した UUID。手動投入必須 (init が冪等なので再実行しても
+            # ID は同じ UUID を返す = 上書き rollout 時も値保持)。
+            # Task 6 (init 実行後) に値を確定させる。
+            # - { name: FUGUE_ASK_AGENT_GROUP_ID, value: '<uuid-from-init-stdout>' }
+            # - { name: FUGUE_ASK_MESSAGING_GROUP_ID, value: '<uuid-from-init-stdout>' }
             # === M4-F Phase 2 gate agent (Phase 3 以降 GKE 常時 true 運用) ===
             # gate 4 層 (pattern → escape → XML → LLM evaluator) の 3 分類 routing
             # (biblio-adk / biblio-other / in-secure)。**GKE Prod は Phase 3 (2026-07-05)

@@ -3755,6 +3755,338 @@ container.json に `systemPromptOverride: ''` が literal で入った場合、S
 
 ---
 
+## M4-H Phase 3 life-capabilities-wiring 運用手順
+
+Phase 3 で fugue-ask agent group (`fugue-ask-biblio-shisho`) を新設し、Fugue synthetic
+messaging group と wire する運用手順。ID 発行は `scripts/init-fugue-ask-agent.ts` で
+冪等に行い、stdout の `FUGUE_ASK_AGENT_GROUP_ID` / `FUGUE_ASK_MESSAGING_GROUP_ID` を
+StatefulSet manifest に手投入する (Prod)。
+
+### init 実行 (local + Prod 両経路)
+
+**Local (docker compose)**:
+
+```bash
+pnpm exec tsx scripts/init-fugue-ask-agent.ts
+# stdout 末尾に:
+#   FUGUE_ASK_AGENT_GROUP_ID=<uuid>
+#   FUGUE_ASK_MESSAGING_GROUP_ID=<uuid>
+# .env に貼り付けて docker compose 再起動
+```
+
+**Prod (GKE)**:
+
+```bash
+# StatefulSet Ready 前提 (image tag は Phase 5 fix 済 = fugue-ask.md 同梱)
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  pnpm exec tsx scripts/init-fugue-ask-agent.ts
+# stdout の 2 UUID を capture → k8s/10-orchestrator-statefulset.yaml に投入
+# → kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+# → kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s
+```
+
+init script は冪等: 既存 agent group を検出時は `system_prompt_override` を再投入 +
+`container_config` scalar を再 assert (`updateContainerConfigScalars`)。複数回実行 OK。
+
+### FUGUE_ASK_TIMEOUT_MS の運用
+
+- 既定 90000 (90s)、実測 30-60s 前後で応答
+- 実 Prod で response 遅延が持続的に 60s を超える場合 `FUGUE_ASK_TIMEOUT_MS=120000`
+  で調整可 (env override → StatefulSet 再 rollout)
+- 未設定は `fugue-http.ts` の `FUGUE_ASK_DEFAULT_TIMEOUT_MS = 90_000` fallback、
+  invalid (非数値 / 0 / 負数) も default fallback
+
+### 罠
+
+1. **`container/agent-runner/src/system-prompts/fugue-ask.md` 不在で ENOENT**
+   → Phase 5 の `Dockerfile` fix (system-prompts selective COPY) で解消済。
+   image tag が Phase 5 base (`m4h-p5-N`) 以降であれば発生しない
+2. **agent LLM meta response (「起動しました」等)** → Phase 3.5 で `system_prompt_override`
+   投入により解消済 (`fugue-ask.md` = ~19KB の指示)。regression は `init-fugue-ask-agent.ts`
+   の毎回 assert で防ぐ
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-h-ask-endpoint.prd.md` (Phase 3)
+- Source Plan (archived): `.claude/PRPs/plans/completed/m4/m4-h/phase-3-life-capabilities-wiring.plan.md`
+- 実装: `scripts/init-fugue-ask-agent.ts` + `container/agent-runner/src/system-prompts/fugue-ask.md`
+- 継承元 §M4-H Phase 3.5: `system_prompt_override` の migration + init 経路
+
+---
+
+## M4-H Phase 4 rate-limit-and-observability 運用手順
+
+Phase 4 で `/v1/channels/fugue/ask` に自前 sliding window rate limit (依存追加ゼロ) +
+observability event 4 種 (`ask.requested` / `ask.rate_limited` / `ask.completed` /
+`ask.failed`) を追加。BQ sink `channel='fugue' AND operation='ask'` で全 4 event を
+集計可能 (M4-A + M4-E 基盤流用)。
+
+### env override 手順
+
+manifest 修正 → apply + rollout:
+
+```bash
+# 例: 60 → 120 req/min に緩和
+sed -i "s/FUGUE_ASK_RATE_POINTS, value: '60'/FUGUE_ASK_RATE_POINTS, value: '120'/" \
+  k8s/10-orchestrator-statefulset.yaml
+kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s
+# Pod restart で rate limit buckets Map が消失 = 0 req から再カウント (仕様)
+```
+
+または、即時 override (次 rollout で消える) は `kubectl set env`:
+
+```bash
+kubectl set env statefulset/biblio-orchestrator -n biblio-claw \
+  FUGUE_ASK_RATE_POINTS=120 FUGUE_ASK_RATE_WINDOW_MS=60000
+# ⚠ 次回 kubectl apply -f k8s/ で manifest 値に上書きされるため一時措置
+```
+
+### FUGUE_ASK_RATE_DISABLE の運用範囲
+
+- 開発 / test only の escape hatch (`.env.example:348-351` 明記)
+- **Prod StatefulSet では未設定を維持** (default = 有効、cost 保護恒久化)
+- 本 env を Prod manifest に含めない = 誤投入防止の意図明示
+
+### BQ query 例
+
+**過去 1h の event 分布 (operation 別)**:
+
+```sql
+SELECT jsonPayload.channel, jsonPayload.operation,
+       JSON_VALUE(jsonPayload.event) AS event_name, COUNT(*) AS cnt
+FROM `hajimari-ai-hackathon-2026.biblio_ops.stdout_*`
+WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+  AND jsonPayload.channel = 'fugue'
+  AND jsonPayload.operation = 'ask'
+GROUP BY 1, 2, 3
+ORDER BY cnt DESC
+```
+
+**429 発火頻度**:
+
+```sql
+SELECT DATE(timestamp) AS d, COUNT(*) AS rate_limited_cnt
+FROM `hajimari-ai-hackathon-2026.biblio_ops.stdout_*`
+WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
+  AND jsonPayload.channel = 'fugue' AND jsonPayload.operation = 'ask'
+  AND JSON_VALUE(jsonPayload.event) = 'ask.rate_limited'
+GROUP BY 1
+```
+
+### verify 再実行時の rate limit window 待機
+
+- 60s window を跨ぐと buckets Map から自然に落ちる = 60s 経過待ちで再実行可
+- Pod restart (rollout) でも buckets Map 消失 = 即再実行可
+- `verify-fugue-channel.sh:337-341` の既存注記も同流儀 (連続実行時の考慮)
+
+### Retry-After の実運用値
+
+- default 1s (`fugue-rate-limit.ts:calculateRetryAfter`)
+- window の残り時間を切り上げで返す = 実運用で調整の必要性は現在なし
+- Fugue AD 側 `AdvisorClawRateLimitedError` の backoff とセット、client 側で `Retry-After` 尊重
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-h-ask-endpoint.prd.md` (Phase 4)
+- Source Plan (archived): `.claude/PRPs/plans/completed/m4/m4-h/phase-4-rate-limit-and-observability.plan.md`
+- 実装: `src/channels/fugue-rate-limit.ts` + `src/channels/fugue-http.ts` の event 4 発火点
+- 継承元 §M4-A Phase 3: BQ sink `stdout_*` table + channel/operation 集計 pattern
+
+---
+
+## M4-H Phase 5 prod-deploy
+
+Phase 5 で Phase 1-4 実装を Prod GKE Autopilot (`biblio-prod`) に反映し、Fugue Cloud Run
+と実結線して 1 trace 串刺し + BQ sink 実測を取り M4-H PRD 完了判定を成立させる。
+**アプリ側改修 3 箇所** (Dockerfile + .dockerignore + StatefulSet env)、Terraform 変更なし
+= M4-E Phase 5 infra を全面流用 (Fugue Ingress / static IP / cert / Secret Manager)。
+
+### 概要 (アプリ側改修 3 箇所)
+
+| Location | 改修内容 |
+| :--- | :--- |
+| `Dockerfile` | `COPY container/agent-runner/src/system-prompts/` 追加 (~20KB、init-fugue-ask-agent.ts の readFileSync 対応) |
+| `.dockerignore` | `container` blanket exclude を維持 + `!container/agent-runner/src/system-prompts/**` 例外 (段階的 unignore 必須) |
+| `k8s/10-orchestrator-statefulset.yaml` | `FUGUE_ASK_RATE_POINTS=60` / `FUGUE_ASK_RATE_WINDOW_MS=60000` + `FUGUE_ASK_AGENT_GROUP_ID` / `FUGUE_ASK_MESSAGING_GROUP_ID` (Task 6 で init 実行後に値確定) |
+
+### Deploy 手順 (Step 0-7)
+
+**Step 0 — preflight**:
+
+```bash
+# feature branch = feature/phase-5-prod-deploy を確認
+git branch --show-current
+git status --short  # clean 前提
+
+# GAR 認証確認
+gcloud auth print-access-token > /dev/null
+
+# kubectl context = gke_*_biblio-prod を確認
+kubectl config current-context | grep biblio-prod
+```
+
+**Step 1 — file 編集 (Task 1-4)**: `Dockerfile` + `.dockerignore` + `.env.example` +
+`k8s/10-orchestrator-statefulset.yaml` (rate limit 2 env 追加、ID 2 env は Step 3 後)。
+`pnpm exec tsc --noEmit` + `pnpm test` (1617+ baseline) + `docker build` + image 内
+`fugue-ask.md` 存在確認まで完了させる。
+
+**Step 2 — image build + push (Task 5)**:
+
+```bash
+# 4 image (orchestrator + gh-token-rotator + vertex-token-rotator + drive-token-rotator)
+# を単一 tag で一括 build/push + manifest 4 箇所同期 + kubectl apply + rollout wait
+bash scripts/init-project-gcp-image-sync.sh --tag m4h-p5-1 --confirm
+
+# 反映確認
+gcloud artifacts docker images list \
+  asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw \
+  --include-tags | grep m4h-p5-1
+kubectl get pod biblio-orchestrator-0 -n biblio-claw \
+  -o jsonpath='{.spec.containers[?(@.name=="orchestrator")].image}'
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  ls -la /app/container/agent-runner/src/system-prompts/fugue-ask.md
+```
+
+**Step 3 — init-fugue-ask-agent.ts Prod 実行 (Task 6a)**:
+
+```bash
+kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+  pnpm exec tsx scripts/init-fugue-ask-agent.ts
+# stdout 末尾の 2 UUID を capture
+```
+
+**Step 4 — ID env 反映 + rollout (Task 6b-c)**: `k8s/10-orchestrator-statefulset.yaml`
+の Step 1 で追加した Fugue channel env ブロック末尾のコメントアウト 2 行を実 UUID に
+書き換え → `kubectl apply -f k8s/10-orchestrator-statefulset.yaml` → `kubectl rollout
+status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s`。
+
+**Step 5 — Prod smoke (Task 7)**:
+
+```bash
+TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token)
+DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name)
+
+# (a) curl 疎通
+curl -X POST "https://${DOMAIN}/v1/channels/fugue/ask" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"schema_version":1,"request_id":"m4h-p5-smoke-1","query":"Next.js 15 のリリース日は?","intent":"search-web"}' \
+  -w "\nHTTP %{http_code}\n"
+
+# (b) fake-fugue-client 経由
+export FUGUE_URL="https://${DOMAIN}"
+export FUGUE_SHARED_TOKEN="${TOKEN}"
+pnpm exec tsx scripts/fake-fugue-client.ts ask --query "Next.js 15 のリリース日は?" --intent search-web
+
+# (c) Cloud Trace UI 目視 (GCP Console → Cloud Trace)
+#   Filter: resource.type="k8s_container" resource.labels.namespace_name="biblio-claw"
+#   直近 15 分の trace で fugue.ask span 存在確認
+
+# (d) BQ sink query (smoke 完了 5 分待ち後)
+bq query --use_legacy_sql=false --project_id=hajimari-ai-hackathon-2026 \
+"SELECT jsonPayload.channel, jsonPayload.operation, COUNT(*) AS cnt
+ FROM \`hajimari-ai-hackathon-2026.biblio_ops.stdout_*\`
+ WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
+   AND jsonPayload.channel = 'fugue' AND jsonPayload.operation = 'ask'
+ GROUP BY 1, 2"
+```
+
+**Step 6 — PR #185 body 修正 (Task 9)**: `gh pr view 185 --json body -q .body | sed
+'s/5 failed event log/4 failed event log/g' > /tmp/pr-185-body.md` → `gh pr edit 185
+--body "$(cat /tmp/pr-185-body.md)"`
+
+**Step 7 — Fugue チーム連携 (Task 10)**: DEN さん経由で Fugue チームに Slack DM sync
+(URL + Token + Contract 提示、`BIBLIO_CLAW_URL` 切替待ち)。
+
+### Phase 5 完了判定 (4 assertion)
+
+| # | 指標 | 実測方法 | 合格条件 |
+| :--- | :--- | :--- | :--- |
+| 1 | Prod HTTPS ask endpoint 200 応答 | Step 5(a) curl | HTTP 200 + body に `processing_time_ms` 存在 |
+| 2 | Cloud Trace UI で `fugue.ask` span 存在 | Step 5(c) 目視 | `fugue.ask` span 生成 + `channel:'fugue'` 属性 |
+| 3 | BQ sink で `channel='fugue' AND operation='ask'` >=1 | Step 5(d) bq query | cnt >= 1 |
+| 4 | Fugue Cloud Run 実結線後の合同疎通 | Step 7 Fugue チーム返信 + BQ で Fugue 起源 trace 目視 | Fugue 側 `verify-biblio-integration.sh` exit 0 |
+
+assertion 1-3 全 PASS で「Phase 5 実装完了」、assertion 4 で「M4-H PRD 完了判定成立」。
+
+### 再デプロイ手順
+
+小規模改修 (rate limit env 値変更等):
+
+```bash
+# manifest 修正 → apply → rollout
+kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s
+```
+
+image 更新を伴う改修:
+
+```bash
+bash scripts/init-project-gcp-image-sync.sh --tag m4h-p5-N --confirm
+```
+
+### Rollback 手順 (3 案)
+
+1. **image tag rollback** (最速):
+
+   ```bash
+   kubectl set image statefulset/biblio-orchestrator -n biblio-claw \
+     orchestrator=asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/orchestrator:m4f-p5-4
+   kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s
+   ```
+
+2. **manifest revert** (env drift も戻す):
+
+   ```bash
+   git revert <commit-sha-for-phase-5>
+   kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+   ```
+
+3. **全撤退** (agent group delete + env 除去):
+
+   ```bash
+   kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
+     pnpm exec tsx scripts/q.ts data/v2.db \
+     "DELETE FROM agent_groups WHERE folder = 'fugue-ask-biblio-shisho'"
+   # rate limit env のみ残置は無害 (endpoint 未使用)
+   ```
+
+### 既知の罠
+
+1. **`.dockerignore` の `!` 例外は親ディレクトリ段階的 unignore が必要**
+   — `!container/agent-runner/src/system-prompts/**` 単独では親が exclude されるため
+   `!container/agent-runner` / `!container/agent-runner/src` / `!container/agent-runner/src/system-prompts`
+   の 4 段記述必須。docker `.dockerignore` の既知挙動
+2. **buildkit layer cache で COPY step skip**
+   — `docker build -t ... .` 単独で反映されない場合、`docker buildx prune -f` で
+   builder cache prune → `--no-cache` 併用で再 build。CI では通常発生しない
+3. **init 実行時に `fugue-ask.md` 不在で ENOENT**
+   — Task 1 (Dockerfile fix) が反映されていない image tag (`m4f-p5-4` 以前) で init
+   実行すると発生。Task 5 の image push 完了後に init を実行する順序が必須
+4. **StatefulSet rollout 中に rate limit `buckets` Map 消失で 429 window リセット (仕様)**
+   — 意図的挙動、Pod restart で自然 reset、in-flight ask request は startupProbe Ready
+   まで LB backend から外れるため silent 落ちなし
+5. **Fugue Cloud Run 側切替タイミングずれで old URL 5xx**
+   — Fugue 側の Cloud Run rollout 中に発生しうる、biblio 側で検知不可 = Task 10
+   の Slack DM で明示的な切替完了待ち
+6. **BQ sink 反映遅延 5 分**
+   — Cloud Logging → BQ sink の反映は 5 分程度、Step 5(d) query は smoke 完了 5 分後
+7. **Cloud Trace UI で trace 遅延 1-2 分あり**
+   — Step 5(c) 目視は複数 curl 発火 + 数分待ってから検索
+8. **`FUGUE_ASK_TIMEOUT_MS` 未設定でも 90s default で問題なし**
+   — 実測 30-60s 前後、`.env.example:359-362` に明記済
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-h-ask-endpoint.prd.md` (Phase 5)
+- Source Plan (archived): `.claude/PRPs/plans/completed/phase-5-prod-deploy.plan.md`
+- 実装: `Dockerfile` + `.dockerignore` + `k8s/10-orchestrator-statefulset.yaml` + `.env.example`
+- 継承元 §M4-E Phase 5: Fugue channel infra (Ingress / static IP / cert / Secret Manager)
+- 継承元 §M4-F Phase 5: image tag bump script (`init-project-gcp-image-sync.sh`)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)
