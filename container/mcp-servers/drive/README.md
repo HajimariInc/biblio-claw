@@ -1,6 +1,6 @@
 # biblio-claw Drive MCP server
 
-biblio-claw M4-F Phase 3 (life-capabilities) で追加された、Google Drive
+biblio-claw の life-capabilities 機能の一部として追加された、Google Drive
 read-only の stdio MCP server。agent-container 内で `node /opt/mcp-servers/drive/index.mjs`
 として spawn される (Bun ではなく Node 22 で走る)。
 
@@ -16,7 +16,7 @@ read-only の stdio MCP server。agent-container 内で `node /opt/mcp-servers/d
    `GOOGLE_APPLICATION_CREDENTIALS` (SA 鍵 JSON) を持たない = 既存 MCP server
    の Drive 実装が全て使えない。かといって Google 公式 remote MCP は OAuth
    対話必須で無人不可。
-3. **agent Pod への WI 追加拒否** (M4-B / M4-F Phase 1 で確立した不変条件)
+3. **agent Pod への WI 追加拒否** (repo 全体で確立された不変条件)
    agent Pod egress は `169.254.169.254/32` を metadata block で拒否している。
    したがって agent-container 内で ADC token を発行することは構造的に不可能。
 
@@ -30,9 +30,9 @@ OneCLI MITM proxy に実 token 置換を委ねる**。ADC token は orchestrator
 - `drive_list_files(folder_id?, page_size?)` — フォルダ配下 or 共有中の全 file
 - `drive_get_file(file_id, export_mime?)` — Google Docs は text 化、Binary は 5 MiB まで
 
-書き込み系 tool (upload / delete / move) は Phase 3 では実装しない。破壊操作は
-HITL 承認機構が別途必要 (M4-B の enkin/shokyaku pattern を踏襲する必要があるが、
-Phase 3 の MVP スコープ外)。
+書き込み系 tool (upload / delete / move) は本 server では実装しない。破壊操作は
+HITL 承認機構が別途必要 (破壊操作用の既存 HITL 承認 pattern を踏襲する必要があるが、
+本 server の MVP スコープ外)。
 
 ## 動作確認 (smoke)
 
