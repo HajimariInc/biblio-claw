@@ -13,7 +13,7 @@
 #
 # Apply コマンド (envsubst で `${DOMAIN}` を展開してから kubectl apply、他 manifest と対称):
 #   export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
-#     --project=hajimari-ai-hackathon-2026)
+#     --project=${GCP_PROJECT_ID})
 #   envsubst '${DOMAIN}' < k8s/25-ingress-fugue-channel.yaml | kubectl apply -f -
 #
 # 前提: `envsubst` (`gettext` package) がインストール済。WSL2 AlmaLinux 9 では

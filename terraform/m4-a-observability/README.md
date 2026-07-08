@@ -4,8 +4,8 @@ biblio-claw の構造化ログを BigQuery `llm_observability` dataset に sink 
 
 ## 前提
 
-- GCP project: `hajimari-ai-hackathon-2026`
-- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済 (memory `gcp_iam_secret_manager_pattern` 参照)
+- GCP project: `<your-gcp-project>`
+- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済
 - GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中
 - keyless: `gcloud auth application-default login` 済 (ADC)、service account key を使わない
 - **terraform CLI (v1.5+ 推奨)** — install 手順は `docs/operations-runbook.md` §M4-A Phase 3 §前提 を参照 (AlmaLinux/RHEL/Ubuntu/Debian/macOS 対応)
@@ -14,6 +14,8 @@ biblio-claw の構造化ログを BigQuery `llm_observability` dataset に sink 
 
 ```bash
 cd terraform/m4-a-observability
+# 必須 var を投入 (issue #168 で project_id の default 削除、明示指定必須)
+export TF_VAR_project_id='<your-gcp-project>'
 terraform init
 terraform plan -out=tfplan
 terraform apply tfplan
@@ -28,14 +30,14 @@ terraform apply tfplan
 ## Verify (手動 1 回確認)
 
 1. biblio-claw で任意の biblio action を 1 回実行 (= Slack で `@bot 蔵書` 等)
-2. ~5 分待ち、`bq ls hajimari-ai-hackathon-2026:llm_observability` でテーブル materialize 確認
+2. ~5 分待ち、`bq ls <your-gcp-project>:llm_observability` でテーブル materialize 確認
 3. 実テーブル名は GKE container の logName 由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 実測)
 4. `sql/summary.sql` は `<PROJECT_ID>` / `<DATASET_ID>` placeholder 形式 (= Phase 4 verify-m4-a.sh と共有) のため `sed` 置換で実行:
    ```bash
-   sed -e "s/<PROJECT_ID>/hajimari-ai-hackathon-2026/g" \
+   sed -e "s/<PROJECT_ID>/<your-gcp-project>/g" \
        -e "s/<DATASET_ID>/llm_observability/g" \
        sql/summary.sql | \
-     bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false --format=json
+     bq query --project_id=<your-gcp-project> --use_legacy_sql=false --format=json
    ```
    `hit_count >= 1` かつ `marker = 'M4A_OK'` が返れば OK
 5. `request_id` 1 つを取り出し、`SELECT * WHERE jsonPayload.request_id='<UUID>'` で全境界ログが取得できることを確認
@@ -51,12 +53,12 @@ sink 経由作成テーブルは Terraform 管理外。clustering は `bq update
 ```bash
 bq update \
   --clustering_fields=severity \
-  hajimari-ai-hackathon-2026:llm_observability.stdout
+  <your-gcp-project>:llm_observability.stdout
 ```
 
 - **BQ 仕様: clustering は top-level column のみ**。`jsonPayload.event` 等の nested field は `Fields specified for clustering can only be top-level fields` で reject されるため使えない。`severity` 単独で WHERE 句頻出ケースをカバー
 - 新規行のみ clustering 対象 (既存行は再クラスタなし)。biblio-claw の運用量 (~100 req/day) では DML UPDATE 再クラスタは不要
-- `bq show --format=json hajimari-ai-hackathon-2026:llm_observability.stdout | jq .clustering` で `{"fields": ["severity"]}` が返れば反映済
+- `bq show --format=json <your-gcp-project>:llm_observability.stdout | jq .clustering` で `{"fields": ["severity"]}` が返れば反映済
 - **罠**: `CREATE OR REPLACE TABLE ... CLUSTER BY` は全ログ消滅。使わない
 
 ## Teardown
@@ -66,7 +68,7 @@ bq update \
   ```bash
   cd terraform/m4-a-observability
   terraform plan -destroy                                                  # dry-run
-  bq rm -r -f -d hajimari-ai-hackathon-2026:llm_observability             # dataset + 全テーブル削除
+  bq rm -r -f -d <your-gcp-project>:llm_observability             # dataset + 全テーブル削除
   terraform destroy -auto-approve                                          # sink + IAM 削除
   ```
 - `google_project_service` は `disable_on_destroy=false` で API 残置 (他リソース影響回避)

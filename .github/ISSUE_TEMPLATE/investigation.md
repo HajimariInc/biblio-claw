@@ -10,10 +10,10 @@ labels: investigation
 
 <!--
 本 issue は最終目的地 (patron 視点の何か) に対する「中間ゴール」であることが多い。
-- 最終目的地: (patron 視点で何ができるようになるか、DEN さんの明言があれば引用)
+- 最終目的地: (patron 視点で何ができるようになるか、プロダクトオーナーの明言があれば引用)
 - 本 issue の役割: (見える化 / 原因究明経路の構築)
 - 次に引き継ぐ issue: #N (対処実装 or 自浄機能実装)
-- 別スコープ: (M4-G / M4-F 等、境界を明記)
+- 別スコープ: (別 milestone、境界を明記)
 
 「これが close = 目的地達成」ではないことを明記する。
 -->
@@ -75,9 +75,8 @@ labels: investigation
 ## 関連
 
 <!--
-関連 PR / 関連 issue / 関連 memory / 関連 runbook 節。
+関連 PR / 関連 issue / 関連 runbook 節。
 - 親 issue: #N (現象元)
 - 後続 issue: #N (本 issue の観察結果を元に対処する issue)
-- 別スコープ: M4-X (境界明記)
-- memory: `<memory-name>`
+- 別スコープ: (別 milestone / 境界明記)
 -->

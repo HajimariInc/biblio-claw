@@ -11,14 +11,14 @@
 #   bash scripts/verify-fugue-channel.sh           Section 1 + 2-10 (両方、両環境揃うとき)
 #
 # 必須 env (Prod mode = --prod or 省略で必須、未設定で fail-fast):
-#   GCP_PROJECT_ID         e.g. hajimari-ai-hackathon-2026
+#   GCP_PROJECT_ID         e.g. <your-gcp-project>
 #   BQ_DATASET_ID          e.g. llm_observability
 #
 # 必須 env (Local mode = --local or 省略で必須、未設定で fail-fast):
 #   FUGUE_SHARED_TOKEN    docker compose 経路の Bearer token (.env 経由 or shell env で override)
 #
 # 任意 env (default 挙動を上書き):
-#   VERIFY_FUGUE_TEST_SKILL_ID       equip 発火対象 skill_id (default: example-org--test-biblio-minimal)
+#   VERIFY_FUGUE_TEST_SKILL_ID       equip 発火対象 skill_id (default: HajimariInc--test-biblio-minimal)
 #   VERIFY_FUGUE_ORCHESTRATOR_POD    orchestrator Pod 名 (default: biblio-orchestrator-0)
 #   VERIFY_FUGUE_NAMESPACE           K8s namespace (default: biblio-claw)
 #   VERIFY_FUGUE_INCLUDE_INTEGRATION 予約 (Phase 6 では未使用、Fugue 合同 verify opt-in 用の
@@ -162,7 +162,7 @@ fi
 # --- Prod mode 必須 env fail-fast + kubectl context + Secret Manager Token/Domain 取得 ---
 POD="${VERIFY_FUGUE_ORCHESTRATOR_POD:-biblio-orchestrator-0}"
 NAMESPACE="${VERIFY_FUGUE_NAMESPACE:-biblio-claw}"
-SKILL_ID="${VERIFY_FUGUE_TEST_SKILL_ID:-example-org--test-biblio-minimal}"
+SKILL_ID="${VERIFY_FUGUE_TEST_SKILL_ID:-HajimariInc--test-biblio-minimal}"
 DOMAIN=''
 PROD_TOKEN=''
 
@@ -270,7 +270,7 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   equip_status="$(json_field "$equip_result" 'status')"
   equip_reply="$(json_field "$equip_result" 'response_body.status')"
   [ "$equip_status" = '200' ] || fail "local equip status != 200 (got '$equip_status'): $equip_result"
-  # 実 skill 前提 (example-org--test-biblio-minimal) が棚に存在すれば {equipped, already_equipped}、
+  # 実 skill 前提 (HajimariInc--test-biblio-minimal) が棚に存在すれば {equipped, already_equipped}、
   # 棚に無ければ not_found (Section 2 では棚状態を強く前提しないので 3 状態全部 OK)。
   [[ "$equip_reply" =~ ^(equipped|already_equipped|not_found)$ ]] \
     || fail "local equip reply status not in {equipped, already_equipped, not_found} (got '$equip_reply'): $equip_result"
@@ -412,7 +412,8 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   #
   # PR #132 review C1 対応: grep pattern を text/json 両対応化。
   # `src/log.ts:31,41-48` により LOG_FORMAT 未設定時は text 形式 (`event="fugue.equip.hitl_required"`
-  # = `=` 区切り、colon なし) がデフォルトで、`.env.example:187` も text をローカル推奨とする。
+  # = `=` 区切り、colon なし) がデフォルトで、`.env.example` の LOG_FORMAT=text default も
+  # ローカル推奨とする。
   # 元の JSON 前提の grep pattern `'"event":"..."'` (colon 区切り) は text 形式に一切マッチせず
   # false-negative canary になっていた (matrix 逆転が起きても常に PASS)。両形式を包含する
   # extended regex に変更して text/json どちらでも検知可能に。
@@ -913,7 +914,7 @@ if [ "$MODE" = 'prod' ] || [ "$MODE" = 'both' ]; then
     || fail "Prod equip HTTP status != 200 (got '$prod_equip_http'): $prod_equip_result"
   [[ "$prod_equip_reply" =~ ^(equipped|already_equipped|not_found)$ ]] \
     || fail "Prod equip reply not in {equipped, already_equipped, not_found} (got '$prod_equip_reply')
-    (example-org--test-biblio-minimal が棚に存在しない場合は VERIFY_FUGUE_TEST_SKILL_ID env で override)"
+    (HajimariInc--test-biblio-minimal が棚に存在しない場合は VERIFY_FUGUE_TEST_SKILL_ID env で override)"
   info "  (9-1) Prod equip OK: http=200 reply=$prod_equip_reply"
 
   # (9-2) HITL Point 1: reply status に hitl_required 不在

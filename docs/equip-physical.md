@@ -1,5 +1,7 @@
 # 装備機構 — 物理配置 + 自律呼び出し (M3 Phase 1 + Phase 2)
 
+> **語彙メモ**: biblio-claw 独自語彙 (`biblio` / `司書` / `patron` / `装備` / `禁書` / `焼却` 等) の解説は [`glossary.md`](glossary.md) 参照。
+
 biblio-claw の装備機構 (souwa / equip) は、棚から取り出した biblio を agent-container に
 取り込んで実行する経路を構築する。本書はその中核となる **物理配置 (= ホスト側のソース
 位置と agent 側の mount 先 path 規約)** + **spawn-time install ライフサイクル** を扱う。

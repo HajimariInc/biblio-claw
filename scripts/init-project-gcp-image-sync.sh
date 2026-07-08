@@ -41,7 +41,7 @@ if [ -f "$ROOT/.env" ]; then set -a; . "$ROOT/.env"; set +a; fi
 # info/warn/fail/extract_result/json_field/json_array_length は verify-m3-helpers.sh に集約
 # (M3 PRD Phase 5 PR #21 code-simplifier 推奨)。本 Phase 4.5 で必要だが helpers に未集約な
 # ok() のみ局所定義 (= verify-phase-4-deploy.sh:41 と同流儀、両 source による
-# info/warn/fail 二重定義を回避、CLAUDE.md memory biblio-design-overthinking-avoidance と整合)。
+# info/warn/fail 二重定義を回避)。
 # shellcheck source=scripts/verify-m3-helpers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/verify-m3-helpers.sh"
 ok() { printf '[OK]   %s\n' "$*" >&2; }
@@ -49,7 +49,8 @@ ok() { printf '[OK]   %s\n' "$*" >&2; }
 # 定数
 NS='biblio-claw'
 ORCH_POD='biblio-orchestrator-0'
-GAR='asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw'
+: "${GCP_PROJECT_ID:?required for GAR path and envsubst: export GCP_PROJECT_ID before running (e.g. export GCP_PROJECT_ID=your-gcp-project-id)}"
+GAR="asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw"
 MANIFEST="$ROOT/k8s/10-orchestrator-statefulset.yaml"
 
 # 引数 parse
@@ -154,7 +155,7 @@ ok '[cmd] docker / kubectl / gcloud / sed / envsubst 揃い'
 ctx="$(kubectl config current-context 2>/dev/null || echo '<none>')"
 case "$ctx" in
   gke_*_biblio-prod) ok "[ctx] $ctx" ;;
-  *) fail "[ctx] kubectl context が biblio-prod ではない (= $ctx)。実行: gcloud container clusters get-credentials biblio-prod --region=asia-northeast1 --project=hajimari-ai-hackathon-2026" ;;
+  *) fail "[ctx] kubectl context が biblio-prod ではない (= $ctx)。実行: gcloud container clusters get-credentials biblio-prod --region=asia-northeast1 --project=\"\${GCP_PROJECT_ID}\"" ;;
 esac
 
 # StatefulSet ready (= rollout 前の現状確認、warn 継続)
@@ -182,7 +183,7 @@ else
 fi
 
 # AR repository 存在確認 (= init-project-gcp-resource-check.sh:126-129 と同パターン)
-if gcloud artifacts repositories describe biblio-claw --location=asia-northeast1 --project=hajimari-ai-hackathon-2026 >/dev/null 2>&1; then
+if gcloud artifacts repositories describe biblio-claw --location=asia-northeast1 --project="${GCP_PROJECT_ID}" >/dev/null 2>&1; then
   ok '[ar] AR repository biblio-claw 存在'
 else
   fail '[ar] AR repository biblio-claw が見えない。権限 (= roles/artifactregistry.reader) を確認、または gcloud auth login 再実行'
@@ -339,27 +340,28 @@ else
   if [ -z "${DOMAIN:-}" ]; then
     # `--project` は image build/push の GAR と同一プロジェクト前提。
     DOMAIN="$(gcloud secrets versions access latest --secret=fugue-domain-name \
-      --project=hajimari-ai-hackathon-2026 2>/dev/null | tr -d '[:space:]' || true)"
+      --project="${GCP_PROJECT_ID}" 2>/dev/null | tr -d '[:space:]' || true)"
   fi
   [ -n "${DOMAIN:-}" ] || \
     fail "[apply] DOMAIN 未解決 (env 未設定 + Secret Manager fugue-domain-name 空 or gcloud 権限不足)。DOMAIN=<host> を env で明示 or gcloud secrets versions access で単独確認"
   export DOMAIN
-  # tmpdir で render (Ingress のみ envsubst、他 manifest は cp で pass-through)。
-  # ${DOMAIN} を含む file を grep で判定 = 将来 別 manifest に env 変数が増えた場合も自動追随。
+  export GCP_PROJECT_ID
+  # tmpdir で render (envsubst で ${DOMAIN} / ${GCP_PROJECT_ID} を展開、他 manifest は cp で pass-through)。
+  # 対象 env 変数を含む file を grep で判定 = 将来 別 manifest に env 変数が増えた場合も自動追随。
   apply_tmp="$(mktemp -d -t biblio-p4-5-apply-XXXXXX)"
   # top-level script なので trap EXIT で cleanup (関数 scope の RETURN は使わない)
   trap 'rm -rf "$apply_tmp"' EXIT
   substituted_count=0
   for f in "$ROOT/k8s"/*.yaml; do
     base="$(basename "$f")"
-    if grep -q '${DOMAIN}' "$f" 2>/dev/null; then
-      envsubst '${DOMAIN}' < "$f" > "$apply_tmp/$base"
+    if grep -qE '\$\{(DOMAIN|GCP_PROJECT_ID)\}' "$f" 2>/dev/null; then
+      envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < "$f" > "$apply_tmp/$base"
       substituted_count=$((substituted_count + 1))
     else
       cp "$f" "$apply_tmp/$base"
     fi
   done
-  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN} を実値 ($DOMAIN) に展開"
+  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN}, \${GCP_PROJECT_ID} を実値に展開"
   run kubectl apply -f "$apply_tmp/"
   ok '[apply] kubectl apply done'
 

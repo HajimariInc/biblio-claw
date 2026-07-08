@@ -18,7 +18,7 @@
  *
  * 設計判断 (plan §補足):
  *   - host に claude CLI が無いため PoC-14 の `claude plugin validate --strict` 写経は不採用、
- *     必須フィールド検証で代替 (auto memory `biblio-design-overthinking-avoidance` 準拠)。
+ *     必須フィールド検証で代替。
  *   - schema 軸を独立ゲートとして残すのは「LLM に答えさせる前に構造的に成立しているかを確かめる」
  *     fail-fast 設計 (= 計算コスト最適化ではなく早期切上げ)。
  *   - throw しない方針: LLM 例外は内部 try/catch で握り HOLD に変換 (silent failure 禁止)。

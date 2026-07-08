@@ -23,7 +23,7 @@
 #         --project=<project>
 #
 # 既定値 (env で上書き可、.env から読み込み):
-#   GCP_PROJECT_ID=hajimari-ai-hackathon-2026
+#   GCP_PROJECT_ID=<your-gcp-project>
 #   CLOUD_SQL_INSTANCE=biblio-pgsql
 #   PGSQL_DB_NAME=biblio_onecli   (= OneCLI 内部 DB、k8s/10-orchestrator-statefulset.yaml の DATABASE_URL より)
 #   PGSQL_IAM_USER=biblio-orchestrator@${GCP_PROJECT_ID}.iam
@@ -56,7 +56,7 @@ fi
 . "${ROOT}/scripts/onecli-lib.sh"
 
 # --- 既定値 (env で上書き可) ---
-PROJECT="${GCP_PROJECT_ID:-hajimari-ai-hackathon-2026}"
+PROJECT="${GCP_PROJECT_ID:?required (export GCP_PROJECT_ID)}"
 INSTANCE="${CLOUD_SQL_INSTANCE:-biblio-pgsql}"
 DB_NAME="${PGSQL_DB_NAME:-biblio_onecli}"
 IAM_USER="${PGSQL_IAM_USER:-biblio-orchestrator@${PROJECT}.iam}"
@@ -78,7 +78,7 @@ info "前提 2: 手元 gcloud に roles/iap.tunnelResourceAccessor 権限 (IAP T
 
 # === SQL ブロック (heredoc、bash 変数展開 + PG identifier quote の両立) ===
 # "${IAM_USER}" を heredoc 内で bash が展開 → 結果が PG identifier として quote される
-# (= "biblio-orchestrator@hajimari-ai-hackathon-2026.iam" 等、@ や - を含むので必須)。
+# (= "biblio-orchestrator@<your-gcp-project>.iam" 等、@ や - を含むので必須)。
 #
 # 冪等性 (= 同一 SQL の再実行で no-op になる根拠):
 #   - GRANT: 既付与の権限への再実行は NOTICE なしに通過 (= 実質 no-op)

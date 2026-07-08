@@ -298,7 +298,7 @@ function seedMcpServers(agentGroupId: string): void {
       instructions:
         'Google Drive は `drive_list_files` (フォルダ内一覧) / '
         + '`drive_get_file` (ファイル内容取得) を使え。'
-        + 'DEN さんが GSA `biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` に'
+        + `DEN さんが GSA \`biblio-orchestrator@${process.env.GCP_PROJECT_ID ?? '<gcp-project-id>'}.iam.gserviceaccount.com\` に`
         + '「閲覧者」として共有した Drive フォルダのみアクセス可能。'
         + 'それ以外は 403 が返るため、その旨を patron に明示し、共有依頼を促せ。'
         + 'Google Docs は自動的に text 化される、Binary ファイルは 5 MiB まで。',

@@ -25,7 +25,7 @@
 # 2 連続実行で両方 exit 0 (= 冪等、副作用は draft PR + dummy pending row のみ = 毎回 cleanup)。
 #
 # 必須 env (未設定で fail-fast):
-#   GCP_PROJECT_ID         e.g. hajimari-ai-hackathon-2026
+#   GCP_PROJECT_ID         e.g. <your-gcp-project>
 #   BQ_DATASET_ID          e.g. llm_observability (Section 5-6 Cloud Trace API に必須ではない
 #                                    が verify-m4-a.sh との一貫性 + M4-A 継承前提を保証)
 #
@@ -72,7 +72,7 @@ else
   warn ".env が見つかりません — GKE / CI 経路 (env 直接投入) と想定して継続"
 fi
 
-: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. hajimari-ai-hackathon-2026)}"
+: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. <your-gcp-project>)}"
 : "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)}"
 
 for cmd in gcloud jq kubectl curl; do

@@ -54,7 +54,7 @@ spec:
               set -euo pipefail
               gcloud secrets versions access latest \
                 --secret=biblio-gh-app-pem \
-                --project=hajimari-ai-hackathon-2026 \
+                --project=${GCP_PROJECT_ID} \
                 > /pem/key.pem
               chmod 0400 /pem/key.pem
           volumeMounts:
@@ -74,7 +74,7 @@ spec:
             - '--auto-iam-authn'
             - '--private-ip'
             - '--port=5432'
-            - 'hajimari-ai-hackathon-2026:asia-northeast1:biblio-pgsql'
+            - '${GCP_PROJECT_ID}:asia-northeast1:biblio-pgsql'
           # startupProbe は付けない:
           #  - cloud-sql-proxy v2 image は distroless で sh/nc を持たず exec probe 不可
           #  - cloud-sql-proxy は 127.0.0.1:5432 のみ listen するため、tcpSocket probe
@@ -105,7 +105,7 @@ spec:
             # KSA を統合した結果、cloud-sql-proxy も orchestrator GSA で認証する
             # ため username が変わる (旧 biblio-onecli@... → biblio-orchestrator@...)。
             - name: DATABASE_URL
-              value: 'postgresql://biblio-orchestrator%40hajimari-ai-hackathon-2026.iam@127.0.0.1:5432/biblio_onecli?sslmode=disable'
+              value: 'postgresql://biblio-orchestrator%40${GCP_PROJECT_ID}.iam@127.0.0.1:5432/biblio_onecli?sslmode=disable'
             - { name: APP_URL, value: 'http://localhost:10254' }
             - { name: GATEWAY_API_URL, value: 'http://localhost:10255' }
           ports:
@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:m4f-p5-4
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p5-4,
+                value: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:m4f-p5-4,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -174,7 +174,12 @@ spec:
             - { name: NODE_EXTRA_CA_CERTS, value: /etc/ssl/certs/onecli/ca.pem }
             # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
-            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
+            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
+            # === orchestrator コード (drive/logic.mjs, init-hybrid-agent.ts, etc) が
+            #     patron 発話向け SA email をランタイムで組み立てるための env 参照。
+            #     envsubst で literal 値に置換された state で container に注入するため、
+            #     コード側は `process.env.GCP_PROJECT_ID` で解決可能になる。
+            - { name: GCP_PROJECT_ID, value: ${GCP_PROJECT_ID} }
             - { name: CLOUD_ML_REGION, value: global }
             # === 検品 (Vertex × Gemini) + カテゴライズ (Vertex × Claude) の model 設定 ===
             # local docker compose では `.env` 経由で渡るが、GKE manifest に明示投入が必要。
@@ -310,7 +315,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-gh:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-gh:m4f-p5-4
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -356,18 +361,18 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
-            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: hajimari-ai-hackathon-2026 }
+            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
             - { name: CLOUD_ML_REGION, value: global }
             - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
             # issue #49: 50min (3000s) は ADC token TTL ~60min との 10min gap 帯に
             # agent Pod spawn が当たると起動直後の Vertex 呼び出しで 401 を踏むため、
             # 40min 周期で gap を ~0min に縮小する (script 既定値とも同期)。
             - { name: ROTATE_INTERVAL_SEC, value: '2400' }
-            - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: CLOUDSDK_CORE_PROJECT, value: ${GCP_PROJECT_ID} }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: vertex-token-rotator }
           resources:
@@ -394,14 +399,14 @@ spec:
         # image tag は運用中の値をそのまま反映する形。詳細は runbook §M4-F Phase 3
         # §deploy 手順 (image-sync 経由で bump)。
         - name: drive-token-rotator
-          image: asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
           command: ['bash', '/scripts/drive-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
             - { name: DRIVE_SECRET_NAME, value: biblio-claw-drive }
             # Vertex と同流儀: 40min 周期で ADC TTL ~60min との margin 20min を確保。
             - { name: ROTATE_INTERVAL_SEC, value: '2400' }
-            - { name: CLOUDSDK_CORE_PROJECT, value: hajimari-ai-hackathon-2026 }
+            - { name: CLOUDSDK_CORE_PROJECT, value: ${GCP_PROJECT_ID} }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: drive-token-rotator }
           resources:
