@@ -18,7 +18,7 @@ biblio-claw を **GCP(本番相当)とローカル(開発)で別々の Slack App
 - メンション先(= bot)で環境を選べる:本番 ws の bot に話す → GCP、開発 ws の bot に話す → ローカル。
 
 > **重要な落とし穴 — ワークスペースごとに「自分」の user ID が違う**
-> Slack の user ID / channel ID は **ワークスペース単位で一意**。同じ人でもワークスペースが違えば user ID が変わる(例:本番 ws では `U9V1A1MNE`、開発 ws では `U7F8TRM6X`)。owner / wiring / destination は**ワークスペース(= DB)ごとに別々**にセットアップする必要があり、user ID の取り違えが最大の事故源になる。
+> Slack の user ID / channel ID は **ワークスペース単位で一意**。同じ人でもワークスペースが違えば user ID が変わる(例:本番 ws では `U0000000A`、開発 ws では `U0000000B`)。owner / wiring / destination は**ワークスペース(= DB)ごとに別々**にセットアップする必要があり、user ID の取り違えが最大の事故源になる。
 
 ## 仕組み(どこが受けるか)
 
@@ -70,7 +70,7 @@ kubectl logs biblio-orchestrator-0 -n biblio-claw -c orchestrator --since=3m | g
 
 ncl は orchestrator Pod 内で実行する(`kubectl exec biblio-orchestrator-0 -n biblio-claw -c orchestrator -- sh -c "cd /app && pnpm run ncl <…>"`)。
 
-**まず対象ワークスペースの自分の user ID を確定させる**:bot に **DM を 1 回送る**と、host が cold-DM として `users` と `messaging_groups` に自動登録する。`ncl users list` でその user ID(例:`slack:U9V1A1MNE`)と、`messaging_groups` の新しい行(DM channel)を確認する。
+**まず対象ワークスペースの自分の user ID を確定させる**:bot に **DM を 1 回送る**と、host が cold-DM として `users` と `messaging_groups` に自動登録する。`ncl users list` でその user ID(例:`slack:U0000000A`)と、`messaging_groups` の新しい行(DM channel)を確認する。
 
 ```bash
 # 1) owner 付与(その ws の自分の user ID)
@@ -128,7 +128,7 @@ pnpm run dev   # ログに "Slack socket mode connected" + 期待した botUserI
 
 GCP と同じ流れを**ローカル DB に対して**行う。ローカルでは ncl は直接実行できる(`pnpm run ncl <…>`)。DM を 1 回送って user/messaging_group を登録 → `roles grant` / `wirings create` / `destinations add`。
 
-> M1 期にローカルセットアップ済みなら、これらは既に DB に残っていることがある(`pnpm exec tsx scripts/q.ts data/v2.db 'SELECT …'` で確認)。その場合は追加作業不要。
+> 過去にローカルセットアップ済みなら、これらは既に DB に残っていることがある(`pnpm exec tsx scripts/q.ts data/v2.db 'SELECT …'` で確認)。その場合は追加作業不要。
 
 ---
 

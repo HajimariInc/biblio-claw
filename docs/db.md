@@ -44,7 +44,7 @@ data/
         outbox/<message_id>/              ← agent が生成した添付
 ```
 
-パスヘルパー:`sessionDir()`、`inboundDbPath()`、`outboundDbPath()`、`heartbeatPath()` — ラッパー (既存シグネチャを保ったままの薄い委譲) は `src/session-manager.ts` 内、パス算出の実体は `getDsnProvider()` (= `src/adapters/dsn/`、Phase 1 で新設)。Phase 2 で GKE PV (StatefulSet `volumeClaimTemplates` + mountPath `/data`) へ差し替え済 — `src/adapters/dsn/gke.ts` の `GkeDsnProvider` 実装、`DSN_PROVIDER=gke` env で切替。
+パスヘルパー:`sessionDir()`、`inboundDbPath()`、`outboundDbPath()`、`heartbeatPath()` — ラッパー (既存シグネチャを保ったままの薄い委譲) は `src/session-manager.ts` 内、パス算出の実体は `getDsnProvider()` (= `src/adapters/dsn/`、環境分離アダプタとして新設)。GKE PV (StatefulSet `volumeClaimTemplates` + mountPath `/data`) へ差し替え済 — `src/adapters/dsn/gke.ts` の `GkeDsnProvider` 実装、`DSN_PROVIDER=gke` env で切替。
 
 ---
 
@@ -106,7 +106,7 @@ data/
 | `sessions` | central | `src/db/sessions.ts`、`src/session-manager.ts` | delivery、sweep、コンテナ runner |
 | `pending_questions` | central | `src/db/sessions.ts`(`ask_user_question` 経由) | コンテナ応答マッチャ |
 | `agent_destinations` | central | `src/db/agent-destinations.ts`、migration 004 backfill | `writeDestinations()`、配信 ACL |
-| `pending_approvals` | central | `src/db/sessions.ts`、`src/modules/approvals/onecli-approvals.ts`、`src/modules/approvals/adk-approvals.ts` (M4-B Phase 4) | admin カード配信、sweep、ADK HITL 承認 |
+| `pending_approvals` | central | `src/db/sessions.ts`、`src/modules/approvals/onecli-approvals.ts`、`src/modules/approvals/adk-approvals.ts` (ADK HITL 承認) | admin カード配信、sweep、ADK HITL 承認 |
 | `unregistered_senders` | central | `src/db/dropped-messages.ts` | 運用ツール |
 | `chat_sdk_*` | central | `src/state-sqlite.ts` | Chat SDK ブリッジ |
 | `schema_version` | central | `src/db/migrations/index.ts` | マイグレーションランナー |

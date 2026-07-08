@@ -1,17 +1,16 @@
 /**
- * biblio-claw Drive MCP server — 純粋ロジック (M4-F Phase 3、testability 分離)
+ * biblio-claw Drive MCP server — 純粋ロジック (testability 分離)
  *
  * `index.mjs` は本 module を stdio transport で wire するだけの薄い entry point。
  * 全ての fetch 呼出し / エラー整形 / tool 定義 / dispatch は本 module に集約し、
  * `logic.test.mjs` から fake `globalThis.fetch` を差し替えた unit test で検証できる
- * ようにする (`mcp-env-overlay.ts` の testability 分離判断と一貫)。
+ * ようにする (host 側 MCP wrapper の testability 分離判断と一貫)。
  *
  * ## 契約
  * - `driveFetch(url)` は Bearer placeholder を送るだけ。実 ADC token 置換は OneCLI
  *   MITM (hostPattern=www.googleapis.com) に委ね、本 module は token を持たない。
  * - `driveFetch()` は `AbortSignal.timeout(DRIVE_FETCH_TIMEOUT_MS)` を必ず付ける
- *   (`shelf-gh.ts` / `vertex-client.ts` の `GH_FETCH_TIMEOUT_MS` / `VERTEX_TIMEOUT_MS`
- *   と同流儀、無期限ハング撲滅)。
+ *   (他 HTTP client と同流儀の timeout 定数、無期限ハング撲滅)。
  * - `formatError()` は非 2xx / AbortError / network-level (`err.cause` あり) を
  *   分岐して patron 向け日本語 hint に整形。診断 (原因の生 message + cause) は
  *   本 module では stdout / stderr に出さず、呼出側 (index.mjs の catch) で
@@ -22,9 +21,8 @@ const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const MAX_BIN_BYTES = 5 * 1024 * 1024; // 5 MiB
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
-// 20s: shelf-gh.ts の GH_FETCH_TIMEOUT_MS (30s) と vertex-client.ts の VERTEX_TIMEOUT_MS
-// (60s) の間で妥当な値。Drive API は通常 sub-second 応答、20s あれば proxy 経路の
-// 遅延 + Google 側 slow request も許容。無期限ハング撲滅が主目的。
+// 20s: 他 HTTP client と同流儀の timeout 定数。Drive API は通常 sub-second 応答、
+// 20s あれば proxy 経路の遅延 + Google 側 slow request も許容。無期限ハング撲滅が主目的。
 const DRIVE_FETCH_TIMEOUT_MS = 20_000;
 
 export {
@@ -79,7 +77,7 @@ export function formatError(err) {
   } else if (status === 401) {
     hint
       = 'Drive token 未注入。OneCLI 経由の Bearer 注入が失敗している可能性 '
-      + '(drive-token-rotator sidecar のログを確認、`kubectl logs biblio-orchestrator-0 -c drive-token-rotator`)。';
+      + '(drive-token-rotator sidecar のログを確認)。';
   } else if (status === 403) {
     const gcpProjectId = process.env.GCP_PROJECT_ID || '<gcp-project-id>';
     hint

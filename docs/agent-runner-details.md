@@ -451,7 +451,7 @@ pending → processing → completed
 
 Agent-runner はエージェントに NanoClaw ツールを公開する MCP server を走らせる。すべてのツールはセッション DB に書く。
 
-**エラー封じ込め:** tool handler が throw した場合、`mcp-tools/server.ts` の `dispatchTool` が catch して `{ isError: true, content: [{ type: 'text', text: '内部エラー: ...' }] }` の MCP レスポンスへ変換する (例外は SDK 層へ伝播せず、agent が tool 呼び出し失敗を認識して patron へ間接通知できる)。biblio MCP tool 9 種は writeMessageOut で outbound.db に system action を書くが、SQLITE_BUSY 等で書き込み失敗 → throw した場合もこの経路で agent reply 経由で patron に届く (issue #51 で導入)。未知 tool 名の呼び出しも同様に `isError: true` を立てる。
+**エラー封じ込め:** tool handler が throw した場合、`mcp-tools/server.ts` の `dispatchTool` が catch して `{ isError: true, content: [{ type: 'text', text: '内部エラー: ...' }] }` の MCP レスポンスへ変換する (例外は SDK 層へ伝播せず、agent が tool 呼び出し失敗を認識して patron ([glossary](glossary.md#patron)) へ間接通知できる)。biblio MCP tool 9 種は writeMessageOut で outbound.db に system action を書くが、SQLITE_BUSY 等で書き込み失敗 → throw した場合もこの経路で agent reply 経由で patron に届く (issue #51 で導入)。未知 tool 名の呼び出しも同様に `isError: true` を立てる。
 
 **DB パス:** MCP server は環境変数経由でセッション DB パスを受け取る。同じ SQLite ファイルへの 2 つ目の接続を開く(WAL モードが並行アクセスを許す)。
 

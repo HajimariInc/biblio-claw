@@ -1,6 +1,6 @@
 # OneCLI への in-cluster アクセス用 ClusterIP Service。
 # gateway (REST/Dashboard) 10254 / proxy (MITM) 10255 を expose。
-# M2 PRD A Phase 3: OneCLI を orchestrator Pod の Native sidecar に統合したため、
+# OneCLI を orchestrator Pod の Native sidecar に統合したため、
 # Service の selector は `component: onecli` → `component: orchestrator` に変更した。
 # Service 自体は **agent Pod 経路** のために残す:
 #   - orchestrator 本体は同 Pod 内 localhost (= http://localhost:10254) で OneCLI に到達

@@ -1,7 +1,7 @@
 {
   "name": "biblio-claw-drive-mcp",
   "version": "0.1.0",
-  "description": "biblio-claw Drive MCP server (M4-F Phase 3): stdio Node server that reads Google Drive via OneCLI MITM-injected Bearer",
+  "description": "biblio-claw Drive MCP server: stdio Node server that reads Google Drive via OneCLI MITM-injected Bearer",
   "type": "module",
   "main": "index.mjs",
   "bin": {

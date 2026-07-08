@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * biblio-claw Drive MCP server logic の unit test (M4-F Phase 3、Task 7 拡張)。
+ * biblio-claw Drive MCP server logic の unit test。
  *
  * Node built-in test runner (`node:test` + `node:assert/strict`) を使用し、
  * 依存ゼロで走る (`node test.mjs` ではなく `node --test logic.test.mjs`)。
  * fake `globalThis.fetch` を差し替えて実 Drive 到達なしで全分岐を検証する
- * (`src/biblio/vertex-client.test.ts` の vi.stubGlobal 経路と同思想を、Node
- * 22 では test-scope の manual restore で実現)。
+ * (host 側 test の vi.stubGlobal 経路と同思想を、Node 22 では test-scope の
+ * manual restore で実現)。
  *
- * 保護対象 (test-analyzer Gap 1 対応):
+ * 保護対象:
  *   - formatError: 401/403/404 hint + AbortError timeout hint + err.cause 追記 + fallback (status なし)
  *   - driveFetch: 非 2xx で err.status/err.driveBody セット、body 読取失敗の握りつぶし防止
  *   - listFiles: q クエリ組立 (folder_id 有無)、page_size clamping (1-100)、folder_id エスケープ
