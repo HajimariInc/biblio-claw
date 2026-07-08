@@ -72,7 +72,10 @@ export const scheduleTask: McpToolDefinition = {
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
 
-    // Write as a system action — host will insert into inbound.db
+    // Write as a system action — host will insert into inbound.db.
+    // content.threadId は task 行 → task 実行 session の thread 継承の source。
+    // 定期タスク発火時の応答をチャンネル top-level に投稿するため null で落とす
+    // (@mention 経路の thread 返信は無変更、session 自体の thread_id は既存経路で管理)。
     writeMessageOut({
       id,
       kind: 'system',
@@ -88,7 +91,7 @@ export const scheduleTask: McpToolDefinition = {
         recurrence,
         platformId: r.platform_id,
         channelType: r.channel_type,
-        threadId: r.thread_id,
+        threadId: null,
       }),
     });
 
