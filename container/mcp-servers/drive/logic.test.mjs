@@ -5,8 +5,8 @@
  * Node built-in test runner (`node:test` + `node:assert/strict`) を使用し、
  * 依存ゼロで走る (`node test.mjs` ではなく `node --test logic.test.mjs`)。
  * fake `globalThis.fetch` を差し替えて実 Drive 到達なしで全分岐を検証する
- * (`src/biblio/vertex-client.test.ts` の vi.stubGlobal 経路と同思想を、Node
- * 22 では test-scope の manual restore で実現)。
+ * (host 側 test の vi.stubGlobal 経路と同思想を、Node 22 では test-scope の
+ * manual restore で実現)。
  *
  * 保護対象:
  *   - formatError: 401/403/404 hint + AbortError timeout hint + err.cause 追記 + fallback (status なし)
