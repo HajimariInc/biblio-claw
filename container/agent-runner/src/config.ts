@@ -18,6 +18,13 @@ export interface RunnerConfig {
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   model?: string;
   effort?: string;
+  /**
+   * Optional custom system prompt string. When set, the claude provider passes it
+   * to the SDK as `systemPrompt: <string>` (custom variant, `sdk.d.ts:1745`) and
+   * scopes `settingSources: []` to bypass NanoClaw preset + auto-loaded CLAUDE.md.
+   * Materialized from `container_configs.system_prompt_override` (M4-H Phase 3.5).
+   */
+  systemPromptOverride?: string;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -47,6 +54,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    systemPromptOverride: (raw.systemPromptOverride as string) || undefined,
   };
 
   return _config;

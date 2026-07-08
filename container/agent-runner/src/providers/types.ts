@@ -68,9 +68,19 @@ export interface QueryInput {
   /**
    * System context to inject. Providers translate this into whatever their
    * SDK expects (preset append, full system prompt, per-turn injection…).
+   *
+   * - `instructions` — identity + destinations map produced at runtime by
+   *   `buildSystemPromptAddendum()`. Used as the `append` payload on top of
+   *   the preset chatbot base (Claude SDK preset mode).
+   * - `customSystemPrompt` (M4-H Phase 3.5) — full custom system prompt
+   *   string. When set, providers should bypass the preset entirely and
+   *   pass this verbatim as the SDK's native custom system prompt
+   *   (Claude SDK: `systemPrompt: <string>` + `settingSources: []` for
+   *   isolation from CLAUDE.md / CLAUDE.local.md auto-load).
    */
   systemContext?: {
     instructions?: string;
+    customSystemPrompt?: string;
   };
 }
 

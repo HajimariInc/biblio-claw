@@ -3584,6 +3584,148 @@ pnpm exec tsx scripts/q.ts data/v2.db \
 
 ---
 
+## M4-H Phase 3.5 system-prompt-override (fugue-ask meta response 対処、2026-07-08)
+
+Phase 3 hotfix 罠 4 (agent LLM が meta response =「起動しました」を返す傾向) への根本対処。
+`container_configs.system_prompt_override TEXT` 列を追加し、Claude Agent SDK の `systemPrompt: <string>`
+(custom variant、`sdk.d.ts:1745`) + `settingSources: []` (SDK isolation mode、`sdk.d.ts:1671`) 経路に切替。
+NanoClaw 標準 chatbot pattern (`.claude-shared.md` = `container/CLAUDE.md` + preset `claude_code` 内蔵慣習) を完全 bypass し、fugue-ask.md (~300 行) だけが LLM に届く状態を確立する。
+
+### 適用範囲と regression zero 担保
+
+- fugue-ask-biblio-shisho agent group のみに `system_prompt_override` を投入
+- 他 agent group (hybrid / ADK / dm-*) は `system_prompt_override = NULL` = 既存 preset 経路継続
+- container.json は寛容パース (`config.ts:loadConfig` が未知 key を無視) = agent-runner image が古くても動作、rollout 順序自由
+- `RunnerConfig.systemPromptOverride: undefined` → `providers/claude.ts:query()` の `customPrompt ?? preset(...)` 分岐で従来経路にそのまま fallback = 挙動不変
+- Level 3 test suite: Phase 3 baseline 1563 → Phase 3.5 baseline 1578 (+15 = container-configs.test.ts の新 CRUD case)
+- agent-runner bun test: 138/138 PASS
+
+### 初回 seed 手順 (local 開発)
+
+```bash
+# 1. docker compose 起動 + OneCLI secret 投入 (Vertex + Tavily + Drive)
+docker compose up -d --wait
+bash scripts/onecli-vertex-secret.sh
+bash scripts/onecli-tavily-secret.sh
+bash scripts/onecli-drive-secret.sh
+
+# 2. 既存 fugue-ask agent group の CLAUDE.local.md を clean (Phase 3 hotfix 痕跡除去)
+#    再 init すると空 file が生成される (settingSources: [] で auto-load 停止しているため
+#    内容有無は挙動に影響しないが、hygiene として空化推奨)
+rm -f groups/fugue-ask-biblio-shisho/CLAUDE.local.md
+
+# 3. init 実行 (fugue-ask.md を read → container_configs.system_prompt_override に投入)
+pnpm exec tsx scripts/init-fugue-ask-agent.ts
+# 期待出力例:
+#   Ensured container_config: provider=null (claude fallback), model='claude-sonnet-4-6',
+#     system_prompt_override=NNNN chars from container/agent-runner/src/system-prompts/fugue-ask.md
+#   SEED_RESULT={...}
+
+# 4. DB 確認: system_prompt_override が投入されたか (LENGTH で非 NULL を確認)
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT agent_group_id, LENGTH(system_prompt_override) AS L FROM container_configs WHERE LENGTH(system_prompt_override) > 0"
+# → fugue-ask-biblio-shisho の row で L > 0 (~10KB 前後)、他 group は不在
+```
+
+### 実挙動確認 (Level 4)
+
+`fake-fugue-client.ts` で 3 query 種を smoke test。**LLM 応答なので数秒~数十秒の揺らぎがある**が、
+成功パターンは以下:
+
+```bash
+# orchestrator を LOG_LEVEL=debug で起動 (System prompt mode: mode=custom log を追うため)
+LOG_LEVEL=debug pnpm run dev &
+until ss -tlnp | grep -q ':8080'; do sleep 2; done
+
+# Q1: 計算 (一般対話、meta response 消失確認)
+FUGUE_ASK_TIMEOUT_MS=180000 \
+  pnpm exec tsx scripts/fake-fugue-client.ts ask --query "1+1 は?" --intent general
+# 期待: status='ok', summary に "2 です" 相当 (「起動しました」meta response NG)
+
+# Q2: Web 検索 (Tavily 呼出発火確認)
+FUGUE_ASK_TIMEOUT_MS=180000 \
+  pnpm exec tsx scripts/fake-fugue-client.ts ask --query "Next.js 15 のリリース日は?" --intent search-web
+# 期待: status='ok', sources.length >= 1, sources[0].kind='web', sources[0].url に nextjs.org 系
+
+# Q3: Drive 参照 (Drive tool 呼出発火確認)
+FUGUE_ASK_TIMEOUT_MS=180000 \
+  pnpm exec tsx scripts/fake-fugue-client.ts ask --query "Drive フォルダの資料を教えて" --intent drive-lookup
+# 期待: status='ok', sources[0].kind='drive' or 適切な "共有依頼" summary
+```
+
+**成功シグナル**: orchestrator log で `System prompt mode: mode=custom, custom_length=<N>` (agent-runner 側の
+`src/index.ts` mainInner 冒頭 log、Phase 3.5 新設) が観測できる。`mode=preset` になっている場合は
+`container_configs.system_prompt_override` の投入が失敗している (init script fail-fast 済のはずだが、DB を
+別 path で開いていないか確認)。
+
+### 既知の罠 (Phase 3.5 独自)
+
+#### 罠 1: `initGroupFilesystem` の `!fs.existsSync` ガードが Phase 3 hotfix 内容を残す
+
+**症状**: Phase 3.5 の init script を実行しても、`groups/fugue-ask-biblio-shisho/CLAUDE.local.md` が
+Phase 3 hotfix 時に書き込まれた「2 段包み契約」の内容のまま残る。
+
+**原因**: `src/group-init.ts` の `initGroupFilesystem` は `!fs.existsSync(CLAUDE.local.md)` ガードで
+初回のみ書き込む挙動。Phase 3.5 の init は空文字を渡すが、既存 file がある場合は上書きされない。
+
+**影響**: `settingSources: []` (SDK isolation mode) で auto-load 停止しているため、CLAUDE.local.md の
+内容は SDK に届かず**実際の挙動は不変** = 実質的な問題なし。ただし読み手が混乱するため、初回 seed 時に
+`rm -f groups/fugue-ask-biblio-shisho/CLAUDE.local.md` を先行させることを推奨。
+
+#### 罠 2: `readFileSync` の cwd 依存 (GKE 経路の前提)
+
+**症状**: GKE (orchestrator container 内) で init script を実行すると `ENOENT: fugue-ask.md not found` で fail-fast。
+
+**原因**: `scripts/init-fugue-ask-agent.ts` は `readFileSync(resolvePath(process.cwd(), 'container/agent-runner/src/system-prompts/fugue-ask.md'), 'utf-8')` で読む。orchestrator container の WORKDIR は
+`/app`、root Dockerfile が `container/agent-runner/src/system-prompts/fugue-ask.md` を COPY 済かに依存。
+
+**対処**: Phase 5 Prod deploy 時に:
+- root `Dockerfile` の `COPY container/` (or 選択的 COPY) に `system-prompts/` が含まれることを確認
+- `kubectl exec biblio-orchestrator-0 -- ls /app/container/agent-runner/src/system-prompts/fugue-ask.md`
+  で pre-flight 検証してから init 実行
+- container image tag bump + `kubectl exec ... pnpm exec tsx scripts/init-fugue-ask-agent.ts` を rollout runbook に追記
+
+#### 罠 3: `settingSources: []` で MCP servers も disable されないかの確認
+
+**症状想定**: Phase 3.5 の実挙動確認 (Q2 Web 検索 / Q3 Drive) で **Tavily / Drive tool が呼び出されない**
+可能性。
+
+**原因想定**: `sdk.d.ts:1671` の JSDoc は `settingSources` を「Control which filesystem settings to load」
+= `.claude/settings.json` 系 file 読み込みの話に限定と読める。`mcpServers` オプション (`claude.ts:432`)
+は独立して直渡しされるため、MCP servers は維持される想定。ただし SDK 内部実装で auto-load 経由に依存
+していれば tool 呼出不可 = Q2/Q3 で反証。
+
+**対処**: Level 4 で失敗した場合の中間案 = `settingSources: ['project']` に絞る (custom mode でも
+project 側 `.claude/settings.json` は auto-load、user/local は disable)。実装は
+`container/agent-runner/src/providers/claude.ts:query()` の `settingSources` 三項演算子を修正。
+
+#### 罠 4: 空文字 `system_prompt_override` は preset に fallback しない
+
+**症状想定**: `updateContainerConfigScalars(id, {system_prompt_override: ''})` を投入すると、
+`config.ts:loadConfig` の `(raw.systemPromptOverride as string) || undefined` で空文字が falsy 判定
+される (= `|| undefined` パス) ため、agent-runner 側は preset 経路に fallback する。**ここまでは意図通り**。
+
+しかし `providers/claude.ts:query()` の `customPrompt ??` は `null` / `undefined` のみ左辺採用 = **もし
+container.json に `systemPromptOverride: ''` が literal で入った場合、SDK に空文字 system prompt が
+渡って挙動が壊れる**。
+
+**対処**: `config.ts:loadConfig` の `||` guard が 1 段防御 (falsy strip)。追加の負担にはならない設計。
+また init script は fugue-ask.md を read しているため通常経路では空文字投入は起きない。**silent 化を防ぐ
+契約**: `updateContainerConfigScalars` に空文字を渡さない (init script 側で assert 追加を検討 = Phase 4+
+での自主改善タスク)。
+
+### 申し送り (Phase 4 以降)
+
+- **Prod GKE deploy** (Phase 5): container image に fugue-ask.md を含める + `kubectl exec` 経由の
+  init 実行 + PVC 上 CLAUDE.local.md の clean 手順を rollout runbook に統合
+- **CLI 経路の露出**: fugue-ask 以外の group で override を投入する需要が出た時点で
+  `src/cli/resources/groups.ts:223-228` の `Pick<>` union に `'system_prompt_override'` を追加。
+  現状 Phase 3.5 では init script 経由の投入のみで運用
+- **他 group (hybrid / ADK) の custom prompt 導入**: Phase 3.5 の枠組みを転用、
+  fugue-ask.md 相当の group-specific.md を追加する形。ADK は既に in-process runner で `systemInstruction`
+  を直接持つため対象外 (hybrid のみ検討余地)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)

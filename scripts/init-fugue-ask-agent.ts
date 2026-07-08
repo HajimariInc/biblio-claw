@@ -28,6 +28,8 @@
  *     [--agent-name "司書 (Fugue ask)"]
  */
 import path from 'path';
+import { readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { DATA_DIR } from '../src/config.js';
@@ -50,6 +52,21 @@ const FUGUE_CHANNEL = 'fugue';
 const FUGUE_PLATFORM_ID = 'fugue-ask-mg';
 const FUGUE_ASK_AGENT_FOLDER = 'fugue-ask-biblio-shisho';
 const FUGUE_ASK_DEFAULT_NAME = '司書 (Fugue ask)';
+
+/**
+ * fugue-ask 専用 system prompt file (M4-H Phase 3.5)。
+ *
+ * 本 init script は host (local dev = project root cwd / GKE = orchestrator container の
+ * `/app` cwd) 上で走るため、`process.cwd()` からの相対 path 解決で拾う。
+ * 内容 (~300 行) を read 後、`container_configs.system_prompt_override` に投入し、
+ * agent-runner 側 (`providers/claude.ts`) が SDK `systemPrompt: <string>` (custom) に
+ * 直渡しする。この経路では `settingSources: []` (SDK isolation mode) が同時に有効化されるため
+ * CLAUDE.md / CLAUDE.local.md auto-load は完全 disable = fugue-ask.md の指示だけが LLM に届く。
+ *
+ * GKE 経路の前提: orchestrator container image が本 file を含む必要
+ * (`Dockerfile` の COPY 対象、Phase 5 で runbook に手順記録予定)。
+ */
+const FUGUE_ASK_SYSTEM_PROMPT_PATH = 'container/agent-runner/src/system-prompts/fugue-ask.md';
 
 export interface Args {
   agentName: string;
@@ -236,64 +253,21 @@ export function seedFugueAskAgent(args: Args, now: string): SeedResult {
 
   // initGroupFilesystem が `ensureContainerConfig` を内部で呼ぶため、
   // updateContainerConfigScalars の前に必ず通す (行不在なら UPDATE が silent no-op)。
-  // groups/<folder>/CLAUDE.md に agent 側 root instruction を配置する (Task 8 相当、
-  // Task 5 に統合)。
   //
-  // **PR #178 実測反省 (Option 1 hotfix、2026-07-08)**:
-  // 当初「agent が独自に `<message to>` を書かない設計」で instruction したが、
-  // 実際は agent-runner の `dispatchResultText` (poll-loop.ts:508-548) が
-  // `<message to="name">body</message>` タグ **必須** で、未ラップ text は
-  // scratchpad drop + LLM nudge 発火 = handleAsk 側で timeout / tag_missing の原因。
-  // 正しい応答形式は **`<message to="fugue-ask-synthetic"><ask-response>{JSON}</ask-response></message>`**
-  // の 2 段包み。agent-runner が `<message>` を剥ぎ取り、body の `<ask-response>` タグ付き
-  // JSON が `messages_out.content` の text field に届く経路 = handleAsk の
-  // `parseAgentAskResponse` が正しく抽出可能。
-  initGroupFilesystem(ag, {
-    instructions:
-      `# ${args.agentName}\n\n`
-      + 'あなたは biblio-shisho の司書代理 (Advisor as Fugue Director への応答者) です。'
-      + 'Fugue Director から Fugue channel 経由で質問が届き、以下の順で処理してください:\n\n'
-      + '## 1. tool 呼び出し方針\n\n'
-      + '- Web 検索が必要 → `mcp__tavily__tavily_search`\n'
-      + '- Google Drive の資料参照が必要 → `mcp__drive__drive_list_files` → `mcp__drive__drive_get_file`\n'
-      + '- 一般対話で答えられる → tool 呼出なし (LLM 直接応答)\n\n'
-      + 'query に `intent` が付いている場合はヒントとして扱う (search-web / drive-lookup / general)。\n'
-      + 'ただし intent が誤っている可能性もあるため、自分の判断で tool 選択して構わない。\n'
-      + 'query に `context_hint` (Fugue Director 側の任意情報 = 画面要約 / active_tab 等) が付いている\n'
-      + '場合は、tool 選択・検索クエリ組立・応答内容の絞り込みの参考情報として活用してよい。\n\n'
-      + '## 2. 応答フォーマット (必須) — 2 段包み\n\n'
-      + '**外側 `<message to="fugue-ask-synthetic">` タグで必ずラップし、内側に `<ask-response>` 1 個のみ書け**。\n'
-      + '未ラップの生 text は agent-runner が scratchpad として drop するため、Fugue Director に届かない。\n\n'
-      + '正しい応答フォーマット:\n\n'
-      + '```\n'
-      + '<message to="fugue-ask-synthetic">\n'
-      + '<ask-response>{\n'
-      + '  "summary": "AD の発話素材 (500 字以内、日本語、事実のみ)。Grounding された内容を書け",\n'
-      + '  "findings": [\n'
-      + '    {"text": "Director LLM 向け事実摘出 (600 字以内)", "source_indexes": [0, 1]}\n'
-      + '  ],\n'
-      + '  "sources": [\n'
-      + '    {"kind": "web", "title": "..", "url": "..", "snippet": "..", "metadata": {}}\n'
-      + '  ]\n'
-      + '}</ask-response>\n'
-      + '</message>\n'
-      + '```\n\n'
-      + '## 3. 制約 (silent parse fail 防止)\n\n'
-      + '- **外側 `<message to="fugue-ask-synthetic">` タグは必須** (未ラップは scratchpad drop で応答が届かない)\n'
-      + '- 内側 `<ask-response>` は 1 個のみ、`<ask-response>` タグの外 (かつ `<message>` タグ内) には\n'
-      + '  一切文章を書かない (handleAsk の regex 抽出が定まらなくなる)\n'
-      + '- `<message to="fugue-ask-synthetic">` 以外の宛先 (別 destination) を書かない (Fugue 経路以外に発火しない)\n'
-      + '- `sources[]` は 20 件以下、`findings[]` は 10 件以下、`findings.source_indexes` は\n'
-      + '  `sources` 配列の index (0-indexed) を指す。存在しない index は書かない\n'
-      + '- Tavily response の title/url/snippet はそのまま transcribe を推奨 (LLM 側で書き換えると source 信頼性が下がる)\n'
-      + '- Drive の場合: `kind: "drive"`、`url` は `drive://<file_id>` 形式、`snippet` は本文からの抜粋 (~200 字)\n'
-      + '- 応答不能な場合: `summary` に理由を書き、`findings` / `sources` を空にする\n'
-      + '- Web 検索も Drive 参照も不要 (一般対話) の場合: `sources: []`, `findings: []`, `summary` に直接応答\n\n'
-      + '## 4. biblio 業務 (仕入れ / 検品 / 陳列 等) は扱わない\n\n'
-      + 'Fugue ask 経路は biblio 検索 (= consult endpoint) と分離されている。'
-      + '「shelve / acquire / inspect」等の biblio 業務指示が来た場合は、'
-      + '`summary` で「biblio 業務は consult 経路で扱う旨」を伝え、tool 呼出しない。\n',
-  });
+  // **M4-H Phase 3.5 の設計変更 (2026-07-08、meta response 対処)**:
+  // Phase 3 hotfix (Option 1) では `initGroupFilesystem({instructions: <2 段包み契約>})` で
+  // groups/<folder>/CLAUDE.local.md に指示を書き込み、SDK の `settingSources: ['project',
+  // 'user', 'local']` 経路で auto-load させていた。しかし preset の内蔵 chatbot pattern
+  // (`.claude-shared.md` = `container/CLAUDE.md`) が優先度で勝ち、agent LLM が meta response
+  // (「起動しました」) を返す構造が残っていた。
+  //
+  // Phase 3.5 は `container_configs.system_prompt_override` (migration 020) 経由で SDK に
+  // custom system prompt 直渡し + `settingSources: []` (SDK isolation) で auto-load 停止。
+  // CLAUDE.md / CLAUDE.local.md は SDK に届かないため、ここで instructions を積む意味がない。
+  // ただし `initGroupFilesystem` は agent group folder scaffolding (`.claude-fragments/` /
+  // `.claude-shared.md` symlink / container.json のディレクトリ) を作る役割は残るため、
+  // instructions は空文字を渡して呼び出しは維持する (副作用の scaffolding は保持)。
+  initGroupFilesystem(ag, { instructions: '' });
 
   // provider=null が本 script の中核設定 (init-hybrid-agent.ts と同じ選択)。
   // router.ts:deliverToAgent で provider === 'adk' 分岐が偽になり、既存 agent-container
@@ -307,11 +281,20 @@ export function seedFugueAskAgent(args: Args, now: string): SeedResult {
   // updateContainerConfigScalars が飛ばされた場合、次回実行時に isNewGroup=false と
   // 判定されて provider 設定が永久に反映されない (silent 破綻)。毎回 assert する
   // 方が真の意味での冪等・自己修復に近い。
+  //
+  // M4-H Phase 3.5: fugue-ask.md (~300 行) を read + `system_prompt_override` に投入。
+  // readFileSync throw (ENOENT 等) は init script の fatal error として扱い、fail-fast する
+  // (silent skip すると agent-runner が preset fallback で meta response を再発する)。
+  const fugueAskSystemPrompt = readFileSync(resolvePath(process.cwd(), FUGUE_ASK_SYSTEM_PROMPT_PATH), 'utf-8');
   updateContainerConfigScalars(ag.id, {
     provider: null,
     model: 'claude-sonnet-4-6',
+    system_prompt_override: fugueAskSystemPrompt,
   });
-  console.log(`Ensured container_config: provider=null (claude fallback), model='claude-sonnet-4-6'`);
+  console.log(
+    `Ensured container_config: provider=null (claude fallback), model='claude-sonnet-4-6', ` +
+      `system_prompt_override=${fugueAskSystemPrompt.length} chars from ${FUGUE_ASK_SYSTEM_PROMPT_PATH}`,
+  );
 
   // Tavily + Drive を hybrid と完全同一 seed (M4-F Phase 3 資産の再利用)。
   seedMcpServers(ag.id);

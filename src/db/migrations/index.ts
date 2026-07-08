@@ -16,6 +16,7 @@ import { migration016 } from './016-boots.js';
 import { migration017 } from './017-session-equipped-biblios.js';
 import { migration018 } from './018-biblio-settings.js';
 import { migration019 } from './019-fugue-equipped-biblios.js';
+import { migration020 } from './020-system-prompt-override.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 
@@ -43,6 +44,7 @@ const migrations: Migration[] = [
   migration017,
   migration018,
   migration019,
+  migration020,
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -58,6 +58,12 @@ export interface PollLoopConfig {
   cwd: string;
   systemContext?: {
     instructions?: string;
+    /**
+     * Optional custom system prompt string (M4-H Phase 3.5). Providers that
+     * support custom-mode dispatch (e.g. claude) will bypass the preset when set.
+     * See `QueryInput.systemContext.customSystemPrompt` in `providers/types.ts`.
+     */
+    customSystemPrompt?: string;
   };
 }
 
