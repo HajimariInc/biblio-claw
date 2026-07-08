@@ -17,4 +17,4 @@ metadata:
     app.kubernetes.io/name: biblio-claw
     app.kubernetes.io/component: orchestrator
   annotations:
-    iam.gke.io/gcp-service-account: biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com
+    iam.gke.io/gcp-service-account: biblio-orchestrator@${GCP_PROJECT_ID}.iam.gserviceaccount.com

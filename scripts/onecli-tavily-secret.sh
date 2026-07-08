@@ -57,9 +57,9 @@ fi
 : "${TAVILY_SECRET_NAME:=biblio-claw-tavily}"
 : "${TAVILY_API_HOST:=api.tavily.com}"
 # Secret Manager fallback 用: secret 名 + project ID。両方 override 可能で、default は
-# terraform/tavily-secret/ module が作成する `biblio-tavily-api-key` on `hajimari-ai-hackathon-2026`。
+# terraform/tavily-secret/ module が作成する `biblio-tavily-api-key` on `<your-gcp-project>`。
 : "${TAVILY_SM_SECRET:=biblio-tavily-api-key}"
-: "${TAVILY_SM_PROJECT:=${ANTHROPIC_VERTEX_PROJECT_ID:-hajimari-ai-hackathon-2026}}"
+: "${TAVILY_SM_PROJECT:=${ANTHROPIC_VERTEX_PROJECT_ID:?required (export ANTHROPIC_VERTEX_PROJECT_ID or TAVILY_SM_PROJECT)}}"
 
 ONECLI_API="${ONECLI_URL%/}/v1"
 

@@ -76,11 +76,35 @@ test('formatError: 401 は drive-token-rotator hint を含む', () => {
   assert.match(msg, /drive-token-rotator/);
 });
 
-test('formatError: 403 は GSA 共有設定 hint を含む', () => {
-  const err = Object.assign(new Error('Drive API 403: forbidden'), { status: 403 });
-  const msg = formatError(err);
-  assert.match(msg, /閲覧者/);
-  assert.match(msg, /biblio-orchestrator@hajimari-ai-hackathon-2026/);
+test('formatError: 403 は GSA 共有設定 hint を含む (env-driven の project id で組み立て)', () => {
+  const savedProjectId = process.env.GCP_PROJECT_ID;
+  process.env.GCP_PROJECT_ID = 'test-project-id';
+  try {
+    const err = Object.assign(new Error('Drive API 403: forbidden'), { status: 403 });
+    const msg = formatError(err);
+    assert.match(msg, /閲覧者/);
+    assert.match(msg, /biblio-orchestrator@test-project-id\.iam\.gserviceaccount\.com/);
+  } finally {
+    if (savedProjectId === undefined) {
+      delete process.env.GCP_PROJECT_ID;
+    } else {
+      process.env.GCP_PROJECT_ID = savedProjectId;
+    }
+  }
+});
+
+test('formatError: 403 は GCP_PROJECT_ID 未設定なら sentinel placeholder に fallback', () => {
+  const savedProjectId = process.env.GCP_PROJECT_ID;
+  delete process.env.GCP_PROJECT_ID;
+  try {
+    const err = Object.assign(new Error('Drive API 403: forbidden'), { status: 403 });
+    const msg = formatError(err);
+    assert.match(msg, /biblio-orchestrator@<gcp-project-id>\.iam\.gserviceaccount\.com/);
+  } finally {
+    if (savedProjectId !== undefined) {
+      process.env.GCP_PROJECT_ID = savedProjectId;
+    }
+  }
 });
 
 test('formatError: 404 は「存在しない」hint を返す', () => {

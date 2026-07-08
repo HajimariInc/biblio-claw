@@ -16,8 +16,8 @@
 #
 # Build:   docker build -f Dockerfile.sidecar.vertex -t biblio-sidecar-vertex:m4f-p3 .
 # AR push: docker tag biblio-sidecar-vertex:m4f-p3 \
-#            asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3 && \
-#          docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3
+#            asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:m4f-p3 && \
+#          docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:m4f-p3
 
 FROM gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
 

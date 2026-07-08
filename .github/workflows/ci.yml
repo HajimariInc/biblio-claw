@@ -37,3 +37,17 @@ jobs:
       - name: Container tests
         working-directory: container/agent-runner
         run: bun test
+
+      - name: Guard against hardcoded GCP project ID
+        # 再混入防止 (public 化 cleanup、issue #168): 特定 project id は placeholder
+        # (`<your-gcp-project>`) or env 参照 (`${GCP_PROJECT_ID}`) に統一する。
+        # `.claude/` は gitignore 済みで CI checkout に含まれないため exclude 記述は不要。
+        # 検索 pattern の先頭を bracket ([h]) で囲む = grep の正規表現としては同じ 1 文字だが、
+        # ci.yml 内の pattern リテラル自身にマッチしない = self-hit 回避 (classic pattern)。
+        run: |
+          if git grep -l '[h]ajimari-ai-hackathon-2026'; then
+            echo "ERROR: hardcoded GCP project ID detected." >&2
+            echo "  See PR body / issue #168 for the replacement policy" >&2
+            echo "  (docs -> <your-gcp-project> placeholder / code -> \${GCP_PROJECT_ID} env)." >&2
+            exit 1
+          fi

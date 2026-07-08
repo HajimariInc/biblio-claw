@@ -405,8 +405,10 @@ bash scripts/teardown-phase-2.sh --confirm
 # 3. GKE / Cloud SQL / VPC / Artifact Registry を再作成
 #    (= `/init-project-gcp reset` で完結。詳細手順は §/init-project-gcp サブコマンド利用ガイド §reset 参照)
 
-# 4. K8s manifest 再適用
-kubectl apply -f k8s/
+# 4. K8s manifest 再適用 (envsubst 経由必須 = manifest 内の ${DOMAIN} + ${GCP_PROJECT_ID}
+#    を実値に展開してから apply する必要がある。生 `kubectl apply -f k8s/` は literal 残置
+#    で ImagePullBackOff / WI 認証失敗を起こす、罠 2/10/11 と同源。issue #168 で拡張)
+bash scripts/init-project-gcp-image-sync.sh --no-build --no-push
 
 # 5. K8s Secret 投入 (= docs/slack-environments-setup.md 参照)
 #    - biblio-gh-app (GH App ID + installation ID)
@@ -794,8 +796,8 @@ Phase 6 PASS (Slack E2E GKE) — PR URL=https://github.com/<owner>/<repo>/pull/<
 
 ### 前提
 
-- GCP IAM:GSA `biblio-orchestrator@<PROJECT_ID>.iam.gserviceaccount.com` に `roles/cloudtrace.agent`、project owner に `roles/cloudtrace.user` を付与
-- Cloud Trace API は project default で有効。未有効なら `gcloud services enable cloudtrace.googleapis.com --project=hajimari-ai-hackathon-2026`
+- GCP IAM:GSA `biblio-orchestrator@<your-gcp-project>.iam.gserviceaccount.com` に `roles/cloudtrace.agent`、project owner に `roles/cloudtrace.user` を付与
+- Cloud Trace API は project default で有効。未有効なら `gcloud services enable cloudtrace.googleapis.com --project=<your-gcp-project>`
 - ローカル実行は `gcloud auth application-default login` 済前提(ADC)
 
 ### 疎通確認(local)
@@ -803,7 +805,7 @@ Phase 6 PASS (Slack E2E GKE) — PR URL=https://github.com/<owner>/<repo>/pull/<
 Phase 4 で導入した `scripts/emit-test-span.ts` を流用する (= zero-traceId guard + verify-m4-a.sh と同 fixture)。
 
 ```bash
-GOOGLE_CLOUD_PROJECT=hajimari-ai-hackathon-2026 \
+GOOGLE_CLOUD_PROJECT=<your-gcp-project> \
   pnpm exec tsx --import ./src/instrumentation.ts scripts/emit-test-span.ts
 # 出力 (3 行):
 #   TRACE_ID=<32hex>
@@ -815,13 +817,13 @@ sleep 30
 # `gcloud trace` CLI は廃止済 (= "Invalid choice: 'trace'")。Cloud Trace v1 REST API を直叩き。
 TOKEN=$(gcloud auth application-default print-access-token)
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "https://cloudtrace.googleapis.com/v1/projects/hajimari-ai-hackathon-2026/traces/${TRACE_ID}" \
+  "https://cloudtrace.googleapis.com/v1/projects/<your-gcp-project>/traces/${TRACE_ID}" \
   | jq '{traceId, spans: [.spans[] | {name, labels}]}'
 # 同 TRACE_ID と root span 名 = `biblio.acquire` + labels[biblio.request_id] が REQUEST_ID と
 # 一致すれば PASS
 ```
 
-UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-hackathon-2026>
+UI 確認は <https://console.cloud.google.com/traces/list?project=<your-gcp-project>>
 
 ### shutdown 挙動
 
@@ -840,8 +842,8 @@ UI 確認は <https://console.cloud.google.com/traces/list?project=hajimari-ai-h
 2. **stdout の `TRACE_ID=...` 行**:32-hex が `0...0` (all-zero) で出ていないか (= NodeSDK が degraded fallback に倒れている)。`emit-test-span.ts` 自体が zero-traceId なら exit 1 で fail させる
 3. **`OTEL_DIAG=true` で再実行**:「Request timed out」が大量に出るか
 4. **30s 待って Cloud Trace v1 REST API を直叩き** (`gcloud trace` CLI は廃止):`curl -s -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" "https://cloudtrace.googleapis.com/v1/projects/<project>/traces/<traceId>"` で span が返れば成功
-5. **IAM 確認**:`gcloud projects get-iam-policy hajimari-ai-hackathon-2026 --flatten="bindings[].members" --filter="bindings.members:biblio-orchestrator"` で `roles/cloudtrace.agent` 存在
-6. **API enable 確認**:`gcloud services list --enabled --filter=cloudtrace --project=hajimari-ai-hackathon-2026`
+5. **IAM 確認**:`gcloud projects get-iam-policy <your-gcp-project> --flatten="bindings[].members" --filter="bindings.members:biblio-orchestrator"` で `roles/cloudtrace.agent` 存在
+6. **API enable 確認**:`gcloud services list --enabled --filter=cloudtrace --project=<your-gcp-project>`
 7. **agent 側のみ届かない場合**:`kubectl exec biblio-orchestrator-0 -c orchestrator -- printenv | grep -i otel` で env 確認、`NO_PROXY` に `telemetry.googleapis.com` が入っているか
 8. **HTTPS_PROXY 経由を疑う**:agent Pod 内で `bun -e "fetch('https://telemetry.googleapis.com/v1/traces')"` で直接接続テスト
 9. **Fallback 候補**:(a) `@google-cloud/opentelemetry-cloud-trace-exporter` (gRPC、Cloud Trace 専用 SDK) に host 側だけ切り替え(agent 側は Bun gRPC silent freeze のため不可)/(b) agent 側 export を諦め、span を `outbound.db` の新規テーブル経由で host に送って一元 export する architecture に変更
@@ -880,8 +882,8 @@ projectId 解決ロジックは持たない (= Cloud Logging UI が現在の pro
 
 GKE `biblio-claw` namespace で Cloud Logging Console UI の "View trace" リンク動作を目視確認 (issue #81 実機検証成果)。
 
-- **確認経路**: 過去 24h の biblio.\* action 由来 log entry を `gcloud logging read 'resource.type="k8s_container" AND resource.labels.namespace_name="biblio-claw" AND jsonPayload.event=~"biblio\\."' --limit=5 --freshness=24h --project=hajimari-ai-hackathon-2026 --format=json` で引き出し、`trace` 列が `projects/hajimari-ai-hackathon-2026/traces/<32hex>` 形式に自動昇格されていることを確認 → 該当 entry を Cloud Logging Console (`https://console.cloud.google.com/logs/query?project=hajimari-ai-hackathon-2026`) で開いて "Trace を表示 / View trace" リンクをクリック → Cloud Trace UI に該当 span (`biblio.<action>`) が表示されることを目視
-- **BQ sink 側の証跡**: `SELECT trace FROM \`hajimari-ai-hackathon-2026.llm_observability.stdout\` WHERE jsonPayload.event LIKE 'biblio.%' AND trace IS NOT NULL LIMIT 1` で top-level `trace` 列が resource name 形式で観測される (= Fluent Bit / Cloud Logging 取り込み層が projectId を自動補完)。`scripts/verify-m4-a.sh` Section 5.5 で shape assertion 化済 (regression 検知)
+- **確認経路**: 過去 24h の biblio.\* action 由来 log entry を `gcloud logging read 'resource.type="k8s_container" AND resource.labels.namespace_name="biblio-claw" AND jsonPayload.event=~"biblio\\."' --limit=5 --freshness=24h --project=<your-gcp-project> --format=json` で引き出し、`trace` 列が `projects/<your-gcp-project>/traces/<32hex>` 形式に自動昇格されていることを確認 → 該当 entry を Cloud Logging Console (`https://console.cloud.google.com/logs/query?project=<your-gcp-project>`) で開いて "Trace を表示 / View trace" リンクをクリック → Cloud Trace UI に該当 span (`biblio.<action>`) が表示されることを目視
+- **BQ sink 側の証跡**: `SELECT trace FROM \`<your-gcp-project>.llm_observability.stdout\` WHERE jsonPayload.event LIKE 'biblio.%' AND trace IS NOT NULL LIMIT 1` で top-level `trace` 列が resource name 形式で観測される (= Fluent Bit / Cloud Logging 取り込み層が projectId を自動補完)。`scripts/verify-m4-a.sh` Section 5.5 で shape assertion 化済 (regression 検知)
 - **判断**: 「Preferred Format = trace_id alone」実装 (`trace-fields.ts` の bare 32-hex 出力) はそのまま維持。Option G (full path 送出) への切替は不要
 - **失敗時の対処**: 将来 Fluent Bit / Cloud Logging 側の仕様変更で自動補完が壊れた場合、`trace-fields.ts` を `projects/${projectId}/traces/${ctx.traceId}` 形式に変更 (`otel.ts:24` の `GOOGLE_CLOUD_PROJECT ?? ANTHROPIC_VERTEX_PROJECT_ID` fallback 経路を再利用)
 - **既知の非適用 fixture**: `scripts/emit-test-span.ts` は Cloud Trace への span 到達検証専用 (verify-m4-a.sh Section 3-4) で、**Cloud Logging には structured log を emit しない** (`emitJson` 呼出なし)。"View trace" リンク動作を新規発火で試したいときは実 biblio action (agent 経由の chat, `@bot 蔵書` 等の read-only action) を使うか、既存の biblio.\* log entry (過去 24h 分) で代替する
@@ -893,7 +895,7 @@ GKE `biblio-claw` namespace で Cloud Logging Console UI の "View trace" リン
 | # | 用途 | 経路 | 手順 | 向き不向き |
 |---|------|------|------|-----------|
 | 1 | 特定 request 追跡 | **Cloud Trace ← → Cloud Logging 往復** | Cloud Trace UI で span を開く → 右上「関連ログを表示 / View logs」で trace_id フィルタ済 Cloud Logging に遷移 (本節 "View trace" の逆方向) | request 単位で全 log 揃うので debug 最適 |
-| 2 | **日常監視 / error 洗い** | **Cloud Logging Console 直行 + Saved Query** | `https://console.cloud.google.com/logs/query?project=hajimari-ai-hackathon-2026` を開いて頻用 query を「保存済みクエリ」に登録、以後 1 クリック | **常時使いのベース** |
+| 2 | **日常監視 / error 洗い** | **Cloud Logging Console 直行 + Saved Query** | `https://console.cloud.google.com/logs/query?project=<your-gcp-project>` を開いて頻用 query を「保存済みクエリ」に登録、以後 1 クリック | **常時使いのベース** |
 | 3 | Pod 単位のログ確認 | GKE Workloads → Pod → ログ | GKE Console で該当 Pod を選んで「ログ」タブ = 該当 Pod で auto-filter された Cloud Logging に遷移 | orchestrator (永続 Pod) 向き / agent Pod (Job 起動でスポット) は Pod 消失後は空 |
 | 4 | 一括抽出 / 自動化 | `gcloud logging read` | CLI (verify script / Crane と同じ経路) | 対話 debug より dump 向け |
 
@@ -915,7 +917,7 @@ resource.labels.namespace_name="biblio-claw"
 severity>=WARNING
 
 # 特定 trace_id (request 追跡、TRACE_ID を差し替えて使う)
-trace="projects/hajimari-ai-hackathon-2026/traces/<TRACE_ID>"
+trace="projects/<your-gcp-project>/traces/<TRACE_ID>"
 ```
 
 ### GenAI semconv の Development ステータス
@@ -1020,14 +1022,14 @@ terraform apply tfplan
 ### Verify(手動 1 回確認)
 
 1. biblio-claw で任意の biblio action を 1 回実行 (Slack で `@bot 蔵書` 等)
-2. ~5 分待ち、`bq ls hajimari-ai-hackathon-2026:llm_observability` でテーブル materialize 確認
+2. ~5 分待ち、`bq ls <your-gcp-project>:llm_observability` でテーブル materialize 確認
 3. 実テーブル名は GKE container の logName 直接由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 Phase 3 apply 時に実測確認)
 4. 以下を実行 (`sql/summary.sql` は M4-A Phase 4 で placeholder 化済 = `sed` 置換が必要):
    ```bash
-   sed -e "s/<PROJECT_ID>/hajimari-ai-hackathon-2026/g" \
+   sed -e "s/<PROJECT_ID>/<your-gcp-project>/g" \
        -e "s/<DATASET_ID>/llm_observability/g" \
        terraform/m4-a-observability/sql/summary.sql | \
-     bq query --project_id=hajimari-ai-hackathon-2026 --use_legacy_sql=false
+     bq query --project_id=<your-gcp-project> --use_legacy_sql=false
    ```
    1 行返却で `hit_count >= 1` かつ `marker = M4A_OK` が出れば OK。event/outcome 別集計が欲しい場合は SQL ファイル末尾のコメントブロックを参照
 5. `request_id` 1 つを取り出し、`SELECT * WHERE jsonPayload.request_id='<UUID>'` で全境界ログが取得できることを確認
@@ -1041,10 +1043,10 @@ sink 経由作成テーブルは Terraform 管理外 (sink writer SA に `tables
 ```bash
 bq update \
   --clustering_fields=severity \
-  hajimari-ai-hackathon-2026:llm_observability.stdout
+  <your-gcp-project>:llm_observability.stdout
 
 bq show --format=json \
-  hajimari-ai-hackathon-2026:llm_observability.stdout \
+  <your-gcp-project>:llm_observability.stdout \
   | jq .clustering
 # → {"fields": ["severity"]}
 ```
@@ -1060,7 +1062,7 @@ bq show --format=json \
 ```bash
 cd terraform/m4-a-observability
 terraform plan -destroy                                       # dry-run
-bq rm -r -f -d hajimari-ai-hackathon-2026:llm_observability   # dataset + 全テーブル削除
+bq rm -r -f -d <your-gcp-project>:llm_observability   # dataset + 全テーブル削除
 terraform destroy -auto-approve                                # sink + IAM 削除
 ```
 
@@ -1110,7 +1112,7 @@ bash scripts/verify-m4-a.sh
 
 | 変数 | 例 | 用途 |
 | :--- | :--- | :--- |
-| `GCP_PROJECT_ID` | `hajimari-ai-hackathon-2026` | Cloud Trace + BQ query 対象 |
+| `GCP_PROJECT_ID` | `<your-gcp-project>` | Cloud Trace + BQ query 対象 |
 | `BQ_DATASET_ID` | `llm_observability` | sink 先 dataset (terraform default) |
 
 `.env` 不在は warn 継続 (= GKE / CI 経路想定)。
@@ -1371,7 +1373,7 @@ GET / POST / tcp.connect × 多数   (= undici HTTP client の自動計装、acq
 Cloud Trace UI で trace_id 検索:
 
 ```
-https://console.cloud.google.com/traces/list?tid=<TRACE_ID>&project=hajimari-ai-hackathon-2026
+https://console.cloud.google.com/traces/list?tid=<TRACE_ID>&project=<your-gcp-project>
 ```
 
 trace_id は Pod ログの JSON structured log の `logging.googleapis.com/trace` field (bare 32hex、`projects/.../traces/` prefix なし) から拾える。**単純に `tail -n1` で拾うと rotator sidecar の trace_id を掴む race がある**ため、`event=adk.tool.acquire.invoke` / `event=adk.anthropic_vertex_llm.init` 等の ADK 経路 event に絞って抽出する (`verify-m4-b.sh` Section 5 参照):
@@ -2127,7 +2129,7 @@ ESM 判断の詳細は上記 §M4-E Phase 4 §ESM フック判断 参照。
 
 ```bash
 gcloud services enable endpoints.googleapis.com \
-  --project=hajimari-ai-hackathon-2026
+  --project=<your-gcp-project>
 # 既に enable 済なら no-op、初回は Terraform apply 前に必須 (罠 9 で fail-fast)
 ```
 
@@ -2135,7 +2137,7 @@ gcloud services enable endpoints.googleapis.com \
 
 ```bash
 # Service 名は自由 (例: biblio-claw-fugue = 全固有名詞を含めてシンプル)
-export TF_VAR_domain_name='biblio-claw-fugue.endpoints.<PROJECT_ID>.cloud.goog'
+export TF_VAR_domain_name='biblio-claw-fugue.endpoints.<your-gcp-project>.cloud.goog'
 export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
 
 # 値の確認 (log には出さない、tmux buffer / ephemeral copy 用)
@@ -2161,12 +2163,12 @@ terraform output # static_ip_address / cert_name / endpoints_service_name / secr
 ```bash
 # Domain を Secret Manager から動的取得 (ここ以降 hardcode 参照ゼロ、セッション env で継承)
 export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
-  --project=hajimari-ai-hackathon-2026)
+  --project=<your-gcp-project>)
 echo "domain: $DOMAIN"
 
 # Cloud Endpoints Service 状態確認 (Terraform apply で ACTIVE 化済)
 gcloud endpoints services describe "$DOMAIN" \
-  --project=hajimari-ai-hackathon-2026 --format='value(state)'
+  --project=<your-gcp-project> --format='value(state)'
 
 # DNS 反映確認 (.cloud.goog は Google 内部 DNS = 通常 5-10 分)
 while ! dig +short "$DOMAIN" | grep -q .; do
@@ -2192,14 +2194,16 @@ gcloud compute ssl-certificates describe biblio-fugue-channel-cert \
 # 罠 8 の silent fail (`$(...)` の空出力を kubectl が正常な空文字値として受け入れる) を防ぐため
 # 2 段に分けて token 空チェック → apply。
 TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
-  --project=hajimari-ai-hackathon-2026)
+  --project=<your-gcp-project>)
 [[ -n "$TOKEN" ]] || { echo 'ERROR: token fetch failed (permission / typo / propagation?)'; exit 1; }
 kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
   --from-literal=FUGUE_SHARED_TOKEN="$TOKEN"
 
 # deploy 順序 = StatefulSet update → Service + BackendConfig → NetworkPolicy → Ingress
 # (Ingress 最後 = NEG + backend health 反映が早い、rollout 中の 502 window 最短化)
-kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+# 10-orchestrator-statefulset.yaml は ${GCP_PROJECT_ID} を含むため envsubst 経由必須
+# (罠 10/11 と同源、issue #168 で拡張)
+envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < k8s/10-orchestrator-statefulset.yaml | kubectl apply -f -
 kubectl rollout status statefulset biblio-orchestrator -n biblio-claw --timeout=10m
 # → Pod 再起動時に `/tmp/host-ready` が書かれるまで startupProbe が pending
 #   (30 * 10s = 5 min 猶予)。ready 化後 LB backend に組み込まれる
@@ -2280,7 +2284,7 @@ FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$TOKEN" \
 
 ```
 # Cloud Trace UI で 1 trace 串刺し確認 (直近 1 時間の trace リスト)
-# https://console.cloud.google.com/traces/list?project=hajimari-ai-hackathon-2026
+# https://console.cloud.google.com/traces/list?project=<your-gcp-project>
 # 期待: fugue.consult (top) → biblio.list (child) の親子関係、
 #       attributes に channel='fugue' / fugue.request_id / biblio.request_id 揃う
 ```
@@ -2290,14 +2294,14 @@ FUGUE_URL="https://${DOMAIN}" FUGUE_SHARED_TOKEN="$TOKEN" \
 # 注: BQ sink は timestamp 列による column-based DAY partition = `_PARTITIONTIME` 疑似列
 # (ingestion-time partition 専用) は存在しないため、`timestamp` 列で filter する。
 # §M4-A Phase 3 / §M4-E Phase 4 の集計 SQL と同流儀で stdout/stderr を UNION ALL する。
-bq query --project_id=hajimari-ai-hackathon-2026 --nouse_legacy_sql --format=pretty \
+bq query --project_id=<your-gcp-project> --nouse_legacy_sql --format=pretty \
   "SELECT event, channel, COUNT(*) as cnt
    FROM (
      SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
-     FROM \`hajimari-ai-hackathon-2026.llm_observability.stdout\`
+     FROM \`<your-gcp-project>.llm_observability.stdout\`
      UNION ALL
      SELECT jsonPayload.event AS event, jsonPayload.channel AS channel, timestamp
-     FROM \`hajimari-ai-hackathon-2026.llm_observability.stderr\`
+     FROM \`<your-gcp-project>.llm_observability.stderr\`
    )
    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
      AND channel = 'fugue'
@@ -2310,9 +2314,9 @@ bq query --project_id=hajimari-ai-hackathon-2026 --nouse_legacy_sql --format=pre
 ```
 Fugue チームに Slack DM or ephemeral share で共有する値 (両方とも Secret Manager から取得):
   - DOMAIN: gcloud secrets versions access latest --secret=fugue-domain-name \
-            --project=hajimari-ai-hackathon-2026
+            --project=<your-gcp-project>
   - TOKEN:  gcloud secrets versions access latest --secret=fugue-shared-token \
-            --project=hajimari-ai-hackathon-2026
+            --project=<your-gcp-project>
 
 Fugue 側 Cloud Run:
   - Fugue 自身の Secret Manager に BIBLIO_CLAW_URL = "https://${DOMAIN}" + FUGUE_SHARED_TOKEN
@@ -2347,7 +2351,7 @@ Fugue 側 Cloud Run:
 ```bash
 # init-project-gcp Phase 4.5 image-sync で新 tag (m4e-p5-N 等) を打った後:
 kubectl set image statefulset/biblio-orchestrator -n biblio-claw \
-  orchestrator=asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m4e-p5-<N>
+  orchestrator=asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:m4e-p5-<N>
 kubectl rollout status statefulset biblio-orchestrator -n biblio-claw --timeout=10m
 # Ingress / Service / Terraform は無変更で継続
 ```
@@ -2368,14 +2372,15 @@ kubectl delete -f k8s/27-networkpolicy-fugue-channel.yaml
 kubectl delete -f k8s/26-service-fugue-channel.yaml
 kubectl delete secret biblio-fugue-shared-token -n biblio-claw
 git checkout HEAD~1 -- k8s/10-orchestrator-statefulset.yaml   # 例、Phase 5 前へ revert
-kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+# envsubst 経由 (罠 10/11 と同源、${GCP_PROJECT_ID} も含む issue #168 以降)
+envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < k8s/10-orchestrator-statefulset.yaml | kubectl apply -f -
 
 # 案 3: Terraform destroy (Fugue infra を完全削除、Fugue チーム連携が終わっていることが前提)
 #   順序 = k8s Ingress + Secret 削除 → terraform destroy
 #   sensitive var (`TF_VAR_domain_name` + `TF_VAR_fugue_shared_token`) は destroy 時も
 #   必須 (Terraform lifecycle 経路の要求)、dummy 値で OK
 cd terraform/fugue-channel
-export TF_VAR_domain_name='biblio-claw-fugue.endpoints.<PROJECT_ID>.cloud.goog'
+export TF_VAR_domain_name='biblio-claw-fugue.endpoints.<your-gcp-project>.cloud.goog'
 export TF_VAR_fugue_shared_token='dummy-for-destroy'
 terraform destroy
 ```
@@ -2536,10 +2541,10 @@ terraform destroy
     peering 再割当があった場合は以下で再検証 + `k8s/27-networkpolicy-fugue-channel.yaml` を更新する:
     ```bash
     gcloud sql instances describe biblio-pgsql \
-      --project=hajimari-ai-hackathon-2026 \
+      --project=<your-gcp-project> \
       --format='value(ipAddresses[].ipAddress)'
     gcloud compute addresses list \
-      --filter="purpose:VPC_PEERING AND project:hajimari-ai-hackathon-2026" \
+      --filter="purpose:VPC_PEERING AND project:<your-gcp-project>" \
       --format='table(name,address,prefixLength,subnetwork)'
     ```
 
@@ -2671,9 +2676,9 @@ bash scripts/verify-fugue-channel.sh --prod
 
 # 2. DOMAIN + TOKEN を Fugue チームに通知
 DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
-  --project=hajimari-ai-hackathon-2026)
+  --project=<your-gcp-project>)
 TOKEN=$(gcloud secrets versions access latest --secret=fugue-shared-token \
-  --project=hajimari-ai-hackathon-2026)
+  --project=<your-gcp-project>)
 echo "biblio-claw DOMAIN=https://${DOMAIN} TOKEN=${TOKEN:0:8}..."
 # → Slack DM (ephemeral share 推奨) で full token + DOMAIN を共有
 
@@ -3073,26 +3078,28 @@ tail -10 data/gate-audit.jsonl | jq '.'
 1. **agent image を build + AR push** (`tavily-mcp` global pin + Drive server COPY を含む):
    ```bash
    ./container/build.sh m4f-p3-1
-   docker tag nanoclaw-agent:m4f-p3-1 asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p3-1
-   docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/nanoclaw-agent:m4f-p3-1
+   docker tag nanoclaw-agent:m4f-p3-1 asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/nanoclaw-agent:m4f-p3-1
+   docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/nanoclaw-agent:m4f-p3-1
    ```
 2. **sidecar image を build + AR push** (`drive-rotate.sh` + `onecli-drive-secret.sh` を含む、Vertex と兼用 image):
    ```bash
    docker build -f Dockerfile.sidecar.vertex -t biblio-sidecar-vertex:m4f-p3-1 .
-   docker tag biblio-sidecar-vertex:m4f-p3-1 asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
-   docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
+   docker tag biblio-sidecar-vertex:m4f-p3-1 asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
+   docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:m4f-p3-1
    ```
 3. **Drive API + IAM Credentials API 有効化 (1 回のみ、両 API とも Terraform 化は保留 = project レベルで gcloud + 手動管理)**:
    ```bash
    gcloud services enable drive.googleapis.com iamcredentials.googleapis.com \
-     --project=hajimari-ai-hackathon-2026
+     --project=<your-gcp-project>
    ```
    - `drive.googleapis.com`: agent-container の Drive MCP server が叩く Drive REST API
    - `iamcredentials.googleapis.com`: R4 経路の Step 5(c) rotator sidecar が `generateAccessToken` を呼ぶために必須 (2026-07-06 追加)
 4. **k8s manifest 更新 + rollout** (`10-orchestrator-statefulset.yaml` の 2 sidecar image tag + `nanoclaw-agent` image tag を bump):
    ```bash
    # image tag を m4f-p3-1 に一斉更新した状態で
-   kubectl apply -f k8s/10-orchestrator-statefulset.yaml -n biblio-claw
+   # envsubst 経由 (罠 10/11 と同源、${GCP_PROJECT_ID} も含む issue #168 以降)
+   envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < k8s/10-orchestrator-statefulset.yaml | \
+     kubectl apply -n biblio-claw -f -
    kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=180s
    kubectl get pod biblio-orchestrator-0 -n biblio-claw -o json | jq '.spec.containers[] | .name'
    # → orchestrator, gh-token-rotator, vertex-token-rotator, drive-token-rotator の 4 name
@@ -3106,7 +3113,7 @@ tail -10 data/gate-audit.jsonl | jq '.'
    TF_VAR_tavily_api_key='tvly-...' terraform apply
    cd -
    # 確認: gcloud で読み戻せる
-   gcloud secrets versions access latest --secret=biblio-tavily-api-key --project=hajimari-ai-hackathon-2026
+   gcloud secrets versions access latest --secret=biblio-tavily-api-key --project=<your-gcp-project>
 
    # (b) OneCLI に Tavily secret を bootstrap 投入 (以降は Tavily Dashboard で key regenerate 時のみ)。
    #     env 未設定 = script が自動で SM から取得 (orchestrator Pod 内 gcloud + WI 経由)。
@@ -3151,13 +3158,13 @@ tail -10 data/gate-audit.jsonl | jq '.'
    cd -
    # 確認: binding が付いたか
    gcloud iam service-accounts get-iam-policy \
-     biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com \
-     --project=hajimari-ai-hackathon-2026 --format=yaml
+     biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com \
+     --project=<your-gcp-project> --format=yaml
    # → bindings に serviceAccount:biblio-orchestrator@... / roles/iam.serviceAccountTokenCreator が 1 個
    ```
 8. **Drive フォルダを 分離 SA email に共有** (DEN さん手作業):
    - Drive UI で対象フォルダを右クリック → 共有
-   - `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` を「閲覧者」として追加
+   - `biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com` を「閲覧者」として追加
    - **`biblio-orchestrator@...` には共有しない** (境界分離、orchestrator 経由の誤アクセス経路を構造的に閉じる、罠 7 の R4 経路採用の帰結)
    - 通知メールは GSA 宛だが送信不可、無視して良い
 
@@ -3188,7 +3195,7 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
    agent-runner (Bun) 内で `fetch()` / `undici` / `node:https` で HTTPS_PROXY 経由の外部到達を試みると、CONNECT トンネル確立後の応答パースが壊れる (`response.headers` に CONNECT envelope 混入 / `response.body` に生 HTTP バイト漏洩 / keep-alive 無限ハング)。**対処**: 新規 MCP server は必ず **独立 Node 22 プロセス** として spawn する (Drive server と同流儀)。Bun 内で `fetch()` を追加する誘惑は禁物、外部 HTTPS は全て MCP server に切り出す。
 
 2. **Drive フォルダの分離 SA 共有忘れで 403 が返る**
-   patron が「Drive を見て」と発話 → agent が `drive_list_files` を発火 → 403 → LLM が「フォルダの共有設定を確認 (`biblio-google-drive-user@...` に閲覧権限があるか)」と応答。**patron 誤解しやすい**が挙動としては正常 (crash なし)。**対処**: 上記 deploy 手順 (8) で verify 前に `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` (分離 SA、**`biblio-orchestrator@` ではない**) に閲覧者として追加。verify 中に踏んだ場合はその場で共有追加して再発話。
+   patron が「Drive を見て」と発話 → agent が `drive_list_files` を発火 → 403 → LLM が「フォルダの共有設定を確認 (`biblio-google-drive-user@...` に閲覧権限があるか)」と応答。**patron 誤解しやすい**が挙動としては正常 (crash なし)。**対処**: 上記 deploy 手順 (8) で verify 前に `biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com` (分離 SA、**`biblio-orchestrator@` ではない**) に閲覧者として追加。verify 中に踏んだ場合はその場で共有追加して再発話。
 
 3. **tavily-mcp の body auth (`api_key` field) が OneCLI header injection と非互換** (2026-07-05 実測で確定)
    `tavily-mcp` v0.2.20 の `src/index.ts:103` は Authorization header に `Bearer ${TAVILY_API_KEY}` を送るが、同時に line 612 以降で request body にも `api_key: TAVILY_API_KEY` を埋める (search/extract/crawl/map/research 全て)。OneCLI proxy は Authorization header 置換のみで body は書き換えられないため、`env={TAVILY_API_KEY:'placeholder'}` だと body に `api_key:"placeholder"` が入って **Tavily API が 401** を返す。**対処**: `env={}` にして tavily-mcp の keyless mode (`src/index.ts:110` のログ「no TAVILY_API_KEY set; running in keyless mode. Search and extract are available」) を利用する。keyless mode では body に api_key を追加しない (`...(IS_KEYLESS ? {} : { api_key: API_KEY })`) ので OneCLI Bearer 注入だけで search + extract が成立。**crawl/map/research は keyless mode 不可** = 別途 tavily-mcp fork or 自作 stdio server (別 PRD 候補)。
@@ -3205,7 +3212,7 @@ kubectl exec biblio-orchestrator-0 -c orchestrator -n biblio-claw -- \
 7. **Drive scope 不足で 403 が返る = R4 経路 (SA 2 段 impersonation) で恒久解決** (2026-07-05 症状発現 → 2026-07-06 R4 経路採用で確定)
    `gcloud auth application-default print-access-token` の default (cloud-platform scope) では Drive API が **403 PERMISSION_DENIED / insufficientPermissions** を返す。当初 plan の想定では `--scopes=https://www.googleapis.com/auth/drive.readonly` を明示すれば効くはずだったが (Task 8b で反映 = commit `1cf1a97`)、**GCE account type (GKE Autopilot Pod 内 WI 経由 impersonate 経路) では `WARNING: --scopes flag may not work as expected and will be ignored for account type gce` が stderr に出て、実際に silent ignored される** (2026-07-06 実測で確定、事前の「warning は誤り、実測では effective」記述は撤回)。metadata server が返す ADC は node pool 側 scope に固定されるため **client 側 override 不可** = `--scopes` 明示は GKE では効果ゼロ。
    **恒久対処 = R4 経路採用**:
-   (a) Drive access 専用 SA `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` を分離し、Drive フォルダ ACL はこの SA だけに共有 (orchestrator@ には共有しない = 境界分離)。
+   (a) Drive access 専用 SA `biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com` を分離し、Drive フォルダ ACL はこの SA だけに共有 (orchestrator@ には共有しない = 境界分離)。
    (b) rotator (`scripts/onecli-drive-secret.sh`) は gcloud を捨てて、metadata server → `iamcredentials.googleapis.com/v1/.../generateAccessToken` (target=drive-user@, scope=drive.readonly, lifetime=3600s) で drive.readonly scope 付き token を発行、OneCLI に PATCH。
    (c) IAM binding は `terraform/iam-drive-user/` で `roles/iam.serviceAccountTokenCreator` を宣言 (orchestrator@ が drive-user@ を impersonate 可能)。
    (d) keyless 維持 (SA key JSON 不要、WI + `iamcredentials` API のみ)。

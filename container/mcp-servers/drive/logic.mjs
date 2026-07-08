@@ -81,9 +81,10 @@ export function formatError(err) {
       = 'Drive token 未注入。OneCLI 経由の Bearer 注入が失敗している可能性 '
       + '(drive-token-rotator sidecar のログを確認、`kubectl logs biblio-orchestrator-0 -c drive-token-rotator`)。';
   } else if (status === 403) {
+    const gcpProjectId = process.env.GCP_PROJECT_ID || '<gcp-project-id>';
     hint
       = 'Drive フォルダの共有設定を確認。GSA '
-      + '`biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` に '
+      + `\`biblio-orchestrator@${gcpProjectId}.iam.gserviceaccount.com\` に `
       + '「閲覧者」権限が付いていないと 403 になる。DEN さんに Drive の共有追加を依頼して。';
   } else if (status === 404) {
     hint = 'ファイル / フォルダが存在しない (削除済 or 存在しない ID)。';

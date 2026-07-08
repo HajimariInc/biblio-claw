@@ -57,7 +57,7 @@ fi
 : "${ONECLI_URL:=http://localhost:10254}"
 : "${DRIVE_SECRET_NAME:=biblio-claw-drive}"
 : "${DRIVE_API_HOST:=www.googleapis.com}"
-: "${DRIVE_USER_SA:=biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com}"
+: "${DRIVE_USER_SA:=biblio-google-drive-user@${GCP_PROJECT_ID:?required (export GCP_PROJECT_ID or DRIVE_USER_SA)}.iam.gserviceaccount.com}"
 : "${DRIVE_SCOPE:=https://www.googleapis.com/auth/drive.readonly}"
 : "${DRIVE_TOKEN_LIFETIME:=3600s}"
 : "${METADATA_HOST:=metadata.google.internal}"

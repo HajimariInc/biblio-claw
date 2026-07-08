@@ -31,10 +31,13 @@ cd terraform/fugue-channel
 
 # Step 0: Cloud Endpoints API 有効化 (初回のみ、既に enable 済なら no-op)
 gcloud services enable endpoints.googleapis.com \
-  --project=hajimari-ai-hackathon-2026
+  --project=<your-gcp-project>
 
-# Step 1: Domain 名 + Bearer token を投入 (セッション先頭で 1 回、以降 export で継承)
-export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
+# Step 1: 必須 var を投入 (セッション先頭で 1 回、以降 export で継承)
+# project_id + orchestrator_gsa_email は default 削除済み (issue #168)、明示指定必須
+export TF_VAR_project_id='<your-gcp-project>'
+export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
+export TF_VAR_domain_name="biblio-claw-fugue.endpoints.${TF_VAR_project_id}.cloud.goog"
 export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
 
 # Step 2: Terraform apply (9 resource create: IP + Endpoints Service + cert + secret x2 +
@@ -50,12 +53,12 @@ terraform output   # static_ip_address / cert_name / endpoints_service_name / se
 ```bash
 # Domain を Secret Manager から動的取得 (セッション env、`.env` に書かない)
 export DOMAIN=$(gcloud secrets versions access latest --secret=fugue-domain-name \
-  --project=hajimari-ai-hackathon-2026)
+  --project=<your-gcp-project>)
 echo "domain: $DOMAIN"
 
 # 1. Cloud Endpoints Service 状態確認
 gcloud endpoints services describe "$DOMAIN" \
-  --project=hajimari-ai-hackathon-2026 \
+  --project=<your-gcp-project> \
   --format='value(state)'
 # 期待: ACTIVE
 
@@ -82,7 +85,7 @@ done
 
 # 4. Secret Manager から token 取得可能か
 gcloud secrets versions access latest --secret=fugue-shared-token \
-  --project=hajimari-ai-hackathon-2026 | head -c 8
+  --project=<your-gcp-project> | head -c 8
 # 期待: 8 hex chars (プレフィックス確認のみ = 全文は表示しない)
 ```
 
@@ -99,7 +102,10 @@ kubectl delete secret biblio-fugue-shared-token -n biblio-claw
 
 # Step 2: Terraform destroy (cert が Ingress から detach 済 + Endpoints Service が LB attach
 # 参照なし = destroy 成立)
-export TF_VAR_domain_name='biblio-claw-fugue.endpoints.hajimari-ai-hackathon-2026.cloud.goog'
+# 必須 var (default 削除済み、destroy 時も lifecycle 経路で要求される)
+export TF_VAR_project_id='<your-gcp-project>'
+export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
+export TF_VAR_domain_name="biblio-claw-fugue.endpoints.${TF_VAR_project_id}.cloud.goog"
 export TF_VAR_fugue_shared_token='dummy-for-destroy'  # sensitive var は destroy 時も必要
 terraform destroy
 ```

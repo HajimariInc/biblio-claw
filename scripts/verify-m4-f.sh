@@ -18,7 +18,7 @@
 #   bash scripts/verify-m4-f.sh           両方
 #
 # 必須 env (Prod mode = --prod or 省略で必須、未設定で fail-fast):
-#   GCP_PROJECT_ID         e.g. hajimari-ai-hackathon-2026
+#   GCP_PROJECT_ID         e.g. <your-gcp-project>
 #   BQ_DATASET_ID          e.g. llm_observability
 #
 # 任意 env (default 挙動を上書き):
