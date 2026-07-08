@@ -268,9 +268,24 @@ else
   info "[manifest] \${IMAGE_TAG} placeholder 検出 ($hit 行、Block 5 で --tag=$TAG に envsubst 展開)"
 
   # rollback 用 backup (= --confirm 時のみ実体作成、dry-run では skip)
+  # $(date +%s) を先に変数に捕捉 = cp が作った実ファイル名と log 出力が
+  # 秒境界跨ぎで食い違うのを防ぐ (rollback 復元時の混乱を撲滅)。
   if ! "$DRY_RUN"; then
-    cp "$MANIFEST" "$MANIFEST.bak.$(date +%s)"
-    ok "[manifest] backup 作成: $MANIFEST.bak.$(date +%s)"
+    backup_path="$MANIFEST.bak.$(date +%s)"
+    cp "$MANIFEST" "$backup_path"
+    ok "[manifest] backup 作成: $backup_path"
+  fi
+
+  # fork 側 deploy で手動置換が必要な angle-bracket placeholder が残っていないか
+  # fail-fast 検出 (envsubst 対象外 = envsubst で literal のまま container に注入され、
+  # `readListEnv` / `readShelveEnv` は空文字チェックのみで literal `<...>` を通過するため
+  # 起動 → 最初の `@bot 蔵書` / `@bot 仕入れて` を叩くまで異常に気付けない silent failure)。
+  # 全 placeholder は fork 側で sed / envsubst 前の手動 rewrite で実値に置換必須。
+  placeholder_pattern='<(shelf-repo-owner|shelf-repo-name|bot-commit-author-name|bot-commit-author-email|cloud-sql-db-name)>'
+  if grep -qE "$placeholder_pattern" "$MANIFEST"; then
+    warn "[manifest] 未置換の angle-bracket placeholder を検出 (envsubst 対象外):"
+    grep -nE "$placeholder_pattern" "$MANIFEST" | head -10 >&2
+    fail "[manifest] fork 側で全 placeholder を実値に置換してから deploy してください (sed 例: sed -i 's|<shelf-repo-owner>|myorg|g' $MANIFEST)"
   fi
 fi
 

@@ -148,7 +148,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:${IMAGE_TAG},
+                value: 'asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:${IMAGE_TAG}',
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -170,12 +170,12 @@ spec:
             - { name: NODE_EXTRA_CA_CERTS, value: /etc/ssl/certs/onecli/ca.pem }
             # === Vertex × Claude (OneCLI MITM 経由) ===
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
-            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
+            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
             # === orchestrator コード (drive/logic.mjs, init-hybrid-agent.ts, etc) が
             #     patron 発話向け SA email をランタイムで組み立てるための env 参照。
             #     envsubst で literal 値に置換された state で container に注入するため、
             #     コード側は `process.env.GCP_PROJECT_ID` で解決可能になる。
-            - { name: GCP_PROJECT_ID, value: ${GCP_PROJECT_ID} }
+            - { name: GCP_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
             - { name: CLOUD_ML_REGION, value: global }
             # === 検品 (Vertex × Gemini) + カテゴライズ (Vertex × Claude) の model 設定 ===
             # local docker compose では `.env` 経由で渡るが、GKE manifest に明示投入が必要。
@@ -273,7 +273,7 @@ spec:
           #   (C3) 旧コメント「`initChannelAdapters` throw → sentinel 未書込 → crash loop」は
           #        実装 (channel-registry.ts:57-60 の per-adapter catch) と矛盾していた。
           #        現在は「main() で throw する経路 (writeFileSync 失敗 / DB migration 失敗
-          #        等) のみが Pod 再起動を招り、per-adapter の credential 欠落は silent skip」
+          #        等) のみが Pod 再起動を招き、per-adapter の credential 欠落は silent skip」
           #        という実装通りの契約に修正。
           #
           # Fugue endpoint への外部 request が失敗した場合の可視化は Fugue Cloud Run 側で
@@ -359,14 +359,14 @@ spec:
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
-            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
+            - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
             - { name: CLOUD_ML_REGION, value: global }
             - { name: VERTEX_SECRET_NAME, value: biblio-claw-vertex }
             # 50min (3000s) は ADC token TTL ~60min との 10min gap 帯に
             # agent Pod spawn が当たると起動直後の Vertex 呼び出しで 401 を踏むため、
             # 40min 周期で gap を ~0min に縮小する (script 既定値とも同期)。
             - { name: ROTATE_INTERVAL_SEC, value: '2400' }
-            - { name: CLOUDSDK_CORE_PROJECT, value: ${GCP_PROJECT_ID} }
+            - { name: CLOUDSDK_CORE_PROJECT, value: '${GCP_PROJECT_ID}' }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: vertex-token-rotator }
           resources:
@@ -398,7 +398,7 @@ spec:
             - { name: DRIVE_SECRET_NAME, value: biblio-claw-drive }
             # Vertex と同流儀: 40min 周期で ADC TTL ~60min との margin 20min を確保。
             - { name: ROTATE_INTERVAL_SEC, value: '2400' }
-            - { name: CLOUDSDK_CORE_PROJECT, value: ${GCP_PROJECT_ID} }
+            - { name: CLOUDSDK_CORE_PROJECT, value: '${GCP_PROJECT_ID}' }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: drive-token-rotator }
           resources:
