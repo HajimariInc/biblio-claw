@@ -65,6 +65,18 @@ async function mainInner(): Promise<void> {
   // memory lives in /workspace/agent/CLAUDE.local.md (auto-loaded).
   const instructions = buildSystemPromptAddendum(config.assistantName || undefined);
 
+  // M4-H Phase 3.5: custom system prompt モード。DB `container_configs.system_prompt_override`
+  // が非 NULL の group では、SDK に `systemPrompt: <string>` (custom variant) を渡し、
+  // `settingSources: []` で CLAUDE.md / CLAUDE.local.md の auto-load も切る (`providers/claude.ts`
+  // の分岐で実施)。identity + destinations map は custom prompt 内で hardcode する設計。
+  //   - customSystemPrompt: undefined → 既存 preset 経路 (regression zero、他 group はここ)
+  //   - customSystemPrompt: string    → custom 経路 (fugue-ask 用、meta response 回避)
+  const customSystemPrompt = config.systemPromptOverride;
+  log.info('System prompt mode', {
+    mode: customSystemPrompt ? 'custom' : 'preset',
+    custom_length: customSystemPrompt?.length ?? 0,
+  });
+
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
   const extraBase = '/workspace/extra';
@@ -121,7 +133,7 @@ async function mainInner(): Promise<void> {
     provider,
     providerName,
     cwd: CWD,
-    systemContext: { instructions },
+    systemContext: { instructions, customSystemPrompt },
   });
 }
 

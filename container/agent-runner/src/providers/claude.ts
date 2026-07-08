@@ -408,6 +408,15 @@ export class ClaudeProvider implements AgentProvider {
     stream.push(input.prompt);
 
     const instructions = input.systemContext?.instructions;
+    // M4-H Phase 3.5: `customPrompt` が入っている場合、SDK v0.2.138 の string 経路
+    // (`sdk.d.ts:1745`) で custom variant として system message を全置換する (preset 完全 bypass)。
+    // 同時に `settingSources: []` (SDK isolation mode、`sdk.d.ts:1671`) で CLAUDE.md /
+    // CLAUDE.local.md auto-load を disable し、fugue-ask 用 system prompt のみを届ける。
+    // `buildSystemPromptAddendum` が返す identity + destinations addendum は custom mode
+    // では捨てられる (custom prompt 内で hardcode 済み、fugue-ask.md の §1/§2 参照)。
+    // `??` operator を採用しているので empty string custom prompt は preset に fallback せず、
+    // "user が明示的に空文字を渡した" 状態として尊重される (init 側で空文字化を避ける契約)。
+    const customPrompt = input.systemContext?.customSystemPrompt;
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -416,7 +425,9 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
+        systemPrompt:
+          customPrompt ??
+          (instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined),
         allowedTools: [
           ...TOOL_ALLOWLIST,
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),
@@ -428,7 +439,7 @@ export class ClaudeProvider implements AgentProvider {
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        settingSources: ['project', 'user', 'local'],
+        settingSources: customPrompt ? [] : ['project', 'user', 'local'],
         mcpServers: this.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],

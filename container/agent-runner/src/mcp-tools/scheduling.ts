@@ -72,13 +72,19 @@ export const scheduleTask: McpToolDefinition = {
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
 
-    // Write as a system action — host will insert into inbound.db
+    // Write as a system action — host will insert into inbound.db.
+    // content.threadId は task 行 → task 実行 session の thread 継承の source。
+    // 定期タスク発火時の応答をチャンネル top-level に投稿するため null で落とす
+    // (@mention 経路の thread 返信は無変更、session 自体の thread_id は既存経路で管理)。
+    // 行 thread_id も null に落として cancel/pause/resume/update_task 系 handler
+    // (thread_id 非設定) と対称性を回復。system action delivery は行 thread_id を
+    // 消費しないため機能影響なし、将来 refactor で silent regression にならない安全側。
     writeMessageOut({
       id,
       kind: 'system',
       platform_id: r.platform_id,
       channel_type: r.channel_type,
-      thread_id: r.thread_id,
+      thread_id: null,
       content: JSON.stringify({
         action: 'schedule_task',
         taskId: id,
@@ -88,7 +94,7 @@ export const scheduleTask: McpToolDefinition = {
         recurrence,
         platformId: r.platform_id,
         channelType: r.channel_type,
-        threadId: r.thread_id,
+        threadId: null,
       }),
     });
 

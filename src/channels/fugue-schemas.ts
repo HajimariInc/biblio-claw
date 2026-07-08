@@ -65,6 +65,220 @@ export const FugueEquipRequest = z.object({
 export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 
 /**
+ * Fugue ask endpoint (M4-H) の intent literal union。Phase 1 では受理のみ (Zod validation
+ * pass 後は log field に emit するだけ、skeleton response には反映しない)。
+ *
+ * TODO(M4-H Phase 2): gate 4 層と `INTENT_GATE_MISMATCH` 検出に再利用する。定数化しておく
+ * ことで Phase 2 で inline enum を export し直す手戻りを防ぐ。
+ */
+export const FUGUE_ASK_INTENTS = ['search-web', 'drive-lookup', 'general'] as const;
+export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
+
+/**
+ * Fugue ask endpoint (M4-H) の source kind literal union (single-source of truth)。
+ *
+ * `FUGUE_ASK_INTENTS` の模範解答を横展開 (type-design-analyzer 発見 1、2026-07-08 PR #195 review)。
+ * 従来 `Source.kind` / `AgentAskSource.kind` / `wrapExternalContent` の kind 引数 / `handleAsk`
+ * の repKind 型注釈の 4 箇所に `'web' | 'drive'` (or `z.enum(['web', 'drive'])`) が直書きされて
+ * いたのを本定数に集約する。将来 Fugue 契約側で kind literal を拡張する場合、本 1 箇所を
+ * 更新するだけで TypeScript compiler が biblio-claw 内部の drift を検知できる。
+ *
+ * Fugue 契約側との drift (別 repo / Python) は依然として型では守られない。継続論点 #1
+ * (biblio 側 kind 拡張時は Fugue 側 Literal 更新を先行同期) の運用ルールに委ねる。
+ */
+export const FUGUE_SOURCE_KINDS = ['web', 'drive'] as const;
+export type FugueSourceKind = (typeof FUGUE_SOURCE_KINDS)[number];
+
+// M4-H Phase 2: ask endpoint 向け warnings 定数 (Contract §5.5 準拠、named export で test 済みの厳格な文字列契約)。
+// consult/equip の inline literal (`'input rejected by input gate'`) との書き味の混在は許容 (Fugue 側実装が塊で疎通
+// 取れた時点で fix 方針、DEN さん判断 2026-07-06)。
+export const AD_ASK_DENIED_BY_GATE = 'AD_ASK_DENIED_BY_GATE' as const;
+export const INTENT_GATE_MISMATCH = 'INTENT_GATE_MISMATCH' as const;
+
+/**
+ * Fugue ask endpoint (M4-H) の Request full spec (Phase 1 skeleton)。
+ *
+ * consult より広い `query` 上限 (2000 char) は PRD §5.5 に準拠 (Fugue Director が Web
+ * 検索・Drive lookup を要求する自然文は長くなりうる)。`intent` は将来 gate 4 層で
+ * `INTENT_GATE_MISMATCH` 検出に使う (Phase 2 以降)、Phase 1 では受理のみで応答には反映しない。
+ * `context_hint` は consult 側と同一 shape (`.optional().nullable()` 順を統一)。
+ */
+export const FugueAskRequest = z.object({
+  schema_version: z.literal('1').describe('Schema version. Phase 1 accepts "1" only.'),
+  request_id: z.string().min(1).max(64).describe('Client-provided idempotency key (max 64 chars).'),
+  query: z
+    .string()
+    .min(1)
+    .max(2000)
+    .describe('Free-text ask query from Fugue Director (max 2000 chars, wider than consult).'),
+  intent: z
+    .enum(FUGUE_ASK_INTENTS)
+    .optional()
+    .nullable()
+    .describe('Optional intent hint (search-web/drive-lookup/general). Phase 1 receives but does not act on it.'),
+  context_hint: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .nullable()
+    .describe('Optional context (screen_summary etc). Phase 1 receives but does not use.'),
+});
+export type FugueAskRequestT = z.infer<typeof FugueAskRequest>;
+
+/**
+ * ask endpoint の source item (Phase 3 で外部 backend の実結果を格納)。
+ *
+ * Phase 1 skeleton では `sources: []` (backend 未接続)。`metadata` は上限を持たない自由な
+ * dict (backend-specific な補助情報を透過的に運ぶ)。
+ */
+export const Source = z.object({
+  id: z.string().min(1).max(64).describe('Unique source id within a single ask response.'),
+  kind: z.enum(FUGUE_SOURCE_KINDS).describe('Source backend kind (Phase 3 で `web` = Tavily, `drive` = Google Drive).'),
+  title: z.string().min(1).max(400).describe('Source title (Web page title / Drive file name).'),
+  url: z.string().min(1).max(1000).describe('Source URL (Web link / Drive file URL).'),
+  snippet: z.string().min(1).max(1100).describe('Short excerpt or summary from the source.'),
+  metadata: z.record(z.string(), z.unknown()).default({}).describe('Optional backend-specific metadata.'),
+});
+export type SourceT = z.infer<typeof Source>;
+
+/**
+ * ask endpoint の finding item (Phase 3 で外部 backend の抽出結果を格納)。
+ *
+ * Phase 1 skeleton では `findings: []` (backend 未接続)。`source_ids` は上限 5 で
+ * findings 側から `sources` の item を後方参照する形。
+ *
+ * GOTCHA (Zod v4): `source_ids` は `.max(5).default([])` の順で書く必要がある。逆順
+ * (`.default([]).max(5)`) にすると `TS2339: Property 'max' does not exist on type
+ * 'ZodDefault<...>'` の compile error になる (v4 で `.default()` は output 型扱いに変更、
+ * v3 記法と非互換)。
+ */
+export const Finding = z.object({
+  text: z.string().min(1).max(600).describe('Extracted finding text (max 600 chars).'),
+  source_ids: z
+    .array(z.string())
+    .max(5)
+    .default([])
+    .describe('Source ids from `sources[]` supporting this finding (max 5).'),
+});
+export type FindingT = z.infer<typeof Finding>;
+
+/**
+ * ask endpoint 内部の agent-container protocol (M4-H Phase 3)。
+ *
+ * agent-container が `<ask-response>{JSON}</ask-response>` タグ内に書く JSON の型。
+ * Contract §5.5 の `Source` / `Finding` (handleAsk 応答型) とは別:
+ *
+ * - `AgentAskSource`: agent は `id` を発行しない (handleAsk 側で `src-01`, `src-02`, ... と連番付与)。
+ * - `AgentAskFinding.source_indexes`: `sources[]` の array index (0-indexed) を返す。
+ *   handleAsk が `source_indexes` → `Source.id` (`src-XX`) に変換して `Finding.source_ids` を組む。
+ *
+ * agent は Tavily / Drive tool を呼び終えたあと、最終 message に本 JSON を単一 `<ask-response>` タグで
+ * 包んで書き出す。handleAsk が regex 抽出 → `JSON.parse` → 本 schema で `safeParse` する。上限は
+ * Contract §5.5 の Response Field 定義 (summary/finding.text = 600、source.title = 400、source.url =
+ * 1000、source.snippet = 1100) と一致 = wrap 前の実長でも wrap 後の XML overhead 込みでも通過する
+ * ように上限は wrap 前実長で切る (handleAsk 側でも上限超過しない再帰チェックは行わない)。
+ */
+export const AgentAskSource = z.object({
+  kind: z.enum(FUGUE_SOURCE_KINDS),
+  title: z.string().min(1).max(400),
+  url: z.string().min(1).max(1000),
+  snippet: z.string().min(1).max(1100),
+  // 既存 `Source.metadata` (line 124) と consistency 統一 (PR #178 review 対応、提案 S1)。
+  // `.default({})` 単体で「input=undefined → {} 置換」が成立するため `.optional()` は不要。
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type AgentAskSourceT = z.infer<typeof AgentAskSource>;
+
+export const AgentAskFinding = z.object({
+  text: z.string().min(1).max(600),
+  source_indexes: z.array(z.number().int().nonnegative()).max(5).default([]),
+});
+export type AgentAskFindingT = z.infer<typeof AgentAskFinding>;
+
+export const AgentAskResponse = z.object({
+  summary: z.string().min(1).max(600),
+  findings: z.array(AgentAskFinding).max(10).default([]),
+  sources: z.array(AgentAskSource).max(20).default([]),
+});
+export type AgentAskResponseT = z.infer<typeof AgentAskResponse>;
+
+/**
+ * Fugue ask endpoint の Reply body (Phase 1 skeleton)。
+ *
+ * status の意味 (Contract §5.5):
+ *
+ * - `ok` — 正常応答 (summary / findings / sources のいずれかが埋まる、Phase 3 完了時点で発火)
+ * - `denied` — gate `in-secure` 判定 (Phase 2 で扱う)
+ * - `not_available` — バックエンド未接続 (backend が Phase 3 で結線されるまで発火)。**Phase 1
+ *   skeleton の意味と一致** — agent-container backend を呼ばない = Contract 上「未接続状態」の
+ *   semantics。Fugue 側 AD は `not_available` を「AD ラウンド省略」の signal として静かに fallback する。
+ * - `error` — timeout / 部分失敗
+ *
+ * Phase 1 skeleton は必ず `status: 'not_available'` + `warnings: ['skeleton_response']` を返す。
+ * TODO(M4-H Phase 3): backend 結線完了時に (a) `status` を `'ok'` に切替、(b) `warnings` から
+ * `'skeleton_response'` を除去、(c) `summary` / `findings` / `sources` の 3 並列 payload を実データで埋める。
+ *
+ * **discriminated union 設計 (A3-1)**: Phase 3 で status ごとの分岐が実装される時点で `FugueEquipReply`
+ * (PR #117) と同型の discriminated union 化を予告している。Phase 1 skeleton では常に `status:'not_available'`
+ * だが、Contract §5.5 の 4 status を型で明示することで、Phase 2/3 実装時に status × payload 相関の
+ * silent 不整合を compile-time で検知する。
+ */
+export const FugueAskReply = z.discriminatedUnion('status', [
+  // 'ok': backend 結線後の正常応答 (Phase 3)
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('ok'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+  // 'denied': gate in-secure 判定 (Phase 2)
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('denied'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+  // 'not_available': backend 未接続 (Phase 1 skeleton の default)
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('not_available'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+  // 'error': timeout / 部分失敗
+  z.object({
+    schema_version: z.literal('1'),
+    request_id: z.string(),
+    operation: z.literal('ask'),
+    status: z.literal('error'),
+    summary: z.string().min(1).max(600),
+    findings: z.array(Finding).max(10).default([]),
+    sources: z.array(Source).max(20).default([]),
+    raw: z.record(z.string(), z.unknown()).default({}),
+    processing_time_ms: z.number().int().nonnegative(),
+    warnings: z.array(z.string()).default([]),
+  }),
+]);
+export type FugueAskReplyT = z.infer<typeof FugueAskReply>;
+
+/**
  * biblio-shelf の 1 skill を Fugue Director に返すときの参照型 (Phase 3 で decidable 化)。
  *
  * biblio-claw 側で組み立てて返すのみで、Fugue 側から受け取ることはない → interface で
@@ -176,7 +390,7 @@ export type FugueEquipReply =
 export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplace_parse' | 'in_secure' | 'other';
 
 /**
- * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 500
+ * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 429 / 500
  * のすべての error response を型付け)。
  *
  * discriminated union で `error='unavailable'` の場合のみ `reason` を必須にし、他の
@@ -185,6 +399,13 @@ export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplac
  * `error='unavailable'` を返すのは biblio-claw 自体の応答不能時に限定 (認可・上限超過・
  * 内部例外)。listBiblio() の部分失敗は 200 + `FugueConsultReply.status='error'` で運ぶため
  * `unavailable` variant は現状 uncaught exception 経路の予備 (現行 code path で明示発火なし)。
+ *
+ * `error='rate_limited'` は M4-H Phase 4 で追加。Contract §5.6 の `RATE_LIMITED` semantics
+ * に対応し、`writeError(res, 429, {error:'rate_limited'})` で使用する。`Retry-After`
+ * header は呼び出し側で `res.setHeader('Retry-After', <sec>)` として明示送出 (writeError/
+ * writeJson の signature は無変更、PRD 意思決定 #E)。AD の本義契約の 5xx catch-all only
+ * 制約に対して 429 は 4xx なので影響なし (Fugue 側は 5xx を "unavailable" に、429 を
+ * `AdvisorClawRateLimitedError` に分岐)。
  */
 export type FugueErrorResponse =
   | {
@@ -199,4 +420,8 @@ export type FugueErrorResponse =
       detail?: string;
       path?: string;
       issues?: unknown[];
+    }
+  | {
+      error: 'rate_limited';
+      detail?: string;
     };

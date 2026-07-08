@@ -26,6 +26,53 @@ import { FugueHttpServer } from './fugue-http.js';
 
 const TOKEN = 'adh-test-token-abcdef0123456789abcdef0123456789abcdef01';
 
+/**
+ * source 内の `log.<method>(...)` 呼出しを quote-aware + bracket-balanced に切り出す
+ * (review 中 3 対応、正規表現の脆弱性 = message 内 `)` / nested object / 内部 `{...}` で
+ * false negative になる問題の根絶)。
+ *
+ * 挙動:
+ *   - `log.info(` / `log.warn(` / `log.error(` / `log.debug(` / `log.fatal(` を開始点として検出
+ *   - 対応する閉じ `)` まで走査、depth counter で nested `(` `)` を追跡
+ *   - `'` `"` `` ` `` の string literal 内では `(` `)` を counter から除外
+ *   - `\` escape は次の 1 文字を skip (`"\'"` 等の quote escape 対応)
+ *   - 対応 `)` が見つからない block (source 末尾未閉じ等) は結果から除外
+ *
+ * **template literal `${expr()}` の caveat**: 現行 fugue-http.ts では `event: \`fugue.\${operation}\``
+ * のように expr が単純な variable reference のみで `)` を含まない。将来 `${func()}` を導入する場合
+ * template literal の `${` を depth counter で扱う拡張が必要 (現状は変数展開のみで安全域)。
+ */
+function extractLogBlocks(source: string): string[] {
+  const blocks: string[] = [];
+  const startRe = /log\.(?:info|warn|error|debug|fatal)\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = startRe.exec(source)) !== null) {
+    const beginIdx = m.index;
+    let i = m.index + m[0].length;
+    let depth = 1;
+    let inString: string | null = null;
+    let escape = false;
+    while (i < source.length && depth > 0) {
+      const c = source[i];
+      if (escape) {
+        escape = false;
+      } else if (inString !== null) {
+        if (c === '\\') escape = true;
+        else if (c === inString) inString = null;
+      } else if (c === '"' || c === "'" || c === '`') {
+        inString = c;
+      } else if (c === '(') {
+        depth++;
+      } else if (c === ')') {
+        depth--;
+      }
+      i++;
+    }
+    if (depth === 0) blocks.push(source.slice(beginIdx, i));
+  }
+  return blocks;
+}
+
 vi.mock('../biblio/list-biblio.js', () => ({
   listBiblio: vi.fn(),
 }));
@@ -96,6 +143,9 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       // 実 HTTP fetch では handleRequest の catch-all を発火させるのが困難なため (`res.headersSent`
       // check + `writeError(res, 500, ...)` は uncaught 想定のみ発火)、静的 grep assertion で
       // 「5xx 応答経路が catch-all 1 箇所に集約されていること」を担保する。
+      //
+      // M4-H Phase 4 Task 3 (rate limit): `writeError(res, 429, ...)` は 4xx なので本 assertion に
+      // 影響しない (429 は enumeration 対象外、Contract §5.6 の `RATE_LIMITED` semantics)。
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
       const matches = source.match(/writeError\(res,\s*5\d{2}/g) ?? [];
@@ -126,10 +176,79 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
           `fugueSpan.setAttribute('fugue.outcome', ...) = ${setFugueOutcomeMatches.length} 箇所。` +
           `全 200 応答分岐で outcome 属性を刻むべき (Cloud Trace outcome ベース集計からの silent drop 防止)。`,
       ).toBe(writeJson200Matches.length);
-      // 参考値の retention: Phase 4 完了時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
-      // partial_B + success)。追加/削除時は本 assertion が fail するので、意図された対称性の範囲で
-      // 数を updateする。
+      // 参考値の retention:
+      //   - M4-E Phase 4 完了時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
+      //     partial_B + success)。
+      //   - **M4-H Phase 4 完了時点は 17** (consult 2 + equip 5 + ask 10 = invoked/in_secure/
+      //     config_missing/spawn.failed/spawn.timeout/response.parse_failed/self_val_in_secure/
+      //     self_val_ok/completed 分岐 + rate_limited を除く 200 経路)。`recordFugueProcessingTime`
+      //     呼出数も対称に 17 (下の test 4 で機械検知、Task 6 の 5xx-set 直後契約)。
+      // 追加/削除時は本 assertion が fail するので、意図された対称性の範囲で数を update する。
       expect(writeJson200Matches.length).toBeGreaterThanOrEqual(6);
+    });
+
+    // Phase 4 Task 9 (M4-H): 全 fugue log payload に operation field が付与されていることを
+    // 静的 grep で強制。BQ sink 上の `WHERE jsonPayload.operation = "ask"` query が Phase 5
+    // deploy 後に即動く構造的保証、regression 保護 (追加のみで既存 field 無変更、regression zero)。
+    //
+    // 除外: handleRequest 共通 log (path 未特定) は operation を付けない = 8 event を除外リスト化。
+    // appendGateAuditLog は log 呼出ではない (`log.info/warn/error/debug` の外) ので log block
+    // 抽出関数の対象外 (function 名 `log.<method>` で始まる block のみ拾う)。
+    //
+    // **regex 脆弱性の根絶 (review 中 3 対応)**: 従来の `[^)]*\{[\s\S]*?\}\s*\)` regex は message 引数に
+    // `)` を含む文字列や、payload 内の nested object (`issues: [{...}]` 等) で false negative になる。
+    // 本 test では quote-aware + bracket-balanced な `extractLogBlocks` パーサに置き換えて、log block
+    // の切り出しを構造的に頑健化する。string literal (single/double/backtick) 内の `(` `)` は counter
+    // から除外され、backslash escape も対応。
+    it('static grep: 全 fugue log payload has operation field (M4-H Phase 4 Task 9)', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
+      const logBlocks = extractLogBlocks(source);
+      const fugueLogBlocks = logBlocks.filter((b) => /channel: 'fugue',/.test(b));
+      const commonEventPattern =
+        /event: 'fugue\.(inbound\.received|auth\.rejected|traceparent\.malformed|route\.not_found|handler\.error|healthz\.write_failed|url_parse_failed|server\.error)'/;
+      const opPattern = /operation: (?:'(?:consult|equip|ask)'|operation)/;
+      const violations = fugueLogBlocks.filter((block) => !commonEventPattern.test(block) && !opPattern.test(block));
+      expect(
+        violations,
+        `M4-H Phase 4 対称性: 全 fugue log に operation field 必須。違反 ${violations.length} 件: ` +
+          violations.map((v) => v.slice(0, 200)).join(' || '),
+      ).toHaveLength(0);
+      // fugue log 総数の下限 assertion (追加時の regression 気付き)。M4-H Phase 4 完了時点で
+      // 40+ log 想定 (共通 8 + fugue.<op> 系 30+)。
+      expect(fugueLogBlocks.length).toBeGreaterThanOrEqual(30);
+    });
+
+    // Phase 4 Task 9 (M4-H, review 中 2 対応で pattern-match 化): recordFugueProcessingTime 呼出数と
+    // fugue.outcome set 数の対称性契約を、outcome set の分岐特性に合わせて緩和した。
+    //
+    // - **Task 6 当初契約**: 17 == 17 の呼出数 exact match。しかし self_validation_failed の nested
+    //   分岐 (denied + ok completed) では親スコープの `processing_time_ms` を再利用するのが自然で、
+    //   対称性を保つために helper を「返り値捨て + span attribute の上書き」で二重呼出しにしていた
+    //   = 実運用では ~ms オーダの silent inconsistency (`fugue.processing_time_ms` span attr と
+    //   response body の `processing_time_ms` field がわずかにズレる) を生んでいた。
+    // - **review 中 2 対応後**: 二重呼出しを除去し、self_validation_failed 分岐 2 経路は親スコープの
+    //   processing_time_ms を明示的に再利用する。残る 15 outcome set は 1:1 で helper 呼出しペア。
+    //
+    // 契約: `recordFugueProcessingTime` 呼出数 == `fugueSpan.setAttribute('fugue.outcome', ...)` 数
+    //       (親再利用経路の許容数、現行 2)。新規 outcome set 追加時は helper 呼出しも追加すること。
+    //       親再利用が正当な追加 (別 nested self_val 分岐等) なら、下記の allowedShared 定数を +1 する
+    //       (変更理由をコメントに明示、CI review で意図確認)。
+    it('static grep: recordFugueProcessingTime call count symmetric with fugue.outcome set (M4-H Phase 4 Task 6 revised)', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
+      const recordMatches = source.match(/recordFugueProcessingTime\(/g) ?? [];
+      const outcomeMatches = source.match(/fugueSpan\.setAttribute\('fugue\.outcome',/g) ?? [];
+      // 親スコープの processing_time_ms を再利用する分岐数 (self_validation_failed が denied + ok
+      // completed の 2 経路で発生、review 中 2 対応で helper 二重呼出しを除去済)。
+      const allowedSharedProcessingTime = 2;
+      expect(
+        recordMatches.length,
+        `recordFugueProcessingTime 呼出数 (${recordMatches.length}) と ` +
+          `fugueSpan.setAttribute('fugue.outcome', ...) 呼出数 (${outcomeMatches.length}) の差が ` +
+          `許容 shared 数 (${allowedSharedProcessingTime}) と一致しない。outcome set 直後の helper ` +
+          `呼び忘れ、または新たな nested self_val 経路の追加で shared 数の update が必要な疑い。`,
+      ).toBe(outcomeMatches.length - allowedSharedProcessingTime);
     });
 
     it('listBiblio throw is served as 200 + status:error (not 5xx)', async () => {
