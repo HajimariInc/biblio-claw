@@ -3500,7 +3500,7 @@ bash scripts/onecli-vertex-secret.sh
 **症状**:
 - Phase 3 実装で agent が「`<ask-response>{JSON}</ask-response>` タグ単独で応答」と CLAUDE.local.md instruction で書かせた → handleAsk 側で `parse_reason: tag_missing` or 応答が届かない (`ask_backend_timeout`)
 
-**原因** (`container/agent-runner/src/poll-loop.ts:508-548` の `dispatchResultText`):
+**原因** (`container/agent-runner/src/poll-loop.ts:506-554` の `dispatchResultText`、JSDoc 込みの範囲):
 
 ```typescript
 const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;

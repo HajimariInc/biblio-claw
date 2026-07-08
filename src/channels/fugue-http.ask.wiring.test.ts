@@ -390,6 +390,62 @@ describe('handleAsk wiring (M4-H Phase 3) — happy path', () => {
     expect(body.summary).toContain('<external-content source-id="summary" kind="web">');
     expect(body.summary).toContain('一般対話で答えます。');
   });
+
+  // PR #195 review 提案 P1c (pr-test-analyzer 評価 5): agent LLM が out-of-range な
+  // `source_indexes` (例: 空 sources[] に対して `[99]` を返す) を返した経路の silent fallback
+  // (`repSourceId='unknown'` / `repKind='web'`) + `fugue.ask.response.invalid_source_index` log
+  // event の regression 検知。fugue-http.ts:1781-1807 を機械化。
+  it('agent が out-of-range な source_indexes を返した経路 → fallback + invalid_source_index log', async () => {
+    const sessionMgrModule = await import('../session-manager.js');
+    const logModule = await import('../log.js');
+    // sources[] は空、findings[0].source_indexes = [99] (out-of-range)
+    const askText = buildValidAskResponseText({
+      summary: 'orphan finding のケース',
+      findings: [{ text: '孤立した finding text', source_indexes: [99] }],
+      sources: [],
+    });
+    const fakeDb = buildFakeOutboundDb([
+      {
+        id: 'msg-out-oor',
+        seq: 3,
+        kind: 'chat',
+        content: buildMessageContent(askText),
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        in_reply_to: null,
+      },
+    ]);
+    vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
+
+    const res = await postAsk({
+      schema_version: '1',
+      request_id: 'req-oor-1',
+      query: 'anything',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FugueAskReplyT;
+    // (a) status:ok で通す (fail-open で response 成立を優先)
+    expect(body.status).toBe('ok');
+    // (b) findings[0].source_ids は sources に存在しない → 空配列 (filter で drop)
+    expect(body.findings).toHaveLength(1);
+    expect(body.findings[0]!.source_ids).toEqual([]);
+    // (c) findings[0].text は 'unknown' + 'web' fallback で XML 囲み
+    expect(body.findings[0]!.text).toContain('<external-content source-id="unknown" kind="web">');
+    expect(body.findings[0]!.text).toContain('孤立した finding text');
+
+    // (d) invalid_source_index log 発火 (BQ 集計で agent instruction 精度追跡源)
+    expect(vi.mocked(logModule.log.info)).toHaveBeenCalledWith(
+      expect.stringContaining('source_indexes out-of-range'),
+      expect.objectContaining({
+        event: 'fugue.ask.response.invalid_source_index',
+        request_id: 'req-oor-1',
+        finding_idx: 0,
+        source_indexes: [99],
+        sources_length: 0,
+      }),
+    );
+  });
 });
 
 // =============================================================================
@@ -553,6 +609,123 @@ describe('handleAsk wiring (M4-H Phase 3) — parse failure', () => {
     expect(body.status).toBe('error');
     expect(body.warnings).toContain('ask_response_malformed');
     expect(body.raw).toMatchObject({ parse_reason: 'zod_validate' });
+  });
+
+  // PR #195 review 提案 P1b (pr-test-analyzer 評価 6): `parseAgentAskResponse` の 4 失敗理由
+  // (`content_shape` / `tag_missing` / `json_parse` / `zod_validate`) のうち未検証だった 2
+  // (`content_shape` / `json_parse`) を追加。silent fallback (raw.parse_reason に理由を残す)
+  // + AD 本義契約 (200 + status:'error') の regression 検知源として機械化する。
+  it('content 自体が JSON parse 不能 → 200 + status:error + warnings:[ask_response_malformed] + parse_reason:content_shape', async () => {
+    const sessionMgrModule = await import('../session-manager.js');
+    const containerModule = await import('../container-runner.js');
+    const logModule = await import('../log.js');
+    // content が JSON でない (buildMessageContent を通さず生の非 JSON string を投入)
+    const fakeDb = buildFakeOutboundDb([
+      {
+        id: 'msg-out-badcontent',
+        seq: 3,
+        kind: 'chat',
+        content: 'not-json-at-all',
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        in_reply_to: null,
+      },
+    ]);
+    vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
+
+    const res = await postAsk({
+      schema_version: '1',
+      request_id: 'req-parse-cshape-1',
+      query: 'anything',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FugueAskReplyT;
+    expect(body.status).toBe('error');
+    expect(body.warnings).toContain('ask_response_malformed');
+    expect(body.raw).toMatchObject({ agent_session_id: 'sess-mock-1', parse_reason: 'content_shape' });
+
+    expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('response parse failed'),
+      expect.objectContaining({
+        event: 'fugue.ask.response.parse_failed',
+        reason: 'content_shape',
+      }),
+    );
+
+    // cleanup 呼出 (parse 失敗経路、P2 統合 try/finally 経路で cleanupReason='fugue-ask-parse-failed')
+    expect(vi.mocked(containerModule.killContainer)).toHaveBeenCalledWith('sess-mock-1', 'fugue-ask-parse-failed');
+  });
+
+  it('content JSON に text field が無い → 200 + status:error + parse_reason:content_shape', async () => {
+    const sessionMgrModule = await import('../session-manager.js');
+    // content は JSON.parse できるが text field 不在 (agent-runner の未想定 shape)
+    const fakeDb = buildFakeOutboundDb([
+      {
+        id: 'msg-out-notext',
+        seq: 3,
+        kind: 'chat',
+        content: JSON.stringify({ notext: 'other-field' }),
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        in_reply_to: null,
+      },
+    ]);
+    vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
+
+    const res = await postAsk({
+      schema_version: '1',
+      request_id: 'req-parse-cshape-2',
+      query: 'anything',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FugueAskReplyT;
+    expect(body.status).toBe('error');
+    expect(body.raw).toMatchObject({ parse_reason: 'content_shape' });
+  });
+
+  it('<ask-response> タグ内が壊れた JSON → 200 + status:error + warnings:[ask_response_malformed] + parse_reason:json_parse', async () => {
+    const sessionMgrModule = await import('../session-manager.js');
+    const containerModule = await import('../container-runner.js');
+    const logModule = await import('../log.js');
+    // <ask-response> タグ内 JSON が壊れた状態 (LLM が構造化応答に失敗)
+    const brokenAskText = '<ask-response>{not valid json</ask-response>';
+    const fakeDb = buildFakeOutboundDb([
+      {
+        id: 'msg-out-badjson',
+        seq: 3,
+        kind: 'chat',
+        content: buildMessageContent(brokenAskText),
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        in_reply_to: null,
+      },
+    ]);
+    vi.mocked(sessionMgrModule.openOutboundDb).mockReturnValue(fakeDb as never);
+
+    const res = await postAsk({
+      schema_version: '1',
+      request_id: 'req-parse-jsonparse-1',
+      query: 'anything',
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as FugueAskReplyT;
+    expect(body.status).toBe('error');
+    expect(body.warnings).toContain('ask_response_malformed');
+    expect(body.raw).toMatchObject({ agent_session_id: 'sess-mock-1', parse_reason: 'json_parse' });
+
+    expect(vi.mocked(logModule.log.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('response parse failed'),
+      expect.objectContaining({
+        event: 'fugue.ask.response.parse_failed',
+        reason: 'json_parse',
+      }),
+    );
+
+    // cleanup 呼出 (parse 失敗経路)
+    expect(vi.mocked(containerModule.killContainer)).toHaveBeenCalledWith('sess-mock-1', 'fugue-ask-parse-failed');
   });
 });
 

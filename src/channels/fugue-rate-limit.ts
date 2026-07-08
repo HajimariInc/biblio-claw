@@ -95,14 +95,20 @@ export function resolveFugueAskRateWindowMs(): number {
  * - overflow 時は最古 timestamp + windowMs - nowMs から `retryAfterSec` を計算
  *   (`Math.max(1, Math.ceil(...))` で最低 1 秒保証、client の即時再送ループ防止)
  *
+ * **clock skew 対策 (silent-failure-hunter MEDIUM 2、PR #195 review)**: default nowMs は
+ * `performance.now()` (単調時計、プロセス起動 relative ms) を使う。壁時計 (`Date.now()`) は
+ * NTP 前方補正で無警告 sliding window リセット → 直後 burst 素通り (rate limit の一時 bypass)
+ * を silent に起こす経路があるため。helper は数値の大小比較しか行わないので、スケールが
+ * 絶対時刻でなくても内部整合性は保たれる。test は明示 `nowMs` を渡すので影響なし。
+ *
  * @param digest `tokenDigest(token)` の返す 32 hex string
- * @param nowMs 呼出時刻 (default `Date.now()`、test では明示指定で決定性確保)
+ * @param nowMs 呼出時刻 (default `performance.now()`、test では明示指定で決定性確保)
  * @param points 上限 req 数 (default env `FUGUE_ASK_RATE_POINTS` → 60)
  * @param windowMs sliding window の幅 ms (default env `FUGUE_ASK_RATE_WINDOW_MS` → 60_000)
  */
 export function checkFugueAskRateLimit(
   digest: string,
-  nowMs: number = Date.now(),
+  nowMs: number = performance.now(),
   points?: number,
   windowMs?: number,
 ): RateLimitResult {

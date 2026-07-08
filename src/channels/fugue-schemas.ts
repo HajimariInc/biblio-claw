@@ -74,6 +74,21 @@ export type FugueEquipRequestT = z.infer<typeof FugueEquipRequest>;
 export const FUGUE_ASK_INTENTS = ['search-web', 'drive-lookup', 'general'] as const;
 export type FugueAskIntent = (typeof FUGUE_ASK_INTENTS)[number];
 
+/**
+ * Fugue ask endpoint (M4-H) の source kind literal union (single-source of truth)。
+ *
+ * `FUGUE_ASK_INTENTS` の模範解答を横展開 (type-design-analyzer 発見 1、2026-07-08 PR #195 review)。
+ * 従来 `Source.kind` / `AgentAskSource.kind` / `wrapExternalContent` の kind 引数 / `handleAsk`
+ * の repKind 型注釈の 4 箇所に `'web' | 'drive'` (or `z.enum(['web', 'drive'])`) が直書きされて
+ * いたのを本定数に集約する。将来 Fugue 契約側で kind literal を拡張する場合、本 1 箇所を
+ * 更新するだけで TypeScript compiler が biblio-claw 内部の drift を検知できる。
+ *
+ * Fugue 契約側との drift (別 repo / Python) は依然として型では守られない。継続論点 #1
+ * (biblio 側 kind 拡張時は Fugue 側 Literal 更新を先行同期) の運用ルールに委ねる。
+ */
+export const FUGUE_SOURCE_KINDS = ['web', 'drive'] as const;
+export type FugueSourceKind = (typeof FUGUE_SOURCE_KINDS)[number];
+
 // M4-H Phase 2: ask endpoint 向け warnings 定数 (Contract §5.5 準拠、named export で test 済みの厳格な文字列契約)。
 // consult/equip の inline literal (`'input rejected by input gate'`) との書き味の混在は許容 (Fugue 側実装が塊で疎通
 // 取れた時点で fix 方針、DEN さん判断 2026-07-06)。
@@ -117,7 +132,7 @@ export type FugueAskRequestT = z.infer<typeof FugueAskRequest>;
  */
 export const Source = z.object({
   id: z.string().min(1).max(64).describe('Unique source id within a single ask response.'),
-  kind: z.enum(['web', 'drive']).describe('Source backend kind (Phase 3 で `web` = Tavily, `drive` = Google Drive).'),
+  kind: z.enum(FUGUE_SOURCE_KINDS).describe('Source backend kind (Phase 3 で `web` = Tavily, `drive` = Google Drive).'),
   title: z.string().min(1).max(400).describe('Source title (Web page title / Drive file name).'),
   url: z.string().min(1).max(1000).describe('Source URL (Web link / Drive file URL).'),
   snippet: z.string().min(1).max(1100).describe('Short excerpt or summary from the source.'),
@@ -163,7 +178,7 @@ export type FindingT = z.infer<typeof Finding>;
  * ように上限は wrap 前実長で切る (handleAsk 側でも上限超過しない再帰チェックは行わない)。
  */
 export const AgentAskSource = z.object({
-  kind: z.enum(['web', 'drive']),
+  kind: z.enum(FUGUE_SOURCE_KINDS),
   title: z.string().min(1).max(400),
   url: z.string().min(1).max(1000),
   snippet: z.string().min(1).max(1100),

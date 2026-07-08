@@ -19,7 +19,7 @@ biblio-claw は姉妹プロジェクト **Fugue** (`<FUGUE_REPO_URL_HERE>` — F
 > - **仕入れ → 検品 → カテゴライズ → 陳列**: patron の 1 通の依頼で外部の biblio (skill) を棚リポジトリに draft PR で並べる E2E 経路
 > - **装備機構 + 蔵書一覧**: session 単位の biblio 装備 / 解除 / 禁書 / 焼却 (破壊操作は HITL 承認) と Slack から棚 marketplace の閲覧
 > - **観測性**: OpenTelemetry + GenAI semconv + Cloud Trace + BigQuery sink で 1 trace 串刺しの cost attribution
-> - **channel integration**: Slack (bot / DM) + Fugue (同期 HTTP、外部 AD 連携用、consult / equip の 2 endpoint)
+> - **channel integration**: Slack (bot / DM) + Fugue (同期 HTTP、外部 AD 連携用、consult / equip / ask の 3 endpoint、M4-H で ask endpoint 追加)
 >
 > 詳細な Milestone 完了状況と PR 履歴は [`CLAUDE.md`](CLAUDE.md) 冒頭を参照。
 

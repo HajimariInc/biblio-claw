@@ -382,6 +382,53 @@ describe('handleAsk OTel span attributes (M4-H Phase 4)', () => {
     const askSpans = memoryExporter.getFinishedSpans().filter((s) => s.name === 'fugue.ask');
     expect(askSpans).toHaveLength(2); // r1 + r2 のみ、r3 は span なし
   });
+
+  // PR #195 review 提案 P1a (pr-test-analyzer 評価 5): consult / equip endpoint が
+  // rate limit の path 分岐 (`if (pathname === ASK_PATH)`) を **構造的に bypass** する
+  // ことを規約テストで固定化する。実装は `fugue-http.ts:661` の 1 行 if 文で、書き間違い
+  // (例: `pathname.startsWith('/v1/channels/fugue')` に変わる) すると consult / equip も
+  // 429 で拒否されうる silent regression が発生するため、PRD 意思決定 #7 の契約を
+  // programmatically 固定化する。
+  it('consult / equip endpoint は rate limit を構造的に bypass する (PRD 意思決定 #7)', async () => {
+    process.env.FUGUE_ASK_RATE_POINTS = '2';
+    _resetFugueRateLimitForTest();
+    // 2 req = allow, 3 req 目 = 429 (ask endpoint で rate limit 消費)
+    await postAsk({ schema_version: '1', request_id: 'r-consume-1', query: 'q' });
+    await postAsk({ schema_version: '1', request_id: 'r-consume-2', query: 'q' });
+    const r3 = await postAsk({ schema_version: '1', request_id: 'r-consume-3', query: 'q' });
+    expect(r3.status).toBe(429);
+
+    // consult は rate limit を消費しない (bypass)、かつ既に消費済みの状態でも 429 で拒否
+    // されない (= consult は `if (pathname === ASK_PATH)` の外)。応答 200/400/500 の
+    // どれでも 429 でなければ bypass が成立している証拠 (mock listBiblio が undefined を
+    // 返すため handleConsult 内で 200 + status:'error' 経路に落ちる想定)。
+    const consultRes = await fetch(`${baseUrl}/v1/channels/fugue/consult`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        schema_version: '1',
+        request_id: 'consult-bypass-1',
+        query: 'q',
+        mode: 'ask-ad',
+      }),
+    });
+    expect(consultRes.status).not.toBe(429);
+
+    // equip も同様: rate limit 消費済みでも 429 にならない
+    const equipRes = await fetch(`${baseUrl}/v1/channels/fugue/equip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({
+        schema_version: '1',
+        request_id: 'equip-bypass-1',
+        skill_id: 'MockOwner--mock-shelf',
+        channel: 'fugue',
+      }),
+    });
+    expect(equipRes.status).not.toBe(429);
+
+    delete process.env.FUGUE_ASK_RATE_POINTS;
+  });
 });
 
 describe('handleAsk log payload has operation:"ask"', () => {

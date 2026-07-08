@@ -1,3 +1,5 @@
+import type { FugueSourceKind } from './fugue-schemas.js';
+
 /**
  * M4-H Phase 3 trust boundary: Fugue ask endpoint 応答の `<external-content>` タグ囲み helper。
  *
@@ -57,7 +59,7 @@ function stripOuterExternalContent(text: string): string {
  * @param kind `'web' | 'drive'` — source の backend 種別 (`AgentAskSource.kind` と一致)。
  * @returns XML boundary で囲まれた text。既存の close tag は escape 済、外側二重 wrap は剥がし済。
  */
-export function wrapExternalContent(text: string, sourceId: string, kind: 'web' | 'drive'): string {
+export function wrapExternalContent(text: string, sourceId: string, kind: FugueSourceKind): string {
   const stripped = stripOuterExternalContent(text);
   const escaped = stripped.replaceAll(CLOSE_TAG, CLOSE_TAG_ESCAPED);
   return `<external-content source-id="${sourceId}" kind="${kind}">${escaped}${CLOSE_TAG}`;
