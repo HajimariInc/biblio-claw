@@ -5,15 +5,15 @@
  * は ask 経路では使わないが、既存 test file 側の mock 慣習に合わせて空 mock を張っておく =
  * import 副作用が同一状態で走ることを保証)。実 HTTP fetch で以下を検証:
  *
- * - 200 skeleton 応答 (status='not_available' + warnings=['skeleton_response'] + 固定 shape)
- * - intent field: 3 literal (`it.each(FUGUE_ASK_INTENTS)`) / null / 未指定で 200 (`.optional().nullable()`)
- * - context_hint: record / null / 未指定の 3 パスで 200
- * - 400 Zod validation fail (schema_version 欠落 / invalid intent literal / query 空 / request_id 過長)
- * - 401 no auth (`/ask` でも 404 にならない = auth check が path 分岐より前という不変)
- * - processing_time_ms が non-negative integer
- * - 404 unknown path が既存挙動維持 (`/invoke` 経路)
- * - span 属性 (`fugue.ask` 名 + `channel`/`fugue.operation`/`fugue.request_id`/`fugue.intent`/
- *   `fugue.outcome`) を実 HTTP 経由で検証 (`fugue-http.otel.test.ts` の consult パターン写経)
+ * **Phase 3 更新**: skeleton reply (Phase 1) は廃止され、backend (agent-container) 未接続時は
+ * `resolveFugueAskConfig()` の DB lookup も throw する (initDb 未実行のテスト env)。fail-open で
+ * `status:'error'` + `warnings:['ask_config_missing']` + `summary:'ask backend failed:
+ * ask_config_missing'` の errorReply を 200 で返す (AD の本義契約: 5xx を出さない)。
+ * spawn 経路の完全 test は `fugue-http.ask.wiring.test.ts` (Phase 3 新設) を参照。本 test file は:
+ *   - 200 errorReply (Phase 3 config missing shape)
+ *   - Zod validation (400) は Phase 1 と同じ
+ *   - 401 no-auth path enumeration guard も Phase 1 と同じ
+ *   - span 属性 (fugue.ask + intent/outcome) は Phase 3 の error outcome で検証
  */
 import * as otelApi from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
@@ -92,8 +92,8 @@ async function postAsk(body: unknown, options: { auth?: boolean } = { auth: true
   });
 }
 
-describe('handleAsk (M4-H Phase 1 skeleton)', () => {
-  it('200 skeleton response with minimum valid body', async () => {
+describe('handleAsk (M4-H Phase 3 config missing errorReply)', () => {
+  it('200 errorReply with minimum valid body (config missing = DB lookup throw, fail-open)', async () => {
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-1', query: 'test query' });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
@@ -101,11 +101,11 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
       schema_version: '1',
       request_id: 'req-ask-1',
       operation: 'ask',
-      status: 'not_available',
+      status: 'error',
       findings: [],
       sources: [],
       raw: {},
-      warnings: ['skeleton_response'],
+      warnings: ['ask_config_missing'],
     });
     expect(typeof body.summary).toBe('string');
     expect(body.summary.length).toBeGreaterThan(0);
@@ -129,7 +129,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
+    expect(body.status).toBe('error');
     expect(body.operation).toBe('ask');
   });
 
@@ -142,7 +142,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
+    expect(body.status).toBe('error');
   });
 
   it('accepts context_hint as record', async () => {
@@ -154,8 +154,8 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
-    // Phase 1 skeleton は context_hint を応答に反映しない (Phase 3 で backend に渡す予定)。
+    expect(body.status).toBe('error');
+    // Phase 3 config missing errorReply は raw を空 object で emit する (agent-container 起動しない経路)。
     expect(body.raw).toEqual({});
   });
 
@@ -168,7 +168,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
+    expect(body.status).toBe('error');
   });
 
   it('accepts long query up to 2000 chars (upper bound)', async () => {
@@ -176,7 +176,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
     const res = await postAsk({ schema_version: '1', request_id: 'req-ask-max', query: longQuery });
     expect(res.status).toBe(200);
     const body = (await res.json()) as FugueAskReplyT;
-    expect(body.status).toBe('not_available');
+    expect(body.status).toBe('error');
   });
 
   it('400 on missing schema_version', async () => {
@@ -265,7 +265,7 @@ describe('handleAsk (M4-H Phase 1 skeleton)', () => {
  *
  * `fugue-http.otel.test.ts` の consult / equip パターンを写経。
  */
-describe('handleAsk span attributes (M4-H Phase 1)', () => {
+describe('handleAsk span attributes (M4-H Phase 3)', () => {
   let memoryExporter: InMemorySpanExporter;
   let provider: BasicTracerProvider;
   let server: FugueHttpServer;
@@ -350,10 +350,10 @@ describe('handleAsk span attributes (M4-H Phase 1)', () => {
     expect(fugue?.attributes['fugue.intent']).toBe('null');
   });
 
-  it('Phase 1 skeleton の fugue.outcome は not_available で固定', async () => {
+  it('Phase 3 config missing の fugue.outcome は error に刻まれる', async () => {
     const res = await postAskSpan({ schema_version: '1', request_id: 'req-span-outcome', query: 'test' });
     expect(res.status).toBe(200);
     const fugue = memoryExporter.getFinishedSpans().find((s) => s.name === 'fugue.ask');
-    expect(fugue?.attributes['fugue.outcome']).toBe('not_available');
+    expect(fugue?.attributes['fugue.outcome']).toBe('error');
   });
 });
