@@ -3855,7 +3855,7 @@ kubectl set env statefulset/biblio-orchestrator -n biblio-claw \
 ```sql
 SELECT jsonPayload.channel, jsonPayload.operation,
        JSON_VALUE(jsonPayload.event) AS event_name, COUNT(*) AS cnt
-FROM `hajimari-ai-hackathon-2026.llm_observability.stdout`
+FROM `<your-gcp-project>.llm_observability.stdout`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
   AND jsonPayload.channel = 'fugue'
   AND jsonPayload.operation = 'ask'
@@ -3867,7 +3867,7 @@ ORDER BY cnt DESC
 
 ```sql
 SELECT DATE(timestamp) AS d, COUNT(*) AS rate_limited_cnt
-FROM `hajimari-ai-hackathon-2026.llm_observability.stdout`
+FROM `<your-gcp-project>.llm_observability.stdout`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
   AND jsonPayload.channel = 'fugue' AND jsonPayload.operation = 'ask'
   AND JSON_VALUE(jsonPayload.event) = 'ask.rate_limited'
@@ -3984,9 +3984,9 @@ pnpm exec tsx scripts/fake-fugue-client.ts ask --query "Next.js 15 のリリー�
 #   直近 15 分の trace で fugue.ask span 存在確認
 
 # (d) BQ sink query (smoke 完了 5 分待ち後)
-bq query --use_legacy_sql=false --project_id=hajimari-ai-hackathon-2026 \
+bq query --use_legacy_sql=false --project_id=<your-gcp-project> \
 "SELECT jsonPayload.channel, jsonPayload.operation, COUNT(*) AS cnt
- FROM \`hajimari-ai-hackathon-2026.llm_observability.stdout\`
+ FROM \`<your-gcp-project>.llm_observability.stdout\`
  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
    AND jsonPayload.channel = 'fugue' AND jsonPayload.operation = 'ask'
  GROUP BY 1, 2"
