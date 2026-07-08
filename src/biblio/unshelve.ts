@@ -105,7 +105,7 @@ function buildPrBody(opLabel: string, category: BiblioCategory, biblioName: stri
     `- [ ] ${biblioName} を本当に棚から外していいか (= 残置 vs 物理削除は biblio-claw 側で完了済、本 PR は marketplace.json + 配下ファイルの削除のみ)\n` +
     `- [ ] \`marketplace.json\` の plugins[] から \`${biblioName}\` entry が消えている\n` +
     `- [ ] \`${category}/${biblioName}/\` 配下のファイルが全て削除されている\n\n` +
-    `> このリクエストは biblio-claw 司書が admin (DEN) 承認のもと自動生成しました。\n` +
+    `> このリクエストは biblio-claw 司書が admin 承認のもと自動生成しました。\n` +
     `> Co-Authored-By: Claude (Sonnet 4.6 on Vertex) <noreply@anthropic.com>\n`
   );
 }

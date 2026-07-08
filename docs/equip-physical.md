@@ -219,7 +219,7 @@ NetworkPolicy (`k8s/60-netpol-agent-egress.yaml`) は M2 PRD A で agent label
   詳細は [db-central.md](db-central.md) migration 019 参照) からも同時に除去。禁書 (enkin)
   は両 store とも touch しない対称性を維持 (= 装備状態残置で再装備可)。
 - **HITL 経路**: 禁書 / 焼却の MCP tool 発火 → `requestApproval('enkin_confirm' /
-  'shokyaku_confirm', ...)` で admin (DEN) DM カード → 承認後に `registerApprovalHandler`
+  'shokyaku_confirm', ...)` で admin DM カード → 承認後に `registerApprovalHandler`
   callback が `enkin()` / `shokyaku()` を実行 → `notify()` で patron に PR URL 通知。
   破壊操作の最終 gate を admin に集約 (= 取り違え事故防止)。
 - **shelf-gh.ts 共通化**: `shelve.ts` から `ghFetch` / `GhHttpError` / `fetchMarketplace`
