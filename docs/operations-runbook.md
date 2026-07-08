@@ -420,6 +420,18 @@ bash scripts/verify-phase-2-wiring.sh
 
 Secret Manager `biblio-gh-app-pem` は teardown でも残置するため、再投入不要 (= `teardown-phase-2.sh` 冒頭コメント参照)。
 
+### 既存 DB を新 GSA で引き継ぐ場合の role membership 継承 GRANT
+
+上記 §手順 6 (`bash scripts/init-project-gcp-pgsql-grant.sh`) は「空 DB の新規再構築」を前提とする (= 全テーブルを新 GSA が新規作成)。**空でない DB に GSA を切り替える** (= M2 PRD A Phase 3 移行のような、既存テーブル資産を持ったまま GSA を切り替える) ケースでは、schema GRANT だけでは既存テーブル (`_prisma_migrations` 等、旧 `biblio-onecli` 所有) にアクセスできず migrate が `permission denied for table _prisma_migrations` で落ちる。
+
+対処: `init-project-gcp-pgsql-grant.sh` (schema GRANT) の実行後、psql 経由で **旧 user の role membership を新 user に継承** する 1 文を追加投入する (新 user が旧 user の全資産を継承):
+
+```sql
+GRANT "biblio-onecli@<your-gcp-project>.iam" TO "biblio-orchestrator@<your-gcp-project>.iam";
+```
+
+teardown 後の完全再構築 (= 空 DB) では全テーブルを新 GSA が新規作成するため、この role membership は不要。
+
 ### トラブルシューティング
 
 | 症状 | 原因 | 対処 |
