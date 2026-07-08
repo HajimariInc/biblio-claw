@@ -36,7 +36,7 @@
 
 ## 執行
 
-虐待的、ハラスメント的、その他受け入れられない行動の事例は、執行を担当するコミュニティリーダー(community@nanoclaw.dev)に報告できる。
+虐待的、ハラスメント的、その他受け入れられない行動の事例は、biblio-claw リポジトリの [GitHub Issue](https://github.com/HajimariInc/biblio-claw/issues) 経由で報告できる (機密性が高い場合は private repository の維持期間中は直接 issue を開き、public 化後は該当 issue を private label で運用する)。
 すべての苦情は迅速かつ公正にレビューされ、調査される。
 
 すべてのコミュニティリーダーは、あらゆる事案の報告者のプライバシーとセキュリティを尊重する義務がある。

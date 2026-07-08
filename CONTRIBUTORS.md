@@ -1,5 +1,7 @@
 # コントリビューター
 
+biblio-claw は [`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork した司書実装リポジトリ。以下は上流 NanoClaw に貢献してくれた方々。biblio-claw fork 側の変更は `CHANGELOG.md` の冒頭 `[biblio-claw-*]` セクションを参照 (fork 開発は WForest 内部で完結、外部貢献は当面受け付けない)。
+
 NanoClaw に貢献してくれたすべての方々に感謝!
 
 - [Alakazam03](https://github.com/Alakazam03) — Vaibhav Aggarwal
