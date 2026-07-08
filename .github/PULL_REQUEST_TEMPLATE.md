@@ -8,12 +8,10 @@
 - [ ] **Refactor** — 振る舞い不変な再構成 / simplification
 - [ ] **Docs** — README / docs / CLAUDE.md / runbook / PRD 変更のみ
 
-## PRP / Plan / Issue
+## Issue
 
-<!-- 該当するものを記入。該当しない欄は削除して可。 -->
+<!-- 該当するものを記入。 -->
 
-- Source PRD: `.claude/PRPs/prds/...` (該当する場合)
-- Source Plan: `.claude/PRPs/plans/(completed/)?...` (該当する場合、実施後は `completed/` 配下)
 - Issue: `Closes #N` または `関連: #N`
 
 ## 要約
@@ -31,7 +29,7 @@
 ```bash
 # 例
 pnpm test
-bash scripts/verify-m3.sh
+bash scripts/verify-<name>.sh
 ```
 
 ## 関連
