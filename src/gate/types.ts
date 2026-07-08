@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 2 gate-and-defense の型定義。
+ * gate-and-defense の型定義。
  *
  * gate は cheap-to-expensive の 4 層 (`layer1` pattern → `layer2` escape shell →
  * `layer3` XML boundary → `layer4` LLM evaluator) で patron 発話を評価し、
@@ -45,9 +45,9 @@ export interface GateResult {
   /** Layer 4 使用モデル。Layer 1-3 で確定した場合 undefined。 */
   model?: string;
   /**
-   * Layer 4 evaluator が失敗し fallback として `biblio-other` を返した場合 true (M4-E `fugue.degraded=true`
-   * pattern と対称)。genuine な LLM 判定と誤検知率の集計を BQ 上で分離するための categorical signal。
-   * silent-failure-hunter I6 対応で追加、正常判定時は undefined。
+   * Layer 4 evaluator が失敗し fallback として `biblio-other` を返した場合 true (Fugue channel の
+   * `fugue.degraded=true` pattern と対称)。genuine な LLM 判定と誤検知率の集計を BQ 上で分離するための categorical signal。
+   * silent-failure 撲滅目的で追加、正常判定時は undefined。
    */
   degraded?: boolean;
 }

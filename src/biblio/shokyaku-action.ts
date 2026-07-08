@@ -30,7 +30,7 @@ import { BIBLIO_CATEGORIES } from './types.js';
 const APPROVAL_ACTION = 'shokyaku_confirm';
 
 registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
-  // payload parse を集約 helper に委譲 (= PR #37 code-simplifier S2、enkin-action.ts と逐語コピー解消)。
+  // payload parse を集約 helper に委譲 (= enkin-action.ts と逐語コピーになるのを避けるため 1 箇所に集約)。
   const { biblioName, category } = parseApprovalPayload(payload);
   // approval 後の境界 = 独立 request_id (= 申請境界とは別 trace)。
   const requestId = crypto.randomUUID();
@@ -61,15 +61,15 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
     }
     try {
       const result = await shokyaku({ biblioName, category }, { ctx: { requestId } });
-      // PR #78 review-agents I2: success / 業務失敗の両 path で biblio.outcome を必ず立てる
-      // (= enkin-action.ts と同流儀)。
+      // success / 業務失敗の両 path で biblio.outcome を必ず立てる (silent failure 撲滅、
+      // enkin-action.ts と同流儀)。
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
       if (result.ok) {
-        // cleanup 成否で通知文言を切替 (= 「物理削除しました」と無条件通知で焼却の意味を誤認させない、
-        // PR #15 silent-failure-hunter HIGH 2 対応)。
+        // cleanup 成否で通知文言を切替 (= 「物理削除しました」と無条件通知で焼却の意味を
+        // 誤認させない、silent failure 撲滅)。
         // cleanupWarning は複数系統の cleanup (装備源 dir 物理削除 / session_equipped_biblios /
         // fugue_equipped_biblios) の失敗を ' / ' 連結で運ぶため、ヘッドラインを理由非依存にする
-        // (= 特定系統に限定した誤ミスリード防止、PR #117 review silent-failure-hunter HIGH)。
+        // (= 特定系統に限定した誤ミスリード防止)。
         // 是正指示も「詳細を確認して該当箇所を個別に対処」に一般化。
         const cleanupLine = result.cleanupWarning
           ? `${biblioName} を棚から除去する draft PR を立てましたが、**装備状態のクリーンアップに一部失敗しました** ` +
@@ -103,7 +103,7 @@ registerApprovalHandler(APPROVAL_ACTION, async ({ payload, notify }) => {
         });
       }
     } catch (err) {
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
@@ -155,7 +155,7 @@ registerDeliveryAction('shokyaku_biblio', async (content, session, inDb) => {
       );
       span.setAttribute('biblio.outcome', 'success');
     } catch (err) {
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });

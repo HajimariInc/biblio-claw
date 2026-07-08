@@ -8,15 +8,15 @@
  * `CONTAINER_PROVIDER` env var. This file builds a runtime-neutral
  * `AgentSpawnSpec` (mounts, env, command, OneCLI raw args) and hands it off.
  *
- * M4-F Phase 4 (PR #145) 逸脱理由 breadcrumb:
+ * progress-status 逸脱理由 breadcrumb:
  *   progress-status (Slack 進行ステート表示) の「container 起動中」文言は本 file の内側
  *   では発射せず、`src/router.ts` の `deliverToAgent()` wake 分岐で `startTypingRefresh`
  *   に `initialStatus=PIPELINE_STATUS.CONTAINER_STARTING` を渡す設計に集約している。
- *   元 plan は container-runner.ts の spawn 前で `emitPreSpawnStatus` を直呼びする予定
+ *   当初案は container-runner.ts の spawn 前で `emitPreSpawnStatus` を直呼びする予定
  *   だったが、既に `startTypingRefresh` 済の状態 (= refresh loop が currentStatus=null で
  *   稼働中) と競合して次 4s tick で status が上書きされる race を招くため、router.ts
  *   に集約し `wakeContainer` の signature 拡張は不要とした。詳細は
- *   `docs/operations-runbook.md` §M4-F Phase 4 §既知の罠 #4。
+ *   `docs/operations-runbook.md` の progress-status 既知の罠を参照。
  */
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -131,7 +131,7 @@ async function spawnContainer(session: Session): Promise<void> {
         if (!agentGroup) {
           // throw して wakeContainer の .catch に拾わせる (= false 返却)。
           // 旧実装は `return` で void 完了 → wakeContainer が `true` を返してしまい、
-          // caller が「コンテナ起動成功」と誤解する経路があった (M3 Phase 2 spawn-verify で表面化)。
+          // caller が「コンテナ起動成功」と誤解する経路があった (spawn-verify で表面化)。
           throw new Error(`Agent group not found: ${session.agent_group_id}`);
         }
         span.setAttribute('agent.group_name', agentGroup.name);
@@ -156,12 +156,12 @@ async function spawnContainer(session: Session): Promise<void> {
         const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
         // Defense-in-depth: `provider='adk'` runs in-process via `src/adk/dispatcher.ts`
-        // (M4-B Phase 3) — no container spawn. `deliverToAgent` in `src/router.ts`
+        // — no container spawn. `deliverToAgent` in `src/router.ts`
         // intercepts before reaching here, so this branch fires only on a router bug
         // or a direct `spawnContainer` call.
         //
-        // **Must `throw`, not `return`** (silent-failure-hunter #2 = PR #101 review 指摘 +
-        // 同ファイル :120-126 の M3 Phase 2 spawn-verify で修正済のパターンと同じ問題):
+        // **Must `throw`, not `return`** (silent-failure 撲滅原則、同ファイル :120-126 の
+        // spawn-verify で修正済のパターンと同じ問題):
         // `wakeContainer` は `spawnContainer(session).then(() => true).catch(() => false)` で
         // 成否を判定する。ここで `return` (void) すると `wakeContainer` が **`true`
         // (成功)** を返す。`host-sweep.ts` (60s tick) や `container-restart.ts` は

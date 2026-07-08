@@ -167,7 +167,7 @@ registerDeliveryAction(ACTION_NAME, async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // shelveMulti() は throw しない設計だが、想定外例外も握って patron に通知する (host を落とさない)。
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });

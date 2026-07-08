@@ -102,9 +102,9 @@ describe('detectInjectionPattern - false positives (must NOT match)', () => {
       // git SHA (40 char hex) 単体では EXFILTRATION_RE の共起がない = matched false
       'PR URL: https://github.com/owner/repo/pull/1',
       'commit sha: 1234abcd5678ef901234abcd5678ef901234abcd',
-      'shelve completed: https://github.com/example-org/biblio-shelf/pull/42',
+      'shelve completed: https://github.com/HajimariInc/biblio-shelf/pull/42',
       // skill 名の <owner>--<repo> 形式
-      'example-org--test-biblio-minimal を装備してください',
+      'HajimariInc--test-biblio-minimal を装備してください',
       // base64 単体 (exfiltration URL 共起なし)
       'here is a token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9AABB',
     ])('not matched: %s', (text) => {
@@ -115,11 +115,11 @@ describe('detectInjectionPattern - false positives (must NOT match)', () => {
 
   describe('正当な biblio 操作 mention (biblio-adk 分類対象、in-secure ではない)', () => {
     it.each([
-      '@bot 仕入れて https://github.com/example-org/test-biblio-minimal',
-      '@bot 検品してください example-org--test-biblio-minimal',
+      '@bot 仕入れて https://github.com/HajimariInc/test-biblio-minimal',
+      '@bot 検品してください HajimariInc--test-biblio-minimal',
       '@bot カテゴライズして',
       '@bot 蔵書一覧',
-      '@bot 焼却して example-org--old-biblio',
+      '@bot 焼却して HajimariInc--old-biblio',
     ])('not matched: %s', (text) => {
       const result = detectInjectionPattern(text);
       expect(result.matched).toBe(false);

@@ -1,5 +1,5 @@
 /**
- * PR #126 review I5 対応 = pr-test-analyzer 評価 7/10。
+ * main() 内 2 段 sentinel 書き込み順序の static grep 回帰テスト。
  *
  * `src/index.ts` の main() 内で 2 段 sentinel (`/tmp/boot-complete` と `/tmp/host-ready`) が
  * 書かれる順序を **static grep** で機械的に固定化する。main() を実行しない = mock 地獄を回避

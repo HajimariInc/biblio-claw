@@ -1,11 +1,11 @@
 /**
  * HTTP header 用 TextMapGetter (`httpHeadersGetter`) と `extractTraceContextFromHttpHeaders`
- * の contract test (M4-E Phase 4)。
+ * の contract test。
  *
  * env-propagation の pattern (`propagation-roundtrip.test.ts`) を Fugue channel の HTTP header
  * carrier 版に写経した位置付け。W3C propagator の global 設定は本 test file 内で完結させ、
- * 他 test file への leakage を防ぐため afterAll で必ず reset する (M4-A で確立済の
- * 「global state を触る test は必ず reset」慣習)。
+ * 他 test file への leakage を防ぐため afterAll で必ず reset する
+ * 「global state を触る test は必ず reset」慣習に従う。
  */
 import type { IncomingHttpHeaders } from 'node:http';
 
@@ -83,10 +83,10 @@ describe('extractTraceContextFromHttpHeaders', () => {
     expect(trace.getSpan(ctx)).toBeUndefined();
   });
 
-  // PR #135 review 提案 6b 対応: Phase 4 review C1 で `base=context.active()` デフォルト引数を
-  // 導入した目的 = 将来 auto HTTP SERVER span 層が発火した際に、既存 active span を破壊せず
-  // extract を適用する契約。既存 test (`traceparent 不在時は ROOT_CONTEXT`) は active span 不在の
-  // シナリオしかカバーしていないため、`ROOT_CONTEXT` を明示 base に渡す旧実装と挙動が区別できない。
+  // `base=context.active()` デフォルト引数を導入した目的 = 将来 auto HTTP SERVER span 層が発火した際に、
+  // 既存 active span を破壊せず extract を適用する契約。既存 test (`traceparent 不在時は ROOT_CONTEXT`)
+  // は active span 不在のシナリオしかカバーしていないため、`ROOT_CONTEXT` を明示 base に渡す
+  // 旧実装と挙動が区別できない。
   // pre-existing active span がある状態で本 test を追加することで、非破壊性を初めて固定化する
   // (2 段構造 → 将来 3 段化される可逆性の保険設計の存在証明)。
   it('traceparent 不在時に既存の active span を破壊しない (base=context.active() の非破壊契約)', () => {

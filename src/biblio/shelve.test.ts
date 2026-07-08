@@ -354,7 +354,7 @@ describe('shelve — PAT fallback', () => {
   });
 });
 
-describe('shelve — 後半 API step non-2xx (rename 完了後の中断、PR #8 レビュー pr-test-analyzer 改善 1)', () => {
+describe('shelve — 後半 API step non-2xx (rename 完了後の中断)', () => {
   it('POST git/blobs が 500 を返すと github_api_error (rename 完了後なので shelf に残骸が残る)', async () => {
     setupQuarantine('owner--repo');
     let blobCalled = false;
@@ -384,7 +384,7 @@ describe('shelve — 後半 API step non-2xx (rename 完了後の中断、PR #8 
   });
 });
 
-describe('shelve — marketplace.json invalid JSON (PR #8 レビュー pr-test-analyzer 改善 2)', () => {
+describe('shelve — marketplace.json invalid JSON', () => {
   it('既存 marketplace.json が壊れた JSON だと github_api_error + quarantine 残置', async () => {
     setupQuarantine('owner--repo');
     fetchMock.mockImplementationOnce(async () =>
@@ -408,7 +408,7 @@ describe('shelve — marketplace.json invalid JSON (PR #8 レビュー pr-test-a
   });
 });
 
-describe('shelve — バイナリ fail-closed (PR #8 レビュー silent-failure-hunter Important 2)', () => {
+describe('shelve — バイナリ fail-closed', () => {
   it('shelf 内に NULL byte を含むファイルがあると github_api_error で中断 (silent 文字化け回避)', async () => {
     const dir = setupQuarantine('owner--repo');
     // NULL byte を含む binary ファイルを混ぜる (= SKILL.md / plugin.json と同じ階層)
@@ -445,7 +445,7 @@ describe('shelve — バイナリ fail-closed (PR #8 レビュー silent-failure
  *
  * verify-m2.sh の 6/6 (再 shelve) は branch 既存 422 を実機で踏むが、unit でも分類網羅
  * (= github_api_error への確実な倒し込み) を固定する。残骸 shelf も assert することで
- * silent-failure-hunter で対応した「rename 後失敗 = shelf 残骸 warn」経路が回帰しないよう守る。
+ * silent failure 撲滅で対応した「rename 後失敗 = shelf 残骸 warn」経路が回帰しないよう守る。
  */
 describe('shelve — branch / PR 作成失敗 (rename + blob/tree/commit 完了後)', () => {
   it('POST git/refs が 422 (Reference already exists) を返すと github_api_error + shelf 残骸', async () => {
@@ -891,7 +891,6 @@ describe('shelveMulti — single 経路 (reqs.length === 1) で既存 shelve と
   // listShelfFiles の ioErrorCount > 0 経路 (= shelve.ts:529-540 で fail-closed)。
   // rename 完了後の shelf dir 走査で EACCES / EMFILE 等が起きると、
   // 読み取りエラー件数を detail に含めて github_api_error reason で fail する経路。
-  // PR #48 review-agents (pr-test-analyzer 改善 2、5/10) 対応。
   it('shelveMulti: shelf scan で ioErrorCount > 0 → github_api_error + 読み取りエラー件数を detail に', async () => {
     setupQuarantine('owner--repo--ioerror');
     fetchMock.mockImplementationOnce(async () => res(404, { message: 'Not Found' }));

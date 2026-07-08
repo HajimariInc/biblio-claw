@@ -1,5 +1,5 @@
 /**
- * shokyaku-tool のユニットテスト (M4-B Phase 4)。
+ * shokyaku-tool のユニットテスト。
  *
  * enkin-tool.test.ts と同流儀 (HITL pause/resume 経路)。追加で `cleanupWarning` の log.warn 経路
  * (= 装備源物理削除失敗を patron に伝える差分点) を検証。

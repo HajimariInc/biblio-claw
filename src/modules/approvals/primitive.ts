@@ -11,7 +11,7 @@
  *     modules (self-mod, future module gates) register here.
  *
  * Approver picking lives here too — it used to sit in src/access.ts and got
- * folded in with the PR #7 re-tier. The picks functions walk user_roles
+ * folded in with the approvals re-tier. The picks functions walk user_roles
  * (owner, global admin, scoped admin) and resolve to a reachable DM via the
  * permissions module's user-dm helper.
  *

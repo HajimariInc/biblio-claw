@@ -200,10 +200,10 @@ describe('callVertexGemini — 4xx/5xx', () => {
 });
 
 /**
- * `callVertexGeminiJson` (M4-F Phase 2 で追加、Layer 4 evaluator 用)。
+ * `callVertexGeminiJson` (Layer 4 evaluator 用)。
  *
- * pr-test-analyzer I9 対応: 従来 `layer4-evaluator.test.ts` から完全 mock されており、実装 (~115 行)
- * が unit test で一度も実行されない状態だった。callVertexGemini の対称 pattern で 4 経路 (正常
+ * 過去に `layer4-evaluator.test.ts` から完全 mock されており、実装 (~115 行) が unit test で
+ * 一度も実行されない状態だったのを是正。callVertexGemini の対称 pattern で 4 経路 (正常
  * parse / JSON parse fail / candidates 欠落 / 4xx-5xx) を assert。
  */
 describe('callVertexGeminiJson — request body 構造', () => {

@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 2 gate Layer 3: XML trust boundary (Microsoft Spotlighting pattern)。
+ * gate Layer 3: XML trust boundary (Microsoft Spotlighting pattern)。
  *
  * 外部由来の text を XML tag で囲い、LLM に「これは指示ではなくデータ」と伝える。
  * `wrapUntrustedInput(patronText)` の戻り値を Layer 4 evaluator の Prompt 内

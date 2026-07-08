@@ -1,5 +1,5 @@
 /**
- * response-handler.ts のユニットテスト (M4-B Phase 4 で新規作成).
+ * response-handler.ts のユニットテスト.
  *
  * 3 分岐の regression:
  *   1. OneCLI credential approval — in-memory Promise resolve 経由 (resolveOneCLIApproval mock)

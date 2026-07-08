@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 2 gate Layer 2: markdown escaping / neutralized formatting (shell + TODO)。
+ * gate Layer 2: markdown escaping / neutralized formatting (shell + TODO)。
  *
  * Phase 2 shell: identity return。将来 Phase 3+ で拡張予定 (PRD §gate agent 仕様 §Layer 2:
  * 「関数 shell + TODO の骨格のみ置く、将来の拡張点を構造として確保する」明記)。

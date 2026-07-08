@@ -1,11 +1,10 @@
 /**
- * M4-F Phase 4: pre-spawn (`emitPreSpawnStatus` + `emitAdkToolStatus` +
+ * pre-spawn (`emitPreSpawnStatus` + `emitAdkToolStatus` +
  * `clearAdkTargetStatus`) の unit test。
  *
- * PR #145 review pr-test-analyzer IM-4 対応: 従来これらは専用 test を持たず、
- * dispatcher.test.ts + router.gate.test.ts でも呼出引数の assertion がなく、
- * ADK 経路の唯一の入口 (`emitAdkToolStatus`) の分岐 (skip 条件 / rate-limit ガード /
- * throw fail-safe) が unit test で未検証だった。
+ * 従来これらは専用 test を持たず、dispatcher.test.ts + router.gate.test.ts でも
+ * 呼出引数の assertion がなく、ADK 経路の唯一の入口 (`emitAdkToolStatus`) の
+ * 分岐 (skip 条件 / rate-limit ガード / throw fail-safe) が unit test で未検証だった。
  *
  * カバー範囲:
  *   - emitPreSpawnStatus: adapter 未登録 / setTyping 未実装 / 正常呼出 / throw 時 warn 化
@@ -53,7 +52,7 @@ function mkAdapter(overrides: Partial<{ setTyping: ReturnType<typeof vi.fn> }> =
   } as unknown as ChannelAdapter;
 }
 
-describe('emitPreSpawnStatus (M4-F Phase 4)', () => {
+describe('emitPreSpawnStatus', () => {
   beforeEach(() => {
     _resetAdkTargetStatusForTest();
   });
@@ -99,7 +98,7 @@ describe('emitPreSpawnStatus (M4-F Phase 4)', () => {
   });
 });
 
-describe('emitAdkToolStatus (M4-F Phase 4 IM-1: rate-limit ガード)', () => {
+describe('emitAdkToolStatus (rate-limit ガード)', () => {
   beforeEach(() => {
     _resetAdkTargetStatusForTest();
   });
@@ -158,10 +157,10 @@ describe('emitAdkToolStatus (M4-F Phase 4 IM-1: rate-limit ガード)', () => {
   });
 });
 
-// M4-F Phase 5: `progress.status.transition` structured log emit を検証。emitPreSpawnStatus
+// `progress.status.transition` structured log emit を検証。emitPreSpawnStatus
 // の 3 outcome (no_adapter / triggered / failed) と emitAdkToolStatus の遷移時 emit + tool_name
-// 保持を assert。Phase 4 の弱点 (成功パス log 不在) を Phase 5 で補完した実装を直接テスト。
-describe('progress.status.transition emit (M4-F Phase 5)', () => {
+// 保持を assert。成功パス log を補完した実装を直接テスト。
+describe('progress.status.transition emit', () => {
   beforeEach(() => {
     _resetAdkTargetStatusForTest();
     vi.clearAllMocks();
@@ -245,7 +244,7 @@ describe('progress.status.transition emit (M4-F Phase 5)', () => {
   });
 });
 
-describe('clearAdkTargetStatus (M4-F Phase 4 IM-1)', () => {
+describe('clearAdkTargetStatus', () => {
   beforeEach(() => {
     _resetAdkTargetStatusForTest();
   });

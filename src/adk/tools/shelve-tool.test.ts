@@ -1,5 +1,5 @@
 /**
- * shelve-tool のユニットテスト (M4-B Phase 1)。
+ * shelve-tool のユニットテスト。
  *
  * acquire-tool.test.ts と同流儀。`category` の Zod enum 検証 (= `BIBLIO_CATEGORIES` 4 値以外
  * reject) も含む。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。

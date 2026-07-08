@@ -34,7 +34,7 @@ describe('evaluateInput - Vertex 応答 3 分類', () => {
       classification: 'biblio-adk',
       reason: '仕入れ操作 (URL 明示)',
     });
-    const wrapped = wrapUntrustedInput('@bot 仕入れて https://github.com/example-org/test');
+    const wrapped = wrapUntrustedInput('@bot 仕入れて https://github.com/HajimariInc/test');
     const result = await evaluateInput(wrapped);
     expect(result.classification).toBe('biblio-adk');
     expect(result.reason).toBe('仕入れ操作 (URL 明示)');

@@ -1,5 +1,5 @@
 /**
- * `shokyaku_biblio` FunctionTool — ADK Runner 配下から既存 host action `shokyaku()` を呼ぶ HITL 対応 wrap (M4-B Phase 4)。
+ * `shokyaku_biblio` FunctionTool — ADK Runner 配下から既存 host action `shokyaku()` を呼ぶ HITL 対応 wrap。
  *
  * 焼却 = 棚除去 + 装備源物理削除 + 全 session の装備リスト個別削除 (= 再装備不可)。破壊操作
  * かつ物理削除を伴うため、admin 承認を必須とし、`Context.requestConfirmation` API で自動 pause /

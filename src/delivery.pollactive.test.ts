@@ -1,5 +1,5 @@
 /**
- * PR #145 review pr-test-analyzer IM-9 対応 = 回帰テスト。
+ * `pollActive` best-effort 契約の回帰テスト (static grep 経路)。
  *
  * `src/delivery.ts` の `pollActive()` は 1s tick ループで
  * `deliverSessionMessages` → `refreshProgressStatus` を直列実行する。この経路の
@@ -12,8 +12,7 @@
  * - 直接 test しにくい代わりに「契約に必要な構造」= 3 点 (1s tick loop / catch
  *   吸収 / 継続 setTimeout) を static grep で fix する = 将来リファクタで silent
  *   に落ちても赤くなる。
- * - 1s tick 経路の中核契約 (pr-test-analyzer が「唯一の未検証区間」と指摘) を
- *   最低限のコストで守る狙い。
+ * - 1s tick 経路の中核契約を最低限のコストで守る狙い。
  *
  * 何を検証するか:
  *   (1) pollActive() 内で `refreshProgressStatus(session)` を await 呼出している
@@ -52,8 +51,8 @@ describe('pollActive best-effort 契約 (static assertion)', () => {
     expect(pattern.test(SRC)).toBe(true);
   });
 
-  it('drainSession db open 判定は isPreSpawnDbOpenError を使う (CR-4 regression 防止)', () => {
-    // Wave B CR-4 で SQLITE_CANTOPEN を `poller.ts` と共通化した helper 化が
+  it('drainSession db open 判定は isPreSpawnDbOpenError を使う (regression 防止)', () => {
+    // SQLITE_CANTOPEN を `poller.ts` と共通化した helper 化が
     // 剥がれると本 test が赤くなる。
     const pattern = /if\s*\(\s*isPreSpawnDbOpenError\(code\)\s*\)/;
     expect(pattern.test(SRC)).toBe(true);

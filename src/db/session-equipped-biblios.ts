@@ -1,12 +1,12 @@
 /**
- * `session_equipped_biblios` テーブルの CRUD (M3 Phase 2)。
+ * `session_equipped_biblios` テーブルの CRUD。
  *
  * 装備リストは session 単位で永続化し、`order_index` ASC で順序を保つ。
  * 更新は全置換 semantics (= `upsertEquippedBiblios` は DELETE + INSERT トランザクション)
- * に固定する。部分更新 = `deleteEquippedBiblioByName` (Phase 3、焼却で全 session から個別行を消す
+ * に固定する。部分更新 = `deleteEquippedBiblioByName` (焼却で全 session から個別行を消す
  * = `equip.ts` の `equipped biblio dir not found, skipping` warn が次回 spawn 以降に残るノイズを
- * 抑制)。1 件追加 / 1 件解除の MCP tool (`equip_biblio` / `disequip_biblio`) は Phase 3.5 で
- * `addEquippedBiblio` / `removeEquippedBiblio` を別途足す。
+ * 抑制)。1 件追加 / 1 件解除の MCP tool (`equip_biblio` / `disequip_biblio`) は将来拡張で
+ * `addEquippedBiblio` / `removeEquippedBiblio` を別途足す想定。
  */
 import { getDb } from './connection.js';
 

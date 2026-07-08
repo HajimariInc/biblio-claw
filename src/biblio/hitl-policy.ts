@@ -1,5 +1,5 @@
 /**
- * HITL 承認要否の政策関数 (M4-E Phase 3 equip-hitl)。
+ * HITL 承認要否の政策関数。
  *
  * Fugue 側契約 (`biblio-claw-required-changes.md` §6.2) の `requires_approval(operation, channel)`
  * matrix をそのまま宣言する pure な関数。副作用なし、外部依存なし = `config-validation.ts`
@@ -23,7 +23,7 @@
  * 1. **政策宣言**: Fugue 契約 §6.2 の matrix をコード上の single source of truth として置く
  * 2. **Fugue equip 経路の guard**: 「equip@fugue = 承認なし」の簡略化を実装で担保
  * 3. **将来の集中化 anchor**: 政策が変わった場合 / Slack/ADK 経路にも equip tool が
- *    追加された場合 (`M3 Phase 3.5` 申し送り) に、本関数を経由する形で集約する起点
+ *    追加された場合に、本関数を経由する形で集約する起点
  *
  * ## Matrix (Fugue 契約 §6.2)
  *
@@ -59,12 +59,11 @@ export type HitlOperation = 'consult' | 'equip' | 'shiire' | 'tekkyo';
 /**
  * Fugue 契約 §6.2 の requires_approval matrix。
  *
- * **switch + `never` exhaustive check パターン** (type-design-analyzer 指摘、
- * PR #135 review Important 3): 政策関数の default は「HITL 不要」= fail-open 側なため、
- * 将来 `HitlOperation` に破壊的な値 (例 `'reorder'`) を追加した際に本関数を更新し忘れると
- * 「新規操作は無警告で承認不要になる」silent HITL bypass に倒れる。switch + `never` で
- * 網羅漏れを compile-time で block する (2×4=8 通りしかないが、security-relevant な政策
- * 関数のためコストパフォーマンスを取る)。
+ * **switch + `never` exhaustive check パターン**: 政策関数の default は
+ * 「HITL 不要」= fail-open 側なため、将来 `HitlOperation` に破壊的な値 (例 `'reorder'`)
+ * を追加した際に本関数を更新し忘れると「新規操作は無警告で承認不要になる」silent HITL
+ * bypass に倒れる。switch + `never` で網羅漏れを compile-time で block する
+ * (2×4=8 通りしかないが、security-relevant な政策関数のためコストパフォーマンスを取る)。
  */
 export function requiresApproval(operation: HitlOperation, channel: HitlChannel): boolean {
   switch (operation) {
@@ -73,7 +72,7 @@ export function requiresApproval(operation: HitlOperation, channel: HitlChannel)
       return false;
     case 'equip':
       // Fugue equip = HITL 簡略化 (装備状態が channel-scoped で closure、Fugue Director 1 人前提)
-      // Slack equip は現状経路なし = M3 Phase 3.5 申し送り、実装されたら本 branch が実効化する
+      // Slack equip は現状経路なし = 将来 Slack/ADK 経路に equip tool が追加されたら本 branch が実効化する
       return channel !== 'fugue';
     case 'shiire':
     case 'tekkyo':

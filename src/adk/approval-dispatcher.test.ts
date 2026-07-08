@@ -1,5 +1,5 @@
 /**
- * approval-dispatcher.ts のユニットテスト (M4-B Phase 4).
+ * approval-dispatcher.ts のユニットテスト.
  *
  * `resolveAdkApproval` の 4 経路 (approve resume / reject resume / session not found /
  * runAsync throw) を mock 経由で検証。

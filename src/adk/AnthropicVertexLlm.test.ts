@@ -1,9 +1,9 @@
 /**
- * AnthropicVertexLlm のユニットテスト (M4-B Phase 0)。
+ * AnthropicVertexLlm のユニットテスト。
  *
  * `src/biblio/vertex-client.test.ts` の `vi.hoisted` モック + InMemorySpanExporter パターン
  * を写経。AsyncGenerator + abortSignal + gen_ai.* span attribute の structural fix で
- * Phase 1 以降の regression を防ぐ。
+ * regression を防ぐ。
  *
  * gen_ai.* span 計装の OTel setup/teardown は `describe` スコープの `beforeEach` / `afterEach`
  * で集約 (= assertion 失敗時も確実に cleanup される、test 間の TracerProvider リークを防ぐ)。
@@ -134,8 +134,8 @@ describe('AnthropicVertexLlm — generateContentAsync 正常系', () => {
   });
 });
 
-describe('AnthropicVertexLlm — Critical/Important 修正 (PR #89 review)', () => {
-  it('空配列 systemInstruction で system field が SDK に渡らない (= C1 fix、`system: ""` 防御)', async () => {
+describe('AnthropicVertexLlm — edge case 修正', () => {
+  it('空配列 systemInstruction で system field が SDK に渡らない (= `system: ""` 防御)', async () => {
     messagesCreateMock.mockResolvedValue({ content: [{ type: 'text', text: 'OK' }] });
     const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
     // 空配列 systemInstruction は truthy だが flatten で '' になる → system field 省略されること
@@ -144,7 +144,7 @@ describe('AnthropicVertexLlm — Critical/Important 修正 (PR #89 review)', () 
     expect(callArgs.system).toBeUndefined();
   });
 
-  it('parts のない Content[] systemInstruction も system field 省略される (= C1 fix、`{parts: []}` 防御)', async () => {
+  it('parts のない Content[] systemInstruction も system field 省略される (= `{parts: []}` 防御)', async () => {
     messagesCreateMock.mockResolvedValue({ content: [{ type: 'text', text: 'OK' }] });
     const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
     await llm
@@ -154,7 +154,7 @@ describe('AnthropicVertexLlm — Critical/Important 修正 (PR #89 review)', () 
     expect(callArgs.system).toBeUndefined();
   });
 
-  it('空 contents で EMPTY_MESSAGES が yield される (= I3 fix、SDK 呼出回避)', async () => {
+  it('空 contents で EMPTY_MESSAGES が yield される (= SDK 呼出回避)', async () => {
     const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
     const req = {
       contents: [],
@@ -669,7 +669,7 @@ describe('AnthropicVertexLlm — tool routing (Phase 2)', () => {
     );
   });
 
-  it('functionResponse に id が無いと skip + log.warn (= functionCall と対称、pr-test-analyzer 改善 2)', async () => {
+  it('functionResponse に id が無いと skip + log.warn (= functionCall と対称)', async () => {
     const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
     const req = {
       contents: [
@@ -694,7 +694,7 @@ describe('AnthropicVertexLlm — tool routing (Phase 2)', () => {
     );
   });
 
-  it('tool_use block が来たが全 id/name 不正で filter 全滅 → warn (= silent-failure-hunter #3)', async () => {
+  it('tool_use block が来たが全 id/name 不正で filter 全滅 → warn (= silent failure 撲滅)', async () => {
     messagesCreateMock.mockResolvedValue({
       content: [
         { type: 'tool_use', name: 'acquire_biblio', input: {} }, // id undefined

@@ -9,7 +9,7 @@
  * - `safeNotify`: approval handler 内で session に notify を書く `ApprovalHandlerContext.notify`
  *   を try/catch で包み、SQLITE_BUSY 等の throw を握って `log.error` で「patron 通知消失」を
  *   明示する。`notify` は `writeSessionMessage` の同期ラッパで retry 機構を持たないため、
- *   HITL 承認後の通知が host を巻き込まないよう本ヘルパで防御する (PR #15 silent-failure HIGH 1)。
+ *   HITL 承認後の通知が host を巻き込まないよう本ヘルパで防御する (silent failure 撲滅)。
  */
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -31,10 +31,10 @@ import { BIBLIO_CATEGORIES, type BiblioCategory } from './types.js';
  * 区別する。新 handler 追加時は本 union を必ず拡張する (= 拡張なしで呼び出すと
  * compile error)。
  *
- * `equip` は M4-E Phase 3 で追加。Fugue channel の装備操作 (`fugue-http.ts:handleEquip`)
- * が `withBiblioActionSpan('equip', request_id, '', fn)` で包むことで、M4-A の
- * `biblio.${action}` 集計に channel-agnostic に載せる (sessionId 空文字は Fugue に
- * session 概念なしのため。approval 経路 と同じ空文字慣習)。
+ * `equip` は Fugue channel の装備操作 (`fugue-http.ts:handleEquip`) が
+ * `withBiblioActionSpan('equip', request_id, '', fn)` で包むことで、`biblio.${action}`
+ * 集計に channel-agnostic に載せる (sessionId 空文字は Fugue に session 概念なしのため。
+ * approval 経路と同じ空文字慣習)。
  */
 export type BiblioActionName =
   | 'acquire'
@@ -234,8 +234,8 @@ export interface BiblioNameCategoryValidated {
  * それ以外は安全側のデフォルト `biblio-dev` に落とす。後段で `BIBLIO_CATEGORIES.includes(category)`
  * の guard を呼べばデフォルトを含めて検証可能 (= 旧実装の動作互換)。
  *
- * 旧実装は enkin-action / shokyaku-action の 2 ファイルに 5 行ずつ逐語コピーされており、
- * 将来 category 追加 / 既定値変更で 2 箇所同時修正が必要だった (= PR #37 code-simplifier S2 提案)。
+ * 逐語コピーの分散を避けるため 1 箇所に集約。将来 category 追加 / 既定値変更の際に
+ * 修正点が単一で済む。
  */
 export function parseApprovalPayload(payload: Record<string, unknown>): {
   biblioName: string;
@@ -245,9 +245,9 @@ export function parseApprovalPayload(payload: Record<string, unknown>): {
   const rawCategory = typeof payload.category === 'string' ? payload.category : null;
   const isKnownCategory = rawCategory !== null && BIBLIO_CATEGORIES.includes(rawCategory as BiblioCategory);
   const category: BiblioCategory = isKnownCategory ? (rawCategory as BiblioCategory) : 'biblio-dev';
-  // 旧実装は不正 category を無警告で `biblio-dev` に置換していたため、shokyaku_confirm 等の
-  // 破壊操作で category 化けが起きると意図と違う shelf を対象にした上にデバッグ時に「なぜ
-  // biblio-dev?」が謎になっていた (PR #78 review-agents I6)。fallback 発動時は warn を残す。
+  // 不正 category を無警告で `biblio-dev` に置換すると、shokyaku_confirm 等の破壊操作で
+  // category 化けが起きた際に意図と違う shelf を対象にする上、デバッグ時に「なぜ
+  // biblio-dev?」が謎になる (silent failure 撲滅)。fallback 発動時は warn を残す。
   if (rawCategory !== null && !isKnownCategory) {
     log.warn('parseApprovalPayload: unknown category, defaulting to biblio-dev', {
       event: 'biblio.validate',
@@ -268,9 +268,8 @@ export function parseApprovalPayload(payload: Record<string, unknown>): {
  * `{ biblioName, category }` を返す (= caller は trust して `requestApproval` / `shelve` に
  * 渡せる)。
  *
- * 旧実装は enkin-action / shokyaku-action / shelve-action の 3 ファイルに 40 行ずつ
- * 逐語コピーされており、将来 category 追加 / メッセージ変更で 3 箇所同時修正が必要だった
- * (= PR #21 code-simplifier 推奨で集約)。
+ * 逐語コピーの分散を避けるため 1 箇所に集約。将来 category 追加 / メッセージ変更の際に
+ * 修正点が単一で済む。
  *
  * @param respPrefix `writeBackMessage` の id プレフィックス (例: `enkin-resp`)
  * @param actionName log の識別用 action 名 (例: `enkin_biblio`)

@@ -1,7 +1,7 @@
 /**
  * `config.ts` の DATA_DIR / GROUPS_DIR 絶対化 (= `path.resolve()` ラップ) の回帰テスト。
  *
- * 背景: PR #20 で発覚した silent fail (= `DATA_DIR=./data` のような相対パスが env で
+ * 背景: 過去に発覚した silent fail (= `DATA_DIR=./data` のような相対パスが env で
  * 渡されると docker run -v が「相対 = local volume 名」と解釈して exit 125 で reject)
  * の根本対処として、`config.ts` の env override 経路を `path.resolve()` で包んだ。
  * 本テストは将来のリファクタで `path.resolve` が外れた場合を回帰防止する。

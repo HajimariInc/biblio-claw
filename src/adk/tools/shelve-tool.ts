@@ -1,16 +1,15 @@
 /**
- * `shelve_biblio` FunctionTool — ADK Runner 配下から既存 host action `shelve()` を呼ぶ wrap (M4-B Phase 1)。
+ * `shelve_biblio` FunctionTool — ADK Runner 配下から既存 host action `shelve()` を呼ぶ wrap。
  *
  * `inspect_biblio` で ACCEPT 判定された biblio を棚 (= HajimariInc/biblio-shelf) に陳列する draft PR を
  * 作成する。設計理念は `acquire-tool.ts` 冒頭ドキュメント参照。
  *
- * **GOTCHA (plan Task 4)**:
+ * **GOTCHA**:
  *   1. `BIBLIO_CATEGORIES` を `z.enum` に hardcode せず、`as const` 配列を動的参照する
  *      (= 型 + 値の単一源、`BIBLIO_CATEGORIES` を 1 箇所修正すれば LLM 公開 schema も追従)
- *   2. `shelveMulti` (= 複数 skill 跨ぎ陳列) の tool 化は本 Phase で見送り (= 任意 Phase 4)、
- *      単一 `shelve()` のみで MVP 成立 (Plan §意思決定ログ)
- *   3. `reason` 長さ上限 `SHELVE_REASON_MAX_LEN` を named constant 化 (= type-design-analyzer S10、
- *      `.max()` と describe 文字列の同期忘れを型強制で防ぐ)
+ *   2. 複数 skill 跨ぎ陳列は `shelve_biblio_multi` に分離
+ *   3. `reason` 長さ上限 `SHELVE_REASON_MAX_LEN` を named constant 化
+ *      (`.max()` と describe 文字列の同期忘れを型強制で防ぐ)
  */
 import { FunctionTool } from '@google/adk';
 import { z } from 'zod';
@@ -23,7 +22,7 @@ import { resolveToolCtx } from './tool-ctx.js';
 
 /**
  * `reason` 文字列の長さ上限 (1-N chars)。describe 文字列と `.max()` の両方で参照することで
- * 同期忘れによる説明不一致を構文レベルで防ぐ (= type-design-analyzer S10 推奨)。
+ * 同期忘れによる説明不一致を構文レベルで防ぐ。
  */
 const SHELVE_REASON_MAX_LEN = 200;
 
@@ -68,7 +67,7 @@ export const shelveBiblioTool = new FunctionTool({
       return await shelve({ biblioName, category, reason }, { ctx: { requestId, sessionId } });
     } catch (err) {
       // `shelve()` は throw しない契約 (= ShelveResult.ok=false に倒す)。万一の unexpected throw を
-      // server-side log で可視化してから rethrow する (= silent-failure-hunter I1)。
+      // server-side log で可視化してから rethrow する (= silent failure 撲滅)。
       log.error('ADK tool: shelve_biblio unexpected throw', {
         event: 'adk.tool.shelve.unexpected_error',
         request_id: requestId,

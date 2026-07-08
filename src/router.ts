@@ -311,18 +311,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     return willEngage || willAccumulate;
   });
 
-  // M4-F Phase 2: gate 判定 (`GATE_ENABLED=true` + willAnyAgentAct 時のみ発火)。gate 自体の
-  // unexpected throw は fail-open (gateResult=null) で従来経路継続。Layer 4 内部の Vertex/Zod
-  // fallback は既に biblio-other に倒れるため throw は本来稀ケース = catch は保険。
+  // gate 判定 (`GATE_ENABLED=true` + willAnyAgentAct 時のみ発火)。gate 自体の unexpected throw
+  // は fail-open (gateResult=null) で従来経路継続。Layer 4 内部の Vertex/Zod fallback は既に
+  // biblio-other に倒れるため throw は本来稀ケース = catch は保険。
   let gateResult: GateResult | null = null;
   if (isGateEnabled() && willAnyAgentAct) {
-    // M4-F Phase 4: 分類前に「分類中」status を出す。session 未確定な pre-spawn 区間の
-    // 一発発射 (fire-and-forget、adapter 直呼び)。gate 通過後は session 確定 → 既存の
-    // startTypingRefresh の initialStatus='container 起動中' 経路 (下の deliverToAgent
-    // wake 分岐) に引き継がれる。文言は PIPELINE_STATUS に集約 (tool-status-map.ts)。
-    // silent-failure-hunter IM-5 対応: fire-and-forget の unhandledRejection を撲滅する
-    // ため明示 `.catch()` を挿入 (現状 emitPreSpawnStatus は throw しない契約だが、
-    // dispatcher.ts:emitAdkToolStatus の S3 と同流儀の防衛)。
+    // 分類前に「分類中」status を出す。session 未確定な pre-spawn 区間の一発発射
+    // (fire-and-forget、adapter 直呼び)。gate 通過後は session 確定 → 既存の startTypingRefresh
+    // の initialStatus='container 起動中' 経路 (下の deliverToAgent wake 分岐) に引き継がれる。
+    // 文言は PIPELINE_STATUS に集約 (tool-status-map.ts)。fire-and-forget の unhandledRejection
+    // を撲滅するため明示 `.catch()` を挿入 (現状 emitPreSpawnStatus は throw しない契約だが、
+    // dispatcher.ts:emitAdkToolStatus と同流儀の防衛)。
     void emitPreSpawnStatus(
       event.channelType,
       event.platformId,
@@ -606,22 +605,21 @@ async function deliverToAgent(
   wake: boolean,
   gateResult: GateResult | null = null,
 ): Promise<void> {
-  // Provider dispatch (M4-B Phase 3): agent_group が provider='adk' を選択している
-  // 場合、agent-runner container 経路 (= session / container spawn) をスキップし、
-  // orchestrator 内 in-process ADK Runner に patron 命令を直接流す。
+  // Provider dispatch: agent_group が provider='adk' を選択している場合、agent-runner
+  // container 経路 (= session / container spawn) をスキップし、orchestrator 内 in-process
+  // ADK Runner に patron 命令を直接流す。
   //
   // - session concept なし (= `runEphemeral` が都度 ephemeral session を作る)
   // - Command gate / typing indicator は既存 claude 経路のみに適用 (ADK 経路では
   //   dispatcher 内で応答返却まで完結するため typing の意味が薄い)
   // - `wake=false` は「傍受中、message 蓄積のみ or 完全ドロップ」の 2 ポリシーが
   //   `ignored_message_policy` で分岐するが、ADK 経路は session なし = **accumulate
-  //   相当の永続化手段を持たない**。よってどちらのポリシーでも実質 drop 挙動になる
-  //   (I5 = PR #101 review 指摘)。`ignored_message_policy='accumulate'` を ADK
-  //   provider の wiring に設定しても実際には蓄積されず silent に消える点に注意 —
-  //   `init-adk-agent.ts` は現状 `'drop'` 固定で作成するため今は顕在化しないが、
-  //   将来 accumulate を選ぶ運用で silent data loss を招く。Phase 4/90 で session
-  //   永続化を導入するか、accumulate ポリシーを ADK provider では reject する経路
-  //   を検討する。
+  //   相当の永続化手段を持たない**。よってどちらのポリシーでも実質 drop 挙動になる。
+  //   `ignored_message_policy='accumulate'` を ADK provider の wiring に設定しても実際には
+  //   蓄積されず silent に消える点に注意 — `init-adk-agent.ts` は現状 `'drop'` 固定で作成する
+  //   ため今は顕在化しないが、将来 accumulate を選ぶ運用で silent data loss を招く。session
+  //   永続化を導入するか、accumulate ポリシーを ADK provider では reject する経路を検討する
+  //   (未整備)。
   //
   // 実装 note: `resolveProviderName` (container-runner.ts) を import せず inline 化するのは、
   // 既存 test 群が `vi.mock('./container-runner.js', ...)` で 4 関数 stub (wakeContainer /
@@ -633,19 +631,19 @@ async function deliverToAgent(
   // ADK 分岐は container_configs.provider だけ見れば十分 (= session.agent_provider は
   // session 作成前の deliverToAgent 冒頭では未確定)。
   //
-  // TODO(Phase 4/90): 将来 session.agent_provider を non-null に更新する mutator が
-  // 追加されたら、本 inline 版も追従して session.agent_provider を優先する経路が要る
-  // (現状 `ncl sessions` は read-only で該当 mutator 不在のため実害ゼロ)。
+  // TODO: 将来 session.agent_provider を non-null に更新する mutator が追加されたら、本
+  // inline 版も追従して session.agent_provider を優先する経路が要る (現状 `ncl sessions` は
+  // read-only で該当 mutator 不在のため実害ゼロ)。
   const containerConfig = getContainerConfig(agentGroup.id);
   const providerName = (containerConfig?.provider ?? 'claude').toLowerCase();
-  // M4-F Phase 2: gate classification と provider の mismatch skip。
+  // gate classification と provider の mismatch skip。
   // gateResult=null (= GATE_ENABLED=false or gate unexpected throw で fail-open) 時は
   // skip せず既存経路継続 (= gate 無効化時の main 合流退路を担保)。
   //
-  // silent-failure-hunter C1 + S2 対応: `log.debug` は default LOG_LEVEL=info で filter
-  // され Cloud Logging / BQ sink に届かない = patron 経路の routing 決定が観測不能。
-  // `log.warn` に昇格することで audit trail の外側でも「gate は allowed としたが
-  // provider mismatch で個別 agent は skip した」という配送判断を明示的に残す。
+  // `log.debug` は default LOG_LEVEL=info で filter され Cloud Logging / BQ sink に届かない =
+  // patron 経路の routing 決定が観測不能。`log.warn` に昇格することで audit trail の外側でも
+  // 「gate は allowed としたが provider mismatch で個別 agent は skip した」という配送判断を
+  // 明示的に残す。
   if (gateResult) {
     const isAdk = providerName === 'adk';
     const shouldSkip =
@@ -693,8 +691,7 @@ async function deliverToAgent(
     } catch (err) {
       // dispatcher は throw しない contract (内部で catch + fallback text)。
       // 万一の unexpected throw を silent 化しないため保険で拾う + patron に最終砦
-      // fallback を送る (I6 = PR #101 review 指摘、dispatcher の contract 破綻時に
-      // patron が完全無応答になる二重の脆さを解消)。
+      // fallback を送る (dispatcher の contract 破綻時に patron が完全無応答になる二重の脆さを解消)。
       log.error('ADK dispatcher threw (should not happen)', {
         event: 'router.dispatch.adk_unexpected_throw',
         agent_group_id: agent.agent_group_id,
@@ -801,12 +798,11 @@ async function deliverToAgent(
   if (wake) {
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
-    // M4-F Phase 4 (PR #145 実機で race 発見 → 修正): startTypingRefresh の immediate
-    // tick を initialStatus='container 起動中' で発火し、cold start 区間 (~10-15s) を
-    // 明示化する。以降は poller が container_state.current_tool を読んで tool 名日本語
-    // 文言に遷移する。かつて分離していた updateTypingStatus 呼出は Slack API 到達順の
-    // race (「Typing...」が後勝ち) を招くため、initialStatus 経由の 1 発集約に変更。
-    // 文言は PIPELINE_STATUS (tool-status-map.ts) に集約。
+    // startTypingRefresh の immediate tick を initialStatus='container 起動中' で発火し、
+    // cold start 区間 (~10-15s) を明示化する。以降は poller が container_state.current_tool を
+    // 読んで tool 名日本語文言に遷移する。分離していた updateTypingStatus 呼出は Slack API
+    // 到達順の race (「Typing...」が後勝ち) を招くため、initialStatus 経由の 1 発集約にした
+    // (実機で判明)。文言は PIPELINE_STATUS (tool-status-map.ts) に集約。
     startTypingRefresh(
       session.id,
       session.agent_group_id,

@@ -71,7 +71,7 @@ function setupWorld(): void {
   });
   // resolveSenderUserId の owner fallback 経路は verify 経路 (実 DB + owner seed) で担保する。
   // unit test は explicit --user-id を渡す経路で行う (owner seed は migration order 依存で
-  // FK 制約が壊れるためテストの安定性を優先する判断 = M4-F Phase 5 実装時判断)。
+  // FK 制約が壊れるためテストの安定性を優先する判断)。
 }
 
 beforeEach(() => {
@@ -87,7 +87,7 @@ afterEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-describe('ncl messages send (M4-F Phase 5)', () => {
+describe('ncl messages send', () => {
   it('routes an InboundEvent to routeInbound with expected fields', async () => {
     const resp = await dispatch(
       {
@@ -233,8 +233,8 @@ describe('ncl messages send (M4-F Phase 5)', () => {
     expect(routeInboundMock).not.toHaveBeenCalled();
   });
 
-  // PR #154 review S2: 実 CLI 経路が渡す文字列 'true' (bash から `--stub-outbound true`)
-  // が boolean coercion で正しく true に変換されることを assert。
+  // 実 CLI 経路が渡す文字列 'true' (bash から `--stub-outbound true`) が
+  // boolean coercion で正しく true に変換されることを assert。
   it('coerces string "true" to stub_outbound=true (real CLI call shape)', async () => {
     let stubDuringDispatch: boolean | undefined;
     routeInboundMock.mockImplementation(async () => {
@@ -262,7 +262,7 @@ describe('ncl messages send (M4-F Phase 5)', () => {
     expect(isStubOutboundTarget(AGENT_GROUP_ID, 'slack', 'D-slack-dm')).toBe(true);
   });
 
-  // PR #154 review IM-4: --wait-ms が非数値の場合、silent に timedOut=true を返さず
+  // --wait-ms が非数値の場合、silent に timedOut=true を返さず
   // fail-fast で明示 error を出す (usage error 誘導)。
   it('rejects --wait-ms with non-finite number (NaN)', async () => {
     const resp = await dispatch(
@@ -310,10 +310,10 @@ describe('ncl messages send (M4-F Phase 5)', () => {
     }
   });
 
-  // PR #154 review S3: user_id 未指定時の resolveSenderUserId fallback 経路 (explicit →
-  // scoped admin → global admin → owner → 'ncl:host') を明示的に検証。owner seed 経路は
-  // 前回の messages.test.ts で FK 制約再現困難と判明した (migration order 依存の未解明挙動)
-  // ため、resolveSenderUserId 関数を export して直接 unit test する方式で全 4 分岐を担保する。
+  // user_id 未指定時の resolveSenderUserId fallback 経路 (explicit → scoped admin →
+  // global admin → owner → 'ncl:host') を明示的に検証。owner seed 経路は FK 制約再現困難
+  // (migration order 依存の未解明挙動) と判明したため、resolveSenderUserId 関数を export
+  // して直接 unit test する方式で全 4 分岐を担保する。
   it('resolveSenderUserId: explicit user_id は最優先', async () => {
     const { resolveSenderUserId } = await import('./messages.js');
     expect(resolveSenderUserId(AGENT_GROUP_ID, 'slack:U-explicit')).toBe('slack:U-explicit');
@@ -324,7 +324,7 @@ describe('ncl messages send (M4-F Phase 5)', () => {
     expect(resolveSenderUserId(AGENT_GROUP_ID, undefined)).toBe('ncl:host');
   });
 
-  // PR #154 review IM-8: session 作成後の pollOutbound / 応答取得経路の integration test。
+  // session 作成後の pollOutbound / 応答取得経路の integration test。
   // 従来 5 case 全てで routeInbound mock が session を作らないため polling 分岐が一度も走らず、
   // pollOutbound の SQL / seq フィルタ / kind フィルタ / timeout 判定が unit test で検証
   // されていなかった (実運用は GKE E2E 経由 = 10-20 分サイクルでしかフィードバックが得られなかった)。

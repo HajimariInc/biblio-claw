@@ -1,5 +1,5 @@
 /**
- * `list_biblio` FunctionTool — ADK Runner 配下から既存 host action `listBiblio()` を呼ぶ wrap (M4-B Phase 4)。
+ * `list_biblio` FunctionTool — ADK Runner 配下から既存 host action `listBiblio()` を呼ぶ wrap。
  *
  * 棚 (HajimariInc/biblio-shelf) の marketplace.json から蔵書一覧を取得する。category 未指定で
  * 全件、指定時はそのカテゴリで絞り込み。404 (marketplace.json 未存在) は「棚が空」として
@@ -44,7 +44,7 @@ export const listBiblioTool = new FunctionTool({
       return await listBiblio(params, { ctx: { requestId, sessionId } });
     } catch (err) {
       // `listBiblio()` は throw しない契約 (= ok:true 固定、404 も空リストで正常応答)。
-      // 万一の unexpected throw を server-side log で可視化してから rethrow する (= silent-failure-hunter I1)。
+      // 万一の unexpected throw を server-side log で可視化してから rethrow する (= silent failure 撲滅)。
       log.error('ADK tool: list_biblio unexpected throw', {
         event: 'adk.tool.list.unexpected_error',
         request_id: requestId,

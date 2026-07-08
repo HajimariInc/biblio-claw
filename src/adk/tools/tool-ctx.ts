@@ -1,14 +1,12 @@
 /**
- * `resolveToolCtx` — ADK tool 共通の `requestId` / `sessionId` 抽出ヘルパ (M4-B Phase 1)。
+ * `resolveToolCtx` — ADK tool 共通の `requestId` / `sessionId` 抽出ヘルパ。
  *
- * 3 tool (`acquire` / `inspect` / `shelve`) の execute 内で同じ 2 行が複製されていたため抽出
- * (= code-simplifier S11c 推奨)。**ADK の公開 API 面である `ReadonlyContext` の getter (=
- * `invocationId` / `sessionId`)** を経由することで、ADK 内部実装変更 (例:
- * `invocationContext.session.id` のリネーム / 派生値化) に対する resilience を確保する
- * (= type-design-analyzer S8 推奨)。
+ * 3 tool (`acquire` / `inspect` / `shelve`) の execute 内で同じ 2 行が複製されていたため抽出。
+ * **ADK の公開 API 面である `ReadonlyContext` の getter (= `invocationId` / `sessionId`)** を
+ * 経由することで、ADK 内部実装変更 (例: `invocationContext.session.id` のリネーム / 派生値化)
+ * に対する resilience を確保する。
  *
- * **fallback 戦略の使い分け** (= type-design-analyzer S9-b 推奨、意図を型から読み取れないため
- * コードコメントで明示):
+ * **fallback 戦略の使い分け** (意図を型から読み取れないためコードコメントで明示):
  *
  *   - `requestId`: `tool_context` 不在経路 (= ADK 内部の edge case、或いは unit test 経由で
  *     ADK が toolContext を省略するケース) で `crypto.randomUUID()` を **自動生成**。理由:

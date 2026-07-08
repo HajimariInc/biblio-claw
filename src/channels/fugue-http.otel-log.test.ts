@@ -1,5 +1,5 @@
 /**
- * Fugue HTTP server の trace 相関 log field 検証 (M4-E Phase 4)。
+ * Fugue HTTP server の trace 相関 log field 検証。
  *
  * `LOG_FORMAT=json` 経路 (Prod default) で emitJson() が active span から `getTraceLogFields()`
  * を呼び出し、`logging.googleapis.com/trace` / `logging.googleapis.com/spanId` /
@@ -11,7 +11,7 @@
  * evaluate して emitJson 経路を確実に有効化する (`log-trace.test.ts:47` と同流儀)。
  *
  * span 発火 + outcome 属性の検証は `fugue-http.otel.test.ts` に分離済 (2 file 分離は
- * plan Task 10 Option B の判断: LOG_FORMAT env stubbing の module 初期化順序制約に配慮)。
+ * LOG_FORMAT env stubbing の module 初期化順序制約に配慮)。
  */
 import * as otelApi from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
@@ -208,7 +208,7 @@ describe('FugueHttpServer trace log correlation (Phase 4, LOG_FORMAT=json)', () 
     expect(completed!['logging.googleapis.com/spanId']).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  // Phase 4 review I3 (pr-test-analyzer #2): 部分失敗経路 (log.error) の trace 相関 field 検証。
+  // 部分失敗経路 (log.error) の trace 相関 field 検証。
   // 従来は成功経路の completed event のみ確認していたが、trace 相関ログの実運用価値は
   // 「失敗した request を trace_id から辿って原因を見る」場面で最大化する。partial_failure ログが
   // 同じ active span context 内 (withFugueEntrySpan → withBiblioActionSpan の中、span.end() 前) で
@@ -288,14 +288,13 @@ describe('FugueHttpServer trace log correlation (Phase 4, LOG_FORMAT=json)', () 
     expect(partial!['logging.googleapis.com/spanId']).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  // PR #135 review 提案 5 対応 (pr-test-analyzer #2、malformed traceparent 経路):
+  // malformed traceparent 経路の regression 検知:
   //
   // Fugue Cloud Run 側が壊れた `traceparent` header を送ってきたときに `fugue.traceparent.malformed`
-  // event を warn として emit する経路 = Phase 4 review M3 (silent-failure #3) で「auto trace 経路が
-  // 壊れているのに Cloud Trace 側が何事もなかったかのように見える」silent 縮退を可視化するために
-  // 明示的に追加された regression 検知点。しかし本 event 自体を叩く test が unit / E2E どちらにも
-  // 存在せず「検知ガード自身が最も無防備」だった。malformed traceparent (all-zero trace_id、W3C spec
-  // §3.2 で invalid) を送信して:
+  // event を warn として emit する経路 = 「auto trace 経路が壊れているのに Cloud Trace 側が何事も
+  // なかったかのように見える」silent 縮退を可視化するために明示的に追加された regression 検知点。
+  // しかし本 event 自体を叩く test が unit / E2E どちらにも存在せず「検知ガード自身が最も無防備」
+  // だった。malformed traceparent (all-zero trace_id、W3C spec §3.2 で invalid) を送信して:
   //   (a) HTTP 応答は 200 で継続 (AD の本義: header 破損で検索を殺さない)
   //   (b) `fugue.traceparent.malformed` event が warn 経路で 1 回だけ emit される
   //   (c) 応答自体は fresh な (継承していない) 新 trace_id で生成される

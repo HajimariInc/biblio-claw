@@ -170,8 +170,8 @@ export interface VertexCallCtx {
  * Vertex 呼び出しログの共通フィールド (= `event` + `model` + ctx 由来 4 件) を集約するヘルパ。
  *
  * 失敗 / 成功 / メタデータ警告で `request_id` / `session_id` / `axis` / `biblio_name` が
- * 4 関数 × 複数箇所で逐語コピーされていた payload を 1 箇所に集約 (= PR #37 code-simplifier
- * S1 提案)。`extras` で `outcome` / `status` / `latency_ms` / `tokens_*` 等の個別フィールドを
+ * 4 関数 × 複数箇所で逐語コピーされていた payload を 1 箇所に集約。
+ * `extras` で `outcome` / `status` / `latency_ms` / `tokens_*` 等の個別フィールドを
  * 上乗せする。
  */
 function vertexLogFields(
@@ -537,7 +537,7 @@ export interface VertexJsonCallArgs {
   /**
    * Vertex Gemini の `responseSchema` フィールドに直接載せる JSON Schema オブジェクト。
    *
-   * **GOTCHA (M4-F Phase 2 罠 3)**: Vertex Gemini の `type` は **UPPERCASE** (`OBJECT` /
+   * **GOTCHA**: Vertex Gemini の `type` は **UPPERCASE** (`OBJECT` /
    * `STRING` / `NUMBER` 等)、Anthropic の JSON Schema は lowercase (`object` / `string`)。
    * ADK 経由の `simple_zod_to_json.ts` (`normalizeSchema`) は逆方向 (UPPERCASE → lowercase)
    * のため**流用しない**。呼び出し側 (Layer 4 evaluator) が Vertex 形式で直接 literal

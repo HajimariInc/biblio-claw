@@ -3,16 +3,16 @@
 // 対象: Fugue channel adapter (`src/channels/fugue-http.ts`) が Fugue Cloud Run 側から
 // 受け取る `traceparent` / `tracestate` HTTP header。
 //
-// **Phase 4 review C1 対応** (2 段構造は Phase 5 で正式化として確定):
+// **2 段構造を正式仕様として確定**:
 //
-//   確定形 (Phase 5): fugue.consult / fugue.equip → biblio.list / biblio.equip
+//   確定形: fugue.consult / fugue.equip → biblio.list / biblio.equip
 //     (auto server span 層は本 repo の ESM + `--import` 起動構成では未発火 =
 //      `@opentelemetry/instrumentation-http` の core module patch が
 //      `require-in-the-middle` 依存で、ESM で機能させるには `module.register()`
-//      が別途必要。Phase 5 の ESM フック判断で **2 段構造を正式仕様として採用** = Node 24.15.0
+//      が別途必要。ESM フック判断で **2 段構造を正式仕様として採用** = Node 24.15.0
 //      `module.register()` DEP0205 documentation-only 非推奨化 + Node 26.0.0 runtime
 //      deprecation 予定を根拠に 3 段化投資を見送り、詳細は
-//      `docs/operations-runbook.md` §M4-E Phase 4 §ESM フック判断 参照)
+//      `docs/operations-runbook.md` §ESM フック判断 参照)
 //
 // 経路の非破壊性を保つ二重の保険:
 //   1. **extract の base を `context.active()` にデフォルト引数化**

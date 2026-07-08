@@ -1,5 +1,5 @@
 /**
- * M4-H Phase 3.5 = `system-prompt-override`.
+ * migration: `system-prompt-override`.
  *
  * `container_configs.system_prompt_override TEXT` 列を追加する。
  * agent-runner (`providers/claude.ts`) が SDK に `systemPrompt: <string>` を直渡しする

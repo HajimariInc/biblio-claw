@@ -1,5 +1,5 @@
 /**
- * ADK HITL 承認完了時の resume 経路 (M4-B Phase 4)。
+ * ADK HITL 承認完了時の resume 経路。
  *
  * response-handler.ts の `adk_confirm` 分岐が admin 押下時にここ (`resolveAdkApproval`) を呼ぶ。
  * dispatcher.ts で pause した ADK session を **同じ sessionId で `runner.runAsync` 再呼出**し、
@@ -232,10 +232,9 @@ async function deliverToPatron(payload: AdkApprovalPayload, text: string, reques
     return;
   }
   try {
-    // Phase 4 review I1 対応: `deliverFallback` (dispatcher.ts:333-379) と同流儀の
+    // `deliverFallback` (dispatcher.ts:333-379) と同流儀の
     // `deliveryId === undefined` 検知を追加。CLI adapter が client 未接続時に undefined を
-    // 返すため、`delivered` ではなく `not_delivered` warn を残して silent 化を防ぐ
-    // (silent-failure-hunter C1 教訓の carry over)。
+    // 返すため、`delivered` ではなく `not_delivered` warn を残して silent 化を防ぐ。
     const deliveryId = await adapter.deliver(payload.platformId, payload.threadId, {
       kind: 'chat',
       content: { text },

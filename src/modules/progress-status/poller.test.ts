@@ -1,5 +1,5 @@
 /**
- * M4-F Phase 4: progress-status poller の unit test。
+ * progress-status poller の unit test。
  *
  * カバー範囲:
  *   - agent group 削除済 session の silent skip
@@ -54,7 +54,7 @@ const mkSession = (): Session =>
 
 const mkOutDb = () => ({ close: vi.fn() });
 
-describe('refreshProgressStatus (M4-F Phase 4)', () => {
+describe('refreshProgressStatus', () => {
   beforeEach(() => {
     vi.mocked(getAgentGroup).mockReturnValue({
       id: 'ag-1',
@@ -94,10 +94,9 @@ describe('refreshProgressStatus (M4-F Phase 4)', () => {
     expect(updateTypingStatus).not.toHaveBeenCalled();
   });
 
-  // PR #145 review pr-test-analyzer IM-8: SQLITE_CANTOPEN (better-sqlite3 readonly
-  // open 特有) が ENOENT と同じ debug 抑制分岐に落ちる (cold start 中の意図せぬ
-  // warn を silent 化) ことを assert する。以前の test は「throw しないこと」しか
-  // 検証しておらず、debug vs warn の振り分けが未確認だった。
+  // SQLITE_CANTOPEN (better-sqlite3 readonly open 特有) が ENOENT と同じ debug 抑制
+  // 分岐に落ちる (cold start 中の意図せぬ warn を silent 化) ことを assert する。
+  // 「throw しないこと」だけでは debug vs warn の振り分けが未確認になる罠を防ぐ。
   it('debug on SQLITE_CANTOPEN (better-sqlite3 readonly 特有), no warn', async () => {
     vi.mocked(openOutboundDb).mockImplementation(() => {
       const err = new Error('unable to open database file') as NodeJS.ErrnoException;

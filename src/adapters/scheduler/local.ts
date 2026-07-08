@@ -10,7 +10,7 @@ export const DEFAULT_INTERVAL_MS = 60_000;
  * interval = 5 minutes of dead sweep — long enough to be a real outage,
  * short enough that the first FATAL fires before the on-call window closes.
  * After the initial fatal, the loop re-escalates every multiple of the
- * threshold (10, 15, 20 …) so a long outage doesn't go silent (PR #6 review R1).
+ * threshold (10, 15, 20 …) so a long outage doesn't go silent.
  */
 export const FATAL_FAILURE_THRESHOLD = 5;
 
@@ -27,7 +27,7 @@ export class LocalScheduler implements SchedulerProvider {
   // Consecutive tick failures since the last success. Reset on every successful
   // tick. Surfaced via log.fatal at FATAL_FAILURE_THRESHOLD so the loop being
   // "alive but dead" (process up, but every sweep throwing) becomes observable
-  // rather than buried in a stream of log.error entries (PR #6 review P7).
+  // rather than buried in a stream of log.error entries.
   private consecutiveFailures = 0;
 
   constructor(private readonly intervalMs: number = DEFAULT_INTERVAL_MS) {}
@@ -62,7 +62,7 @@ export class LocalScheduler implements SchedulerProvider {
           // transient outage (network / OneCLI restart) shouldn't take down the
           // whole process. The fatal log entry is the on-call signal, and
           // re-firing prevents a long outage from going silent after the first
-          // fatal (PR #6 review R1).
+          // fatal.
           log.fatal(
             `Scheduler has failed ${this.consecutiveFailures} ticks in a row — sweep is effectively dead. Investigate immediately.`,
             { consecutiveFailures: this.consecutiveFailures, err },

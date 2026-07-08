@@ -121,7 +121,7 @@ function createAdapter(): ChannelAdapter {
       if (!client) {
         // 従来経路 (agent-runner): outbound.db に永続化済のため次接続で見える (data loss なし)。
         // ADK 経路 (in-process): outbound.db を経由しないため **この応答は永久にロストする**
-        // (silent-failure-hunter #1 = PR #101 review 指摘)。呼出元 dispatcher.ts は SDK 慣習に
+        // 呼出元 dispatcher.ts は SDK 慣習に
         // 従い返り値 undefined を「配信成功」として扱うため、warn ログを残さないと運用上
         // 気付きにくい。ここで silent 化せず warn を出す。呼出元側 (dispatcher.ts) はこの
         // undefined を「client 未接続 = 実 delivery なし」として扱う経路に修正済。

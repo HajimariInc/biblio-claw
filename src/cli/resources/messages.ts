@@ -57,10 +57,10 @@ export function resolveSenderUserId(agentGroupId: string, explicitUserId: string
 
 /**
  * DB open エラーを既存の pre-spawn 規律 (`delivery.ts:260` / `poller.ts:46`) と対称に分岐する。
- * PR #154 review CR-5 対応: 従来 catch-all で全 error を silent 化していた結果、EACCES /
- * SQLITE_CORRUPT / EMFILE 等の非 pre-spawn error まで「session がまだ spawn していない」と
- * 誤認して silent に retry timeout していた。`isPreSpawnDbOpenError` は ENOENT + SQLITE_CANTOPEN
- * のみ pre-spawn (debug) 扱いし、それ以外は warn で可視化する。
+ * 従来 catch-all で全 error を silent 化していた結果、EACCES / SQLITE_CORRUPT / EMFILE 等の
+ * 非 pre-spawn error まで「session がまだ spawn していない」と誤認して silent に retry
+ * timeout していた。`isPreSpawnDbOpenError` は ENOENT + SQLITE_CANTOPEN のみ pre-spawn
+ * (debug) 扱いし、それ以外は warn で可視化する。
  */
 function classifyDbOpenError(
   err: unknown,
@@ -126,7 +126,7 @@ async function pollOutbound(
         db.close();
       }
     } catch (err) {
-      // PR #154 review CR-5 対応: pre-spawn (debug) vs 非 pre-spawn (warn) の 2 分岐
+      // pre-spawn (debug) vs 非 pre-spawn (warn) の 2 分岐
       classifyDbOpenError(err, { agentGroupId, sessionId, caller: 'pollOutbound' });
       msgs = [];
     }
@@ -163,7 +163,7 @@ registerResource({
         const explicitUserId = args.user_id as string | undefined;
         const explicitThreadId = args.thread_id as string | undefined;
         const stubOutbound = args.stub_outbound === true || args.stub_outbound === 'true' || args.stub_outbound === 1;
-        // PR #154 review IM-4 対応: 数値引数の NaN 経路を fail-fast 化。
+        // 数値引数の NaN 経路を fail-fast 化。
         // 従来 `Math.max(0, Number('abc')) = NaN` → `Date.now() < NaN` は常に false →
         // pollOutbound が一度も回らず即 `timedOut: true` で silent 退化していた。
         const waitMsRaw = args.wait_ms;
@@ -199,7 +199,7 @@ registerResource({
         const fromSeq = explicitFromSeq ?? (preSession ? currentMaxOutboundSeq(agentGroupId, preSession.id) : 0);
 
         if (stubOutbound) {
-          // PR #154 review CR-1 対応: 3-tuple key (agent_group_id + channel_type + platform_id)。
+          // 3-tuple key (agent_group_id + channel_type + platform_id)。
           // thread_id は session_mode='shared' で null 化される仕様のため key から除外。
           // 詳細は `src/delivery.ts:stubTargetKey` の JSDoc 参照。
           addStubOutboundTarget(agentGroupId, mg.channel_type, mg.platform_id);
@@ -323,5 +323,3 @@ export const _messagesResourceLoaded = true;
 // の 2 段解決)。session_mode='per-thread' で thread_id なし session が存在するケース (Fugue 経路
 // など今は理論上のみ) を吸収するための defensive fallback。verify 経路は毎回 fresh session を
 // 想定するため実運用では preSession/postSession の第一候補が hit する。
-// PR #154 review CM-3 対応: `getSessionsByAgentGroup` import + void は本 file の実装に無関係な
-// 説明コメントで誤導的だったため削除 (import 自体も撤去)。

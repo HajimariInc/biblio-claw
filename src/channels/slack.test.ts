@@ -1,7 +1,7 @@
 /**
  * Tests for the Slack channel adapter's factory — specifically that the
  * factory returns null when either of the Socket Mode credentials is missing,
- * preventing a half-configured adapter from being instantiated (PR #6 review P5).
+ * preventing a half-configured adapter from being instantiated.
  *
  * The factory is registered on import via `registerChannelAdapter('slack', ...)`,
  * so the test captures the registration call to extract the factory closure.
@@ -30,7 +30,7 @@ vi.mock('../env.js', () => ({
   readEnvFile: hoist.readEnvFile,
 }));
 
-describe('Slack channel adapter factory (PR #6 review P5)', () => {
+describe('Slack channel adapter factory', () => {
   let factory: ChannelRegistration['factory'];
 
   beforeEach(async () => {

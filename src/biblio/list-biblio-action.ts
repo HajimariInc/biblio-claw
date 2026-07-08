@@ -116,7 +116,7 @@ registerDeliveryAction('list_biblio', async (content, session, inDb) => {
     } catch (err) {
       // listBiblio() は fetchMarketplace / readShelveEnv の throw 等で抜けることがある。
       // 想定外例外も握って patron に通知 (host を落とさない、`shelve-action.ts` 流儀)。
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });

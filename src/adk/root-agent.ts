@@ -1,18 +1,17 @@
 /**
- * root `LlmAgent` factory — biblio-claw 司書 root agent の構築 (M4-B Phase 1 → Phase 4 拡張).
+ * root `LlmAgent` factory — biblio-claw 司書 root agent の構築.
  *
  * `LLMRegistry.register(AnthropicVertexLlm)` 完了後 (= `registerAnthropicVertexLlm()` 経由) に
  * `buildRootAgent()` を呼ぶと、`new LlmAgent({model: 'claude-sonnet-4-6', tools: [...]})` で
- * Anthropic Claude on Vertex AI が `LLMRegistry.resolve()` 経由で解決される。Phase 4 で tools
- * 配列を 3 → 9 に拡張 (`categorize` / `list_biblio` / `shelve_biblio_multi` / `update_config` /
- * `enkin` / `shokyaku` 追加) + instruction に破壊操作の判断規範を追加した。
+ * Anthropic Claude on Vertex AI が `LLMRegistry.resolve()` 経由で解決される。tools 配列は
+ * 破壊操作 (enkin/shokyaku) を含む 9 tool を保持し、instruction に破壊操作の判断規範を集約する。
  *
- * **設計判断 (Phase 1 plan §意思決定ログ + Phase 4 plan §意思決定ログ)**:
+ * **設計判断**:
  *   - `subAgents` は不採用 (= `tools` 経路で MVP 成立)
  *   - `name: 'biblio_root_agent'` は ADK の valid 名 (snake_case + 数字、`'user'` は予約)
  *   - factory function 化 (= module-scope で `new LlmAgent(...)` を書くと import 時に Vertex
  *     SDK の認証解決が走り test の mock 順序問題を引き起こす罠を回避)
- *   - Phase 4 破壊操作 (enkin/shokyaku) の判断規範を instruction に集約 (= tool description では
+ *   - 破壊操作 (enkin/shokyaku) の判断規範を instruction に集約 (= tool description では
  *     表現しきれない cross-tool の rule)
  */
 import { LlmAgent } from '@google/adk';

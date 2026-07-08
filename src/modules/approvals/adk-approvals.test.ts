@@ -1,5 +1,5 @@
 /**
- * adk-approvals.ts のユニットテスト (M4-B Phase 4).
+ * adk-approvals.ts のユニットテスト.
  *
  * `requestAdkApproval` の 4 経路 (正常 / approver 不在 / DM 経路不在 / deliver throw) を検証。
  * onecli-approvals.ts の pattern を継承し、DB row 作成 + adapter.deliver + fallback 通知の

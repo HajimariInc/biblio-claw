@@ -1,11 +1,11 @@
 /**
- * M4-F Phase 4: 秒オーダー ポーラー本体。
+ * 秒オーダー ポーラー本体。
  *
  * `src/delivery.ts:pollActive()` の既存 1s tick loop から呼ばれ、outbound.db の
  * `container_state.current_tool` を read-only で叩き、`tool-status-map` で日本語文言に
  * 変換して `updateTypingStatus(session.id, status)` を呼ぶ。
  *
- * 契約 (PR #145 review I4 で契約と実装の乖離を修正):
+ * 契約:
  *   - **db open (`openOutboundDb`) の失敗のみ本関数内で catch**、warn / debug に振り分ける
  *   - **`getContainerState` / `updateTypingStatus` の予期しない throw は呼出元 (`pollActive`) の
  *     `.catch()` に委譲**する (稀ケース、`poller.test.ts` で defensive test 済)

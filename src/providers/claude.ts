@@ -33,7 +33,7 @@ registerProviderContainerConfig('claude', () => {
     // from .env so none of these vars are emitted.
     env.CLAUDE_CODE_USE_VERTEX = '1';
     // Suppress claude-code's built-in google-auth so the dummy token survives
-    // for OneCLI to overwrite (the previously-untrodden region PoC-5 sidestepped).
+    // for OneCLI to overwrite (a previously-untrodden region sidestepped in earlier prototypes).
     env.CLAUDE_CODE_SKIP_VERTEX_AUTH = '1';
     env.ANTHROPIC_VERTEX_PROJECT_ID = dotenv.ANTHROPIC_VERTEX_PROJECT_ID;
     env.CLOUD_ML_REGION = dotenv.CLOUD_ML_REGION || 'global';

@@ -11,9 +11,9 @@
  * 決定的ロジックは全てここに集約し、`acquire.test.ts` で固める。
  *
  * `git` は `getChildProcEnv()` の env (OneCLI proxy 経由) で実行するため、host から認証付きで
- * github に到達する。GitHub REST API 経路は `shelf-gh.ts:ghFetch` を流用 (= gh CLI 依存撤廃、
- * PR #33 hotfix で確立)。存在確認と clone の経路差 + 採用理由 (WHY) はそれぞれの呼出ブロックの
- * インラインコメントに記述する。PoC-7 `verify.sh` の clone/存在確認を写経。
+ * github に到達する。GitHub REST API 経路は `shelf-gh.ts:ghFetch` を流用 (= gh CLI 依存撤廃)。
+ * 存在確認と clone の経路差 + 採用理由 (WHY) はそれぞれの呼出ブロックのインラインコメントに
+ * 記述する。
  */
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -134,8 +134,7 @@ function hasFileRecursive(dir: string, filename: string, depth = 0): boolean {
 
 /**
  * biblio 成立条件: `.claude-plugin/marketplace.json` または任意階層の `SKILL.md`。
- * M2 PRD B Phase 1 (= 仕入れ段階) では「存在チェック」のみ実施 (schema 妥当性は M2 PRD B
- * Phase 2 検品 `inspect.ts` の責務)。
+ * 仕入れ段階では「存在チェック」のみ実施 (schema 妥当性は検品 `inspect.ts` の責務)。
  */
 function hasManifest(quarantinePath: string): boolean {
   const marketplace = path.join(quarantinePath, '.claude-plugin', 'marketplace.json');
@@ -655,7 +654,7 @@ export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = 
   //    ProxyAgent (= `initHostProxy` で設定) 経由で OneCLI proxy に乗る。本 step は
   //    `noAuth: true` で Authorization ヘッダを省略する (= 後段 `countSkillsInRepo`
   //    の marketplace.json / git/trees 経路と同流儀)。理由は外部 repo (= GH App
-  //    installation scope 外、例: `example-org/*`) の場合、placeholder を素通しすると
+  //    installation scope 外の外部 owner) の場合、placeholder を素通しすると
   //    OneCLI MITM が installation token に置換 → GitHub が scope 外として 401 を
   //    返すため (= public API は無認証で 200、rate limit は IP 単位 60 req/h で本 step
   //    は 1 acquire = 1 回呼出のため余裕)。HajimariInc 系 public repo も無認証 200。
@@ -720,7 +719,7 @@ export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = 
   if (!countResult.ok) {
     // `countSkillsInRepo` 内で warn は出ているが、acquire() 側でも skip 事実を記録する。
     // 「閾値判定なしで clone に進んだ仕入れ」を後段の `biblio acquired` log line から
-    // reverse-trace するときの audit 連鎖を切らないため (silent-failure-hunter HIGH 1)。
+    // reverse-trace するときの audit 連鎖を切らないため (silent failure 撲滅)。
     log.warn('acquire: skill count failed, skipping threshold check', {
       repo: `${owner}/${name}`,
       reason: countResult.reason,
@@ -745,11 +744,11 @@ export async function acquire(req: AcquireRequest, opts: { ctx?: GhFetchCtx } = 
 
   // 2. quarantine 配置先 (biblioName = `<owner>--<name>` の dedup key)。
   //
-  // M2 PRD B Phase 1 (= 仕入れ初期実装) では `biblioName = name` だったが、別 owner の同名 repo が
-  // 同じ quarantine dir を奪い合う silent failure を産んでいた (= M2 PRD B Phase 3 (= 陳列) で
-  // 別 owner の同名 biblio をすり替えるリスク)。GitHub 規約上 `/` は owner/repo に
-  // 含まれず、`--` は通常 repo 名に出現しない (= 衝突可能性は実務上ゼロ) ため、
-  // dedup key かつ shelf entry name として安全に使える形式 (M2 PRD B Phase 3 §補足)。
+  // 素朴に `biblioName = name` としてしまうと、別 owner の同名 repo が同じ quarantine
+  // dir を奪い合う silent failure を産む (= 陳列段階で別 owner の同名 biblio を
+  // すり替えるリスク)。GitHub 規約上 `/` は owner/repo に含まれず、`--` は通常 repo
+  // 名に出現しない (= 衝突可能性は実務上ゼロ) ため、dedup key かつ shelf entry name
+  // として安全に使える形式。
   const biblioName = `${owner}--${name}`;
   const quarantinePath = path.join(QUARANTINE_DIR, biblioName);
   try {

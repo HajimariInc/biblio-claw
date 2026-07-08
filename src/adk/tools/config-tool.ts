@@ -1,12 +1,11 @@
 /**
  * `update_config` FunctionTool — ADK Runner 配下から biblio 設定 (allowlist: ACQUIRE_SKILL_THRESHOLD)
- * を動的変更する wrap (M4-B Phase 4)。
+ * を動的変更する wrap。
  *
  * `setBiblioSetting()` を直接呼び、delivery 経路の `config-action.ts` は経由しない (= ADK 経路には
- * session が無く `isConfigChangeAllowed(session)` の admin check が呼べないため。plan §Out of Scope
- * および §意思決定ログ「`update_config` の admin check は ADK 経路では省略」参照)。allowlist と
- * key-specific value validation は共通コード (`BIBLIO_SETTING_KEYS` + `validateValueForKey`) を
- * import して二重定義を避ける。
+ * session が無く `isConfigChangeAllowed(session)` の admin check が呼べないため、admin check は
+ * ADK 経路では省略する設計判断)。allowlist と key-specific value validation は共通コード
+ * (`BIBLIO_SETTING_KEYS` + `validateValueForKey`) を import して二重定義を避ける。
  *
  * 設計理念は `acquire-tool.ts` 冒頭ドキュメント参照。
  */
@@ -78,7 +77,7 @@ export const updateConfigTool = new FunctionTool({
     } catch (err) {
       // `setBiblioSetting()` は throw しない設計だが、DB layer の予期しない障害 (SQLITE_BUSY 等) を
       // silent に握ると patron 認知と実態が乖離するため、log.error で可視化してから rethrow する
-      // (= silent-failure-hunter I1、他 tool と同流儀)。
+      // (= silent failure 撲滅、他 tool と同流儀)。
       log.error('ADK tool: update_config unexpected throw', {
         event: 'adk.tool.config.unexpected_error',
         request_id: requestId,

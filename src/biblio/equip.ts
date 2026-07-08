@@ -1,13 +1,13 @@
 /**
- * 装備機構の物理配置解決 (M3 Phase 2)。
+ * 装備機構の物理配置解決。
  *
  * 装備リストは session 単位で `session_equipped_biblios` (central DB) に永続化される。
  * 本関数は session の装備リストを `order_index` ASC で読み、各 biblio name について
  * `BIBLIO_NAME_RE` 検証 + 物理 dir 存在確認を行い、通ったものだけ `EquippedBiblio[]` で
- * 返す。signature は Phase 1 から不変なので、`buildMounts` の呼び出しは無変更で動く。
+ * 返す。`buildMounts` の呼び出しに透過的に接続する。
  *
- * env `BIBLIO_EQUIPPED_NAMES` は Phase 1 で導入した stub だが、Phase 2 では DB lookup の
- * **オーバーライドとしてのみ有効** (= env が明示的にセットされている場合のみ env 経路を
+ * env `BIBLIO_EQUIPPED_NAMES` は DB lookup の **オーバーライドとしてのみ有効**
+ * (= env が明示的にセットされている場合のみ env 経路を
  * 取る)。これはテストで agent_group / session を持たずに装備リストを差し込めるバック
  * ドアとして残置する。本番経路 (= host で env をセットしない) では常に DB lookup。
  */

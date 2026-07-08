@@ -1,13 +1,13 @@
 /**
- * M4-F Phase 2 gate audit log。
+ * gate audit log。
  *
  * gate 判定の結果を「Cloud Logging structured log」+「local `.jsonl` fallback」の 2 経路で
- * 記録する。GCP は既存 M4-A Phase 3 sink (`biblio-claw-to-bq`、`terraform/m4-a-observability/`) が Cloud Logging → BQ に自動
+ * 記録する。GCP は既存 observability sink (`biblio-claw-to-bq`、`terraform/m4-a-observability/`) が Cloud Logging → BQ に自動
  * export、local docker (Cloud Logging 経路不在) は `.jsonl` にファイル追記で「残せる」。
  *
  * payload shape は既存 `src/log.ts:emitJson` の Cloud Logging reserved fields
  * (`severity` / `time` / `message`) + `getTraceLogFields()` auto spread と対称にする
- * (trace ↔ log 相関を M4-A 経路で自動確立)。
+ * (trace ↔ log 相関を observability 経路で自動確立)。
  *
  * env:
  *   - `GATE_AUDIT_LOG_PATH` (既定 `data/gate-audit.jsonl`): 出力先 path
@@ -31,7 +31,7 @@ function truncateDigest(text: string, max: number): string {
 }
 
 /**
- * audit event の channel 分類 (closed union、silent-failure-hunter I4 + type-design 所見 1 対応)。
+ * audit event の channel 分類 (closed union、silent-failure 撲滅 + 型設計上の要請)。
  *
  * `'other'` は「slack/cli/fugue 以外の将来 channel or 判定不能」の防御的 fallback。将来 Discord/
  * Teams 等の adapter が追加され routeInbound に流れ込んだ際、audit trail が silent に `'slack'`
@@ -42,7 +42,7 @@ export type GateAuditChannel = 'slack' | 'cli' | 'fugue' | 'other';
 /**
  * gate audit log 1 件の event shape (呼出側が組み立てる)。
  *
- * silent-failure-hunter I5 対応で `outcome:'error'` variant を追加 (gate 自体の throw を audit
+ * silent-failure 撲滅で `outcome:'error'` variant を追加 (gate 自体の throw を audit
  * trail に載せて `event='gate.classified'` / `component='gate'` 集計から silent undercount する
  * のを防ぐ)。`outcome:'error'` は layer / classification が確定していない状態なので、
  * discriminated union で余計なフィールドを持たない (blocked/allowed variant は従来通り)。
@@ -59,7 +59,7 @@ export type GateAuditEvent =
       /** InboundEvent.channelType 生値。multi-channel 対応時の識別用。 */
       channelType: string;
       userId?: string | null;
-      /** Layer 4 evaluator が失敗し fallback biblio-other を返した場合 true (I6 対応)。 */
+      /** Layer 4 evaluator が失敗し fallback biblio-other を返した場合 true。 */
       degraded?: boolean;
     }
   | {
@@ -99,7 +99,7 @@ export function buildGateAuditPayload(event: GateAuditEvent): Record<string, unk
 }
 
 /**
- * `.jsonl` write fail のカウンタ (silent-failure-hunter I12 対応)。misconfigured
+ * `.jsonl` write fail のカウンタ (silent-failure 撲滅目的)。misconfigured
  * `GATE_AUDIT_LOG_PATH` (read-only mount 等) で毎 gate 呼出で `log.error` が発火する
  * flood を抑制しつつ、累積失敗数を N 件ごとに再度可視化する。process 単位の in-memory
  * counter、Pod 再起動で reset (local docker path でしか実質発火しない = GKE は

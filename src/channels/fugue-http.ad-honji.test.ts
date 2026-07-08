@@ -1,5 +1,5 @@
 /**
- * Fugue HTTP server "AD の本義" 契約 assertion (M4-E Phase 4)。
+ * Fugue HTTP server "AD の本義" 契約 assertion。
  *
  * PRD `m4-e-fugue-integration.prd.md` §「AD の本義」で定義された 2 契約を機械化する:
  *
@@ -28,7 +28,7 @@ const TOKEN = 'adh-test-token-abcdef0123456789abcdef0123456789abcdef01';
 
 /**
  * source 内の `log.<method>(...)` 呼出しを quote-aware + bracket-balanced に切り出す
- * (review 中 3 対応、正規表現の脆弱性 = message 内 `)` / nested object / 内部 `{...}` で
+ * (正規表現の脆弱性 = message 内 `)` / nested object / 内部 `{...}` で
  * false negative になる問題の根絶)。
  *
  * 挙動:
@@ -144,7 +144,7 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       // check + `writeError(res, 500, ...)` は uncaught 想定のみ発火)、静的 grep assertion で
       // 「5xx 応答経路が catch-all 1 箇所に集約されていること」を担保する。
       //
-      // M4-H Phase 4 Task 3 (rate limit): `writeError(res, 429, ...)` は 4xx なので本 assertion に
+      // rate limit: `writeError(res, 429, ...)` は 4xx なので本 assertion に
       // 影響しない (429 は enumeration 対象外、Contract §5.6 の `RATE_LIMITED` semantics)。
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
@@ -155,7 +155,7 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       ).toBe(1);
     });
 
-    // Phase 4 review S1 (type-design-analyzer): 全 200 応答分岐で fugueSpan.setAttribute('fugue.outcome', ...)
+    // 全 200 応答分岐で fugueSpan.setAttribute('fugue.outcome', ...)
     // が刻まれていることを静的 grep で強制。withFugueEntrySpan の型では強制せず (over-engineering、
     // BiblioActionName / fugue.outcome の domain logic を呼び出し側が決める既存流儀を維持) の代わりに、
     // 対称性の機械保証で silent gap を塞ぐ。将来 200 応答分岐が追加された際、fugue.outcome の
@@ -177,9 +177,9 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
           `全 200 応答分岐で outcome 属性を刻むべき (Cloud Trace outcome ベース集計からの silent drop 防止)。`,
       ).toBe(writeJson200Matches.length);
       // 参考値の retention:
-      //   - M4-E Phase 4 完了時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
+      //   - 初期時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
       //     partial_B + success)。
-      //   - **M4-H Phase 4 完了時点は 17** (consult 2 + equip 5 + ask 10 = invoked/in_secure/
+      //   - **ask endpoint 導入後は 17** (consult 2 + equip 5 + ask 10 = invoked/in_secure/
       //     config_missing/spawn.failed/spawn.timeout/response.parse_failed/self_val_in_secure/
       //     self_val_ok/completed 分岐 + rate_limited を除く 200 経路)。`recordFugueProcessingTime`
       //     呼出数も対称に 17 (下の test 4 で機械検知、Task 6 の 5xx-set 直後契約)。
@@ -187,20 +187,20 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       expect(writeJson200Matches.length).toBeGreaterThanOrEqual(6);
     });
 
-    // Phase 4 Task 9 (M4-H): 全 fugue log payload に operation field が付与されていることを
-    // 静的 grep で強制。BQ sink 上の `WHERE jsonPayload.operation = "ask"` query が Phase 5
+    // 全 fugue log payload に operation field が付与されていることを
+    // 静的 grep で強制。BQ sink 上の `WHERE jsonPayload.operation = "ask"` query が
     // deploy 後に即動く構造的保証、regression 保護 (追加のみで既存 field 無変更、regression zero)。
     //
     // 除外: handleRequest 共通 log (path 未特定) は operation を付けない = 8 event を除外リスト化。
     // appendGateAuditLog は log 呼出ではない (`log.info/warn/error/debug` の外) ので log block
     // 抽出関数の対象外 (function 名 `log.<method>` で始まる block のみ拾う)。
     //
-    // **regex 脆弱性の根絶 (review 中 3 対応)**: 従来の `[^)]*\{[\s\S]*?\}\s*\)` regex は message 引数に
+    // **regex 脆弱性の根絶**: 従来の `[^)]*\{[\s\S]*?\}\s*\)` regex は message 引数に
     // `)` を含む文字列や、payload 内の nested object (`issues: [{...}]` 等) で false negative になる。
     // 本 test では quote-aware + bracket-balanced な `extractLogBlocks` パーサに置き換えて、log block
     // の切り出しを構造的に頑健化する。string literal (single/double/backtick) 内の `(` `)` は counter
     // から除外され、backslash escape も対応。
-    it('static grep: 全 fugue log payload has operation field (M4-H Phase 4 Task 9)', () => {
+    it('static grep: 全 fugue log payload has operation field', () => {
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
       const logBlocks = extractLogBlocks(source);
@@ -211,36 +211,36 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       const violations = fugueLogBlocks.filter((block) => !commonEventPattern.test(block) && !opPattern.test(block));
       expect(
         violations,
-        `M4-H Phase 4 対称性: 全 fugue log に operation field 必須。違反 ${violations.length} 件: ` +
+        `対称性契約: 全 fugue log に operation field 必須。違反 ${violations.length} 件: ` +
           violations.map((v) => v.slice(0, 200)).join(' || '),
       ).toHaveLength(0);
-      // fugue log 総数の下限 assertion (追加時の regression 気付き)。M4-H Phase 4 完了時点で
+      // fugue log 総数の下限 assertion (追加時の regression 気付き)。ask endpoint 導入後の時点で
       // 40+ log 想定 (共通 8 + fugue.<op> 系 30+)。
       expect(fugueLogBlocks.length).toBeGreaterThanOrEqual(30);
     });
 
-    // Phase 4 Task 9 (M4-H, review 中 2 対応で pattern-match 化): recordFugueProcessingTime 呼出数と
-    // fugue.outcome set 数の対称性契約を、outcome set の分岐特性に合わせて緩和した。
+    // recordFugueProcessingTime 呼出数と fugue.outcome set 数の対称性契約を、outcome set の
+    // 分岐特性に合わせて緩和した。
     //
-    // - **Task 6 当初契約**: 17 == 17 の呼出数 exact match。しかし self_validation_failed の nested
+    // - **当初契約**: 17 == 17 の呼出数 exact match。しかし self_validation_failed の nested
     //   分岐 (denied + ok completed) では親スコープの `processing_time_ms` を再利用するのが自然で、
     //   対称性を保つために helper を「返り値捨て + span attribute の上書き」で二重呼出しにしていた
     //   = 実運用では ~ms オーダの silent inconsistency (`fugue.processing_time_ms` span attr と
     //   response body の `processing_time_ms` field がわずかにズレる) を生んでいた。
-    // - **review 中 2 対応後**: 二重呼出しを除去し、self_validation_failed 分岐 2 経路は親スコープの
+    // - **改修後**: 二重呼出しを除去し、self_validation_failed 分岐 2 経路は親スコープの
     //   processing_time_ms を明示的に再利用する。残る 15 outcome set は 1:1 で helper 呼出しペア。
     //
     // 契約: `recordFugueProcessingTime` 呼出数 == `fugueSpan.setAttribute('fugue.outcome', ...)` 数
     //       (親再利用経路の許容数、現行 2)。新規 outcome set 追加時は helper 呼出しも追加すること。
     //       親再利用が正当な追加 (別 nested self_val 分岐等) なら、下記の allowedShared 定数を +1 する
     //       (変更理由をコメントに明示、CI review で意図確認)。
-    it('static grep: recordFugueProcessingTime call count symmetric with fugue.outcome set (M4-H Phase 4 Task 6 revised)', () => {
+    it('static grep: recordFugueProcessingTime call count symmetric with fugue.outcome set', () => {
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
       const recordMatches = source.match(/recordFugueProcessingTime\(/g) ?? [];
       const outcomeMatches = source.match(/fugueSpan\.setAttribute\('fugue\.outcome',/g) ?? [];
       // 親スコープの processing_time_ms を再利用する分岐数 (self_validation_failed が denied + ok
-      // completed の 2 経路で発生、review 中 2 対応で helper 二重呼出しを除去済)。
+      // completed の 2 経路で発生、helper 二重呼出しを除去済)。
       const allowedSharedProcessingTime = 2;
       expect(
         recordMatches.length,

@@ -231,15 +231,15 @@ export type ShelveFailureReason =
   /**
    * 必須 env 欠落 (`SHELF_REPO_OWNER` / `SHELF_REPO_NAME` / `SHELF_PR_AUTHOR_NAME` / `SHELF_PR_AUTHOR_EMAIL` の計 4 件、`shelf-gh.ts:SHELVE_ENV_KEYS_REQUIRED`) = 設定不備。`github_api_error` と区別し、patron に "設定不備" として認知させる (= GitHub API 障害との誤解を防ぐ、issue #50)。
    *
-   * **M4-B Phase 4 追加 (Phase 4 review CM4 対応)**: ADK 経路の 4 用途にも転用されている。
-   * `UnshelveFailureReason` に対応 tag がない失敗を config_error に集約している:
+   * **ADK 経路の 4 用途にも転用**: `UnshelveFailureReason` に対応 tag がない失敗を
+   * config_error に集約している:
    *   - `enkin-tool.ts` / `shokyaku-tool.ts` の path-traversal guard 失敗 (`BIBLIO_NAME_RE` 不通過)
    *   - `enkin-tool.ts` / `shokyaku-tool.ts` の admin 拒否 (`toolConfirmation.confirmed=false`)
    *   - `enkin-tool.ts` / `shokyaku-tool.ts` の `tool_context` 不在 (defensive)
-   *   - `enkin-tool.ts` / `shokyaku-tool.ts` の `requestConfirmation` throw (Phase 4 review I2)
+   *   - `enkin-tool.ts` / `shokyaku-tool.ts` の `requestConfirmation` throw
    *   - `shelve-multi-tool.ts` の path-traversal guard 失敗 (per-item BIBLIO_NAME_RE 不通過)
    * 各 tool ファイルのコメントで個別に「なぜ config_error を借用するか」を明記済。将来
-   * Phase 90 で `UnshelveFailureReason` / `MultiShelveFailureReason` に `'schema_invalid'` /
+   * `UnshelveFailureReason` / `MultiShelveFailureReason` に `'schema_invalid'` /
    * `'user_rejected'` 追加を検討 (= 型分離の判断は本 union が unshelve 経路とも共有される
    * closed union のため慎重に扱う)。
    */
@@ -254,11 +254,11 @@ export type ShelveResult =
   | { ok: false; biblioName: string; reason: ShelveFailureReason; detail: string };
 
 /**
- * 複数 (biblioName, category) を 1 PR にまとめる陳列リクエストの 1 件 (Phase 4 multi-category-shelve)。
+ * 複数 (biblioName, category) を 1 PR にまとめる陳列リクエストの 1 件。
  *
- * 1 仕入れリクエストで複数 skill が異なる category に分かれるケース (= PRD シナリオ A
- * 「同一 repo 内で複数 category へ分散」) を表現する。`reason` は per-item の categorize 判定
- * 理由 (= shelveMulti が commit message / PR body に category 別 section で展開する)。
+ * 1 仕入れリクエストで複数 skill が異なる category に分かれるケース (= 同一 repo 内で
+ * 複数 category へ分散) を表現する。`reason` は per-item の categorize 判定理由
+ * (= shelveMulti が commit message / PR body に category 別 section で展開する)。
  */
 export interface MultiShelveItem {
   biblioName: string;
@@ -299,7 +299,7 @@ export type MultiShelveResult =
     };
 
 /**
- * 解除 (kaijo / unshelve) の型 (M3 Phase 3)。
+ * 解除 (kaijo / unshelve) の型。
  *
  * 棚 (shelf) から biblio を除去する draft PR を作る `unshelve()` の入出力。
  * 禁書 (`enkin`) / 焼却 (`shokyaku`) はこの薄ラッパで、本ファイル末尾に
@@ -336,7 +336,7 @@ export type EnkinResult = UnshelveResult;
  * 作成が成功した後の付随処理で、失敗しても `ok=true` を維持する設計だが、patron に
  * 「物理削除しました」と無条件通知すると焼却の意味 (= 再装備不可) を誤認させるため、
  * 失敗内容を `cleanupWarning` で持ち上げて action handler 側で通知文言を切替える
- * (= silent failure 防止、PR #15 silent-failure-hunter HIGH 2 対応)。
+ * (= silent failure 撲滅)。
  */
 export type ShokyakuResult =
   | {
@@ -352,11 +352,11 @@ export type ShokyakuResult =
   | { ok: false; biblioName: string; reason: UnshelveFailureReason; detail: string };
 
 /**
- * 装備機構 (souwa / equip) の型 (M3 Phase 1 で導入、Phase 2 で DB lookup 化済)。
+ * 装備機構 (souwa / equip) の型。
  *
  * 司書が shelf clone を agent-container に取り込み実行する「装備」の
  * 物理配置 1 件を表す。実装詳細は `equip.ts:resolveEquippedBiblios` を参照
- * (Phase 2 で `session_equipped_biblios` テーブルから session 単位 lookup、
+ * (`session_equipped_biblios` テーブルから session 単位 lookup、
  * env override は test only バックドアとして残置)。
  */
 

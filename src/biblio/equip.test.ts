@@ -1,7 +1,7 @@
 /**
- * `equip.ts` (= 装備機構の物理配置解決) のユニットテスト (M3 Phase 2)。
+ * `equip.ts` (= 装備機構の物理配置解決) のユニットテスト。
  *
- * Phase 2 で DB lookup 化されたので、test setup で `initTestDb` + `runMigrations` +
+ * DB lookup 経路を検証する。test setup で `initTestDb` + `runMigrations` +
  * session 作成 + `upsertEquippedBiblios` で装備リストを seed して、
  * `resolveEquippedBiblios` が DB 経路で正しく返すかを確認する。
  *

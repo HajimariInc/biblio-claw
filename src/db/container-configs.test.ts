@@ -1,5 +1,5 @@
 /**
- * `container-configs.ts` CRUD のユニットテスト (M4-H Phase 3.5 = system-prompt-override 追加)。
+ * `container-configs.ts` CRUD のユニットテスト (system-prompt-override 追加)。
  *
  * - migration020 apply で system_prompt_override 列が作られる
  * - migration idempotency (2 回 apply しても throw しない、PRAGMA table_info guard)
@@ -11,7 +11,7 @@
  * - null 復帰は不可 (fields.length=0 pattern の undefined guard 挙動を明示 test)
  * - invalid col throw
  * - configFromDb 変換 (NULL → undefined、value → value)
- * - SCALAR_COLUMNS 一貫性 (Task 7 の SCALAR_COLUMNS Set + Pick<> union 2 箇所同期)
+ * - SCALAR_COLUMNS 一貫性 (SCALAR_COLUMNS Set + Pick<> union 2 箇所同期)
  *
  * biblio-settings.test.ts + session-equipped-biblios.test.ts と同じ
  * in-memory DB + runMigrations パターン。
@@ -75,7 +75,7 @@ afterEach(() => {
   closeDb();
 });
 
-describe('container_configs CRUD (M4-H Phase 3.5)', () => {
+describe('container_configs CRUD (system_prompt_override 列)', () => {
   describe('migration020', () => {
     it('applies system_prompt_override column to container_configs', () => {
       const db = initTestDb();

@@ -1,5 +1,5 @@
 /**
- * enkin-tool のユニットテスト (M4-B Phase 4)。
+ * enkin-tool のユニットテスト。
  *
  * HITL pause/resume 経路の 3 pattern (初回呼出 / Resume approve / Resume reject) + BIBLIO_NAME_RE
  * guard を検証。`tool_context.requestConfirmation` は関数 mock、`tool_context.toolConfirmation` は

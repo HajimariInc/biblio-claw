@@ -160,8 +160,8 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     expect(notifiedText).toContain('焼却完了');
     expect(notifiedText).toContain('https://github.com/HajimariInc/biblio-shelf/pull/88');
     // cleanup 失敗を patron に明示 (= 「物理削除しました」と無条件通知しない)。
-    // PR #117 review (silent-failure-hunter HIGH) 対応でヘッドラインを理由非依存に一般化:
-    // 「装備源の物理削除に失敗」→「装備状態のクリーンアップに一部失敗しました」に変更。
+    // ヘッドラインは理由非依存に一般化されている
+    // (「装備源の物理削除に失敗」→「装備状態のクリーンアップに一部失敗しました」)。
     // 個別の失敗詳細は cleanupWarning 経由でメッセージ末尾に残る (EACCES 等)。
     expect(notifiedText).toContain('装備状態のクリーンアップに一部失敗しました');
     expect(notifiedText).toContain('EACCES');

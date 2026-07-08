@@ -1,14 +1,14 @@
 /**
  * `progress.status.transition` event の共有 payload 定義 + emit helper。
  *
- * M4-F Phase 5 で 5 発火点 (`updateTypingStatus` / `triggerTyping` / `emitPreSpawnStatus` /
+ * 5 発火点 (`updateTypingStatus` / `triggerTyping` / `emitPreSpawnStatus` /
  * `emitAdkToolStatus` / `chat-sdk-bridge.setTyping`) に info emit を追加した際、payload
  * の field 名 / union 値が inline object literal で分散コピーされ、typing/index.test.ts +
  * pre-spawn.test.ts + chat-sdk-bridge.test.ts + verify-m4-f.sh の 4 箇所に同じ field list
- * が独立管理される状態になっていた (PR #154 review type-design IM-7)。本 helper でコンパイル
- * 時 union 検査 + 必須 field 欠落検知を集中化する。
+ * が独立管理される状態になる問題があった。本 helper でコンパイル時 union 検査 +
+ * 必須 field 欠落検知を集中化する。
  *
- * `withBiblioActionSpan` の `BiblioActionName` 12 値 closed union (M4-A Phase 2 `action-helpers.ts`)
+ * `withBiblioActionSpan` の `BiblioActionName` 12 値 closed union (`action-helpers.ts`)
  * と同じ設計判断: 「typo は compile-time で block、意味の source of truth を 1 箇所に集約」。
  */
 import { log } from '../../log.js';

@@ -103,8 +103,7 @@ describe('LocalScheduler', () => {
 
   // tick が連続失敗したときに on-call が気づける形で signal を出す。閾値未満は
   // log.error のみ、閾値到達で初回 log.fatal、その後も閾値の倍数 (5/10/15…)
-  // ごとに log.fatal を再発火する (長期障害の sweep 完全停止が無音化しない、
-  // PR #6 review R1)。
+  // ごとに log.fatal を再発火する (長期障害の sweep 完全停止が無音化しない設計)。
   it('emits log.fatal at the threshold and at every multiple thereafter', async () => {
     const fatalSpy = vi.spyOn(log, 'fatal').mockImplementation(() => {});
     const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});

@@ -1,21 +1,21 @@
 /**
- * Fugue HTTP server の OTel integration test (M4-E Phase 4)。
+ * Fugue HTTP server の OTel integration test。
  *
  * fugue-http.test.ts の mock pattern (listBiblio / shelf-gh / fugue-equipped-biblios / hitl-policy)
- * を port:0 ephemeral bind + 実 HTTP fetch に組み合わせて、Phase 4 で追加した **2 段 trace 構造**
+ * を port:0 ephemeral bind + 実 HTTP fetch に組み合わせて、**2 段 trace 構造**
  * (`fugue.consult`/`fugue.equip` → `biblio.list`/`biblio.equip`) と outcome 属性、`traceparent`
  * header からの trace_id 継承を InMemorySpanExporter で観測する。
  *
  * **auto server span 層 (kind=SERVER、HttpInstrumentation 経由) は本 test の scope 外**
- * (Phase 4 review C1 対応、本 repo の ESM + `--import` 起動構成で HttpInstrumentation は現状
- * 未発火のため、real NodeSDK + HttpInstrumentation を registration する統合 test は Phase 5 で
- * ESM フック整備後に別途組む予定 = `docs/operations-runbook.md` §M4-E Phase 4 §関連する
- * scope 境界)。本 test は BasicTracerProvider による中央 (fugue) + 下 (biblio) の 2 layer 検証に
- * 特化し、上層 (auto server span) の親子関係検証は現状 unit test で担わない意思決定。
+ * (本 repo の ESM + `--import` 起動構成で HttpInstrumentation は現状未発火のため、real NodeSDK
+ * + HttpInstrumentation を registration する統合 test は ESM フック整備後に別途組む予定 =
+ * `docs/operations-runbook.md` §ESM フック判断 参照)。本 test は BasicTracerProvider による中央
+ * (fugue) + 下 (biblio) の 2 layer 検証に特化し、上層 (auto server span) の親子関係検証は現状
+ * unit test で担わない意思決定。
  *
  * LOG_FORMAT=json 依存の trace 相関 log field 検証は `fugue-http.otel-log.test.ts` に分離
  * (log.ts の FORMAT は module load 時に評価されるため、env stubbing 経路は独立 file で
- * dynamic import する必要がある、plan Task 10 の Option B 判断)。
+ * dynamic import する必要がある)。
  */
 import * as otelApi from '@opentelemetry/api';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
@@ -261,7 +261,7 @@ describe('FugueHttpServer OTel integration (Phase 4)', () => {
     expect(biblio.parentSpanContext?.spanId).toBe(fugue.spanContext().spanId);
   });
 
-  // Phase 4 review I2 (pr-test-analyzer #1): equip 系失敗/欠落分岐の span 属性検証。
+  // equip 系失敗/欠落分岐の span 属性検証。
   // 従来 equip 側の OTel テストは成功 1 case のみで、not_found / already_equipped /
   // partial_failure (listBiblio throw / DB write throw) の 4 分岐は response body test 側で
   // しか担保されておらず、setAttribute のタイポや消し忘れが silent regression 化する構造。
@@ -363,7 +363,7 @@ describe('FugueHttpServer OTel integration (Phase 4)', () => {
     expect(biblio.status.message).toBe('equip_state_write_failed');
   });
 
-  // Phase 4 review S3 (pr-test-analyzer 提案 3): 401 応答で fugue span が発火しないことの regression guard。
+  // 401 応答で fugue span が発火しないことの regression guard。
   // fugue-http.ts:326-340 の Bearer auth 判定は L347 の runInContext より **前** に位置し、
   // 構造的に 401 応答では withFugueEntrySpan に到達しない。既存 ad-honji.test.ts は status code のみ
   // 確認、本 test は span 発火有無を明示 assert して将来 auth chunk が span 生成の後ろに移動する

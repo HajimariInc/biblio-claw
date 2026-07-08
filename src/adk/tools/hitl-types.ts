@@ -1,5 +1,5 @@
 /**
- * HITL 承認 tool の共有型定義 (M4-B Phase 4 review response、issue #108 対応)。
+ * HITL 承認 tool の共有型定義 (issue #108 対応)。
  *
  * `enkin_biblio` / `shokyaku_biblio` の破壊操作 tool は `tool_context.requestConfirmation()`
  * で pause し、admin 承認後に resume される。このとき tool → dispatcher → adk-approvals →
@@ -12,10 +12,9 @@
  *      dispatcher が `event.content.parts` から取り出して `requestAdkApproval` に渡す payload、
  *      adk-approvals が pending_approvals.payload に serialize する `toolPayload` の shape
  *
- * **設計判断 (Phase 4 review type-design-analyzer W3-3 / W3-4)**:
+ * **設計判断**:
  *
- *   - PR #105 レビューで「3 箇所の重複定義」「`Record<string, unknown>` 経由の型情報損失」
- *     が指摘されたため named type に統一
+ *   - 3 箇所の重複定義 + `Record<string, unknown>` 経由の型情報損失を避けるため named type に統一
  *   - `HITL_ACTIONS` 配列を single source of truth とし、`HitlToolAction` 型は
  *     `(typeof HITL_ACTIONS)[number]` で導出、`isHitlAction()` type guard も同配列を参照する
  *     (array-first パターン、`BIBLIO_CATEGORIES` / `BIBLIO_SETTING_KEYS` と同じ)。新 HITL tool
@@ -38,7 +37,7 @@ import type { BiblioCategory } from '../../biblio/types.js';
  *      tool 側 payload 構築は自動的に型 error で検知される)
  *   2. `isHitlAction()` の runtime 判定も自動追従 (dispatcher.ts の pending 判定が新値を受理)
  * その後の作業:
- *   3. `src/adk/tools/<新>-tool.ts` を Pattern 2 (enkin-tool.ts) 踏襲で作成
+ *   3. `src/adk/tools/<新>-tool.ts` を enkin-tool.ts 踏襲で作成
  *   4. `src/adk/root-agent.ts` の tools 配列に追加
  *   5. `adk-approvals.ts:120` の title 三項比較を更新 (exhaustiveness check 機構がないため
  *      型 error で検知されない = 手動 review 必須、issue #108 scope 外)

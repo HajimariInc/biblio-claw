@@ -1,5 +1,5 @@
 /**
- * shelve-multi-tool のユニットテスト (M4-B Phase 4)。
+ * shelve-multi-tool のユニットテスト。
  *
  * shelve-tool.test.ts と同流儀。items array + per-item BIBLIO_NAME_RE guard + execute 委譲を
  * 1 path で検証。`mockToolContext` / `resetLogMocks` は `test-helpers.ts` 参照。

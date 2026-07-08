@@ -1,7 +1,6 @@
 /**
  * Schema 変換ヘルパ — ADK `FunctionDeclaration` (= Gemini 流儀 UPPERCASE Schema) を
- * Anthropic `Tool[]` (= JSON Schema lowercase + `input_schema` 必須) に変換する純粋関数集
- * (M4-B Phase 2)。
+ * Anthropic `Tool[]` (= JSON Schema lowercase + `input_schema` 必須) に変換する純粋関数集。
  *
  * **背景**:
  *   - ADK 1.3.0 (`@google/adk`) は内部の `simple_zod_to_json.ts` で Zod schema を Gemini 系の
@@ -12,7 +11,7 @@
  *   - 違いは `type` フィールドの大文字小文字のみで、その他は概ね JSON Schema 互換
  *   - → 受け取った schema を再帰的に `type.toLowerCase()` するだけで Anthropic API に渡せる
  *
- * **設計判断 (Phase 2 plan §意思決定ログ)**:
+ * **設計判断**:
  *   - 外部 dep (`pailat/adk-llm-bridge` / `zod-to-json-schema`) は追加しない (= ソース写経のみ)
  *   - `normalizeSchema` は `type` のみ正規化 + 残りは pass-through (= 過剰検証を避ける)
  *   - `toAnthropicTools` の name 不在は warn + skip (= silent failure 撲滅)
@@ -157,7 +156,7 @@ export function toAnthropicTools(adkTools: unknown): AnthropicTool[] {
   if (!Array.isArray(adkTools)) return [];
   const result: AnthropicTool[] = [];
   for (const entry of adkTools as AdkToolEntry[]) {
-    // `?? []` は削除 (= 直後の !Array.isArray guard と二重防御になっていた、code-simplifier #2)。
+    // `?? []` は削除 (= 直後の !Array.isArray guard と二重防御になっていた)。
     // functionDeclarations が undefined / 非配列なら等しく continue で skip する。
     const fns = entry?.functionDeclarations;
     if (!Array.isArray(fns)) continue;
@@ -170,12 +169,12 @@ export function toAnthropicTools(adkTools: unknown): AnthropicTool[] {
         continue;
       }
       // TODO(ADK 1.4.0+): fn.parametersJsonSchema が追加されたら parameters より優先採用する
-      // (= type-design-analyzer #3、grep しやすいコメントで残す)。
+      // (grep しやすいコメントで残す)。
       const normalized = normalizeSchema(fn.parameters);
       // Anthropic は `input_schema.type: 'object'` 必須 (= SDK の `InputSchema` 型リテラル制約)。
       // `normalizeSchema` の結果が他 type / 不在のときは強制的に `'object'` に倒す
       // (= `parameters` 不在 / 不正経路の最小スケルトン fallback)。
-      // silent-failure-hunter #4 対応: fn.parameters が非 null で不正型 (= string 等) だと
+      // silent failure 撲滅: fn.parameters が非 null で不正型 (= string 等) だと
       // normalizeSchema が {} を返して schema を silent discard するため、warn で可視化する。
       if (fn.parameters != null && typeof fn.parameters !== 'object' && Object.keys(normalized).length === 0) {
         log.warn('toAnthropicTools: parameters is not an object, falling back to empty schema', {

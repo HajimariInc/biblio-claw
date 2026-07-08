@@ -102,10 +102,10 @@ registerDeliveryAction('acquire_biblio', async (content, session, inDb) => {
       span.setAttribute('biblio.outcome', result.ok ? 'success' : 'failure');
     } catch (err) {
       // 想定外例外も握って patron に通知する (host を落とさない)。
-      // 例外吸収による silent failure を避けるため span にも記録する (PR #78 review-agents I1):
-      // 旧実装は inner catch が rethrow しないため withBiblioActionSpan の outer catch
-      // (= recordException + ERROR status) が構造的 dead で、Cloud Trace 上のエラー検索
-      // (= status=ERROR) が機能していなかった。
+      // 例外吸収による silent failure を避けるため span にも記録する:
+      // inner catch が rethrow しないため withBiblioActionSpan の outer catch
+      // (= recordException + ERROR status) は構造的 dead になる。Cloud Trace 上の
+      // エラー検索 (= status=ERROR) を機能させるため inner でも明示的に記録する。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });

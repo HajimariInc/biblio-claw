@@ -1,9 +1,9 @@
 /**
- * `fugue_equipped_biblios` テーブルの CRUD (M4-E Phase 3 equip-hitl)。
+ * `fugue_equipped_biblios` テーブルの CRUD (Fugue channel equip-hitl 経路)。
  *
  * Fugue channel は `supportsThreads: false` = session 概念なしのため、`session_equipped_biblios`
  * (session FK NOT NULL) には書けない。channel-scoped で 1 つの装備セット (Fugue Director の view)
- * を持つ設計 (判断 A、`019-fugue-equipped-biblios.ts` 参照)。
+ * を持つ設計 (`019-fugue-equipped-biblios.ts` 参照)。
  *
  * 用途:
  *   - `insertFugueEquippedBiblio`: equip endpoint の実行本体 (`INSERT OR IGNORE` + `changes` 判定で
@@ -36,7 +36,7 @@ export interface FugueEquippedBiblioRow {
  * @returns true = 新規装備 (`equipped`) / false = 既装備 (`already_equipped`)
  *
  * `info.changes === 0` が already_equipped の atomic 判定 (SELECT→INSERT の 2 段にしない、
- * race-free、判断 C)。
+ * race-free)。
  */
 export function insertFugueEquippedBiblio(biblioName: string, requestId: string): boolean {
   const info = getDb()
@@ -59,7 +59,7 @@ export function insertFugueEquippedBiblio(biblioName: string, requestId: string)
  */
 export function getFugueEquippedBiblioNames(): string[] {
   // 型 cast は SELECT した列のみ主張する `Pick<FugueEquippedBiblioRow, 'biblio_name'>[]` を採用
-  // (PR #135 review 提案 9、type-design-analyzer 指摘)。`FugueEquippedBiblioRow[]` 全型を主張すると
+  // `FugueEquippedBiblioRow[]` 全型を主張すると
   // 実際の SELECT には含まれない `equipped_at` / `request_id` へのアクセスを型は許すが実行時は
   // `undefined` になる silent 乖離を招く。`Pick` で narrow することで:
   //   - migration 019 のカラム定義変更時、`FugueEquippedBiblioRow` から `biblio_name` を除去した瞬間に

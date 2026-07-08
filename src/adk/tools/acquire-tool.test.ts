@@ -1,5 +1,5 @@
 /**
- * acquire-tool のユニットテスト (M4-B Phase 1)。
+ * acquire-tool のユニットテスト。
  *
  * `FunctionTool.execute` は private のため、`tool.runAsync({ args, toolContext })` 経由で
  * 起動して Zod 検証 + execute の両方を 1 path で検証する (= adk-js 公式 API、`function_tool.d.ts`

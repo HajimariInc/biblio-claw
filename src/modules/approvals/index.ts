@@ -13,7 +13,7 @@
  *   - A shutdown callback that stops the OneCLI handler cleanly.
  *
  * Self-mod flows (install_packages, add_mcp_server) moved out to
- * `src/modules/self-mod/` in PR #7 — they now register delivery actions
+ * `src/modules/self-mod/` — they now register delivery actions
  * + approval handlers via this module's public API.
  */
 import { onDeliveryAdapterReady } from '../../delivery.js';

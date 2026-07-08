@@ -3,12 +3,12 @@
  *
  * 2 系統のカバレッジを 1 ファイルに併設:
  *
- *  - **BIBLIO_NAME_RE** (= Phase 4 で 3 要素対応に拡張、regression 固定)
+ *  - **BIBLIO_NAME_RE** (= 3 要素対応の regression 固定)
  *    関数本体 (writeBackMessage / safeNotify / validateBiblioInput) のカバレッジは
  *    4 つの action handler test (= shelve / categorize / enkin / shokyaku) で網羅済みのため、
  *    本ブロックは regex の入出力に集中する。
  *
- *  - **writeBackMessage retry 経路** (PR #37 review-agents 提案 PT2、silent failure 防止)
+ *  - **writeBackMessage retry 経路** (silent failure 防止)
  *    1 回目 SQLITE_BUSY → 2 回目に成功 → `log.error('patron notification lost')` は呼ばれない
  *    3 回全滅 → `log.error('patron notification lost')` が必ず呼ばれる
  *    writeBackMessage は **絶対に throw しない** 契約 (= handler 側が catch しないため、

@@ -10,7 +10,7 @@
  * 経路 (PRD B §技術アプローチ / §解決策の詳細):
  *   1. 重複検知 — GET /repos/{shelf}/contents/.claude-plugin/marketplace.json
  *      - 200 → base64 decode → JSON parse → plugins[].name で `biblioName` を照合 (key = `<owner>--<name>`)
- *      - 404 → 初回 = 空 plugins[] で初期化 (PoC-6 schema 準拠で marketplace を組む)
+ *      - 404 → 初回 = 空 plugins[] で初期化 (marketplace 形式で組む)
  *      - その他 (4xx/5xx) → github_api_error
  *   2. 物理移動 — fs.promises.rename(quarantine, shelf/<category>/<biblioName>) を per-req で
  *      - 親 dir は mkdir -p、quarantine 不在は quarantine_missing、rename throw は rename_error
@@ -141,7 +141,7 @@ function failMulti(reason: MultiShelveFailureReason, detail: string, reqs: Multi
   };
 }
 
-/** 初回 commit 用の最小 marketplace.json (PoC-6 schema 踏襲)。 */
+/** 初回 commit 用の最小 marketplace.json (marketplace 形式)。 */
 function newMarketplace(env: ShelfEnv): Record<string, unknown> {
   return {
     name: 'biblio-shelf',
@@ -269,8 +269,7 @@ function readPluginMeta(shelfPath: string, biblioName: string): { description: s
  * step 4 (= ファイル列挙の早期 return 3 箇所: ioErrorCount > 0 / files.length === 0 /
  * totalFiles > MAX_BLOBS_PER_PR) と step 5 (= GitHub API 経路の catch) で共有する。
  * いずれも全 reqs の rename が完了済の状態で fail するため、移動済 path 全件を per-path で
- * warn に出す (= 運用者が `rm -rf` で個別 cleanup 可能、PR #8 silent-failure-hunter Important
- * 1 の per-req 拡張)。
+ * warn に出す (= 運用者が `rm -rf` で個別 cleanup 可能、silent failure 撲滅 per-req 拡張)。
  *
  * step 3 (= rename 途中失敗) では `movedShelfPaths` がループ進行中の部分集合なので、本 helper
  * は使わず inline trail 文字列構築 + `alreadyMoved` フィールドを warn 構造体に直接埋め込む
@@ -554,7 +553,7 @@ export async function shelveMulti(
   }
 
   // 3. 物理移動 (per-req loop、quarantine → shelf/<cat>/<biblio>)
-  // 途中失敗時は既に移動済の path を warn ログに列挙する (= shelf 残骸可視化、PR #8 流儀の per-req 拡張)。
+  // 途中失敗時は既に移動済の path を warn ログに列挙する (= shelf 残骸可視化、per-req 拡張)。
   const movedShelfPaths: string[] = [];
   for (const req of reqs) {
     const quarantinePath = path.join(quarantineRoot, req.biblioName);
@@ -681,11 +680,10 @@ export async function shelveMulti(
     const treeEntries: Array<{ path: string; mode: '100644'; type: 'blob'; sha: string }> = [];
     for (const { req, files } of perReqFiles) {
       for (const f of files) {
-        // バイナリ非対応 (= UTF-8 のみ)。M3 までは binary 対応を Out of Scope として記載
-        // していたが、M3 完了時点でも対応されず継続スコープ外 (= 司書 skill のほとんどが
-        // テキストファイル前提のため、binary 対応はパトロン体験フィードバック後に再評価)。
+        // バイナリ非対応 (= UTF-8 のみ)。現状は継続スコープ外 (= 司書 skill のほとんどが
+        // テキストファイル前提のため、binary 対応は patron 体験フィードバック後に再評価)。
         // NULL byte 検出で binary を fail-closed に倒す (= 旧実装は文字化けで silent に
-        // 棚 PR を作る経路があった、PR #8 レビュー silent-failure-hunter Important 2)。
+        // 棚 PR を作る経路があった)。
         // Buffer で読んで NULL byte 含むなら GhHttpError で中断 → catch で github_api_error に。
         const rawBuffer = fs.readFileSync(f.abs);
         if (rawBuffer.includes(0)) {
@@ -851,8 +849,7 @@ export async function shelveMulti(
   } catch (err) {
     // rename (step 3) 完了後の失敗は shelf に残骸が残る (= 次回 acquire 時の
     // quarantine_missing 経由で patron が混乱する経路を防ぐため、必ず warn ログを残す)。
-    // PR #8 レビュー silent-failure-hunter Important 1 の per-req 拡張、
-    // helper で step 4 と統一形式 (= per-path warn + trail 文字列)。
+    // silent failure 撲滅 per-req 拡張、helper で step 4 と統一形式 (= per-path warn + trail 文字列)。
     const trail = warnAndBuildResidualTrail('step 5 / GitHub API exception', movedShelfPaths);
     if (err instanceof GhHttpError) {
       log.warn('shelveMulti: github api step failed', {

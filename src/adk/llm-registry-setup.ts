@@ -1,5 +1,5 @@
 /**
- * `LLMRegistry.register(AnthropicVertexLlm)` の idempotent entrypoint hook (M4-B Phase 0)。
+ * `LLMRegistry.register(AnthropicVertexLlm)` の idempotent entrypoint hook。
  *
  * `LlmAgent({model: 'claude-sonnet-4-6'})` の文字列モデル ID 解決を成立させるため、`main()`
  * 冒頭 (= OTel init は `--import` 経路で既に完了済の前提) で本関数を 1 回呼ぶ。`LLMRegistry`

@@ -1,5 +1,5 @@
 /**
- * `session_equipped_biblios.ts` CRUD のユニットテスト (M3 Phase 2)。
+ * `session_equipped_biblios.ts` CRUD のユニットテスト。
  *
  * - 空 session → 空配列
  * - upsert 3 件 → `order_index` 0/1/2 順で取得
@@ -126,7 +126,7 @@ describe('session_equipped_biblios CRUD', () => {
     expect(rows.map((r) => r.order_index)).toEqual([0, 1, 2]);
   });
 
-  // PR #21 pr-test-analyzer 重要 — 焼却の「全 session 装備リストから個別削除」設計の DB レベル保証。
+  // 焼却の「全 session 装備リストから個別削除」設計の DB レベル保証。
   it('deleteEquippedBiblioByName: 複数 session を横断して同名 biblio を削除する (= shokyaku の全 session clear)', () => {
     createSession(makeSession('sess-x'));
     createSession(makeSession('sess-y'));

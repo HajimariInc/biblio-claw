@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 /**
- * M4-H Phase 4: Fugue ask endpoint の rate limit helper (自前 sliding window Map、
+ * Fugue ask endpoint の rate limit helper (自前 sliding window Map、
  * token digest 単位、依存追加ゼロ)。
  *
  * `handleRequest` の path 分岐直前で `checkFugueAskRateLimit(tokenDigest(token))` を呼び、
@@ -95,7 +95,7 @@ export function resolveFugueAskRateWindowMs(): number {
  * - overflow 時は最古 timestamp + windowMs - nowMs から `retryAfterSec` を計算
  *   (`Math.max(1, Math.ceil(...))` で最低 1 秒保証、client の即時再送ループ防止)
  *
- * **clock skew 対策 (silent-failure-hunter MEDIUM 2、PR #195 review)**: default nowMs は
+ * **clock skew 対策**: default nowMs は
  * `performance.now()` (単調時計、プロセス起動 relative ms) を使う。壁時計 (`Date.now()`) は
  * NTP 前方補正で無警告 sliding window リセット → 直後 burst 素通り (rate limit の一時 bypass)
  * を silent に起こす経路があるため。helper は数値の大小比較しか行わないので、スケールが

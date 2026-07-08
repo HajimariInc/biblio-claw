@@ -1,10 +1,10 @@
 /**
- * `enkin_biblio` FunctionTool — ADK Runner 配下から既存 host action `enkin()` を呼ぶ HITL 対応 wrap (M4-B Phase 4)。
+ * `enkin_biblio` FunctionTool — ADK Runner 配下から既存 host action `enkin()` を呼ぶ HITL 対応 wrap。
  *
  * 禁書 = 棚除去 + 装備源残置 (= 再装備可)。破壊操作のため admin 承認を必須とし、`Context.requestConfirmation`
  * API で自動 pause / resume する 2 段構造を採る (adk-js@1.3.0 `@experimental`)。
  *
- * # HITL pause/resume パターン (plan Pattern 2)
+ * # HITL pause/resume パターン
  *
  * 1. **初回呼出** (tool_context.toolConfirmation が undefined):
  *    - `BIBLIO_NAME_RE` guard → 不正なら即 fail (`config_error`)
@@ -18,13 +18,13 @@
  *    - `tool_context.toolConfirmation.confirmed === true`: 実 `enkin()` を呼出、結果を LLM に返す
  *    - `tool_context.toolConfirmation.confirmed === false`: 拒否応答 (`config_error`, detail に「admin 拒否」)
  *
- * # GOTCHA (plan Task 6)
+ * # GOTCHA
  *
  * 1. **`requestConfirmation` 呼出後の return 値は runner に無視される** (runner が pause で先取り)、
  *    ただし型上 `EnkinResult` 返却が必要なため pending sentinel を return (= 実行されない dead code だが型合わせ)
  * 2. **承認 reject 時の reason 分類**: 既存 `UnshelveFailureReason` に `user_rejected` 相当なし。
- *    Phase 4 では `config_error` に集約 (= 型変更を避け、detail 文字列で patron 認知)。
- *    将来 Phase 90 で `UnshelveFailureReason` に `'user_rejected'` 追加を検討
+ *    現状は `config_error` に集約 (= 型変更を避け、detail 文字列で patron 認知)。
+ *    将来 `UnshelveFailureReason` に `'user_rejected'` 追加を検討
  * 3. **description に「Requires admin approval via Slack DM Approve/Reject card」明示** — LLM が
  *    「承認が必要な破壊操作」と認識できるように
  * 4. **log event 命名**: `adk.tool.enkin.confirmation_requested` (初回) / `adk.tool.enkin.resumed`

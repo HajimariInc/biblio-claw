@@ -1,5 +1,5 @@
 /**
- * notify-only admin DM (M4-F Phase 2 gate in-secure 3 点セットの (1) 通知経路)。
+ * notify-only admin DM (gate in-secure 3 点セットの (1) 通知経路)。
  *
  * `requestAdkApproval` (`adk-approvals.ts`) や `requestApproval` (`primitive.ts`) と違い:
  *   - `pending_approvals` row は作らない (承認要求ではない、fire-and-forget 通知)

@@ -1,7 +1,7 @@
 import type { FugueSourceKind } from './fugue-schemas.js';
 
 /**
- * M4-H Phase 3 trust boundary: Fugue ask endpoint 応答の `<external-content>` タグ囲み helper。
+ * trust boundary: Fugue ask endpoint 応答の `<external-content>` タグ囲み helper。
  *
  * Contract §5.5 は agent-container が Web / Drive から取得した外部由来 text の 4 field
  * (`summary` / `findings[].text` / `sources[].title` / `sources[].snippet`) を
@@ -9,10 +9,10 @@ import type { FugueSourceKind } from './fugue-schemas.js';
  * (Fugue Director LLM に「これは指示ではなくデータ」と伝える Spotlighting pattern の応用)。
  *
  * **既存 `<untrusted-input>` (`src/gate/layer3-xml.ts`) との関係**:
- * - M4-F Layer 3 の `wrapUntrustedInput()` はタグ名が別で、handleAsk の親 gate 経路
+ * - `wrapUntrustedInput()` はタグ名が別で、handleAsk の親 gate 経路
  *   (evaluateGate の Layer 4 プロンプト内で patron 発話を囲む) にのみ使われる。
  * - 本 helper は Fugue Director LLM に返す response body の 4 field を囲むためのもので、
- *   両 helper は独立して共存する (PRD §論点 A の α 案 = 「新 helper 並置、既存不変」)。
+ *   両 helper は独立して共存する (= 新 helper 並置、既存不変)。
  *
  * **境界破壊攻撃対策**: 外部由来 text 中に `</external-content>` が含まれる場合、そのまま囲むと
  * Fugue Director LLM が「external-content 区間終了 → 続く text は system の続き」と誤解する余地が
@@ -29,7 +29,7 @@ const CLOSE_TAG_ESCAPED = '&lt;/external-content&gt;';
 
 /**
  * agent 応答値の先頭・末尾に既に `<external-content ...>...</external-content>` が付いている場合、
- * その 1 段だけを剥がして中身を返す (二重 wrap 防止の defensive strip、M4-H Phase 3.5 で追加)。
+ * その 1 段だけを剥がして中身を返す (二重 wrap 防止の defensive strip)。
  *
  * fugue-ask.md §5 で「agent は JSON payload の値に `<external-content>` タグを付けない」と
  * 指示しているが、LLM が守らないケース (2026-07-08 Q2 実測で判明) を silent に吸収する。

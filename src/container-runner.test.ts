@@ -44,7 +44,7 @@ describe('resolveProviderName', () => {
   });
 });
 
-describe('appendEquippedBiblioMounts (M3 Phase 1/2 — env override 経路)', () => {
+describe('appendEquippedBiblioMounts (env override 経路)', () => {
   const EQUIP_DIR = path.join(TEST_DIR, 'biblio-equipped');
 
   function makeSession(id = 'sess-m3'): Session {
@@ -144,11 +144,11 @@ describe('appendEquippedBiblioMounts (M3 Phase 1/2 — env override 経路)', ()
   });
 });
 
-// PR #21 pr-test-analyzer 欠落 1 (= 重大、本番の DB lookup 経路 + VolumeMount 組み立ての integration test)。
-// env override 経路は上の describe で網羅、DB 経路 (= Phase 2 以降の本番経路) は equip.test.ts で
+// 本番の DB lookup 経路 + VolumeMount 組み立ての integration test。
+// env override 経路は上の describe で網羅、DB 経路 (= 本番経路) は equip.test.ts で
 // resolveEquippedBiblios 単体まで担保されていたが、appendEquippedBiblioMounts × DB lookup × mount
 // 変換の経路が unit レベルで未検証だった。GKE 本番で装備 mount が生えない silent fail を防ぐ。
-describe('appendEquippedBiblioMounts (M3 Phase 2 — DB 経路 integration)', () => {
+describe('appendEquippedBiblioMounts (DB 経路 integration)', () => {
   const EQUIP_DIR = path.join(TEST_DIR, 'biblio-equipped');
 
   function makeSession(id = 'sess-m3-db'): Session {

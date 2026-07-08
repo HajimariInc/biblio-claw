@@ -112,7 +112,7 @@ describe('evaluateGate - Layer 4 fallthrough', () => {
       latencyMs: 250,
       model: 'gemini-3.1-flash-lite',
     });
-    const result = await evaluateGate('@bot 仕入れて https://github.com/example-org/test-biblio-minimal');
+    const result = await evaluateGate('@bot 仕入れて https://github.com/HajimariInc/test-biblio-minimal');
     expect(result.classification).toBe('biblio-adk');
     expect(result.layerHit).toBe('layer4');
   });

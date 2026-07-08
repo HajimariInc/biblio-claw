@@ -1,13 +1,13 @@
 /**
- * ADK tool テスト共通ヘルパ (M4-B Phase 1)。
+ * ADK tool テスト共通ヘルパ。
  *
- * code-simplifier S11a 推奨で抽出。`mockToolContext` は acquire / inspect / shelve の 3 tool test
- * に各 8 行で複製されていた。`resetLogMocks` も 4 行 × 3 ファイルで同じ pattern が現れていた。
+ * `mockToolContext` は acquire / inspect / shelve の 3 tool test に各 8 行で複製されていたのを
+ * 抽出。`resetLogMocks` も 4 行 × 3 ファイルで同じ pattern が現れていた。
  *
  * **抽出理由**:
  *   - ADK の `Context` 型 shape が変わったとき、3 箇所を同期する必要がある (= `as unknown as
  *     Context` キャストの単一更新点化)
- *   - Phase 2 以降に tool が増えた際に第 4・5 の複製が生まれる前提が高い
+ *   - tool が増えた際に更に複製が生まれる前提が高い
  *   - vitest の `vi.mocked(log.X).mockReset()` パターンは ADK tool 内で log mock を使う限り
  *     繰り返し発生する
  *

@@ -173,7 +173,7 @@ registerDeliveryAction('update_config', async (content, session, inDb) => {
       });
       span.setAttribute('biblio.outcome', 'success');
     } catch (err) {
-      // span 記録は PR #78 review-agents I1 (= acquire-action.ts と同形)。
+      // span 記録は acquire-action.ts と同形 (silent failure 撲滅)。
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
