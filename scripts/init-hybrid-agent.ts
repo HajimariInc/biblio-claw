@@ -1,15 +1,14 @@
 /**
- * Initialize the hybrid (agent-container-backed) biblio librarian agent
- * (M4-F Phase 1: revival-core).
+ * Initialize the hybrid (agent-container-backed) biblio librarian agent.
  *
  * `container_configs.provider = null` (= claude fallback via
  * `resolveProviderName`) を持つ agent group を central DB に作成し、
- * **DEN さん Slack DM に限定して wire** する。これにより M4-B Phase 4 完了以降
- * DB 行不在で休眠していた agent-container 経路 (spawn / M3 装備機構 /
+ * **patron の Slack DM に限定して wire** する。これにより ADK 経路導入時に
+ * DB 行不在で休眠していた agent-container 経路 (spawn / 装備機構 /
  * container skill / container 側 MCP 9 tool) が K8s Job spawn 経路で再稼働する。
  *
- * `scripts/init-adk-agent.ts` (M4-B Phase 3) + `scripts/init-first-agent.ts`
- * (M1 継承の DM 配線) の合成写経で、以下 3 差分を入れる:
+ * `scripts/init-adk-agent.ts` + `scripts/init-first-agent.ts` の合成写経で、
+ * 以下 3 差分を入れる:
  *   - folder: `hybrid-biblio-shisho` (ADK 用 `adk-biblio-shisho` と物理分離)
  *   - `container_configs.provider`: `null` を毎回 assert
  *     (= isNewGroup gate 外 = self-healing、fallback で 'claude' が効く)
@@ -18,12 +17,12 @@
  *     他 agent group に wire 済なら **fail-fast + 手動対応 prompt**。
  *
  * Slack channel (bot mention) wire は本 script では扱わない
- * (= ADK 経路が ハッカソン demo channel を占有継続)。
+ * (= ADK 経路がメイン channel を占有継続)。
  *
  * Usage:
  *   pnpm exec tsx scripts/init-hybrid-agent.ts \
- *     --user-id slack:U7F8TRM6X \
- *     --slack-dm-channel-id D0B6JA2M5GA \
+ *     --user-id slack:<SLACK_USER_ID> \
+ *     --slack-dm-channel-id <SLACK_DM_CHANNEL_ID> \
  *     [--display-name "Patron"] \
  *     [--agent-name "司書 (hybrid)"] \
  *     [--skip-slack-dm]   # test / dry-run 用 (Slack DM wire を skip)
@@ -112,7 +111,7 @@ export function parseArgs(argv: string[]): Args {
   }
   if (!skipSlackDm && !slackDmChannelId) {
     console.error(
-      'Missing required arg: --slack-dm-channel-id (raw D... ID, e.g. D0B6JA2M5GA)',
+      'Missing required arg: --slack-dm-channel-id (raw D... ID; see script header for usage)',
     );
     console.error('  Pass --skip-slack-dm to seed the agent group without a Slack DM wire (test / dry-run).');
     process.exit(2);
@@ -136,15 +135,14 @@ function generateId(prefix: string): string {
  *
  * **fan-out 二重発火防止 (init-adk-agent.ts:wireCliChannel パターンを Slack DM へ転写)**:
  * router.ts:routeInbound は 1 メッセージにつき、その messaging_group に紐づく全 agent
- * (fan-out 全件) を engage 対象にする。DEN さん Slack DM の `slack:D...` mg が既に
+ * (fan-out 全件) を engage 対象にする。patron の Slack DM の `slack:D...` mg が既に
  * 他 agent_group (典型例: ADK) に wire されていると、hybrid をここで追加 wire すると
  * **1 DM = 2 agent への fan-out 発火** = 応答二重 + Vertex API rate limit 消費倍増。
  *
  * したがって、既存 mg に他 agent への wire が検出されたら **fail-fast + 手動対応 prompt**
- * を出す。DEN さんが「既存 wire を先に外す」か「別 platform_id で分離する」か判断する。
+ * を出す。メンテナが「既存 wire を先に外す」か「別 platform_id で分離する」か判断する。
  *
- * plan §Solution Approach (1) の「fan-out 二重発火なしを Task 1 で構造的に保証」を
- * 満たす構造的 assert。init-adk-agent.ts:98-156 の CLI 経路と対称。
+ * fan-out 二重発火なしを構造的に保証する assert。init-adk-agent.ts の CLI 経路と対称。
  */
 function wireSlackDm(
   ag: AgentGroup,
@@ -175,15 +173,16 @@ function wireSlackDm(
   } else {
     console.log(`Reusing Slack DM messaging group: ${dmMg.id} (${encodedPlatformId})`);
     // fan-out 二重発火の観点で既存 wire を検査 (fail-fast)。
-    // **Phase 2 (M4-F gate + routing) で拡張**: `allowFanout=true` (env `GATE_ENABLED` 有効時
-    // にのみ true) は「gate の classification-provider mismatch skip で構造的に二重発火を防ぐ」
-    // 前提で既存 wire (= ADK) の隣に hybrid wire を追加する。gate 無効時は従来通り fail-fast。
+    // **gate + routing 経路が有効な場合の拡張**: `allowFanout=true` (env `GATE_ENABLED`
+    // 有効時にのみ true) は「gate の classification-provider mismatch skip で構造的に
+    // 二重発火を防ぐ」前提で既存 wire (= ADK) の隣に hybrid wire を追加する。
+    // gate 無効時は従来通り fail-fast。
     const existingWirings = getMessagingGroupAgents(dmMg.id);
     const otherWirings = existingWirings.filter((w) => w.agent_group_id !== ag.id);
     if (otherWirings.length > 0) {
       if (allowFanout) {
         console.log(
-          `Phase 2 (gate + routing) allowFanout=true: proceeding to add hybrid wire alongside ${otherWirings.length} existing wire(s).`,
+          `gate + routing allowFanout=true: proceeding to add hybrid wire alongside ${otherWirings.length} existing wire(s).`,
         );
         console.log(
           `  existing wires: ${otherWirings.map((w) => w.agent_group_id).join(', ')}`,
@@ -193,9 +192,9 @@ function wireSlackDm(
         );
         // ここで return せず後段の createMessagingGroupAgent (追加 wire) へ流す
       } else {
-        // 14 個の個別 console.error 呼出 → 単一 template literal 1 回に集約 (S5)。
+        // 14 個の個別 console.error 呼出 → 単一 template literal 1 回に集約。
         // 出力内容 (空行 + 順序) は完全等価、test 側 `errSpy.mock.calls.flat().join('\n')`
-        // の substring assert (case 7 の `already wired to 1 other agent group` /
+        // の substring assert (`already wired to 1 other agent group` /
         // `ag-adk-existing` を含む) も維持される。
         const wiringList = otherWirings
           .map((w) => `  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`)
@@ -205,14 +204,14 @@ function wireSlackDm(
 ERROR: Slack DM ${encodedPlatformId} is already wired to ${otherWirings.length} other agent group(s):
 ${wiringList}
 
-router.ts:routeInbound is fan-out (all wired agents engage), so a single DEN Slack DM
+router.ts:routeInbound is fan-out (all wired agents engage), so a single patron Slack DM
 would double-invoke both the existing agent(s) and the hybrid agent group.
 
 Resolve either by:
   (a) Removing existing wire(s) with \`ncl wirings remove --id <mga.id>\` before re-running
-      (recommended if you intend to migrate the DEN DM to hybrid = agent-container path)
+      (recommended if you intend to migrate the patron DM to hybrid = agent-container path)
   (b) Retiring the existing wire manually via SQL (advanced) after backing up the DB
-  (c) Set GATE_ENABLED=true before running (Phase 2 gate + routing lifts this constraint by
+  (c) Set GATE_ENABLED=true before running (gate + routing lifts this constraint by
       routing on classifier output; both wires will coexist and fan-out is suppressed by the
       classification-provider mismatch skip in router.ts:deliverToAgent).
 `.trim(),
@@ -245,8 +244,7 @@ Resolve either by:
 }
 
 /**
- * hybrid group の container_configs.mcp_servers を desired state に upsert する
- * (M4-F Phase 3)。
+ * hybrid group の container_configs.mcp_servers を desired state に upsert する。
  *
  * 契約 3 点:
  *   1. 副作用は updateContainerConfigJson の 1 回のみ。scalar assert 直後に
@@ -257,7 +255,7 @@ Resolve either by:
  *   3. instructions は日本語で書き、spawn 時に claude-md-compose 経由で CLAUDE.md
  *      にインライン合成される (patron JTBD 言語と一致させて対応品質を上げる)。
  *
- * ## env が空 object の理由 (Tavily keyless mode 発見の経緯、2026-07-05 実測)
+ * ## env が空 object の理由 (Tavily keyless mode)
  * tavily-mcp v0.2.20 の src/index.ts:103 は `Authorization: Bearer ${API_KEY}` を
  * header に送るが、同時に line 612 以降で request body にも `api_key: API_KEY` を
  * 埋める (search/extract/crawl/map/research 全て)。OneCLI proxy は Authorization
@@ -327,10 +325,10 @@ export interface SeedResult {
  * `GROUPS_DIR` env を tmp dir に振り替えてから import すること。
  */
 export function seedHybridAgent(args: Args, now: string): SeedResult {
-  // Args 相互依存 assert (I5、fail-closed): parseArgs は CLI 境界で
+  // Args 相互依存 assert (fail-closed): parseArgs は CLI 境界で
   // slackDmChannelId 必須を強制するが、seedHybridAgent は export され直接
   // 呼び出し経路 (test / 将来の script) が存在するため、契約違反を silent skip
-  // せず fail-fast。plan の「silent failure 撲滅」流儀と整合。
+  // せず fail-fast。silent failure 撲滅の設計方針と整合。
   if (!args.skipSlackDm && !args.slackDmChannelId) {
     throw new Error(
       'seedHybridAgent: slackDmChannelId is required unless skipSlackDm=true '
@@ -342,7 +340,7 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
   //    upsertUser の SQL は `ON CONFLICT DO UPDATE SET display_name = COALESCE(
   //    excluded.display_name, users.display_name)` = 渡した値が non-null なら
   //    常に上書き。args.displayName は parseArgs 経路で default 'Patron' が入り
-  //    非 null 化するため、既存 owner (init-first-agent.ts で登録済の DEN さん)
+  //    非 null 化するため、既存 owner (init-first-agent.ts で登録済の patron)
   //    の display_name が毎回 'Patron' に silent 上書きされる問題を getUser
   //    guard で回避する (既存 row を触らない)。
   if (!getUser(args.userId)) {
@@ -377,34 +375,33 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
   initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n` +
-      'M4-F Phase 1 revival-core 用の hybrid provider agent。' +
+      'agent-container 経路で動作する hybrid provider agent。' +
       '`container_configs.provider = null` → resolveProviderName の "claude" fallback で ' +
-      'agent-runner container 経路 (NanoClaw v2 の原点) が起動する。\n\n' +
+      'agent-runner container 経路 (上流 NanoClaw v2 の原点) が起動する。\n\n' +
       'あなたは司書 (hybrid) として、装備 skill / container skill (welcome / onecli-gateway / ' +
       'self-customize / agent-browser / slack-formatting 等) / Bash / File tool を活用して ' +
       'patron の生活 + 対話 + 実行力仕事を担う。biblio 特化操作 (仕入れ / 検品 / カテゴライズ / ' +
-      '陳列 / 蔵書一覧 / 装備) は M4-G で ADK 側へ吸収される予定のため、Phase 1 では ' +
+      '陳列 / 蔵書一覧 / 装備) は将来 ADK 側へ吸収される想定のため、hybrid 経路では ' +
       'container 側 MCP 9 tool は残置されているが積極利用しない (= ADK 経路が担当継続)。\n\n' +
       '自己拡張は `/self-customize` skill で本 CLAUDE.local.md を追記する。\n\n' +
-      // 以下の biblio workspace 関連 instruction は PR #145 実機で発現した silent success 罠
-      // (agent が /data/quarantine/ /data/shelf/ への rm -rf を実行して exit 0 で「削除成功」
-      // と誤認識、実際は agent container の mount 対象外で空振り) への恒久対策。案 1 + 案 2 統合、
-      // 詳細は issue #149 (`cleanup_biblio_workspace` MCP tool 新設)。既存 agent group の
-      // PVC 上 CLAUDE.local.md には kubectl cp で別途反映 (`initGroupFilesystem` は初回作成時
-      // のみ seed するため、既存 group は自動更新されない、docs/operations-runbook.md §M4-F 参照)。
+      // 以下の biblio workspace 関連 instruction は agent が /data/quarantine/ /data/shelf/
+      // への rm -rf を実行して exit 0 で「削除成功」と誤認識、実際は agent container の
+      // mount 対象外で空振りする silent success 罠への恒久対策。既存 agent group の
+      // PVC 上 CLAUDE.local.md には kubectl cp で別途反映 (`initGroupFilesystem` は
+      // 初回作成時のみ seed するため、既存 group は自動更新されない)。
       '## biblio 業務経路 (`/data/quarantine/` `/data/shelf/`) の扱い\n\n' +
       'biblio 業務の作業ディレクトリ (`/data/quarantine/` `/data/shelf/`) は host TS 実装のみが扱う ' +
-      '(M2 PRD B 集約設計、CLAUDE.md 明記)。**agent container 内には mount されておらず、' +
+      '(集約設計、CLAUDE.md 明記)。**agent container 内には mount されておらず、' +
       '`ls /data` は exit 2 で "No such file or directory" を返す**。\n\n' +
       '**絶対禁止**: `Bash rm -rf /data/quarantine/*` や `rm -rf /data/shelf/*` 等の直接操作。' +
       'path 不在で silent success (`rm -f` / `rm -rf` は exit 0 を返す) する経路が実在し、' +
-      '「削除成功」と誤認識する (PR #145 実機で発現、DEN さん HITL 手動対処 2026-07-06)。\n\n' +
+      '「削除成功」と誤認識する。\n\n' +
       '**cleanup が必要になった場合の正規経路**:\n' +
       '- 棚上 skill (陳列成功済) の削除: `mcp__nanoclaw__shokyaku_biblio` ' +
       '(HITL 承認 + GitHub PR + fs.rmSync + DB clean を atomic に実行)\n' +
       '- shelve 失敗の retry のため未陳列の quarantine / shelf 準備区の残骸を cleanup: ' +
-      '**現状は正規経路なし** = DEN さんに手動 cleanup 依頼 (kubectl exec) が必要。' +
-      '将来的に `mcp__nanoclaw__cleanup_biblio_workspace` MCP tool が追加される予定 (issue #149)\n\n' +
+      '**現状は正規経路なし** = メンテナに手動 cleanup 依頼 (kubectl exec) が必要。' +
+      '将来的に `mcp__nanoclaw__cleanup_biblio_workspace` 相当の MCP tool 追加が想定されている。\n\n' +
       '**rm 全般の silent success 防御**: `Bash rm` 実行後は必ず `ls` or `stat` で削除確認する。' +
       '`-f` / `-rf` オプションは path 不在でも exit 0 を返すため、「rm 成功 = 削除完了」と早合点しない。' +
       'path 不在で success した場合は「そもそも path が見えていない = mount 対象外の可能性」を疑い、' +
@@ -419,11 +416,11 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
   // model は必ず Vertex publisher ID を明示する。null で残すと container.json 経由で
   // agent-runner container の `--model` フラグが unset になり、claude-code SDK 内蔵
   // デフォルトが Anthropic API alias (Vertex 未解決) を返して Vertex rawPredict が
-  // 404 化する既知障害 (M1 で実際に踏み修正済、init-first-agent.ts / init-cli-agent.ts
+  // 404 化する既知障害 (実機で踏み修正済、init-first-agent.ts / init-cli-agent.ts
   // が明示 'claude-sonnet-4-6' で回避している経路を継承)。
   //
-  // **isNewGroup gate から外して毎回 assert** (I2 = PR #101 review 指摘、
-  // init-adk-agent.ts:256-266 の pattern を継承):
+  // **isNewGroup gate から外して毎回 assert** (レビュー指摘、
+  // init-adk-agent.ts の pattern を継承):
   // initGroupFilesystem 途中の fs 書込み failure 等で agent_group 行だけ残り
   // updateContainerConfigScalars が飛ばされた場合、次回実行時に isNewGroup=false と
   // 判定されて provider 設定が永久に反映されない (silent 破綻)。毎回 assert する
@@ -434,7 +431,7 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
   });
   console.log(`Ensured container_config: provider=null (claude fallback), model='claude-sonnet-4-6'`);
 
-  // M4-F Phase 3: mcp_servers を Tavily + Drive で idempotent assert。
+  // mcp_servers を Tavily + Drive で idempotent assert。
   // provider/model scalar と同流儀で isNewGroup gate 外 = self-healing。
   // 実 API key / ADC token は OneCLI vault が MITM 経由で wire 上に置換するため、
   // env は placeholder のみを持たせる (Bash 復活後の /proc/*/environ 読み取り漏洩を撲滅)。
@@ -451,7 +448,7 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
 
   // 4. Slack DM wire — CLI wire は意図的に**しない** (`cli/local` の既存 ADK wire に
   //    hybrid を追加すると `pnpm run chat "..."` が fan-out 二重発火する)。
-  //    **Phase 2 (M4-F gate + routing)**: `GATE_ENABLED=true` の環境下では既存 ADK wire に
+  //    **gate + routing 経路が有効な場合**: `GATE_ENABLED=true` の環境下では既存 ADK wire に
   //    hybrid を並置する両 wire を許容 (fan-out 二重発火は router.ts の gate
   //    classification-provider mismatch skip で構造的に抑止される)。
   const gateEnabled =
@@ -464,7 +461,7 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
 
   // 5. 最終 state を SeedResult として返す。
   //    isNewGroup を含めることで、seed が create 経路 / reuse 経路のどちらを通ったか
-  //    後段の観察 script (Task 7 K8s Job 観察) が判別できる。
+  //    後段の観察 script (K8s Job 観察) が判別できる。
   return {
     agent_group_id: ag.id,
     folder: HYBRID_AGENT_FOLDER,
@@ -500,7 +497,7 @@ export async function main(): Promise<void> {
 // script として直接起動時のみ main() を実行 (unit test では import のみ)。
 // Node 24 + tsx の両方で `process.argv[1]` は絶対パスに解決される (実機検証済)、
 // ESM idiom の `import.meta.url === pathToFileURL(argv[1]).href` 比較で
-// ファイル名 hardcode + Windows path 手動置換の脆弱性を除去 (S4)。
+// ファイル名 hardcode + Windows path 手動置換の脆弱性を除去。
 const invokedDirectly =
   process.argv[1] !== undefined
   && import.meta.url === pathToFileURL(process.argv[1]).href;

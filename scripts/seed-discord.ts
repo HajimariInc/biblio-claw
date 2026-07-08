@@ -20,7 +20,10 @@ runMigrations(db);
 
 const AGENT_GROUP_ID = 'ag-main';
 const MESSAGING_GROUP_ID = 'mg-discord';
-const CHANNEL_ID = 'discord:1470188214710046894:1491569326447132673';
+// env `DISCORD_CHANNEL_ID` で override 可能。default は `discord:<GUILD_ID>:<CHANNEL_ID>`
+// の placeholder のため、実 Discord bot に配線する場合は env に実 ID (`discord:1234...:5678...`
+// 形式) を投入する。
+const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID ?? 'discord:<GUILD_ID>:<CHANNEL_ID>';
 
 // Agent group
 if (!getAgentGroup(AGENT_GROUP_ID)) {
