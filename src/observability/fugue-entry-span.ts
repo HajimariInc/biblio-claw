@@ -114,3 +114,28 @@ export async function withFugueEntrySpan<T>(
     },
   );
 }
+
+/**
+ * Fugue handler の outcome set 直後に呼び、`fugue.processing_time_ms` span attribute を
+ * 記録すると同時に、後段の log / response body で再利用可能な processing_time_ms (ms 単位、
+ * `Math.round` 済) を返す。
+ *
+ * M4-H Phase 4 (Task 6): 呼出側の `Math.round(performance.now() - startedAt)` の重複を
+ * 1 helper に集約。span attribute set 忘れを静的 grep 可能な形にする (呼出数 ==
+ * `fugueSpan.setAttribute('fugue.outcome', ...)` 数で対称性を担保、
+ * `fugue-http.ad-honji.test.ts` の静的 assertion で機械検知)。
+ *
+ * `withFugueEntrySpan` の catch fallback 経路 (`fugue.outcome='error'` 上書き) では
+ * startedAt を渡せないため呼ばない。従って本 helper 呼出数 == 呼出側で outcome set
+ * した回数の対称性が正 (unexpected 例外時のみ processing_time_ms が抜ける許容、
+ * plan Task 6 GOTCHA)。
+ *
+ * @param span withFugueEntrySpan で受け取った `fugueSpan`
+ * @param startedAtMs handler 冒頭の `performance.now()` 値
+ * @returns processing_time_ms (ms 単位、`Math.round` 済) = log/response body で再利用
+ */
+export function recordFugueProcessingTime(span: Span, startedAtMs: number): number {
+  const elapsed = Math.round(performance.now() - startedAtMs);
+  span.setAttribute('fugue.processing_time_ms', elapsed);
+  return elapsed;
+}

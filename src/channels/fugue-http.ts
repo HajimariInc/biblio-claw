@@ -95,7 +95,12 @@ import { evaluateGate, isGateEnabled, withGateSpan } from '../gate/gate.js';
 import type { GateResult } from '../gate/types.js';
 import { log } from '../log.js';
 import { notifyAdmin } from '../modules/approvals/notify-admin.js';
-import { extractTraceContextFromHttpHeaders, withFugueEntrySpan, type FugueOperation } from '../observability/index.js';
+import {
+  extractTraceContextFromHttpHeaders,
+  recordFugueProcessingTime,
+  withFugueEntrySpan,
+  type FugueOperation,
+} from '../observability/index.js';
 import {
   isPreSpawnDbOpenError,
   openOutboundDb,
@@ -105,6 +110,7 @@ import {
 } from '../session-manager.js';
 
 import { wrapExternalContent } from './fugue-ask-content.js';
+import { checkFugueAskRateLimit, tokenDigest } from './fugue-rate-limit.js';
 import {
   AD_ASK_DENIED_BY_GATE,
   AgentAskResponse,
@@ -215,6 +221,7 @@ function resolveFugueAskConfig(): FugueAskConfig | null {
     log.warn('Fugue ask config DB lookup threw (fail-open, treated as missing)', {
       event: 'fugue.ask.spawn.config_lookup_throw',
       channel: 'fugue',
+      operation: 'ask',
       err: err instanceof Error ? err.message : String(err),
     });
     return null;
@@ -337,6 +344,7 @@ async function parseFugueRequest<T>(
       log.warn(`Fugue ${operation} body too large`, {
         event: `fugue.${operation}.body_too_large`,
         channel: 'fugue',
+        operation: operation,
         outcome: 'reject',
         limit: MAX_BODY_SIZE_BYTES,
       });
@@ -348,6 +356,7 @@ async function parseFugueRequest<T>(
     log.warn(`Fugue ${operation} body read failed`, {
       event: `fugue.${operation}.body_read_failed`,
       channel: 'fugue',
+      operation: operation,
       outcome: 'reject',
       reason,
       err: err instanceof Error ? err.message : String(err),
@@ -364,6 +373,7 @@ async function parseFugueRequest<T>(
     log.warn(`Fugue ${operation} schema validation failed`, {
       event: `fugue.${operation}.schema_invalid`,
       channel: 'fugue',
+      operation: operation,
       outcome: 'reject',
       issues: parsed.error.issues,
     });
@@ -631,6 +641,38 @@ export class FugueHttpServer {
       }
       const runInContext = <T>(fn: () => Promise<T>): Promise<T> => context.with(extractedCtx, fn);
 
+      // M4-H Phase 4: rate limit gate (ASK_PATH のみ対象、consult/equip は Phase 4 スコープ外
+      // として構造的 bypass = PRD 意思決定 #7)。auth 通過 + trace 継承済み位置で挿入 = healthz
+      // は影響を受けない (前段の early-return で処理済み、`HEALTHZ_PATH` 分岐)。
+      //
+      // **粒度 (review 中 1 対応)**: key として `this.opts.expectedToken` (= server 側 constant、
+      // Fugue と共有する Bearer token 1 つ) を tokenDigest 化するため、認証通過した全 request が
+      // 同一 digest に集約される = 実質「**per biblio-claw instance の global 60 req/min rate
+      // limit**」として動作 (Contract §5.6 の cost 保護意図)。将来 multi-caller / per-tenant 化
+      // する場合は request 由来の Bearer (auth 通過時の `req.headers.authorization`) を渡すよう
+      // 切り替えるだけで helper 本体は無変更で対応可能。詳細は `fugue-rate-limit.ts` の module
+      // docstring §粒度 参照。
+      //
+      // `Retry-After` header は writeError の前に setHeader = writeError 内の writeHead は
+      // 'Content-Type' のみを引数で渡し、setHeader 済み分は Node.js の http.ServerResponse
+      // 契約で自動 merge される (PRD 意思決定 #E で writeError signature 拡張を回避)。
+      if (pathname === ASK_PATH) {
+        const digest = tokenDigest(this.opts.expectedToken);
+        const rateResult = checkFugueAskRateLimit(digest);
+        if (!rateResult.allowed) {
+          res.setHeader('Retry-After', rateResult.retryAfterSec.toString());
+          log.warn('Fugue ask rate limit exceeded', {
+            event: 'fugue.ask.rate_limited',
+            channel: 'fugue',
+            operation: 'ask',
+            outcome: 'reject',
+            retry_after_sec: rateResult.retryAfterSec,
+          });
+          writeError(res, 429, { error: 'rate_limited' });
+          return;
+        }
+      }
+
       if (pathname === CONSULT_PATH) {
         await runInContext(() => this.handleConsult(req, res));
         return;
@@ -682,6 +724,7 @@ export class FugueHttpServer {
     log.info('Fugue consult invoked', {
       event: 'fugue.consult.invoked',
       channel: 'fugue',
+      operation: 'consult',
       request_id,
       mode,
       query_length: query.length,
@@ -725,6 +768,7 @@ export class FugueHttpServer {
           log.warn('Fugue consult gate unexpected throw, falling back to open', {
             event: 'fugue.consult.gate_unexpected_throw',
             channel: 'fugue',
+            operation: 'consult',
             request_id,
             err: errMsg,
           });
@@ -767,10 +811,11 @@ export class FugueHttpServer {
                 err: err instanceof Error ? err.message : String(err),
               }),
             );
-            const processing_time_ms = Math.round(performance.now() - startedAt);
+            const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
             log.warn('Fugue consult rejected by input gate', {
               event: 'fugue.consult.in_secure',
               channel: 'fugue',
+              operation: 'consult',
               outcome: 'in_secure',
               request_id,
               mode,
@@ -820,10 +865,11 @@ export class FugueHttpServer {
           // status は 200 で応答するため fugue span 側は UNSET のまま (エラー扱いは outcome 属性で表現)。
           fugueSpan.setAttribute('fugue.outcome', 'error');
 
-          const processing_time_ms = Math.round(performance.now() - startedAt);
+          const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
           log.error('Fugue consult listBiblio failed, returning partial-failure reply', {
             event: 'fugue.consult.partial_failure',
             channel: 'fugue',
+            operation: 'consult',
             outcome: 'failure',
             request_id,
             mode,
@@ -876,6 +922,7 @@ export class FugueHttpServer {
           log.warn('Fugue consult equipped state read failed, continuing with empty set', {
             event: 'fugue.consult.equipped_state_unavailable',
             channel: 'fugue',
+            operation: 'consult',
             outcome: 'warn',
             request_id,
             err: err instanceof Error ? err.message : String(err),
@@ -890,7 +937,7 @@ export class FugueHttpServer {
         const skills_found = toSkillRefs(filtered, env.shelfOwner, env.shelfRepo, equippedNames);
         const summary = summarizeConsult(result, filtered, query, mode);
 
-        const processing_time_ms = Math.round(performance.now() - startedAt);
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
 
         // warnings に truncation / unknown 除外を反映する。summary の件数表示と
         // skills_found.length の食い違いを client 側 (Fugue) が検知できるようにする。
@@ -936,6 +983,7 @@ export class FugueHttpServer {
         log.info('Fugue consult completed', {
           event: status === 'ok' ? 'fugue.consult.completed' : 'fugue.consult.not_found',
           channel: 'fugue',
+          operation: 'consult',
           outcome: status === 'ok' ? 'success' : 'not_found',
           request_id,
           mode,
@@ -968,6 +1016,7 @@ export class FugueHttpServer {
       log.warn('Fugue equip skill_id rejected by BIBLIO_NAME_RE', {
         event: 'fugue.equip.schema_invalid',
         channel: 'fugue',
+        operation: 'equip',
         outcome: 'reject',
         reason: 'biblio_name_re',
         request_id,
@@ -983,6 +1032,7 @@ export class FugueHttpServer {
     log.info('Fugue equip invoked', {
       event: 'fugue.equip.invoked',
       channel: 'fugue',
+      operation: 'equip',
       request_id,
       skill_id,
     });
@@ -1024,6 +1074,7 @@ export class FugueHttpServer {
           log.warn('Fugue equip gate unexpected throw, falling back to open', {
             event: 'fugue.equip.gate_unexpected_throw',
             channel: 'fugue',
+            operation: 'equip',
             request_id,
             err: errMsg,
           });
@@ -1063,10 +1114,11 @@ export class FugueHttpServer {
                 err: err instanceof Error ? err.message : String(err),
               }),
             );
-            const processing_time_ms = Math.round(performance.now() - startedAt);
+            const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
             log.warn('Fugue equip rejected by input gate', {
               event: 'fugue.equip.in_secure',
               channel: 'fugue',
+              operation: 'equip',
               outcome: 'in_secure',
               request_id,
               skill_id,
@@ -1092,10 +1144,11 @@ export class FugueHttpServer {
 
       if (requiresApproval('equip', 'fugue')) {
         fugueSpan.setAttribute('fugue.outcome', 'hitl_required');
-        const processing_time_ms = Math.round(performance.now() - startedAt);
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
         log.warn('Fugue equip requires approval but HITL bridge is not wired for fugue channel', {
           event: 'fugue.equip.hitl_required',
           channel: 'fugue',
+          operation: 'equip',
           outcome: 'reject',
           request_id,
           skill_id,
@@ -1127,10 +1180,11 @@ export class FugueHttpServer {
           span.setAttribute('biblio.outcome', 'failure');
           fugueSpan.setAttribute('fugue.outcome', 'error');
 
-          const processing_time_ms = Math.round(performance.now() - startedAt);
+          const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
           log.error('Fugue equip listBiblio failed, returning partial-failure reply', {
             event: 'fugue.equip.partial_failure',
             channel: 'fugue',
+            operation: 'equip',
             outcome: 'failure',
             request_id,
             skill_id,
@@ -1157,10 +1211,11 @@ export class FugueHttpServer {
         if (!item) {
           span.setAttribute('biblio.outcome', 'not_found');
           fugueSpan.setAttribute('fugue.outcome', 'not_found');
-          const processing_time_ms = Math.round(performance.now() - startedAt);
+          const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
           log.info('Fugue equip target not found in shelf', {
             event: 'fugue.equip.not_found',
             channel: 'fugue',
+            operation: 'equip',
             outcome: 'not_found',
             request_id,
             skill_id,
@@ -1192,10 +1247,11 @@ export class FugueHttpServer {
           span.setAttribute('biblio.outcome', 'failure');
           fugueSpan.setAttribute('fugue.outcome', 'error');
 
-          const processing_time_ms = Math.round(performance.now() - startedAt);
+          const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
           log.error('Fugue equip DB write failed, returning partial-failure reply', {
             event: 'fugue.equip.partial_failure',
             channel: 'fugue',
+            operation: 'equip',
             outcome: 'failure',
             request_id,
             skill_id,
@@ -1242,7 +1298,7 @@ export class FugueHttpServer {
         // fugue span は Fugue 契約 §5.3 の 4 status (`equipped` / `already_equipped` /
         // `not_found` / `error`) と揃える (biblio.outcome の 3 値と別軸)。
         fugueSpan.setAttribute('fugue.outcome', status);
-        const processing_time_ms = Math.round(performance.now() - startedAt);
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
         const summary = inserted ? `『${item.name}』を装備しました。` : `『${item.name}』は既に装備済みです。`;
         const reply: FugueEquipReply = {
           schema_version: '1',
@@ -1258,6 +1314,7 @@ export class FugueHttpServer {
         log.info(inserted ? 'Fugue equip completed' : 'Fugue equip already-equipped', {
           event: inserted ? 'fugue.equip.completed' : 'fugue.equip.already_equipped',
           channel: 'fugue',
+          operation: 'equip',
           outcome: 'success',
           request_id,
           skill_id,
@@ -1312,6 +1369,7 @@ export class FugueHttpServer {
     log.info('Fugue ask invoked', {
       event: 'fugue.ask.invoked',
       channel: 'fugue',
+      operation: 'ask',
       request_id,
       intent: intent ?? null,
       query_length: query.length,
@@ -1362,6 +1420,7 @@ export class FugueHttpServer {
           log.warn('Fugue ask gate unexpected throw, falling back to open', {
             event: 'fugue.ask.gate_unexpected_throw',
             channel: 'fugue',
+            operation: 'ask',
             request_id,
             err: errMsg,
           });
@@ -1409,10 +1468,11 @@ export class FugueHttpServer {
                 err: err instanceof Error ? err.message : String(err),
               }),
             );
-            const processing_time_ms = Math.round(performance.now() - startedAt);
+            const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
             log.warn('Fugue ask rejected by input gate', {
               event: 'fugue.ask.in_secure',
               channel: 'fugue',
+              operation: 'ask',
               outcome: 'in_secure',
               request_id,
               intent: intent ?? null,
@@ -1439,9 +1499,16 @@ export class FugueHttpServer {
             const validated = FugueAskReply.safeParse(deniedReply);
             if (!validated.success) {
               fugueSpan.setAttribute('fugue.outcome', 'error');
+              // review 中 2 対応: 二重 recordFugueProcessingTime 呼出しを除去。親スコープの
+              // `processing_time_ms` (in_secure 経路 outcome set 直後の line 1461 で確定) と
+              // `fugue.processing_time_ms` span attribute をそのまま再利用する = span attr と
+              // response body が同値のまま維持され、silent inconsistency (~ms ずれ) が消える。
+              // 対称性契約 (17 == 17) は ad-honji.test.ts の pattern-match assertion に変更した
+              // (「outcome set 直後 or self_validation_failed 分岐で親再利用」を許容)。
               log.error('Fugue ask denied reply self-validation failed', {
                 event: 'fugue.ask.self_validation_failed',
                 channel: 'fugue',
+                operation: 'ask',
                 outcome: 'failure',
                 request_id,
                 issues: validated.error.issues,
@@ -1477,6 +1544,7 @@ export class FugueHttpServer {
             log.info('Fugue ask intent-gate classification mismatch', {
               event: 'fugue.ask.intent_gate_mismatch',
               channel: 'fugue',
+              operation: 'ask',
               request_id,
               intent,
               gate_classification: gateResult.classification,
@@ -1504,10 +1572,13 @@ export class FugueHttpServer {
         // init-fugue-ask-agent.ts が事前に実行されていない (Prod deploy 順序制約)。
         // 5xx を出さず 200 + status:'error' + ask_config_missing warning で運ぶ (AD の本義)。
         fugueSpan.setAttribute('fugue.outcome', 'error');
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, askCtx.startedAt);
         log.error('Fugue ask spawn config missing', {
           event: 'fugue.ask.spawn.config_missing',
           channel: 'fugue',
+          operation: 'ask',
           request_id,
+          processing_time_ms,
         });
         writeJson(res, 200, {
           schema_version: '1',
@@ -1518,7 +1589,7 @@ export class FugueHttpServer {
           findings: [],
           sources: [],
           raw: {},
-          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          processing_time_ms,
           warnings: ['ask_config_missing', ...gateWarnings],
         });
         return;
@@ -1538,6 +1609,7 @@ export class FugueHttpServer {
         log.warn('Fugue ask session reuse detected (unexpected, using existing)', {
           event: 'fugue.ask.spawn.session_reuse',
           channel: 'fugue',
+          operation: 'ask',
           request_id,
           session_id: session.id,
         });
@@ -1569,6 +1641,7 @@ export class FugueHttpServer {
       log.info('Fugue ask spawn started', {
         event: 'fugue.ask.spawn.start',
         channel: 'fugue',
+        operation: 'ask',
         request_id,
         session_id: session.id,
         session_created: created,
@@ -1579,11 +1652,14 @@ export class FugueHttpServer {
       const wakeOk = await wakeContainer(session);
       if (!wakeOk) {
         fugueSpan.setAttribute('fugue.outcome', 'error');
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, askCtx.startedAt);
         log.error('Fugue ask spawn failed (wakeContainer returned false)', {
           event: 'fugue.ask.spawn.failed',
           channel: 'fugue',
+          operation: 'ask',
           request_id,
           session_id: session.id,
+          processing_time_ms,
         });
         void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-spawn-failed').catch((err) =>
           log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
@@ -1602,7 +1678,7 @@ export class FugueHttpServer {
           findings: [],
           sources: [],
           raw: { agent_session_id: session.id },
-          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          processing_time_ms,
           warnings: ['ask_spawn_failed', ...gateWarnings],
         });
         return;
@@ -1618,13 +1694,16 @@ export class FugueHttpServer {
 
       if (pollResult.timedOut) {
         fugueSpan.setAttribute('fugue.outcome', 'timeout');
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, askCtx.startedAt);
         log.warn('Fugue ask spawn timeout', {
           event: 'fugue.ask.spawn.timeout',
           channel: 'fugue',
+          operation: 'ask',
           request_id,
           session_id: session.id,
           elapsed_ms: Math.round(performance.now() - spawnStartAt),
           timeout_ms: timeoutMs,
+          processing_time_ms,
         });
         void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-timeout').catch((err) =>
           log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
@@ -1643,7 +1722,7 @@ export class FugueHttpServer {
           findings: [],
           sources: [],
           raw: { agent_session_id: session.id },
-          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          processing_time_ms,
           warnings: ['ask_backend_timeout', ...gateWarnings],
         });
         return;
@@ -1654,12 +1733,15 @@ export class FugueHttpServer {
       const parsed = this.parseAgentAskResponse(rawContent);
       if (!parsed.ok) {
         fugueSpan.setAttribute('fugue.outcome', 'error');
+        const processing_time_ms = recordFugueProcessingTime(fugueSpan, askCtx.startedAt);
         log.warn('Fugue ask response parse failed', {
           event: 'fugue.ask.response.parse_failed',
           channel: 'fugue',
+          operation: 'ask',
           request_id,
           session_id: session.id,
           reason: parsed.reason,
+          processing_time_ms,
         });
         void this.cleanupAskSession(session.agent_group_id, session.id, 'fugue-ask-parse-failed').catch((err) =>
           log.warn('Fugue ask cleanup unexpected throw (fire-and-forget)', {
@@ -1678,7 +1760,7 @@ export class FugueHttpServer {
           findings: [],
           sources: [],
           raw: { agent_session_id: session.id, parse_reason: parsed.reason },
-          processing_time_ms: Math.round(performance.now() - askCtx.startedAt),
+          processing_time_ms,
           warnings: ['ask_response_malformed', ...gateWarnings],
         });
         return;
@@ -1715,6 +1797,7 @@ export class FugueHttpServer {
           log.info('Fugue ask finding source_indexes out-of-range (silent fallback applied)', {
             event: 'fugue.ask.response.invalid_source_index',
             channel: 'fugue',
+            operation: 'ask',
             request_id,
             session_id: session.id,
             finding_idx: findingIdx,
@@ -1731,7 +1814,7 @@ export class FugueHttpServer {
       // + source-id='summary' で emit (Contract §5.5 で source-id 属性は必須なので dummy 値)。
       const summary = wrapExternalContent(parsed.value.summary, 'summary', 'web');
 
-      const processing_time_ms = Math.round(performance.now() - startedAt);
+      const processing_time_ms = recordFugueProcessingTime(fugueSpan, startedAt);
       const okReply: FugueAskReplyT = {
         schema_version: '1',
         request_id,
@@ -1762,6 +1845,7 @@ export class FugueHttpServer {
         log.error('Fugue ask okReply self-validation failed', {
           event: 'fugue.ask.self_validation_failed',
           channel: 'fugue',
+          operation: 'ask',
           outcome: 'failure',
           request_id,
           session_id: session.id,
@@ -1785,9 +1869,15 @@ export class FugueHttpServer {
       }
 
       fugueSpan.setAttribute('fugue.outcome', 'ok');
+      // review 中 2 対応: 二重 recordFugueProcessingTime 呼出しを除去。親スコープの
+      // `processing_time_ms` (ok reply 組立時の line 1803 で確定) と `fugue.processing_time_ms`
+      // span attribute をそのまま再利用する = span attr と response body が同値のまま維持され、
+      // silent inconsistency (~ms ずれ) が消える。対称性契約は pattern-match 化した (詳細は
+      // denied 経路の同コメント + ad-honji.test.ts の該当 assertion を参照)。
       log.info('Fugue ask completed', {
         event: 'fugue.ask.completed',
         channel: 'fugue',
+        operation: 'ask',
         outcome: 'ok',
         request_id,
         intent: intent ?? null,
