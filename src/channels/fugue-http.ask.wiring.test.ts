@@ -327,7 +327,10 @@ describe('handleAsk wiring (M4-H Phase 3) — happy path', () => {
       'sess-mock-1',
       expect.objectContaining({
         id: 'fugue-ask-req-happy-1',
-        kind: 'user',
+        // M4-H Phase 3.5 動作検証で判明: formatMessages (container/agent-runner/src/formatter.ts:129)
+        // は kind === 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system' のみを拾う。'user' は
+        // drop されて agent に届かないため 'chat' に統一 (fugue-http.ts:1548)。
+        kind: 'chat',
         channelType: 'fugue',
         threadId: 'req-happy-1',
         trigger: 1,

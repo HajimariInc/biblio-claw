@@ -26,14 +26,39 @@ const CLOSE_TAG = '</external-content>';
 const CLOSE_TAG_ESCAPED = '&lt;/external-content&gt;';
 
 /**
+ * agent 応答値の先頭・末尾に既に `<external-content ...>...</external-content>` が付いている場合、
+ * その 1 段だけを剥がして中身を返す (二重 wrap 防止の defensive strip、M4-H Phase 3.5 で追加)。
+ *
+ * fugue-ask.md §5 で「agent は JSON payload の値に `<external-content>` タグを付けない」と
+ * 指示しているが、LLM が守らないケース (2026-07-08 Q2 実測で判明) を silent に吸収する。
+ *
+ * - text 全体が 1 個の外側 tag で囲まれているケースだけを剥がす (中間に散在する tag は残す)
+ * - open tag は属性 (source-id / kind) を持つため regex は非貪欲マッチ
+ * - close tag は EOF or trailing whitespace のみ
+ * - マッチしない場合は元の text をそのまま返す
+ */
+const OUTER_EXTERNAL_CONTENT_RE = /^<external-content\b[^>]*>([\s\S]*?)<\/external-content>\s*$/;
+
+function stripOuterExternalContent(text: string): string {
+  const match = text.trim().match(OUTER_EXTERNAL_CONTENT_RE);
+  return match?.[1] ?? text;
+}
+
+/**
  * 外部由来 text を `<external-content source-id="..." kind="...">...</external-content>` で囲む。
+ *
+ * 二重 wrap 防止: text が既に外側 `<external-content ...>...</external-content>` で囲まれている
+ * 場合は先に剥がしてから新しいタグで包み直す (`stripOuterExternalContent`)。agent が fugue-ask.md
+ * §5 の指示を守らずタグ付き値を返したケース (2026-07-08 Q2 実測) を silent に吸収する defensive
+ * layer。剥がしても attribute (source-id / kind) は handleAsk 側の新しいものが正 = 情報損失なし。
  *
  * @param text 外部由来の text (Tavily / Drive tool の response、agent 内 LLM の summary 等)。
  * @param sourceId handleAsk が発行する連番 id (`src-01`, `src-02`, ..., or `summary` / `unknown`)。
  * @param kind `'web' | 'drive'` — source の backend 種別 (`AgentAskSource.kind` と一致)。
- * @returns XML boundary で囲まれた text。既存の close tag は escape 済。
+ * @returns XML boundary で囲まれた text。既存の close tag は escape 済、外側二重 wrap は剥がし済。
  */
 export function wrapExternalContent(text: string, sourceId: string, kind: 'web' | 'drive'): string {
-  const escaped = text.replaceAll(CLOSE_TAG, CLOSE_TAG_ESCAPED);
+  const stripped = stripOuterExternalContent(text);
+  const escaped = stripped.replaceAll(CLOSE_TAG, CLOSE_TAG_ESCAPED);
   return `<external-content source-id="${sourceId}" kind="${kind}">${escaped}${CLOSE_TAG}`;
 }

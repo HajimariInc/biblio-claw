@@ -1544,15 +1544,22 @@ export class FugueHttpServer {
       }
 
       // Step 2: query prompt を messages_in に書込
+      //
+      // kind='chat' 必須 (M4-H Phase 3.5 で判明、2026-07-08): agent-runner の formatMessages
+      // (container/agent-runner/src/formatter.ts:129) は kind === 'chat' | 'chat-sdk' | 'task'
+      // | 'webhook' | 'system' のみを拾い、それ以外の kind (e.g. 'user') は完全に drop する
+      // (context timezone header だけが agent に届く)。kind='chat' で formatChatMessages 経路に
+      // 乗り、`<message id="..." from="..." sender="..." time="...">{text}</message>` として
+      // agent に prompt が届く。sender は content.sender で "Fugue Director" 固定。
       const prompt = this.buildAskPrompt(query, intent, context_hint);
       writeSessionMessage(session.agent_group_id, session.id, {
         id: `fugue-ask-${request_id}`,
-        kind: 'user',
+        kind: 'chat',
         timestamp: new Date().toISOString(),
         platformId: FUGUE_ASK_MG_PLATFORM_ID,
         channelType: 'fugue',
         threadId: request_id,
-        content: JSON.stringify({ text: prompt }),
+        content: JSON.stringify({ text: prompt, sender: 'Fugue Director' }),
         trigger: 1,
       });
 
