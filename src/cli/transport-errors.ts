@@ -7,7 +7,7 @@ export function formatTransportError(e: unknown): string {
     // process.cwd() is the install dir — install-slug helpers pick up
     // the right per-checkout suffix.
     return [
-      `ncl: cannot reach NanoClaw host (${msg}).`,
+      `ncl: cannot reach host (${msg}).`,
       `Is the host running? Start it with: pnpm run dev`,
       `Or, if installed as a service:`,
       `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
