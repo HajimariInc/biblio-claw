@@ -34,4 +34,4 @@ bash scripts/verify-<name>.sh
 
 ## 関連
 
-<!-- 関連 PR / 関連 issue / 関連 memory / 関連 runbook 節。 -->
+<!-- 関連 PR / 関連 issue / 関連 runbook 節。 -->
