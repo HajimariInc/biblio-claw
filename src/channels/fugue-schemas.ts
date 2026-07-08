@@ -375,7 +375,7 @@ export type FugueEquipReply =
 export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplace_parse' | 'in_secure' | 'other';
 
 /**
- * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 500
+ * Fugue エラー応答 body の型付き契約 (writeError() 経由で 401 / 404 / 400 / 413 / 429 / 500
  * のすべての error response を型付け)。
  *
  * discriminated union で `error='unavailable'` の場合のみ `reason` を必須にし、他の
@@ -384,6 +384,13 @@ export type FugueUnavailableReason = 'env_missing' | 'github_http' | 'marketplac
  * `error='unavailable'` を返すのは biblio-claw 自体の応答不能時に限定 (認可・上限超過・
  * 内部例外)。listBiblio() の部分失敗は 200 + `FugueConsultReply.status='error'` で運ぶため
  * `unavailable` variant は現状 uncaught exception 経路の予備 (現行 code path で明示発火なし)。
+ *
+ * `error='rate_limited'` は M4-H Phase 4 で追加。Contract §5.6 の `RATE_LIMITED` semantics
+ * に対応し、`writeError(res, 429, {error:'rate_limited'})` で使用する。`Retry-After`
+ * header は呼び出し側で `res.setHeader('Retry-After', <sec>)` として明示送出 (writeError/
+ * writeJson の signature は無変更、PRD 意思決定 #E)。AD の本義契約の 5xx catch-all only
+ * 制約に対して 429 は 4xx なので影響なし (Fugue 側は 5xx を "unavailable" に、429 を
+ * `AdvisorClawRateLimitedError` に分岐)。
  */
 export type FugueErrorResponse =
   | {
@@ -398,4 +405,8 @@ export type FugueErrorResponse =
       detail?: string;
       path?: string;
       issues?: unknown[];
+    }
+  | {
+      error: 'rate_limited';
+      detail?: string;
     };

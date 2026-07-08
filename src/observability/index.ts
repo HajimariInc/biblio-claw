@@ -4,7 +4,7 @@ import { upperCaseEnvSetter, upperCaseEnvGetter } from './env-propagation.js';
 export { startOtel, shutdownOtel, getTracer } from './otel.js';
 export { upperCaseEnvSetter, upperCaseEnvGetter } from './env-propagation.js';
 export { httpHeadersGetter, extractTraceContextFromHttpHeaders } from './http-propagation.js';
-export { withFugueEntrySpan, type FugueOperation } from './fugue-entry-span.js';
+export { withFugueEntrySpan, recordFugueProcessingTime, type FugueOperation } from './fugue-entry-span.js';
 
 export function injectTraceContextToEnv(carrier: Record<string, string>): void {
   propagation.inject(context.active(), carrier, upperCaseEnvSetter);

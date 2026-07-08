@@ -291,13 +291,14 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
     || fail "local auth-fail token_kind != bad (got '$auth_fail_token_kind')"
   info "  local auth-fail: status=401 token=bad (OK)"
 
-  # --- ask endpoint (M4-H Phase 1 skeleton + Phase 2 gate、Section 2 内で疎通確認) ---
-  # Phase 1 skeleton は skeleton_response marker を warnings に含む 200 応答を返す (backend / rate
-  # limit は Phase 3-4 で追加)。Phase 2 (PR #173) で gate 4 層通過ロジックを実装済 (in-secure denial
-  # + INTENT_GATE_MISMATCH + fail-open)。現状の 3 assertion (疎通 / no auth / invalid intent) は intent
-  # 未指定・非 in-secure な query のため GATE_ENABLED の値に関わらず PASS する = regression なし。
-  # TODO(M4-H Phase 6): denied 経路 (in-secure query) + INTENT_GATE_MISMATCH assertion を verify に追加
-  # (PRD Phase 6 = 任意 verify スコープ、11 assertion の一部)。
+  # --- ask endpoint (M4-H Phase 1-4、Section 2 内で疎通確認) ---
+  # Phase 3 で agent-container spawn 経路が完成、Phase 3.5 で system prompt override 完成、
+  # Phase 4 で rate limit + observability 統合。Section 2 では fugue-ask agent group が init 済
+  # かどうかは前提しない = 未 init なら `status:'error' + warnings:['ask_config_missing']` を、
+  # init 済なら `status:'ok'` (agent 応答成立) or `status:'error'` (spawn/timeout) を許容する。
+  # 疎通の観点では 200 応答 + status ∈ {ok, error} で十分。
+  # TODO(M4-H Phase 6): denied 経路 (in-secure query) + INTENT_GATE_MISMATCH + rate_limited 完全 assertion
+  # を verify に追加 (PRD Phase 6 = 任意 verify スコープ、11 assertion の一部)。
   LAST_HARNESS_STDERR="$STDERR_DIR/local-ask.stderr"
   ask_result="$(pnpm exec tsx scripts/fake-fugue-client.ts ask \
     --query "typescript" \
@@ -308,11 +309,11 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   ask_reply="$(json_field "$ask_result" 'response_body.status')"
   ask_token_kind="$(json_field "$ask_result" 'used_token_kind')"
   [ "$ask_status" = '200' ] || fail "local ask status != 200 (got '$ask_status'): $ask_result"
-  [ "$ask_reply" = 'not_available' ] \
-    || fail "local ask reply status != 'not_available' (Phase 1 skeleton の固定応答、got '$ask_reply'): $ask_result"
+  [[ "$ask_reply" =~ ^(ok|error)$ ]] \
+    || fail "local ask reply status not in {ok, error} (got '$ask_reply'): $ask_result"
   [ "$ask_token_kind" = 'valid' ] \
     || fail "local ask used_token_kind != valid (got '$ask_token_kind')"
-  info "  local ask: status=200 reply=not_available token=valid (Phase 1 skeleton OK)"
+  info "  local ask: status=200 reply=$ask_reply token=valid (Phase 3+ OK)"
 
   # ask 経路の no auth = 401 (path enumeration 遮断不変、consult/equip と対称)
   LAST_HARNESS_STDERR="$STDERR_DIR/local-ask-noauth.stderr"
@@ -336,6 +337,55 @@ if [ "$MODE" = 'local' ] || [ "$MODE" = 'both' ]; then
   [ "$ask_bad_intent_status" = '400' ] \
     || fail "local ask (invalid intent literal) expected 400 (got '$ask_bad_intent_status') = Zod validation fail 経路が機能していない"
   info "  local ask (invalid intent): status=400 (OK)"
+
+  # --- M4-H Phase 4: rate limit LOCAL assertion ---
+  # 60 req/min の sliding window に対して 61 req 連続を叩き、少なくとも 1 個の 429 + Retry-After
+  # header を確認する。前段の ask 疎通 (200 + 400 = rate limit カウンタ 2 消費済) + 本 loop 61 = total
+  # 63 req のうち >= 3 個は 429 になるはず (最も控えめに 1 個以上を assert = 前段の req 数に依存しない
+  # 頑健な verify)。escape hatch (`FUGUE_ASK_RATE_DISABLE`) は Pod 内 env 変更が困難な docker
+  # compose 経路のため、実装存在を source grep で確認 (Prod 経路の bypass 検証は Phase 5 スコープ)。
+  #
+  # 罠: rate limit カウンタは host process のプロセス lifetime に紐づく = 本 verify 実行中に
+  # accumulate される。60s window で自然 GC されるため、繰り返し実行 (連続 fail retry 等) では
+  # window 経過を待つか host restart する必要あり。
+  info "  ▼ M4-H Phase 4: LOCAL rate limit assertion"
+  ok_count=0
+  rate_hit_count=0
+  retry_after_seen=''
+  tmp_headers="$STDERR_DIR/local-ask-rate-headers.tmp"
+  for i in $(seq 1 61); do
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -D "$tmp_headers" \
+      -X POST "http://127.0.0.1:8080/v1/channels/fugue/ask" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $FUGUE_SHARED_TOKEN" \
+      -d "{\"schema_version\":\"1\",\"request_id\":\"rate-loop-$i\",\"query\":\"test\"}" \
+      2>>"$STDERR_DIR/local-ask-rate.stderr" || echo 'curl-failed')"
+    if [ "$code" = "200" ]; then
+      ok_count=$((ok_count + 1))
+    elif [ "$code" = "429" ]; then
+      rate_hit_count=$((rate_hit_count + 1))
+      if [ -z "$retry_after_seen" ]; then
+        retry_after_seen="$(grep -i '^retry-after:' "$tmp_headers" | awk '{print $2}' | tr -d '\r')"
+      fi
+    fi
+  done
+  rm -f "$tmp_headers"
+
+  [ "$rate_hit_count" -ge 1 ] \
+    || fail "rate limit assertion: 61 req 連続で 429 が 1 度も出なかった (ok=$ok_count 429=$rate_hit_count)。rate limit gate 未発火の疑い"
+  [ -n "$retry_after_seen" ] \
+    || fail "rate limit assertion: 429 応答に Retry-After header が付与されていない"
+  # Retry-After は正の整数 (秒) であるべき
+  if ! [[ "$retry_after_seen" =~ ^[0-9]+$ ]] || [ "$retry_after_seen" -lt 1 ]; then
+    fail "rate limit assertion: Retry-After 値が不正 (got '$retry_after_seen'): 正の整数 (秒) が必須"
+  fi
+  info "    ✓ 61 req loop: ok=$ok_count 429=$rate_hit_count Retry-After=${retry_after_seen}s"
+
+  # escape hatch の実装存在確認 (Pod 内 env 動的変更は docker compose 経路では困難、実挙動確認は
+  # Phase 5 の Prod verify で扱う予定 = Phase 4 スコープでは grep 静的検証で担保)
+  grep -q "isFugueAskRateLimitDisabled" src/channels/fugue-rate-limit.ts \
+    || fail "rate limit escape hatch (isFugueAskRateLimitDisabled) が src/channels/fugue-rate-limit.ts に不在"
+  info "    ✓ FUGUE_ASK_RATE_DISABLE escape hatch は source に実装済 (grep 確認)"
 fi
 
 # =============================================================================

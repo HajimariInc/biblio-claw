@@ -96,6 +96,9 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
       // 実 HTTP fetch では handleRequest の catch-all を発火させるのが困難なため (`res.headersSent`
       // check + `writeError(res, 500, ...)` は uncaught 想定のみ発火)、静的 grep assertion で
       // 「5xx 応答経路が catch-all 1 箇所に集約されていること」を担保する。
+      //
+      // M4-H Phase 4 Task 3 (rate limit): `writeError(res, 429, ...)` は 4xx なので本 assertion に
+      // 影響しない (429 は enumeration 対象外、Contract §5.6 の `RATE_LIMITED` semantics)。
       const here = dirname(fileURLToPath(import.meta.url));
       const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
       const matches = source.match(/writeError\(res,\s*5\d{2}/g) ?? [];
@@ -126,10 +129,62 @@ describe('FugueHttpServer AD-honji assertion (Phase 4)', () => {
           `fugueSpan.setAttribute('fugue.outcome', ...) = ${setFugueOutcomeMatches.length} 箇所。` +
           `全 200 応答分岐で outcome 属性を刻むべき (Cloud Trace outcome ベース集計からの silent drop 防止)。`,
       ).toBe(writeJson200Matches.length);
-      // 参考値の retention: Phase 4 完了時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
-      // partial_B + success)。追加/削除時は本 assertion が fail するので、意図された対称性の範囲で
-      // 数を updateする。
+      // 参考値の retention:
+      //   - M4-E Phase 4 完了時点は 7 (consult 2 + equip 5 = HITL + partial_A + not_found +
+      //     partial_B + success)。
+      //   - **M4-H Phase 4 完了時点は 17** (consult 2 + equip 5 + ask 10 = invoked/in_secure/
+      //     config_missing/spawn.failed/spawn.timeout/response.parse_failed/self_val_in_secure/
+      //     self_val_ok/completed 分岐 + rate_limited を除く 200 経路)。`recordFugueProcessingTime`
+      //     呼出数も対称に 17 (下の test 4 で機械検知、Task 6 の 5xx-set 直後契約)。
+      // 追加/削除時は本 assertion が fail するので、意図された対称性の範囲で数を update する。
       expect(writeJson200Matches.length).toBeGreaterThanOrEqual(6);
+    });
+
+    // Phase 4 Task 9 (M4-H): 全 fugue log payload に operation field が付与されていることを
+    // 静的 grep で強制。BQ sink 上の `WHERE jsonPayload.operation = "ask"` query が Phase 5
+    // deploy 後に即動く構造的保証、regression 保護 (追加のみで既存 field 無変更、regression zero)。
+    //
+    // 除外: handleRequest 共通 log (path 未特定) は operation を付けない = 8 event を除外リスト化。
+    // appendGateAuditLog は log 呼出ではない (`log.info/warn/error/debug` の外) ので直接 grep から
+    // 除外される想定 (`event:` field を持たないため regex に一致しない)。
+    it('static grep: 全 fugue log payload has operation field (M4-H Phase 4 Task 9)', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
+      // log.<method>('<msg>', { ... }) 全体を block として拾う。log 呼出しに限定 = appendGateAuditLog
+      // など別 API の payload は自動的に除外される。channel: 'fugue' を含む log block のみ絞り込み、
+      // block 内に event: + operation: の両 field が揃うかを検証する。
+      //
+      // 除外: handleRequest 共通 log (path 未特定、8 event) は operation を付けない設計。
+      const logBlocks = source.match(/log\.(?:info|warn|error|debug|fatal)\([^)]*\{[\s\S]*?\}\s*\)/g) ?? [];
+      const fugueLogBlocks = logBlocks.filter((b) => /channel: 'fugue',/.test(b));
+      const commonEventPattern =
+        /event: 'fugue\.(inbound\.received|auth\.rejected|traceparent\.malformed|route\.not_found|handler\.error|healthz\.write_failed|url_parse_failed|server\.error)'/;
+      const opPattern = /operation: (?:'(?:consult|equip|ask)'|operation)/;
+      const violations = fugueLogBlocks.filter((block) => !commonEventPattern.test(block) && !opPattern.test(block));
+      expect(
+        violations,
+        `M4-H Phase 4 対称性: 全 fugue log に operation field 必須。違反 ${violations.length} 件: ` +
+          violations.map((v) => v.slice(0, 200)).join(' || '),
+      ).toHaveLength(0);
+      // fugue log 総数の下限 assertion (追加時の regression 気付き)。M4-H Phase 4 完了時点で
+      // 40+ log 想定 (共通 8 + fugue.<op> 系 30+)。
+      expect(fugueLogBlocks.length).toBeGreaterThanOrEqual(30);
+    });
+
+    // Phase 4 Task 9 (M4-H): recordFugueProcessingTime 呼出数 == fugue.outcome set 数 の対称性 (17==17)。
+    // Task 6 の契約 = 「outcome set 直後で必ず helper 呼出」を機械検知 = 呼び忘れが CI で fail
+    // する構造的保証。
+    it('static grep: recordFugueProcessingTime call count == fugue.outcome set count (M4-H Phase 4 Task 6)', () => {
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(resolve(here, 'fugue-http.ts'), 'utf-8');
+      const recordMatches = source.match(/recordFugueProcessingTime\(/g) ?? [];
+      const outcomeMatches = source.match(/fugueSpan\.setAttribute\('fugue\.outcome',/g) ?? [];
+      expect(
+        recordMatches.length,
+        `recordFugueProcessingTime 呼出数 (${recordMatches.length}) と ` +
+          `fugueSpan.setAttribute('fugue.outcome', ...) 呼出数 (${outcomeMatches.length}) が不一致。` +
+          `outcome set 直後の helper 呼び忘れが疑われる (Task 6 対称性契約)。`,
+      ).toBe(outcomeMatches.length);
     });
 
     it('listBiblio throw is served as 200 + status:error (not 5xx)', async () => {
