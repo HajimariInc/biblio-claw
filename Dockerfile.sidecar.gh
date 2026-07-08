@@ -1,4 +1,4 @@
-# biblio-claw gh-token-rotator sidecar image (M2 PRD A Phase 3、TBD-3 案 B)。
+# biblio-claw gh-token-rotator sidecar image。
 # alpine ベースで curl/jq/nodejs/bash + ca-certificates のみ。gcloud SDK は含めない
 # (= GH App rotator は gcloud を使わない、攻撃面を局所化する)。本 image は ~50MB。
 #
@@ -6,10 +6,10 @@
 # Native sidecar 構成は k8s/10-orchestrator-statefulset.yaml の `gh-token-rotator`
 # container として参照される。
 #
-# Build:   docker build -f Dockerfile.sidecar.gh -t biblio-sidecar-gh:m2-p3 .
-# AR push: docker tag biblio-sidecar-gh:m2-p3 \
-#            asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-gh:m2-p3 && \
-#          docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-gh:m2-p3
+# Build:   docker build -f Dockerfile.sidecar.gh -t biblio-sidecar-gh:<image-tag> .
+# AR push: docker tag biblio-sidecar-gh:<image-tag> \
+#            asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-gh:<image-tag> && \
+#          docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-gh:<image-tag>
 
 FROM alpine:3.20
 

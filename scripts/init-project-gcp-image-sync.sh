@@ -6,7 +6,7 @@
 #   Block 1: pre-flight (cluster context + StatefulSet ready + 必要 cmd + 認証 + AR repo 存在)
 #   Block 2: 4 image build (biblio-claw orchestrator + nanoclaw-agent + biblio-sidecar-gh + biblio-sidecar-vertex)
 #   Block 3: 4 image AR push (docker tag → docker push、agent image の install-slug 衝突を吸収)
-#   Block 4: k8s manifest image tag 更新 (= k8s/10-orchestrator-statefulset.yaml の 4 箇所 sed -i)
+#   Block 4: manifest 内 ${IMAGE_TAG} placeholder の存在確認 + rollback backup (envsubst 展開は Block 5)
 #   Block 5: kubectl apply -f k8s/ + kubectl rollout status 待ち
 #   Block 6: 状況確認 (Pod 内 image tag / env 反映 / M3 ファイル存在 / Phase 2 JSON ログ観測)
 #
@@ -50,6 +50,13 @@ ok() { printf '[OK]   %s\n' "$*" >&2; }
 NS='biblio-claw'
 ORCH_POD='biblio-orchestrator-0'
 : "${GCP_PROJECT_ID:?required for GAR path and envsubst: export GCP_PROJECT_ID before running (e.g. export GCP_PROJECT_ID=your-gcp-project-id)}"
+# Cloud SQL instance 名 (envsubst 経由で k8s/10-orchestrator-statefulset.yaml の
+# cloud-sql-proxy args + DATABASE_URL 展開に必要)。fork 側で必ず名前が変わるため env 必須。
+: "${CLOUD_SQL_INSTANCE:?required for envsubst \${CLOUD_SQL_INSTANCE}: export CLOUD_SQL_INSTANCE (Cloud SQL instance 名) before running}"
+# Cloud SQL VPC peering allocation CIDR (envsubst 経由で k8s/27-networkpolicy-fugue-channel.yaml
+# の egress rule 展開に必要)。`gcloud compute addresses list --filter=purpose:VPC_PEERING`
+# で特定、fork 側の VPC ごとに異なる。
+: "${CLOUD_SQL_PEERING_CIDR:?required for envsubst \${CLOUD_SQL_PEERING_CIDR}: export CLOUD_SQL_PEERING_CIDR (Cloud SQL VPC peering CIDR, e.g. 10.191.0.0/16) before running}"
 GAR="asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw"
 MANIFEST="$ROOT/k8s/10-orchestrator-statefulset.yaml"
 
@@ -242,49 +249,43 @@ else
   push_image "biblio-sidecar-vertex:$TAG"    biblio-sidecar-vertex
 fi
 
-# === Block 4: manifest image tag 更新 (sed -i × 4 image) =============================
-info '=== Block 4: manifest image tag 更新 (sed -i × 4 image) ==='
+# === Block 4: manifest placeholder 確認 + rollback backup =============================
+info '=== Block 4: manifest placeholder 確認 + rollback backup ==='
 
+# manifest は ${IMAGE_TAG} placeholder ベースで維持し (= tag literal を git 履歴に残さない)、
+# Block 5 の envsubst で --tag 引数値に展開して kubectl apply する経路に統合済。
+# 本 Block では apply 前の placeholder 存在 assert + rollback backup 作成のみを行う。
 if "$NO_APPLY"; then
   info '[manifest] --no-apply 指定、skip'
 else
   [ -f "$MANIFEST" ] || fail "[manifest] $MANIFEST が見つからない"
 
-  # 書き換え前 backup (= rollback 用、--confirm 時のみ実体ファイル作成)
+  # 期待 hit 数: image 名 4 種 × 各 manifest 行 1 = 4 行 (biblio-claw / nanoclaw-agent
+  # / biblio-sidecar-gh / biblio-sidecar-vertex + drive-token-rotator の vertex 再利用で 5 行)。
+  hit="$(grep -cE 'biblio-claw/[^"'"'"' ,}]+:\$\{IMAGE_TAG\}' "$MANIFEST" || true)"
+  [ "$hit" -ge 4 ] || \
+    fail "[manifest] \${IMAGE_TAG} placeholder が manifest 内に不足 (期待=4 行以上、実際=$hit 行)。cleanup 後の manifest では image tag は \${IMAGE_TAG} placeholder として保持する設計。manifest を確認: $MANIFEST"
+  info "[manifest] \${IMAGE_TAG} placeholder 検出 ($hit 行、Block 5 で --tag=$TAG に envsubst 展開)"
+
+  # rollback 用 backup (= --confirm 時のみ実体作成、dry-run では skip)
+  # $(date +%s) を先に変数に捕捉 = cp が作った実ファイル名と log 出力が
+  # 秒境界跨ぎで食い違うのを防ぐ (rollback 復元時の混乱を撲滅)。
   if ! "$DRY_RUN"; then
-    cp "$MANIFEST" "$MANIFEST.bak.$(date +%s)"
+    backup_path="$MANIFEST.bak.$(date +%s)"
+    cp "$MANIFEST" "$backup_path"
+    ok "[manifest] backup 作成: $backup_path"
   fi
 
-  # image 名で限定する regex で 4 行を一括書き換え。
-  # `biblio-claw/<image-name>:<old-tag>` → `biblio-claw/<image-name>:$TAG`
-  # 注: AR の repository path `biblio-claw/<image-name>` を prefix にすれば image 名で限定でき、
-  # 該当 4 行のみ hit する (= 衝突なし)。
-  # `[^"' ,}]*` は YAML flow style ({ ..., value: ..., }) の `,` と `}` まで除外。
-  for img in biblio-claw nanoclaw-agent biblio-sidecar-gh biblio-sidecar-vertex; do
-    before="$(grep "biblio-claw/$img:" "$MANIFEST" | head -1 | sed -n "s|.*biblio-claw/$img:\([^\"' ,}]*\).*|\1|p")"
-    if [ -z "$before" ]; then
-      warn "[manifest] image $img への参照が見つからない (skip)"
-      continue
-    fi
-    if [ "$before" = "$TAG" ]; then
-      info "[manifest] $img は既に $TAG (no-op)"
-      continue
-    fi
-    run sed -i "s|biblio-claw/$img:[^\"' ,}]*|biblio-claw/$img:$TAG|g" "$MANIFEST"
-    # dry-run 時の「書き換え完了」誤認を防ぐため confirm モード時のみ ok を出す
-    # (= dry-run では sed -i は実行されていない)。
-    "$DRY_RUN" || ok "[manifest] $img $before → $TAG"
-  done
-
-  # 書き換え結果の事後 assert + 表示 (= 旧版は `grep -n ... || true` で hit 数を
-  # 確認せず、書き換え 0 件のまま Block 5 で古い tag を apply するリスクがあった)。
-  # 期待 hit 数: image 名 4 種 × 各 manifest 行 1 = 4 行以上。
-  if ! "$DRY_RUN"; then
-    hit="$(grep -c "biblio-claw/.*:$TAG" "$MANIFEST" || true)"
-    [ "$hit" -ge 4 ] || \
-      fail "[manifest] sed -i 後の tag 書き換え確認失敗 (期待=4 行以上、実際=$hit 行)。manifest を確認: $MANIFEST"
-    info "[manifest] 書き換え後の image 行 ($hit 行):"
-    grep -n "biblio-claw/.*:$TAG" "$MANIFEST" >&2
+  # fork 側 deploy で手動置換が必要な angle-bracket placeholder が残っていないか
+  # fail-fast 検出 (envsubst 対象外 = envsubst で literal のまま container に注入され、
+  # `readListEnv` / `readShelveEnv` は空文字チェックのみで literal `<...>` を通過するため
+  # 起動 → 最初の `@bot 蔵書` / `@bot 仕入れて` を叩くまで異常に気付けない silent failure)。
+  # 全 placeholder は fork 側で sed / envsubst 前の手動 rewrite で実値に置換必須。
+  placeholder_pattern='<(shelf-repo-owner|shelf-repo-name|bot-commit-author-name|bot-commit-author-email|cloud-sql-db-name)>'
+  if grep -qE "$placeholder_pattern" "$MANIFEST"; then
+    warn "[manifest] 未置換の angle-bracket placeholder を検出 (envsubst 対象外):"
+    grep -nE "$placeholder_pattern" "$MANIFEST" | head -10 >&2
+    fail "[manifest] fork 側で全 placeholder を実値に置換してから deploy してください (sed 例: sed -i 's|<shelf-repo-owner>|myorg|g' $MANIFEST)"
   fi
 fi
 
@@ -333,10 +334,15 @@ if "$NO_APPLY"; then
   info '[apply] --no-apply 指定、skip'
 else
   # k8s/25-ingress-fugue-channel.yaml の `host: ${DOMAIN}` は envsubst で展開してから
-  # apply する必要がある (M4-E Phase 5 罠 10/11 = envsubst 未処理で literal 登録 invalid)。
+  # apply する必要がある (罠: envsubst 未処理で literal 登録 = Ingress invalid)。
   # DOMAIN は env で明示、あるいは Secret Manager `fugue-domain-name` から動的取得
-  # (host 名を静的ファイルに露出させない設計、runbook §M4-E Phase 5 §Step 3 参照)。
-  info '[apply] envsubst ${DOMAIN} + kubectl apply (tmpdir 経由)'
+  # (host 名を静的ファイルに露出させない設計)。
+  # k8s/10-orchestrator-statefulset.yaml の image tag / Cloud SQL instance も同経路で
+  # ${IMAGE_TAG} / ${CLOUD_SQL_INSTANCE} placeholder として envsubst 展開する
+  # (= public 化 cleanup で literal を manifest から除去、fork 側で値を注入する設計)。
+  # k8s/27-networkpolicy-fugue-channel.yaml の Cloud SQL VPC peering CIDR も同経路で
+  # ${CLOUD_SQL_PEERING_CIDR} 展開 (fork 側 VPC ごとに CIDR が異なるため env 必須)。
+  info '[apply] envsubst ${DOMAIN} + ${GCP_PROJECT_ID} + ${IMAGE_TAG} + ${CLOUD_SQL_INSTANCE} + ${CLOUD_SQL_PEERING_CIDR} + kubectl apply (tmpdir 経由)'
   if [ -z "${DOMAIN:-}" ]; then
     # `--project` は image build/push の GAR と同一プロジェクト前提。
     DOMAIN="$(gcloud secrets versions access latest --secret=fugue-domain-name \
@@ -344,24 +350,29 @@ else
   fi
   [ -n "${DOMAIN:-}" ] || \
     fail "[apply] DOMAIN 未解決 (env 未設定 + Secret Manager fugue-domain-name 空 or gcloud 権限不足)。DOMAIN=<host> を env で明示 or gcloud secrets versions access で単独確認"
+  # ${IMAGE_TAG} は --tag 引数値を export、${CLOUD_SQL_INSTANCE} は preflight で env 必須確認済
   export DOMAIN
   export GCP_PROJECT_ID
-  # tmpdir で render (envsubst で ${DOMAIN} / ${GCP_PROJECT_ID} を展開、他 manifest は cp で pass-through)。
-  # 対象 env 変数を含む file を grep で判定 = 将来 別 manifest に env 変数が増えた場合も自動追随。
+  export IMAGE_TAG="$TAG"
+  export CLOUD_SQL_INSTANCE
+  export CLOUD_SQL_PEERING_CIDR
+  # tmpdir で render (envsubst で 5 変数を展開、他 manifest は cp で pass-through)。
+  # 対象 env 変数を含む file を grep で判定 = 将来 別 manifest に env 変数が増えた場合も
+  # 自動追随。
   apply_tmp="$(mktemp -d -t biblio-p4-5-apply-XXXXXX)"
   # top-level script なので trap EXIT で cleanup (関数 scope の RETURN は使わない)
   trap 'rm -rf "$apply_tmp"' EXIT
   substituted_count=0
   for f in "$ROOT/k8s"/*.yaml; do
     base="$(basename "$f")"
-    if grep -qE '\$\{(DOMAIN|GCP_PROJECT_ID)\}' "$f" 2>/dev/null; then
-      envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < "$f" > "$apply_tmp/$base"
+    if grep -qE '\$\{(DOMAIN|GCP_PROJECT_ID|IMAGE_TAG|CLOUD_SQL_INSTANCE|CLOUD_SQL_PEERING_CIDR)\}' "$f" 2>/dev/null; then
+      envsubst '${DOMAIN} ${GCP_PROJECT_ID} ${IMAGE_TAG} ${CLOUD_SQL_INSTANCE} ${CLOUD_SQL_PEERING_CIDR}' < "$f" > "$apply_tmp/$base"
       substituted_count=$((substituted_count + 1))
     else
       cp "$f" "$apply_tmp/$base"
     fi
   done
-  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN}, \${GCP_PROJECT_ID} を実値に展開"
+  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN}, \${GCP_PROJECT_ID}, \${IMAGE_TAG}, \${CLOUD_SQL_INSTANCE}, \${CLOUD_SQL_PEERING_CIDR} を実値に展開"
   run kubectl apply -f "$apply_tmp/"
   ok '[apply] kubectl apply done'
 

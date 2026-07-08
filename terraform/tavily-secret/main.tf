@@ -1,5 +1,5 @@
 # ------------------- Secret Manager: biblio-tavily-api-key -------------------
-# Tavily Web 検索の API key (M4-F Phase 3、life-capabilities)。
+# Tavily Web 検索の API key (life-capabilities)。
 #
 # `scripts/onecli-tavily-secret.sh` が deploy 時に本 secret から `latest` version を読み、
 # OneCLI vault に `type=generic + hostPattern=api.tavily.com + Bearer {value}` として投入する。

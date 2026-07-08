@@ -1,20 +1,20 @@
-# M4-A Phase 3: Cloud Logging → BigQuery sink
+# Cloud Logging → BigQuery sink
 
 biblio-claw の構造化ログを BigQuery `llm_observability` dataset に sink する Terraform。
 
 ## 前提
 
 - GCP project: `<your-gcp-project>`
-- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済
-- GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中
+- operator account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済
+- GKE cluster (region `asia-northeast1`) で biblio-claw が稼働中
 - keyless: `gcloud auth application-default login` 済 (ADC)、service account key を使わない
-- **terraform CLI (v1.5+ 推奨)** — install 手順は `docs/operations-runbook.md` §M4-A Phase 3 §前提 を参照 (AlmaLinux/RHEL/Ubuntu/Debian/macOS 対応)
+- **terraform CLI (v1.5+ 推奨)** — install 手順は `docs/operations-runbook.md` を参照 (AlmaLinux/RHEL/Ubuntu/Debian/macOS 対応)
 
 ## Apply
 
 ```bash
 cd terraform/m4-a-observability
-# 必須 var を投入 (issue #168 で project_id の default 削除、明示指定必須)
+# 必須 var を投入 (project_id の default 削除済み、明示指定必須)
 export TF_VAR_project_id='<your-gcp-project>'
 terraform init
 terraform plan -out=tfplan
@@ -32,7 +32,7 @@ terraform apply tfplan
 1. biblio-claw で任意の biblio action を 1 回実行 (= Slack で `@bot 蔵書` 等)
 2. ~5 分待ち、`bq ls <your-gcp-project>:llm_observability` でテーブル materialize 確認
 3. 実テーブル名は GKE container の logName 由来で **`stdout` / `stderr` の 2 テーブル** (2026-06-28 実測)
-4. `sql/summary.sql` は `<PROJECT_ID>` / `<DATASET_ID>` placeholder 形式 (= Phase 4 verify-m4-a.sh と共有) のため `sed` 置換で実行:
+4. `sql/summary.sql` は `<PROJECT_ID>` / `<DATASET_ID>` placeholder 形式 (= verify-m4-a.sh と共有) のため `sed` 置換で実行:
    ```bash
    sed -e "s/<PROJECT_ID>/<your-gcp-project>/g" \
        -e "s/<DATASET_ID>/llm_observability/g" \

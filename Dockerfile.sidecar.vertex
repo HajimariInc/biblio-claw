@@ -1,5 +1,4 @@
-# biblio-claw ADC-based rotator sidecar image (M2 PRD A Phase 3、TBD-3 案 B、
-# M4-F Phase 3 で drive-token-rotator も同 image を再利用)。
+# biblio-claw ADC-based rotator sidecar image (drive-token-rotator も同 image を再利用)。
 #
 # google-cloud-cli:slim ベース。`gcloud auth application-default print-access-token` を
 # 叩いて ADC token を OneCLI に投入する用途のみで、他の重い依存は持たせない。本 image は ~375MB。
@@ -14,10 +13,10 @@
 # Native sidecar 構成は k8s/10-orchestrator-statefulset.yaml の `vertex-token-rotator`
 # + `drive-token-rotator` container として参照される。
 #
-# Build:   docker build -f Dockerfile.sidecar.vertex -t biblio-sidecar-vertex:m4f-p3 .
-# AR push: docker tag biblio-sidecar-vertex:m4f-p3 \
-#            asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:m4f-p3 && \
-#          docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:m4f-p3
+# Build:   docker build -f Dockerfile.sidecar.vertex -t biblio-sidecar-vertex:<image-tag> .
+# AR push: docker tag biblio-sidecar-vertex:<image-tag> \
+#            asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:<image-tag> && \
+#          docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-sidecar-vertex:<image-tag>
 
 FROM gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
 
@@ -25,10 +24,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends bash curl jq ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Vertex rotator (M2 PRD A Phase 3、既存経路)
+# Vertex rotator (既存経路)
 COPY scripts/vertex-rotate.sh        /scripts/vertex-rotate.sh
 COPY scripts/onecli-vertex-secret.sh /scripts/onecli-vertex-secret.sh
-# Drive rotator (M4-F Phase 3、life-capabilities)
+# Drive rotator (life-capabilities)
 COPY scripts/drive-rotate.sh         /scripts/drive-rotate.sh
 COPY scripts/onecli-drive-secret.sh  /scripts/onecli-drive-secret.sh
 # Shared libraries

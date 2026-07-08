@@ -1,13 +1,12 @@
-# Kubernetes ServiceAccount: orchestrator 1 体に集約 (M2 PRD A Phase 3、TBD-1 案 A)。
+# Kubernetes ServiceAccount: orchestrator 1 体に集約 (WI 経由の GSA/KSA 統合)。
 #
-# Phase 3 で OneCLI Deployment + GH Sidecar CronJob を orchestrator Pod の Native
-# sidecar に統合したため、KSA も orchestrator 1 つに集約する。GSA も新 `biblio-orchestrator`
+# OneCLI Deployment + GH Sidecar CronJob を orchestrator Pod の Native sidecar に
+# 統合したため、KSA も orchestrator 1 つに集約する。GSA も新 `biblio-orchestrator`
 # 1 つに統合し、WI (workload identity) / Secret Manager / Cloud SQL / Vertex AI 用の
 # role を resource レベルで bind する (= "1 workload = 1 GSA" 公式推奨パターン)。
 #
-# gcloud 側の binding は本 Phase 着手時に DEN さんが 1 回手作業で実行 (詳細は plan §Task 1)。
-# 旧 `biblio-onecli-ksa` + `biblio-sidecar-ksa` (および対応する旧 2 GSA) は本 Phase 完了
-# 確認後に削除予定 (Rollback 窓を確保するため即削除しない)。
+# gcloud 側の binding は初回 operator が 1 回手作業で実行。
+# 統合前の旧 KSA + 対応 GSA は移行完了確認後に削除予定 (Rollback 窓を確保するため即削除しない)。
 apiVersion: v1
 kind: ServiceAccount
 metadata:

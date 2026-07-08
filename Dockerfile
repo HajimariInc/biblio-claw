@@ -1,18 +1,17 @@
-# biblio-claw host (NanoClaw orchestrator) image — Phase 2 で新規追加。
+# biblio-claw host (NanoClaw orchestrator) image。
 #
-# Phase 1 では host = `pnpm run dev` で host OS 直接実行のため image 未整備
-# (NanoClaw 上流の運用方式)。Phase 2 で本 Dockerfile を新設して、同じ image を:
+# 開発初期は host = `pnpm run dev` で host OS 直接実行のため image 未整備
+# (NanoClaw 上流の運用方式)。本 Dockerfile を新設して、同じ image を:
 #   - Local: docker run で起動 → env (DSN_PROVIDER=local) で local FS パス解決
 #   - GKE:  k8s/10-orchestrator-statefulset.yaml が pull → env (DSN_PROVIDER=gke)
 #          で /data (PVC mountPath) 解決
-# として動かす。「アプリ image SHA 不変、env で環境差分吸収」が Phase 2 の精神
-# (plan §UX Design L162、A 案採用後も維持)。
+# として動かす。「アプリ image SHA 不変、env で環境差分吸収」が本 image の設計原則。
 #
 # Build:
-#   docker build -t biblio-claw:m1-p1 .
+#   docker build -t biblio-claw:<image-tag> .
 # AR push:
-#   docker tag biblio-claw:m1-p1 asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:m1-p1
-#   docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:m1-p1
+#   docker tag biblio-claw:<image-tag> asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:<image-tag>
+#   docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:<image-tag>
 #
 # Local 検証 (DSN_PROVIDER=local):
 #   docker compose up -d --wait   # postgres + onecli を先に起動
@@ -24,10 +23,10 @@
 #     -e ASSISTANT_NAME=biblio \
 #     -e ANTHROPIC_VERTEX_PROJECT_ID=<your-gcp-project> \
 #     -e CLOUD_ML_REGION=global -e CLAUDE_CODE_USE_VERTEX=1 \
-#     biblio-claw:m1-p1
+#     biblio-claw:<image-tag>
 #
 # 構成:
-#   - base: node:24-slim (engines.node >= 24.13.0、M4-B Phase 0 で Node 24 LTS 化、
+#   - base: node:24-slim (engines.node >= 24.13.0、Node 24 LTS 前提、
 #           `@google/adk@^1.3.0` + `better-sqlite3@12.x` (Node 24 prebuilt binary 対応) 前提)
 #   - tools: git (group-init で参照される可能性) / ca-certificates (HTTPS)
 #   - pnpm: corepack で `packageManager: pnpm@10.33.0` を有効化
@@ -43,9 +42,9 @@ FROM node:24-slim
 WORKDIR /app
 
 # 余分な APT cache を残さない (image サイズ最適化)。
-# jq は scripts/onecli-*-secret.sh が JSON payload 組立/解析に使う (M4-F Phase 3 で追加。
+# jq は scripts/onecli-*-secret.sh が JSON payload 組立/解析に使う。
 # 従来は sidecar rotator image 内でのみ実行されていたため orchestrator に未 install だったが、
-# Tavily secret 投入は orchestrator container 内で走らせる必要があるため恒久化)。
+# Tavily secret 投入は orchestrator container 内で走らせる必要があるため恒久化。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     ca-certificates \
@@ -81,9 +80,9 @@ RUN pnpm run build
 
 # Runtime で host プロセスが参照する可能性のある静的ファイル:
 # - scripts/: onecli-*.sh, sign_jwt.cjs, onecli-lib.sh
-#   (Phase 1 の sidecar / vertex secret 投入 script 等)
+#   (sidecar / vertex secret 投入 script 等)
 # - groups/: 空 dir で作成。install 固有 state (cli-with-den 等) は image に焼かず、
-#   runtime で PVC mount or 空のまま (Phase 2 では agent spawn しないので問題ない)
+#   runtime で PVC mount or 空のまま (agent spawn しない host image では問題ない)
 COPY scripts/ ./scripts/
 RUN mkdir -p ./groups
 
