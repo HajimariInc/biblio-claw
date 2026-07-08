@@ -1,6 +1,6 @@
 # terraform/iam-drive-user
 
-M4-F Phase 3 (life-capabilities) の Drive access 経路 (R4 = SA 2 段 impersonation) を成立させる最小構成 Terraform module。
+life-capabilities の Drive access 経路 (R4 = SA 2 段 impersonation) を成立させる最小構成 Terraform module。
 
 ## 何を宣言するか
 
@@ -32,8 +32,8 @@ orchestrator Pod (WI 経由で biblio-orchestrator@ を assume)
 ## 設計判断
 
 - **target SA を分離** — orchestrator SA (Vertex / GH / Cloud SQL IAM / OneCLI 等多方面の権限) に Drive access を相乗りさせず、Drive 専用の `biblio-google-drive-user@` を Drive フォルダ ACL に共有。orchestrator は「その SA を impersonate する権限」だけを持つ (権限最小化 + 境界明快)
-- **GSA 本体は Terraform 管理外** — `biblio-google-drive-user@` GSA は DEN さんが GCP Console で作成済 (手動 lifecycle)。本 module では GSA 作成せず、既存 GSA に対する binding のみ宣言する
-- **Drive フォルダ ACL は Terraform 管理外** — Drive フォルダの ACL は Google Drive リソース側の設定で GCP IAM の管轄外。DEN さんが Drive UI で `biblio-google-drive-user@...` を「閲覧者」共有すること
+- **GSA 本体は Terraform 管理外** — `biblio-google-drive-user@` GSA は operator が GCP Console で作成済 (手動 lifecycle)。本 module では GSA 作成せず、既存 GSA に対する binding のみ宣言する
+- **Drive フォルダ ACL は Terraform 管理外** — Drive フォルダの ACL は Google Drive リソース側の設定で GCP IAM の管轄外。operator が Drive UI で `biblio-google-drive-user@...` を「閲覧者」共有すること
 - **keyless 維持** — GSA key JSON なし、WI + `iamcredentials` API のみで完結 (biblio-claw 全体の設計原則を守る)
 
 ## 前提条件
@@ -46,8 +46,8 @@ orchestrator Pod (WI 経由で biblio-orchestrator@ を assume)
 
 ```bash
 cd terraform/iam-drive-user
-# 必須 var を投入 (issue #168 で project_id + orchestrator_gsa_email +
-# drive_user_gsa_email の default 削除、明示指定必須)
+# 必須 var を投入 (project_id + orchestrator_gsa_email + drive_user_gsa_email の
+# default 削除済み、明示指定必須)
 export TF_VAR_project_id='<your-gcp-project>'
 export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
 export TF_VAR_drive_user_gsa_email="biblio-google-drive-user@${TF_VAR_project_id}.iam.gserviceaccount.com"

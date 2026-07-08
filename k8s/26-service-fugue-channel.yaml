@@ -1,4 +1,4 @@
-# Fugue channel Service + BackendConfig (M4-E Phase 5)。
+# Fugue channel Service + BackendConfig。
 #
 # 構成方針:
 # - Ingress backend として使う ClusterIP Service。既存 `11-orchestrator-service.yaml` は

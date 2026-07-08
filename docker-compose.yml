@@ -1,8 +1,8 @@
-# biblio-claw — local 結線土台 (Phase 1)
+# biblio-claw — local 結線土台
 #
 # OneCLI gateway + postgres のみを compose で起動する。host (NanoClaw) は
 # compose 外で `pnpm run dev` し、通常の docker daemon 接続で agent コンテナを
-# spawn する。host を compose service にしない理由は plan の ARCHITECT 判断ログ
+# spawn する。host を compose service にしない理由は設計判断ログ
 # (docker.sock DinD / volume の cwd 絶対パスが daemon 視点で破綻する 2 問題回避)。
 #
 # 起動: docker compose up -d --wait
@@ -10,7 +10,7 @@
 #       docker compose down -v         (postgres/onecli データも破棄)
 #
 # bind host は 0.0.0.0 が既定。agent コンテナは host.docker.internal:10255 で
-# proxy に届く必要があり (PoC-2 教訓)、127.0.0.1 bind だと host-gateway 経由で
+# proxy に届く必要があり (実測で判明)、127.0.0.1 bind だと host-gateway 経由で
 # 到達できないため。local 専用構成。
 
 name: biblio-claw
@@ -20,9 +20,9 @@ services:
     image: postgres:18-alpine
     # container_name を明示する (= biblio-onecli と同じパターン)。デフォルト命名
     # `<project>-<service>-<replica>` は COMPOSE_PROJECT_NAME 上書きや別 clone
-    # ディレクトリから起動した場合に名前が変わり、verify-phase-1-wiring.sh が
+    # ディレクトリから起動した場合に名前が変わり、verify script が
     # ハードコード grep していた `biblio-claw-postgres-1` と一致しなくなる偽陰性
-    # を生む (PR #6 レビュー I8)。
+    # を生むため (過去 review 由来)。
     container_name: biblio-postgres
     restart: unless-stopped
     environment:
@@ -34,7 +34,7 @@ services:
       - pgdata:/var/lib/postgresql
     healthcheck:
       # OneCLI は entrypoint で prisma migrate deploy を打つため、postgres が
-      # 受け付ける前に起動すると永久 retry → exit 1 (PoC-5 で確認)。
+      # 受け付ける前に起動すると永久 retry → exit 1 (実測で確認)。
       # depends_on: service_healthy で起動順を保証する。
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-onecli}']
       interval: 5s

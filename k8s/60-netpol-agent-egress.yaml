@@ -1,12 +1,12 @@
-# agent Pod egress = OneCLI ClusterIP + DNS のみに制限する NetworkPolicy (PoC-5 / PoC-16 写経)。
+# agent Pod egress = OneCLI ClusterIP + DNS のみに制限する NetworkPolicy。
 #
-# A 案 (plan §補足) では agent Pod を Phase 2 では立てない (M2 以降の別 milestone)
-# ため、本 NetworkPolicy は podSelector に match する Pod がない状態で apply される
-# = 実質的な egress 制限効果は M2 で agent Pod が立った時に発動する。
+# 初期実装では agent Pod を立てず、後段で導入するため、本 NetworkPolicy は
+# podSelector に match する Pod がない状態で apply される = 実質的な egress
+# 制限効果は agent Pod 導入時に発動する。
 # manifest としてここに置く理由:
-#   1. M2 着手時に「NetworkPolicy だけ別途用意する」忘れを防ぐ
-#   2. apply 順序の依存 (NetworkPolicy → Pod) を Phase 2 段階で確認できる
-#   3. plan §Task 7 の Implementation 通り、PoC-5 写経の制限ルールを保存
+#   1. agent Pod 導入時に「NetworkPolicy だけ別途用意する」忘れを防ぐ
+#   2. apply 順序の依存 (NetworkPolicy → Pod) を先行確認できる
+#   3. 制限ルールを事前保存
 #
 # 制限ルール:
 #   - NodeLocal DNS (169.254.20.10/32) と kube-dns Pod への TCP/UDP 53 を許可
@@ -33,7 +33,7 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # GKE Autopilot NodeLocal DNS — 既定 ON で必須 (PoC-5 写経の核)
+    # GKE Autopilot NodeLocal DNS — 既定 ON で必須
     - to:
         - ipBlock:
             cidr: 169.254.20.10/32
@@ -53,9 +53,9 @@ spec:
         - { protocol: TCP, port: 53 }
     # OneCLI Pod (in-cluster) — GKE Dataplane V2 (Cilium) では `ipBlock: 0.0.0.0/0`
     # は cluster 外 IP のみに評価され、Pod-to-Pod は届かない。同 namespace の
-    # OneCLI 受け口 Pod を podSelector で明示許可する (M2 Phase 1 verify §8 で実測検出)。
-    # M2 PRD A Phase 3: OneCLI を orchestrator Pod の Native sidecar に統合したため、
-    # 旧 `component: onecli` → `component: orchestrator` に変更 (= agent → orchestrator
+    # OneCLI 受け口 Pod を podSelector で明示許可する (GKE Dataplane V2 実測検証で判明)。
+    # OneCLI を orchestrator Pod の Native sidecar に統合したため、
+    # `component: onecli` → `component: orchestrator` に変更 (= agent → orchestrator
     # Pod 10254/10255 の egress を許可、Service `biblio-onecli` が orchestrator に向く)。
     - to:
         - namespaceSelector:
