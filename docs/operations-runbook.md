@@ -980,7 +980,7 @@ biblio-claw の構造化ログ (GKE Fluent Bit 経由で Cloud Logging に到達
 
 ### 前提
 
-- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済 (memory `gcp_iam_secret_manager_pattern` 参照)
+- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済
 - GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中 (= Phase 1+2 完了)
 - keyless: `gcloud auth application-default login` 済 (ADC)、SA key を使わない
 - **terraform CLI (v1.5+ 推奨)** — biblio-claw が管理する 2 module (`terraform/m4-a-observability/` + `terraform/fugue-channel/`) の apply に必要。本 §前提 が repo 内の terraform CLI install 経路の集約点 (issue #70)。OS 別 install 手順:

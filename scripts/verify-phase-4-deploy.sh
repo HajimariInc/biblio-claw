@@ -17,8 +17,7 @@
 # 完成度の低さに起因する bug 群 (marker.json 廃止漏れ / mkdir 子 dir 欠落 /
 # spawn-verify ensureRuntime 未呼出 / SHELF_* env manifest 未投入 / OneCLI agent
 # selective mode で github 認証漏れ) が顕在化したため、Z 案 + δ 案で Block 2/3 を
-# Phase 4 plan の Out of Scope に移し、M3 PRD への申し送りとした (auto memory
-# `m3-gke-completion-pending` 参照)。Phase 4 plan は Block 1 (= image-sync の
+# Phase 4 plan の Out of Scope に移し、M3 PRD への申し送りとした。Phase 4 plan は Block 1 (= image-sync の
 # Phase 2 ログ反映を assert) に閉じる。
 #
 # 引数: なし (= GKE 経路のみ、cluster context gate で biblio-prod 専用)

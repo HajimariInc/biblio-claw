@@ -5,7 +5,7 @@ biblio-claw の構造化ログを BigQuery `llm_observability` dataset に sink 
 ## 前提
 
 - GCP project: `hajimari-ai-hackathon-2026`
-- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済 (memory `gcp_iam_secret_manager_pattern` 参照)
+- DEN account に `roles/logging.configWriter` + `roles/bigquery.admin` 付与済
 - GKE cluster `biblio-prod` (region `asia-northeast1`) で biblio-claw が稼働中
 - keyless: `gcloud auth application-default login` 済 (ADC)、service account key を使わない
 - **terraform CLI (v1.5+ 推奨)** — install 手順は `docs/operations-runbook.md` §M4-A Phase 3 §前提 を参照 (AlmaLinux/RHEL/Ubuntu/Debian/macOS 対応)
