@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# biblio-claw M4-F Phase 1 revival-core: init-hybrid-agent GKE wrapper.
+# biblio-claw init-hybrid-agent GKE wrapper.
 #
 # kubectl exec biblio-orchestrator-0 -- pnpm exec tsx scripts/init-hybrid-agent.ts
 # 経由で central DB に hybrid agent group (= claude fallback provider の
-# agent-container 経路) を bootstrap + DEN さん Slack DM に wire する。
+# agent-container 経路) を bootstrap + patron の Slack DM に wire する。
 #
 # 前提:
 #   - kubectl context が biblio-prod (gcloud container clusters get-credentials
@@ -18,7 +18,7 @@
 #
 # fan-out 二重発火防止 (init-hybrid-agent.ts:wireSlackDm の safety net):
 # HYBRID_SLACK_DM_CHANNEL_ID が指す既存 messaging_group が他 agent_group に wire
-# 済の場合、seed script は fail-fast + 手動対応 prompt を出して exit 1。DEN さんが
+# 済の場合、seed script は fail-fast + 手動対応 prompt を出して exit 1。メンテナが
 # 「既存 wire を先に外す」か「別 platform_id で分離する」を判断する。
 #
 # Usage:
@@ -26,7 +26,7 @@
 #   bash scripts/init-hybrid-agent-gke.sh
 #
 #   # HYBRID_SLACK_DM_CHANNEL_ID を明示指定
-#   HYBRID_SLACK_DM_CHANNEL_ID=D0B6JA2M5GA bash scripts/init-hybrid-agent-gke.sh
+#   HYBRID_SLACK_DM_CHANNEL_ID=<SLACK_DM_CHANNEL_ID> bash scripts/init-hybrid-agent-gke.sh
 #
 #   # Slack DM wire なし (test / dry-run)
 #   HYBRID_SKIP_SLACK_DM=1 bash scripts/init-hybrid-agent-gke.sh
@@ -48,20 +48,20 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-# HYBRID_USER_ID (Slack `slack:U...` 形式) は必須。DEN さん owner user (`SLACK_OWNER_USER_ID`)
+# HYBRID_USER_ID (Slack `slack:U...` 形式) は必須。patron owner user (`SLACK_OWNER_USER_ID`)
 # を default にする経路もあるが、後段の accountability を明示するため fail-fast。
-: "${HYBRID_USER_ID:?missing — HYBRID_USER_ID を env or .env に投入 (例: slack:U7F8TRM6X)}"
+: "${HYBRID_USER_ID:?missing — HYBRID_USER_ID を env or .env に投入 (例: slack:<SLACK_USER_ID>)}"
 
-# S6: `HYBRID_SKIP_SLACK_DM` の 2 値判定を `case` で 1 回集約、以降は
+# `HYBRID_SKIP_SLACK_DM` の 2 値判定を `case` で 1 回集約、以降は
 # `$skip_slack_dm` boolean 変数の単純比較のみ使う (project 既存の `case` idiom
-# = verify-m3.sh 等と統一)。判定条件を変更する場合の修正箇所も 1 箇所に集約。
+# と統一)。判定条件を変更する場合の修正箇所も 1 箇所に集約。
 case "${HYBRID_SKIP_SLACK_DM:-0}" in
   1 | true) skip_slack_dm=true ;;
   *) skip_slack_dm=false ;;
 esac
 
 if [ "$skip_slack_dm" = false ]; then
-  : "${HYBRID_SLACK_DM_CHANNEL_ID:?missing — HYBRID_SLACK_DM_CHANNEL_ID を env or .env に投入 (raw D... 形式、例: D0B6JA2M5GA)。Slack DM wire を skip したい場合は HYBRID_SKIP_SLACK_DM=1}"
+  : "${HYBRID_SLACK_DM_CHANNEL_ID:?missing — HYBRID_SLACK_DM_CHANNEL_ID を env or .env に投入 (raw D... 形式、例: <SLACK_DM_CHANNEL_ID>)。Slack DM wire を skip したい場合は HYBRID_SKIP_SLACK_DM=1}"
 fi
 
 NAMESPACE="${BIBLIO_NAMESPACE:-biblio-claw}"

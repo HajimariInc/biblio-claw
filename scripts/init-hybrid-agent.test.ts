@@ -1,8 +1,7 @@
 /**
- * `scripts/init-hybrid-agent.ts` の seedHybridAgent() unit test (M4-F Phase 1)。
+ * `scripts/init-hybrid-agent.ts` の seedHybridAgent() unit test。
  *
- * 保護対象 (plan §Task 2 の 6 case + 実装で追加した fan-out fail-fast 保護
- * + PR #139 review 対応の 2 case):
+ * 保護対象:
  *   (1) 新規 seed: agent_group + container_config(provider=null, model=publisher ID) + Slack DM mg + mga
  *   (2) 冪等 assert: 2 回連続 seed で全テーブル count 不変
  *   (3) 既存 ADK agent group と並存: ADK 側 wire 無傷
@@ -10,13 +9,13 @@
  *   (5) `--skip-slack-dm`: messaging_group 一切作らない (agent_group + config のみ)
  *   (6) container_config: provider=null (claude fallback), model='claude-sonnet-4-6' (Vertex publisher ID)
  *   (7) fan-out fail-fast: Slack DM 既存 mg が他 agent に wire 済なら process.exit(1)
- *   (8) I5 assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw (silent skip 撲滅)
- *   (9) C3 guard: 既存 owner user は upsertUser で display_name を上書きされない (getUser guard 動作確認)
+ *   (8) fail-closed assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw (silent skip 撲滅)
+ *   (9) getUser guard: 既存 owner user は upsertUser で display_name を上書きされない
  *
  * fixture は `session-equipped-biblios.test.ts` の initTestDb + runMigrations
  * pattern を継承。`initGroupFilesystem` (= GROUPS_DIR に依存する fs 副作用) は
  * mock で `ensureContainerConfig` 呼び出しのみに簡素化 (= 本 test の focus は
- * DB seed logic であり、fs 側の scaffold は Task 5 の local 実測で確認する)。
+ * DB seed logic であり、fs 側の scaffold は local 実測で確認する)。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -54,8 +53,8 @@ const NOW = '2026-07-04T12:00:00.000Z';
 
 function baseArgs(overrides: Partial<Args> = {}): Args {
   return {
-    userId: 'slack:U7F8TRM6X',
-    slackDmChannelId: 'D0B6JA2M5GA',
+    userId: 'slack:UTESTUSER123',
+    slackDmChannelId: 'DTESTDM123456',
     displayName: 'Patron',
     agentName: '司書 (hybrid)',
     skipSlackDm: false,
@@ -94,7 +93,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     const mgs = getAllMessagingGroups();
     expect(mgs).toHaveLength(1);
     expect(mgs[0].channel_type).toBe('slack');
-    expect(mgs[0].platform_id).toBe('slack:D0B6JA2M5GA');
+    expect(mgs[0].platform_id).toBe('slack:DTESTDM123456');
     expect(mgs[0].is_group).toBe(0);
 
     // wiring (hybrid agent group のみ)
@@ -106,7 +105,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
 
     // SeedResult のフィールド
     expect(result.slack_dm_wired).toBe(true);
-    expect(result.slack_dm_platform_id).toBe('slack:D0B6JA2M5GA');
+    expect(result.slack_dm_platform_id).toBe('slack:DTESTDM123456');
   });
 
   it('(2) 冪等 assert: 2 回連続 seed で全テーブル count 不変', () => {
@@ -165,9 +164,9 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     // hybrid 側は独自の Slack DM mg (別 platform_id) で共存。
     expect(getAllAgentGroups()).toHaveLength(2);
     const mgs = getAllMessagingGroups();
-    expect(mgs).toHaveLength(2); // cli/local + slack:D0B6JA2M5GA
+    expect(mgs).toHaveLength(2); // cli/local + slack:DTESTDM123456
     const hybridMg = mgs.find((mg) => mg.channel_type === 'slack')!;
-    expect(hybridMg.platform_id).toBe('slack:D0B6JA2M5GA');
+    expect(hybridMg.platform_id).toBe('slack:DTESTDM123456');
     const hybridWirings = getMessagingGroupAgents(hybridMg.id);
     expect(hybridWirings).toHaveLength(1);
     expect(hybridWirings[0].agent_group_id).toBe(result.agent_group_id);
@@ -203,14 +202,14 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(cc).toBeDefined();
     // provider=null = resolveProviderName の "claude" fallback 経路。
     expect(cc!.provider).toBeNull();
-    // model は明示 Vertex publisher ID 必須 (M1 で 404 を実際に踏んだため)。
+    // model は明示 Vertex publisher ID 必須 (実機で 404 を踏んで判明)。
     // null にすると agent-runner container が --model 未指定で claude-code SDK 内蔵
     // デフォルトが Anthropic API alias を返して Vertex rawPredict が 404 化する。
     expect(cc!.model).toBe('claude-sonnet-4-6');
   });
 
   it('(7) fan-out 二重発火 fail-fast: Slack DM 既存 mg が他 agent に wire 済なら process.exit(1)', () => {
-    // 既存 ADK 用に slack:D0B6JA2M5GA を wire (= 本番 mg-i5lnbv 状態を再現)
+    // 既存 ADK 用に slack:DTESTDM123456 を wire
     createAgentGroup({
       id: 'ag-adk-existing',
       name: '司書 (ADK)',
@@ -221,7 +220,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     createMessagingGroup({
       id: 'mg-slack-existing',
       channel_type: 'slack',
-      platform_id: 'slack:D0B6JA2M5GA',
+      platform_id: 'slack:DTESTDM123456',
       name: 'ADK DM',
       is_group: 1,
       unknown_sender_policy: 'public',
@@ -258,8 +257,8 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(wirings[0].agent_group_id).toBe('ag-adk-existing');
   });
 
-  it('(7.5-M4F) GATE_ENABLED=true 時、既存 ADK wire に対して hybrid wire を並置 (fan-out fail-fast を skip)', () => {
-    // 既存 ADK 用に slack:D0B6JA2M5GA を wire (case 7 の setup と同じ)
+  it('(7.5) GATE_ENABLED=true 時、既存 ADK wire に対して hybrid wire を並置 (fan-out fail-fast を skip)', () => {
+    // 既存 ADK 用に slack:DTESTDM123456 を wire (fan-out fail-fast case の setup と同じ)
     createAgentGroup({
       id: 'ag-adk-existing',
       name: '司書 (ADK)',
@@ -270,7 +269,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     createMessagingGroup({
       id: 'mg-slack-existing',
       channel_type: 'slack',
-      platform_id: 'slack:D0B6JA2M5GA',
+      platform_id: 'slack:DTESTDM123456',
       name: 'ADK DM',
       is_group: 1,
       unknown_sender_policy: 'public',
@@ -315,7 +314,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(logCalls).toContain('gate');
   });
 
-  it('(7.5-M4F 冪等) GATE_ENABLED=true 時、2 回目の seedHybridAgent は既存 hybrid wire を検出して重複 wire を作らない', () => {
+  it('(7.5 冪等) GATE_ENABLED=true 時、2 回目の seedHybridAgent は既存 hybrid wire を検出して重複 wire を作らない', () => {
     createAgentGroup({
       id: 'ag-adk-existing',
       name: '司書 (ADK)',
@@ -326,7 +325,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     createMessagingGroup({
       id: 'mg-slack-existing',
       channel_type: 'slack',
-      platform_id: 'slack:D0B6JA2M5GA',
+      platform_id: 'slack:DTESTDM123456',
       name: 'ADK DM',
       is_group: 1,
       unknown_sender_policy: 'public',
@@ -362,7 +361,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
     expect(wirings).toHaveLength(2);
   });
 
-  it('(8) I5 assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw', () => {
+  it('(8) fail-closed assert: skipSlackDm=false + slackDmChannelId 欠落なら fail-fast throw', () => {
     // parseArgs は CLI 境界で防ぐが、seedHybridAgent 直接呼出経路 (= 本 test) で
     // silent skip されると「wire するつもりが黙って skip」= silent failure。
     // 冒頭 assert が throw で撲滅することを保護する。
@@ -379,7 +378,7 @@ describe('init-hybrid-agent: seedHybridAgent()', () => {
   });
 
 /**
- * parseArgs() の CLI 境界 unit test (S1)。
+ * parseArgs() の CLI 境界 unit test。
  *
  * GKE wrapper (`init-hybrid-agent-gke.sh`) は env → 明示 `--flag` に変換して
  * 渡すため env fallback 経路は実運用では通らないが、直接 `HYBRID_USER_ID=...
@@ -403,12 +402,12 @@ describe('init-hybrid-agent: parseArgs()', () => {
   it('(P1) 必須引数揃い: --user-id + --slack-dm-channel-id で正常 parse', () => {
     const args = parseArgs([
       '--user-id',
-      'slack:U7F8TRM6X',
+      'slack:UTESTUSER123',
       '--slack-dm-channel-id',
-      'D0B6JA2M5GA',
+      'DTESTDM123456',
     ]);
-    expect(args.userId).toBe('slack:U7F8TRM6X');
-    expect(args.slackDmChannelId).toBe('D0B6JA2M5GA');
+    expect(args.userId).toBe('slack:UTESTUSER123');
+    expect(args.slackDmChannelId).toBe('DTESTDM123456');
     expect(args.displayName).toBe('Patron'); // default
     expect(args.agentName).toBe('司書 (hybrid)'); // default
     expect(args.skipSlackDm).toBe(false);
@@ -420,7 +419,7 @@ describe('init-hybrid-agent: parseArgs()', () => {
     }) as never);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    expect(() => parseArgs(['--slack-dm-channel-id', 'D0B6JA2M5GA'])).toThrow(
+    expect(() => parseArgs(['--slack-dm-channel-id', 'DTESTDM123456'])).toThrow(
       'process.exit called with 2',
     );
     expect(exitSpy).toHaveBeenCalledWith(2);
@@ -433,7 +432,7 @@ describe('init-hybrid-agent: parseArgs()', () => {
     }) as never);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    expect(() => parseArgs(['--user-id', 'slack:U7F8TRM6X'])).toThrow(
+    expect(() => parseArgs(['--user-id', 'slack:UTESTUSER123'])).toThrow(
       'process.exit called with 2',
     );
     expect(exitSpy).toHaveBeenCalledWith(2);
@@ -443,22 +442,22 @@ describe('init-hybrid-agent: parseArgs()', () => {
   });
 
   it('(P4) --skip-slack-dm 指定時は slack-dm-channel-id 欠落でも正常 parse', () => {
-    const args = parseArgs(['--user-id', 'slack:U7F8TRM6X', '--skip-slack-dm']);
-    expect(args.userId).toBe('slack:U7F8TRM6X');
+    const args = parseArgs(['--user-id', 'slack:UTESTUSER123', '--skip-slack-dm']);
+    expect(args.userId).toBe('slack:UTESTUSER123');
     expect(args.slackDmChannelId).toBeUndefined();
     expect(args.skipSlackDm).toBe(true);
   });
 
   it('(P5) env fallback: --user-id 未指定でも HYBRID_USER_ID env で拾える', () => {
-    process.env.HYBRID_USER_ID = 'slack:UENVFALLBACK';
-    process.env.HYBRID_SLACK_DM_CHANNEL_ID = 'DENV456';
+    process.env.HYBRID_USER_ID = 'slack:UTESTENV456';
+    process.env.HYBRID_SLACK_DM_CHANNEL_ID = 'DTESTV456';
     const args = parseArgs([]);
-    expect(args.userId).toBe('slack:UENVFALLBACK');
-    expect(args.slackDmChannelId).toBe('DENV456');
+    expect(args.userId).toBe('slack:UTESTENV456');
+    expect(args.slackDmChannelId).toBe('DTESTV456');
   });
 
   it('(P6) env fallback: HYBRID_SKIP_SLACK_DM=1 で --skip-slack-dm 未指定でも skip', () => {
-    process.env.HYBRID_USER_ID = 'slack:UENVFALLBACK';
+    process.env.HYBRID_USER_ID = 'slack:UTESTENV456';
     process.env.HYBRID_SKIP_SLACK_DM = '1';
     const args = parseArgs([]);
     expect(args.skipSlackDm).toBe(true);
@@ -468,9 +467,9 @@ describe('init-hybrid-agent: parseArgs()', () => {
   it('(P7) --display-name / --agent-name の trim + default 降格', () => {
     const args = parseArgs([
       '--user-id',
-      'slack:U7F8TRM6X',
+      'slack:UTESTUSER123',
       '--slack-dm-channel-id',
-      'D0B6JA2M5GA',
+      'DTESTDM123456',
       '--display-name',
       '  Alice  ', // trim
       '--agent-name',
@@ -486,7 +485,7 @@ describe('init-hybrid-agent: parseArgs()', () => {
       '--user-id',
       'slack:UFROMCLI',
       '--slack-dm-channel-id',
-      'D0B6JA2M5GA',
+      'DTESTDM123456',
     ]);
     expect(args.userId).toBe('slack:UFROMCLI'); // CLI が勝つ
   });
@@ -494,24 +493,24 @@ describe('init-hybrid-agent: parseArgs()', () => {
 
   it('(9) C3 guard: 既存 owner user の display_name は upsertUser で上書きされない', () => {
     // 既存 owner (init-first-agent.ts 経路で先に登録済) を fixture 注入。
-    // display_name は DEN さん本名相当 (Patron default とは異なる値)。
+    // display_name は既存 owner の実名相当 (Patron default とは異なる値)。
     upsertUser({
-      id: 'slack:U7F8TRM6X',
+      id: 'slack:UTESTUSER123',
       kind: 'slack',
-      display_name: 'DEN (real name)',
+      display_name: 'Test User (existing)',
       created_at: NOW,
     });
-    expect(getUser('slack:U7F8TRM6X')!.display_name).toBe('DEN (real name)');
+    expect(getUser('slack:UTESTUSER123')!.display_name).toBe('Test User (existing)');
 
     // hybrid seed 実行 (args.displayName は parseArgs 経路 default 'Patron')。
     seedHybridAgent(baseArgs(), NOW);
 
     // getUser guard により既存 user 行は touch されず、display_name は保たれる。
     // (guard を外すと upsertUser の COALESCE で 'Patron' に silent 上書きされる)
-    expect(getUser('slack:U7F8TRM6X')!.display_name).toBe('DEN (real name)');
+    expect(getUser('slack:UTESTUSER123')!.display_name).toBe('Test User (existing)');
   });
 
-  // --- M4-F Phase 3: seedMcpServers (Task 2/3) --------------------------------
+  // --- seedMcpServers ---------------------------------------------------------
   it('(P3-1) seedMcpServers: 空 DB から seed で tavily + drive の 2 key を assert', () => {
     // drive instructions は init 実行時の process.env.GCP_PROJECT_ID を interpolation する
     // (public 化に伴う env-driven 化)。test 中は deterministic な値を注入して assertion を安定させる。
@@ -603,7 +602,7 @@ describe('init-hybrid-agent: parseArgs()', () => {
     // 実行時に確認する (実装で誤って `TAVILY_API_KEY: process.env.TAVILY_API_KEY` に
     // 書き換えると本 test は落ちる)。「静的 grep」= ソースファイルの text grep とは
     // 別種の検証手段 (repo 内の他所 = verify-*.sh の静的 grep とは意味が違う)。
-    // keyless mode 化 (M4-F Phase 3 の fixup) で env は空 object になったため、
+    // keyless mode 化で env は空 object になったため、
     // TAVILY_API_KEY key 自体も DB JSON に含まれない (以前は "placeholder" が入っていた)。
     process.env.TAVILY_API_KEY = 'tvly-realsecret1234567890abcdef';
     try {
