@@ -405,8 +405,10 @@ bash scripts/teardown-phase-2.sh --confirm
 # 3. GKE / Cloud SQL / VPC / Artifact Registry を再作成
 #    (= `/init-project-gcp reset` で完結。詳細手順は §/init-project-gcp サブコマンド利用ガイド §reset 参照)
 
-# 4. K8s manifest 再適用
-kubectl apply -f k8s/
+# 4. K8s manifest 再適用 (envsubst 経由必須 = manifest 内の ${DOMAIN} + ${GCP_PROJECT_ID}
+#    を実値に展開してから apply する必要がある。生 `kubectl apply -f k8s/` は literal 残置
+#    で ImagePullBackOff / WI 認証失敗を起こす、罠 2/10/11 と同源。issue #168 で拡張)
+bash scripts/init-project-gcp-image-sync.sh --no-build --no-push
 
 # 5. K8s Secret 投入 (= docs/slack-environments-setup.md 参照)
 #    - biblio-gh-app (GH App ID + installation ID)
@@ -2199,7 +2201,9 @@ kubectl create secret generic biblio-fugue-shared-token -n biblio-claw \
 
 # deploy 順序 = StatefulSet update → Service + BackendConfig → NetworkPolicy → Ingress
 # (Ingress 最後 = NEG + backend health 反映が早い、rollout 中の 502 window 最短化)
-kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+# 10-orchestrator-statefulset.yaml は ${GCP_PROJECT_ID} を含むため envsubst 経由必須
+# (罠 10/11 と同源、issue #168 で拡張)
+envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < k8s/10-orchestrator-statefulset.yaml | kubectl apply -f -
 kubectl rollout status statefulset biblio-orchestrator -n biblio-claw --timeout=10m
 # → Pod 再起動時に `/tmp/host-ready` が書かれるまで startupProbe が pending
 #   (30 * 10s = 5 min 猶予)。ready 化後 LB backend に組み込まれる
@@ -2368,7 +2372,8 @@ kubectl delete -f k8s/27-networkpolicy-fugue-channel.yaml
 kubectl delete -f k8s/26-service-fugue-channel.yaml
 kubectl delete secret biblio-fugue-shared-token -n biblio-claw
 git checkout HEAD~1 -- k8s/10-orchestrator-statefulset.yaml   # 例、Phase 5 前へ revert
-kubectl apply -f k8s/10-orchestrator-statefulset.yaml
+# envsubst 経由 (罠 10/11 と同源、${GCP_PROJECT_ID} も含む issue #168 以降)
+envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < k8s/10-orchestrator-statefulset.yaml | kubectl apply -f -
 
 # 案 3: Terraform destroy (Fugue infra を完全削除、Fugue チーム連携が終わっていることが前提)
 #   順序 = k8s Ingress + Secret 削除 → terraform destroy
@@ -3092,7 +3097,9 @@ tail -10 data/gate-audit.jsonl | jq '.'
 4. **k8s manifest 更新 + rollout** (`10-orchestrator-statefulset.yaml` の 2 sidecar image tag + `nanoclaw-agent` image tag を bump):
    ```bash
    # image tag を m4f-p3-1 に一斉更新した状態で
-   kubectl apply -f k8s/10-orchestrator-statefulset.yaml -n biblio-claw
+   # envsubst 経由 (罠 10/11 と同源、${GCP_PROJECT_ID} も含む issue #168 以降)
+   envsubst '${DOMAIN} ${GCP_PROJECT_ID}' < k8s/10-orchestrator-statefulset.yaml | \
+     kubectl apply -n biblio-claw -f -
    kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=180s
    kubectl get pod biblio-orchestrator-0 -n biblio-claw -o json | jq '.spec.containers[] | .name'
    # → orchestrator, gh-token-rotator, vertex-token-rotator, drive-token-rotator の 4 name

@@ -175,6 +175,11 @@ spec:
             # === Vertex × Claude (OneCLI MITM 経由、PoC-2 / Phase 1 と同) ===
             - { name: CLAUDE_CODE_USE_VERTEX, value: '1' }
             - { name: ANTHROPIC_VERTEX_PROJECT_ID, value: ${GCP_PROJECT_ID} }
+            # === orchestrator コード (drive/logic.mjs, init-hybrid-agent.ts, etc) が
+            #     patron 発話向け SA email をランタイムで組み立てるための env 参照。
+            #     envsubst で literal 値に置換された state で container に注入するため、
+            #     コード側は `process.env.GCP_PROJECT_ID` で解決可能になる。
+            - { name: GCP_PROJECT_ID, value: ${GCP_PROJECT_ID} }
             - { name: CLOUD_ML_REGION, value: global }
             # === 検品 (Vertex × Gemini) + カテゴライズ (Vertex × Claude) の model 設定 ===
             # local docker compose では `.env` 経由で渡るが、GKE manifest に明示投入が必要。

@@ -46,6 +46,11 @@ orchestrator Pod (WI 経由で biblio-orchestrator@ を assume)
 
 ```bash
 cd terraform/iam-drive-user
+# 必須 var を投入 (issue #168 で project_id + orchestrator_gsa_email +
+# drive_user_gsa_email の default 削除、明示指定必須)
+export TF_VAR_project_id='<your-gcp-project>'
+export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
+export TF_VAR_drive_user_gsa_email="biblio-google-drive-user@${TF_VAR_project_id}.iam.gserviceaccount.com"
 terraform init
 terraform apply
 

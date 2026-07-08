@@ -33,8 +33,11 @@ cd terraform/fugue-channel
 gcloud services enable endpoints.googleapis.com \
   --project=<your-gcp-project>
 
-# Step 1: Domain 名 + Bearer token を投入 (セッション先頭で 1 回、以降 export で継承)
-export TF_VAR_domain_name='biblio-claw-fugue.endpoints.<your-gcp-project>.cloud.goog'
+# Step 1: 必須 var を投入 (セッション先頭で 1 回、以降 export で継承)
+# project_id + orchestrator_gsa_email は default 削除済み (issue #168)、明示指定必須
+export TF_VAR_project_id='<your-gcp-project>'
+export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
+export TF_VAR_domain_name="biblio-claw-fugue.endpoints.${TF_VAR_project_id}.cloud.goog"
 export TF_VAR_fugue_shared_token=$(openssl rand -hex 32)
 
 # Step 2: Terraform apply (9 resource create: IP + Endpoints Service + cert + secret x2 +
@@ -99,7 +102,10 @@ kubectl delete secret biblio-fugue-shared-token -n biblio-claw
 
 # Step 2: Terraform destroy (cert が Ingress から detach 済 + Endpoints Service が LB attach
 # 参照なし = destroy 成立)
-export TF_VAR_domain_name='biblio-claw-fugue.endpoints.<your-gcp-project>.cloud.goog'
+# 必須 var (default 削除済み、destroy 時も lifecycle 経路で要求される)
+export TF_VAR_project_id='<your-gcp-project>'
+export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
+export TF_VAR_domain_name="biblio-claw-fugue.endpoints.${TF_VAR_project_id}.cloud.goog"
 export TF_VAR_fugue_shared_token='dummy-for-destroy'  # sensitive var は destroy 時も必要
 terraform destroy
 ```

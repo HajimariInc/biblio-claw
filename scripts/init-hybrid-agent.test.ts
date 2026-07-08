@@ -562,6 +562,28 @@ describe('init-hybrid-agent: parseArgs()', () => {
     }
   });
 
+  it('(P3-1b) seedMcpServers: GCP_PROJECT_ID 未設定なら drive instructions が sentinel placeholder に fallback', () => {
+    // fallback 経路の正 case cover (init-hybrid-agent.ts:301 の nullish coalescing 分岐)。
+    // 実運用の GKE 経路では k8s manifest env に GCP_PROJECT_ID が投入されているため
+    // 通常このパスは通らないが、local dev / .env 未セット時の silent fallback が
+    // (public 化後の) 審査員向け reproducible run で発火し得る = 挙動を明示的に固定する。
+    const savedProjectId = process.env.GCP_PROJECT_ID;
+    delete process.env.GCP_PROJECT_ID;
+    try {
+      const result = seedHybridAgent(baseArgs(), NOW);
+      const cc = getContainerConfig(result.agent_group_id);
+      const servers = JSON.parse(cc!.mcp_servers) as Record<string, unknown>;
+      const drive = servers.drive as { instructions: string };
+      expect(drive.instructions).toContain(
+        'biblio-orchestrator@<gcp-project-id>.iam.gserviceaccount.com',
+      );
+    } finally {
+      if (savedProjectId !== undefined) {
+        process.env.GCP_PROJECT_ID = savedProjectId;
+      }
+    }
+  });
+
   it('(P3-2) seedMcpServers: 2 回連続 seed で mcp_servers が同一 (idempotent)', () => {
     const r1 = seedHybridAgent(baseArgs(), NOW);
     const before = getContainerConfig(r1.agent_group_id)!.mcp_servers;

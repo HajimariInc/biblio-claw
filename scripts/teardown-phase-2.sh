@@ -127,7 +127,7 @@ else
   printf '\n' >&2
   info "==== 次のステップ: GKE を再構築する場合 ===="
   info "1. GKE / Cloud SQL / VPC を再作成 (= docs/operations-runbook.md §GKE リセット手順 を参照)"
-  info "2. K8s manifest 再適用: kubectl apply -f k8s/"
+  info "2. K8s manifest 再適用: bash scripts/init-project-gcp-image-sync.sh --no-build --no-push (envsubst 展開経由が必須)"
   info "3. K8s Secret 投入: biblio-gh-app + biblio-slack-tokens"
   info "4. Cloud SQL Bootstrap GRANT 適用 (Postgres 15+ で IAM user に必須):"
   info "     bash scripts/init-project-gcp-pgsql-grant.sh"

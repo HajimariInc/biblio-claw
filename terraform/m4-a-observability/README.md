@@ -14,6 +14,8 @@ biblio-claw の構造化ログを BigQuery `llm_observability` dataset に sink 
 
 ```bash
 cd terraform/m4-a-observability
+# 必須 var を投入 (issue #168 で project_id の default 削除、明示指定必須)
+export TF_VAR_project_id='<your-gcp-project>'
 terraform init
 terraform plan -out=tfplan
 terraform apply tfplan
