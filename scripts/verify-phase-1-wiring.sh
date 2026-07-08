@@ -34,7 +34,7 @@ if [ -f "${ROOT}/.env" ]; then
   set +a
 fi
 : "${ONECLI_URL:=http://localhost:10254}"
-: "${ANTHROPIC_VERTEX_PROJECT_ID:=hajimari-ai-hackathon-2026}"
+: "${ANTHROPIC_VERTEX_PROJECT_ID:?required (export ANTHROPIC_VERTEX_PROJECT_ID)}"
 : "${CLOUD_ML_REGION:=global}"
 ONECLI_API="${ONECLI_URL%/}/v1"
 

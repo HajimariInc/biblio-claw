@@ -513,41 +513,53 @@ describe('init-hybrid-agent: parseArgs()', () => {
 
   // --- M4-F Phase 3: seedMcpServers (Task 2/3) --------------------------------
   it('(P3-1) seedMcpServers: 空 DB から seed で tavily + drive の 2 key を assert', () => {
-    const result = seedHybridAgent(baseArgs(), NOW);
-    const cc = getContainerConfig(result.agent_group_id);
-    expect(cc).toBeDefined();
+    // drive instructions は init 実行時の process.env.GCP_PROJECT_ID を interpolation する
+    // (public 化に伴う env-driven 化)。test 中は deterministic な値を注入して assertion を安定させる。
+    const savedProjectId = process.env.GCP_PROJECT_ID;
+    process.env.GCP_PROJECT_ID = 'test-project-id';
+    try {
+      const result = seedHybridAgent(baseArgs(), NOW);
+      const cc = getContainerConfig(result.agent_group_id);
+      expect(cc).toBeDefined();
 
-    const servers = JSON.parse(cc!.mcp_servers) as Record<string, unknown>;
-    expect(Object.keys(servers).sort()).toEqual(['drive', 'tavily']);
+      const servers = JSON.parse(cc!.mcp_servers) as Record<string, unknown>;
+      expect(Object.keys(servers).sort()).toEqual(['drive', 'tavily']);
 
-    const tavily = servers.tavily as {
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      instructions: string;
-    };
-    expect(tavily.command).toBe('tavily-mcp');
-    expect(tavily.args).toEqual([]);
-    // env は空 object (tavily-mcp keyless mode を利用、OneCLI Bearer 注入で認証)。
-    // TAVILY_API_KEY を env に置くと body にも api_key: "placeholder" が入って 401 になる。
-    expect(tavily.env).toEqual({});
-    expect(tavily.instructions).toContain('tavily_search');
-    expect(tavily.instructions).toContain('1,000');
+      const tavily = servers.tavily as {
+        command: string;
+        args: string[];
+        env: Record<string, string>;
+        instructions: string;
+      };
+      expect(tavily.command).toBe('tavily-mcp');
+      expect(tavily.args).toEqual([]);
+      // env は空 object (tavily-mcp keyless mode を利用、OneCLI Bearer 注入で認証)。
+      // TAVILY_API_KEY を env に置くと body にも api_key: "placeholder" が入って 401 になる。
+      expect(tavily.env).toEqual({});
+      expect(tavily.instructions).toContain('tavily_search');
+      expect(tavily.instructions).toContain('1,000');
 
-    const drive = servers.drive as {
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      instructions: string;
-    };
-    expect(drive.command).toBe('node');
-    expect(drive.args).toEqual(['/opt/mcp-servers/drive/index.mjs']);
-    expect(drive.env).toEqual({});
-    expect(drive.instructions).toContain('drive_list_files');
-    expect(drive.instructions).toContain('drive_get_file');
-    expect(drive.instructions).toContain(
-      'biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com',
-    );
+      const drive = servers.drive as {
+        command: string;
+        args: string[];
+        env: Record<string, string>;
+        instructions: string;
+      };
+      expect(drive.command).toBe('node');
+      expect(drive.args).toEqual(['/opt/mcp-servers/drive/index.mjs']);
+      expect(drive.env).toEqual({});
+      expect(drive.instructions).toContain('drive_list_files');
+      expect(drive.instructions).toContain('drive_get_file');
+      expect(drive.instructions).toContain(
+        'biblio-orchestrator@test-project-id.iam.gserviceaccount.com',
+      );
+    } finally {
+      if (savedProjectId === undefined) {
+        delete process.env.GCP_PROJECT_ID;
+      } else {
+        process.env.GCP_PROJECT_ID = savedProjectId;
+      }
+    }
   });
 
   it('(P3-2) seedMcpServers: 2 回連続 seed で mcp_servers が同一 (idempotent)', () => {

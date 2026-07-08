@@ -117,7 +117,7 @@ command -v gh      >/dev/null 2>&1 || fail "[pre-flight] gh CLI が見つかり�
 ctx="$(kubectl config current-context 2>/dev/null || echo '<none>')"
 case "$ctx" in
   gke_*_biblio-prod) ok "[ctx] $ctx" ;;
-  *) fail "[ctx] kubectl context が biblio-prod ではない (= $ctx)。実行: gcloud container clusters get-credentials biblio-prod --region=asia-northeast1 --project=hajimari-ai-hackathon-2026" ;;
+  *) fail "[ctx] kubectl context が biblio-prod ではない (= $ctx)。実行: gcloud container clusters get-credentials biblio-prod --region=asia-northeast1 --project=<your-gcp-project>" ;;
 esac
 
 # --- pre-flight: orchestrator StatefulSet ready ---

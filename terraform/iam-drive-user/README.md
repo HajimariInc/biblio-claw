@@ -39,7 +39,7 @@ orchestrator Pod (WI 経由で biblio-orchestrator@ を assume)
 ## 前提条件
 
 - `iamcredentials.googleapis.com` API が project で enabled (本 module では担わない)
-- `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` GSA が存在
+- `biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com` GSA が存在
 - Drive フォルダの ACL に上記 SA email が閲覧者として追加済 (Drive UI 側の手作業)
 
 ## Apply / Verify
@@ -51,8 +51,8 @@ terraform apply
 
 # verify: binding が付いていることを確認
 gcloud iam service-accounts get-iam-policy \
-  biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com \
-  --project=hajimari-ai-hackathon-2026 --format=yaml
+  biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com \
+  --project=<your-gcp-project> --format=yaml
 ```
 
 期待出力:
@@ -60,7 +60,7 @@ gcloud iam service-accounts get-iam-policy \
 ```yaml
 bindings:
 - members:
-  - serviceAccount:biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com
+  - serviceAccount:biblio-orchestrator@<your-gcp-project>.iam.gserviceaccount.com
   role: roles/iam.serviceAccountTokenCreator
 ```
 

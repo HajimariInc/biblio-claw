@@ -1,7 +1,12 @@
 variable "project_id" {
-  description = "GCP project ID (biblio-claw ハッカソン環境)."
+  description = <<-EOT
+    GCP project ID (biblio-claw deploy 対象).
+    default 値なし = **apply 時に `TF_VAR_project_id` env で明示指定を強制** し、
+    Source of Truth を repo 外に出す (公開ポリシー: 静的ファイルに project id を出さない、
+    他 module と同流儀)。
+  EOT
   type        = string
-  default     = "hajimari-ai-hackathon-2026"
+  # default 値なし = 必須化
 }
 
 variable "region" {

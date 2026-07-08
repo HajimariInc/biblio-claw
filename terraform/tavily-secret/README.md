@@ -26,7 +26,7 @@ TF_VAR_tavily_api_key='tvly-...' terraform init
 TF_VAR_tavily_api_key='tvly-...' terraform apply
 
 # verify: gcloud で読み戻せることを確認
-gcloud secrets versions access latest --secret=biblio-tavily-api-key --project=hajimari-ai-hackathon-2026
+gcloud secrets versions access latest --secret=biblio-tavily-api-key --project=<your-gcp-project>
 ```
 
 ## Teardown

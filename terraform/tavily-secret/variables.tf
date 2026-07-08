@@ -1,7 +1,12 @@
 variable "project_id" {
-  description = "GCP project id (biblio-claw deploy 対象)"
+  description = <<-EOT
+    GCP project id (biblio-claw deploy 対象)。
+    default 値なし = **apply 時に `TF_VAR_project_id` env で明示指定を強制** し、
+    Source of Truth を repo 外に出す (公開ポリシー: 静的ファイルに project id を出さない、
+    他 module と同流儀)。
+  EOT
   type        = string
-  default     = "hajimari-ai-hackathon-2026"
+  # default 値なし = 必須化
 }
 
 variable "region" {
@@ -11,9 +16,13 @@ variable "region" {
 }
 
 variable "orchestrator_gsa_email" {
-  description = "既存 biblio-orchestrator GSA email (secret accessor role 付与先。新 GSA を切らない = 1 workload = 1 GSA 原則、Fugue module と同流儀)"
+  description = <<-EOT
+    既存 biblio-orchestrator GSA email (secret accessor role 付与先。新 GSA を切らない = 1 workload = 1 GSA 原則、Fugue module と同流儀)。
+    default 値なし = **apply 時に `TF_VAR_orchestrator_gsa_email` env で明示指定を強制**
+    (例: `biblio-orchestrator@$${var.project_id}.iam.gserviceaccount.com` を呼出側で組み立て)。
+  EOT
   type        = string
-  default     = "biblio-orchestrator@hajimari-ai-hackathon-2026.iam.gserviceaccount.com"
+  # default 値なし = 必須化 (var.project_id への参照式が default では書けないため)
 }
 
 variable "tavily_api_key" {

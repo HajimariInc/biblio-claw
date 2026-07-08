@@ -30,7 +30,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT="${PROJECT:-hajimari-ai-hackathon-2026}"
+PROJECT="${PROJECT:?required (export PROJECT)}"
 REGION="${REGION:-asia-northeast1}"
 NS="biblio-claw"
 

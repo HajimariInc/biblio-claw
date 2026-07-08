@@ -11,8 +11,8 @@
 # Build:
 #   docker build -t biblio-claw:m1-p1 .
 # AR push:
-#   docker tag biblio-claw:m1-p1 asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
-#   docker push asia-northeast1-docker.pkg.dev/hajimari-ai-hackathon-2026/biblio-claw/biblio-claw:m1-p1
+#   docker tag biblio-claw:m1-p1 asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:m1-p1
+#   docker push asia-northeast1-docker.pkg.dev/<your-gcp-project>/biblio-claw/biblio-claw:m1-p1
 #
 # Local 検証 (DSN_PROVIDER=local):
 #   docker compose up -d --wait   # postgres + onecli を先に起動
@@ -22,7 +22,7 @@
 #     -e DSN_PROVIDER=local -e DATA_DIR=/data \
 #     -e ONECLI_URL=http://biblio-onecli:10254 \
 #     -e ASSISTANT_NAME=biblio \
-#     -e ANTHROPIC_VERTEX_PROJECT_ID=hajimari-ai-hackathon-2026 \
+#     -e ANTHROPIC_VERTEX_PROJECT_ID=<your-gcp-project> \
 #     -e CLOUD_ML_REGION=global -e CLAUDE_CODE_USE_VERTEX=1 \
 #     biblio-claw:m1-p1
 #

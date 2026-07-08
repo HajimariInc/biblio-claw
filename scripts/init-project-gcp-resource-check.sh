@@ -14,7 +14,7 @@
 #   bash scripts/init-project-gcp-resource-check.sh
 #
 # 既定値 (env で上書き可、.env から読み込み):
-#   GCP_PROJECT_ID=hajimari-ai-hackathon-2026
+#   GCP_PROJECT_ID=<your-gcp-project>
 #   GCP_REGION=asia-northeast1
 #   GKE_CLUSTER=biblio-prod        ← shell glob (*, ?) は不可 (context match の bash case pattern に展開されるため)
 #   CLOUD_SQL_INSTANCE=biblio-pgsql
@@ -43,7 +43,7 @@ fi
 . "${ROOT}/scripts/onecli-lib.sh"
 
 # --- 既定値 (env で上書き可) ---
-PROJECT="${GCP_PROJECT_ID:-hajimari-ai-hackathon-2026}"
+PROJECT="${GCP_PROJECT_ID:?required (export GCP_PROJECT_ID)}"
 REGION="${GCP_REGION:-asia-northeast1}"
 GKE_CLUSTER="${GKE_CLUSTER:-biblio-prod}"
 CLOUD_SQL_INSTANCE="${CLOUD_SQL_INSTANCE:-biblio-pgsql}"
