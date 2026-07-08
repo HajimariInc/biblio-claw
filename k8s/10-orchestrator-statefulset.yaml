@@ -132,7 +132,7 @@ spec:
           # 同 tag への上書き push 後に rollout で新 SHA を確実に引くため Always。
           # iteration が落ち着いたら digest pin (@sha256:...) に切り替えること
           # (reproducibility 担保)。tag の bump 履歴は git log を正本とする。
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:m4h-p5-1
           imagePullPolicy: Always
           env:
             # === 環境差分アダプタの env switch ===
@@ -150,7 +150,7 @@ spec:
             # tag の bump 履歴は git log を正本とする。
             - {
                 name: CONTAINER_IMAGE,
-                value: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:m4f-p5-4,
+                value: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/nanoclaw-agent:m4h-p5-1,
               }
             # === DSN root (PVC mountPath) ===
             - { name: DATA_DIR, value: /data }
@@ -225,11 +225,10 @@ spec:
             - { name: FUGUE_ASK_RATE_WINDOW_MS, value: '60000' }
             # === M4-H ask endpoint (Phase 5: agent group / messaging group ID) ===
             # kubectl exec biblio-orchestrator-0 -- pnpm exec tsx scripts/init-fugue-ask-agent.ts
-            # を実行して stdout から取得した UUID。手動投入必須 (init が冪等なので再実行しても
-            # ID は同じ UUID を返す = 上書き rollout 時も値保持)。
-            # Task 6 (init 実行後) に値を確定させる。
-            # - { name: FUGUE_ASK_AGENT_GROUP_ID, value: '<uuid-from-init-stdout>' }
-            # - { name: FUGUE_ASK_MESSAGING_GROUP_ID, value: '<uuid-from-init-stdout>' }
+            # を実行して stdout から取得した ID。手動投入必須 (init が冪等なので再実行しても
+            # ID は同じ値を返す = 上書き rollout 時も値保持)。
+            - { name: FUGUE_ASK_AGENT_GROUP_ID, value: 'ag-1783511938166-2ekr24' }
+            - { name: FUGUE_ASK_MESSAGING_GROUP_ID, value: 'mg-1783511938174-qg24f1' }
             # === M4-F Phase 2 gate agent (Phase 3 以降 GKE 常時 true 運用) ===
             # gate 4 層 (pattern → escape → XML → LLM evaluator) の 3 分類 routing
             # (biblio-adk / biblio-other / in-secure)。**GKE Prod は Phase 3 (2026-07-05)
@@ -328,7 +327,7 @@ spec:
         # 50min 周期で onecli-gh-secret.sh を呼んで GH installation token を OneCLI に投入。
         # 旧 biblio-sidecar CronJob (`k8s/30-sidecar-cronjob.yaml`) を本 sidecar に統合。
         - name: gh-token-rotator
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-gh:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-gh:m4h-p5-1
           command: ['bash', '/scripts/gh-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -374,7 +373,7 @@ spec:
         # (`roles/aiplatform.user`) を impersonate する (Task 1 で DEN さん手作業 bind 済)。
         # 旧 DEN さん手叩き `scripts/onecli-vertex-secret.sh` を本 sidecar に統合。
         - name: vertex-token-rotator
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4h-p5-1
           command: ['bash', '/scripts/vertex-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
@@ -412,7 +411,7 @@ spec:
         # image tag は運用中の値をそのまま反映する形。詳細は runbook §M4-F Phase 3
         # §deploy 手順 (image-sync 経由で bump)。
         - name: drive-token-rotator
-          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4f-p5-4
+          image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-sidecar-vertex:m4h-p5-1
           command: ['bash', '/scripts/drive-rotate.sh']
           env:
             - { name: ONECLI_URL, value: 'http://localhost:10254' }
