@@ -50,8 +50,8 @@ else
   warn ".env が見つかりません — GKE / CI 経路 (env 直接投入) と想定して継続"
 fi
 
-: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. hajimari-ai-hackathon-2026)。.env.example の §M4-A observability 参照}"
-: "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)。.env.example の §M4-A observability 参照}"
+: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. hajimari-ai-hackathon-2026)。.env.example の §Observability 節を参照}"
+: "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)。.env.example の §Observability 節を参照}"
 
 # 必要 CLI が PATH 上にいるか fail-fast。
 # `kubectl` は Section 4.5 (CLI 経由 pre-invoke = issue #97 対応で新設) が依存する。
