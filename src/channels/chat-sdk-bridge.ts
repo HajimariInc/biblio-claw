@@ -1,6 +1,6 @@
 /**
  * Chat SDK bridge — wraps a Chat SDK adapter + Chat instance
- * to conform to the NanoClaw ChannelAdapter interface.
+ * to conform to the host ChannelAdapter interface.
  *
  * Used by Discord, Slack, and other Chat SDK-supported platforms.
  */
