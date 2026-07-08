@@ -2,6 +2,19 @@
 
 `biblio-shelf` プロジェクトの**司書実装リポジトリ**。[`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (NanoClaw v2, commit `2492259`, 2026-05-28) を fork し、Google Cloud (Vertex AI + GKE) 上で動作する司書 (biblio) として作り変えた。
 
+## Fork Attribution / 上流との関係
+
+biblio-claw は **[nanocoai/nanoclaw](https://github.com/nanocoai/nanoclaw)** (NanoClaw v2、上流 commit `2492259`、2026-05-28) を fork して base 化しています。上流 NanoClaw 由来のドキュメントは `docs/` 配下 (日本語訳を含む) に参考として残置、biblio-claw 独自の拡張ドキュメントは `CLAUDE.md` §ドキュメント索引 + `docs/glossary.md` (biblio 独自語彙集) 経由で辿れます。
+
+- **上流由来 doc の参考リンク集**: [`docs/README.md`](docs/README.md)
+- **biblio-claw 独自 doc の索引**: [`CLAUDE.md`](CLAUDE.md#ドキュメント索引)
+- **biblio 独自語彙 (biblio / 司書 / patron / 装備 / 禁書 / 焼却 等) の解説**: [`docs/glossary.md`](docs/glossary.md)
+- **アーキテクチャ図**: [`docs/architecture-diagram.md`](docs/architecture-diagram.md) (GitHub 上で Mermaid が自動 render されます)
+
+### 姉妹プロジェクトとの integration
+
+biblio-claw は姉妹プロジェクト **Fugue** (`<FUGUE_REPO_URL_HERE>` — Fugue リポ public 化後に確定) からの channel integration を受け入れます。詳細は [`docs/setup-wiring.md`](docs/setup-wiring.md) 参照。
+
 > **機能ハイライト**:
 > - **仕入れ → 検品 → カテゴライズ → 陳列**: patron の 1 通の依頼で外部の biblio (skill) を棚リポジトリに draft PR で並べる E2E 経路
 > - **装備機構 + 蔵書一覧**: session 単位の biblio 装備 / 解除 / 禁書 / 焼却 (破壊操作は HITL 承認) と Slack から棚 marketplace の閲覧

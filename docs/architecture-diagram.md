@@ -1,5 +1,7 @@
 # NanoClaw アーキテクチャ図
 
+> **語彙メモ**: biblio-claw 独自語彙 (`biblio` / `司書` / `patron` / `装備` / `禁書` / `焼却` 等) の解説は [`glossary.md`](glossary.md) 参照。
+
 ## システム概要
 
 ```mermaid
