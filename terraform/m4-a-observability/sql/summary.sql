@@ -1,5 +1,5 @@
--- biblio-claw M4-A Phase 4 verify-m4-a.sh 用 summary SQL
--- + Phase 3 操作用 GROUP BY 集計 (= 末尾コメントブロックに補助保持)
+-- biblio-claw verify-m4-a.sh 用 summary SQL
+-- + 操作用 GROUP BY 集計 (= 末尾コメントブロックに補助保持)
 --
 -- Usage (verify-m4-a.sh 経由):
 --   sed -e "s/<PROJECT_ID>/${GCP_PROJECT_ID}/g" -e "s/<DATASET_ID>/${BQ_DATASET_ID}/g" \
@@ -15,7 +15,7 @@
 --   sample_component   流入の代表 component (host-orchestrator / agent-runner / 他)
 --   marker             固定 'M4A_OK' (= SQL 自体の到達性 assert 用)
 --
--- 設計上の注 (= Phase 4 verify 実機検証で判明したスキーマ仕様):
+-- 設計上の注 (= 実機検証で判明したスキーマ仕様):
 -- - テーブルは Cloud Logging sink の `use_partitioned_tables = true` 設定により
 --   `stdout` / `stderr` の単独形 (= terraform/m4-a-observability/main.tf:39)。日次 sharded
 --   ではない。`timestamp` 列で DAY partition。
@@ -25,15 +25,15 @@
 -- - 一方、Cloud Logging reserved field の `trace` / `spanId` / `traceSampled` は **トップレベル**
 --   STRING / STRING / BOOL カラムに展開される (= `WHERE trace = 'projects/.../traces/...'`)。
 --   個別 trace 検索は `jsonPayload` ではなく top-level `trace` カラムを使う。
---   `trace` 列は gcloud logging + BQ 両経路で実測 (2026-07-03, issue #81) して resource
---   name 形式 (= `projects/<PROJECT_ID>/traces/<32-hex>`) に自動昇格されることを確認済。
+--   `trace` 列は gcloud logging + BQ 両経路で実測して resource name 形式
+--   (= `projects/<PROJECT_ID>/traces/<32-hex>`) に自動昇格されることを確認済。
 --   `trace-fields.ts` 側は Preferred Format (bare 32-hex) で送出し、Fluent Bit /
 --   Cloud Logging 取り込み層が projectId 補完する設計 (詳細 docs/operations-runbook.md
---   §M4-A Phase 2 log↔trace 連携)。
+--   log↔trace 連携)。
 -- - `DATE(timestamp, 'Asia/Tokyo')` で JST 基準 (「DATE(timestamp) TZ bug」回避、
 --   デフォルト UTC 評価で朝の時間帯に 0 件症状を防ぐ)。
 -- - latency / token usage は span attribute としてのみ記録 (Cloud Trace 側)。
---   BQ サマリは event 単位の boundary 集計に絞る (Phase 3 lesson 「log と span の責務分離」)。
+--   BQ サマリは event 単位の boundary 集計に絞る (log と span の責務分離)。
 
 -- stdout / stderr テーブルの jsonPayload STRUCT は同型ではない (= stderr 側に
 -- `err RECORD` 等の error 専用 field がある、bq query で UNION ALL 時に
@@ -41,7 +41,7 @@
 -- エラー発生)。UNION ALL は同型必須のため、jsonPayload 全体ではなく **集計に
 -- 必要な primitive field だけ** を SELECT してから UNION ALL する。両 table とも
 -- jsonPayload.event / jsonPayload.component は STRING 型で存在確認済
--- (= 2026-06-28 Phase 4 verify 実機検証)。
+-- (= 実機検証で確認済)。
 WITH unioned AS (
   SELECT
     timestamp,
@@ -66,7 +66,7 @@ SELECT
 FROM unioned
 WHERE TIMESTAMP_TRUNC(timestamp, HOUR) >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR);
 
--- ─── 操作用補助クエリ (= Phase 3 deliverable の event/outcome 別 GROUP BY) ───
+-- ─── 操作用補助クエリ (= event/outcome 別 GROUP BY) ───
 -- 実行時は WITH 句を再利用するか、直接以下を貼る (placeholders を sed 置換):
 --
 -- SELECT

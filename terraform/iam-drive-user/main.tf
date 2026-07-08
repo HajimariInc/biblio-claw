@@ -1,5 +1,5 @@
 # ------------------- IAM binding: orchestrator → drive-user (R4 経路) -------------------
-# M4-F Phase 3 (life-capabilities) の Drive access 経路 (R4 = SA 2 段 impersonation) を成立させる
+# life-capabilities の Drive access 経路 (R4 = SA 2 段 impersonation) を成立させる
 # ための IAM binding。orchestrator GSA が drive-user GSA を impersonate して
 # `iamcredentials.googleapis.com/v1/.../generateAccessToken` で drive.readonly scope 付き
 # access token を発行できるようにする。
@@ -11,13 +11,13 @@
 # 「その SA を impersonate する権限」だけを持つ = 権限最小化 + 境界明快。
 #
 # ## GSA 本体は Terraform 管理外
-# `biblio-google-drive-user@` GSA 自体は DEN さんが GCP Console で作成済 (手動 lifecycle)。
+# `biblio-google-drive-user@` GSA 自体は operator が GCP Console で作成済 (手動 lifecycle)。
 # 本 module では GSA 作成は行わず、既存 GSA に対する binding のみを宣言する。GSA を消したり
 # 再作成したりする operation は Console 側で明示的に行う (Terraform 側は state 依存を持たない)。
 #
 # ## Drive フォルダ ACL は Terraform 管理外
 # Drive フォルダの ACL は Google Drive リソース側の設定であり、GCP IAM の管轄外。
-# DEN さんが Drive UI で `biblio-google-drive-user@...` を「閲覧者」として共有すること。
+# operator が Drive UI で `biblio-google-drive-user@...` を「閲覧者」として共有すること。
 # 本 module では ACL 状態を assert しない (Terraform provider に該当 resource がないため)。
 #
 # ## 前提となる API 有効化
