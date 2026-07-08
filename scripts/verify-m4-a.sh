@@ -15,7 +15,7 @@
 # 全通過で `M4-A PASS` を出して exit 0、いずれかの assert で fail 時 exit 1。
 #
 # 必須 env (未設定で fail-fast):
-#   GCP_PROJECT_ID         e.g. hajimari-ai-hackathon-2026
+#   GCP_PROJECT_ID         e.g. <your-gcp-project>
 #   BQ_DATASET_ID          e.g. llm_observability
 #
 # 前提:
@@ -50,7 +50,7 @@ else
   warn ".env が見つかりません — GKE / CI 経路 (env 直接投入) と想定して継続"
 fi
 
-: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. hajimari-ai-hackathon-2026)。.env.example の §Observability 節を参照}"
+: "${GCP_PROJECT_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. <your-gcp-project>)。.env.example の §Observability 節を参照}"
 : "${BQ_DATASET_ID:?preflight fail-fast: .env か env 直接渡しで未設定 (e.g. llm_observability)。.env.example の §Observability 節を参照}"
 
 # 必要 CLI が PATH 上にいるか fail-fast。
