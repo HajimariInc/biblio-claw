@@ -491,7 +491,7 @@ describe('init-hybrid-agent: parseArgs()', () => {
   });
 });
 
-  it('(9) C3 guard: 既存 owner user の display_name は upsertUser で上書きされない', () => {
+  it('(9) getUser guard: 既存 owner user の display_name は upsertUser で上書きされない', () => {
     // 既存 owner (init-first-agent.ts 経路で先に登録済) を fixture 注入。
     // display_name は既存 owner の実名相当 (Patron default とは異なる値)。
     upsertUser({
