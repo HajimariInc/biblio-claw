@@ -28,7 +28,7 @@ const InspectBiblioInput = z.object({
   biblioName: z
     .string()
     .describe(
-      'Biblio name in "<owner>--<repo>" or "<owner>--<repo>--<skill>" format (e.g. "example-org--biblio-min"). Use the biblioName returned by acquire_biblio.',
+      'Biblio name in "<owner>--<repo>" or "<owner>--<repo>--<skill>" format (e.g. "HajimariInc--test-biblio-minimal"). Use the biblioName returned by acquire_biblio.',
     ),
 });
 

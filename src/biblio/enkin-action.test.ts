@@ -134,7 +134,7 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-dev' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     expect(enkinMock).toHaveBeenCalledWith({ biblioName: 'owner--repo', category: 'biblio-dev' }, expect.anything());
@@ -156,7 +156,7 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-dev' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -175,7 +175,7 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-dev' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -190,7 +190,7 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-dev' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -203,7 +203,7 @@ describe('enkin_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: '', category: 'biblio-dev' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     expect(enkinMock).not.toHaveBeenCalled();
@@ -252,7 +252,7 @@ describe('enkin approval handler — HITL 2 span 連結 (originating_request_id)
         category: 'biblio-dev',
         originating_request_id: 'req-original-uuid-xyz',
       },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
 

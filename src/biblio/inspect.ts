@@ -10,11 +10,11 @@
  *                                                                → REJECT/dangerous_code or ACCEPT
  *                  parse 失敗・LLM 例外は HOLD/inspect_error (fail-closed)
  *
- * dangerous 軸の LLM 選択 (用途規約 = CLAUDE.md / DEN さん指針):
- *   - 検品は NanoClaw ネイティブの補助推論であり、skill 発動には絡まない (VERDICT 1 行判定のみ)
+ * dangerous 軸の LLM 選択 (用途規約 = CLAUDE.md 参照):
+ *   - 検品は host ネイティブの補助推論であり、skill 発動には絡まない (VERDICT 1 行判定のみ)
  *   - Claude 特性 (長文推論 / extended thinking / tool use) を要求しない
  *   - = Google モデル可。`.env` の `INSPECT_DANGEROUS_MODEL` (例: `gemini-2.5-flash`) で指定
- *   - ハードコードは不可 (DEN さん指示): モデル ID をコードに埋め込まず env / secret manager 経由
+ *   - ハードコードは不可: モデル ID をコードに埋め込まず env / secret manager 経由
  *
  * 設計判断 (plan §補足):
  *   - host に claude CLI が無いため `claude plugin validate --strict` は使えず、
