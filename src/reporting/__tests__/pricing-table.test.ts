@@ -9,15 +9,22 @@
  *  - Vertex premium: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude
  *  - Gemini:    https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-lite/
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   ANTHROPIC_PRICING,
   GEMINI_PRICING,
+  PROVIDER_APPLIES_VERTEX_PREMIUM,
+  VERTEX_GLOBAL_PREMIUM,
   VERTEX_REGIONAL_PREMIUM,
   isAnthropicModel,
   isGeminiModel,
+  resolveVertexPremium,
 } from '../pricing-table.js';
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe('ANTHROPIC_PRICING (2026-07-09 単価値 pinning)', () => {
   it('claude-sonnet-4-6 は $3/$15、cache_read $0.3、cache_write $3.75', () => {
@@ -64,9 +71,45 @@ describe('ANTHROPIC_PRICING (2026-07-09 単価値 pinning)', () => {
   });
 });
 
-describe('VERTEX_REGIONAL_PREMIUM', () => {
-  it('Vertex regional endpoint premium = 1.10 (base × 10% 上乗せ)', () => {
+describe('VERTEX_REGIONAL_PREMIUM / VERTEX_GLOBAL_PREMIUM', () => {
+  it('regional premium = 1.10 (base × 10% 上乗せ)', () => {
     expect(VERTEX_REGIONAL_PREMIUM).toBe(1.1);
+  });
+
+  it('global premium = 1.0 (base 価格経路、premium なし)', () => {
+    expect(VERTEX_GLOBAL_PREMIUM).toBe(1.0);
+  });
+});
+
+describe('resolveVertexPremium (CLOUD_ML_REGION env で切替)', () => {
+  it('CLOUD_ML_REGION=global → 1.0 (Global endpoint 経路)', () => {
+    vi.stubEnv('CLOUD_ML_REGION', 'global');
+    expect(resolveVertexPremium()).toBe(VERTEX_GLOBAL_PREMIUM);
+  });
+
+  it('CLOUD_ML_REGION 未設定 → 1.10 (regional 経路の保守側 default)', () => {
+    vi.stubEnv('CLOUD_ML_REGION', '');
+    expect(resolveVertexPremium()).toBe(VERTEX_REGIONAL_PREMIUM);
+  });
+
+  it('CLOUD_ML_REGION=asia-northeast1 等の regional は 1.10', () => {
+    vi.stubEnv('CLOUD_ML_REGION', 'asia-northeast1');
+    expect(resolveVertexPremium()).toBe(VERTEX_REGIONAL_PREMIUM);
+  });
+
+  it('大文字 GLOBAL でも正しく判定 (trim + lowercase 正規化)', () => {
+    vi.stubEnv('CLOUD_ML_REGION', ' GLOBAL ');
+    expect(resolveVertexPremium()).toBe(VERTEX_GLOBAL_PREMIUM);
+  });
+});
+
+describe('PROVIDER_APPLIES_VERTEX_PREMIUM (不変条件を型で強制)', () => {
+  it('Anthropic は premium 適用対象 (true)', () => {
+    expect(PROVIDER_APPLIES_VERTEX_PREMIUM.anthropic).toBe(true);
+  });
+
+  it('Gemini は premium 非適用 (false、単価表に組込済のため二重乗算しない)', () => {
+    expect(PROVIDER_APPLIES_VERTEX_PREMIUM.gemini).toBe(false);
   });
 });
 

@@ -1,18 +1,21 @@
 import {
   ANTHROPIC_PRICING,
   GEMINI_PRICING,
-  VERTEX_REGIONAL_PREMIUM,
+  PROVIDER_APPLIES_VERTEX_PREMIUM,
   isAnthropicModel,
   isGeminiModel,
+  resolveVertexPremium,
+  type PricingProvider,
 } from './pricing-table.js';
 
 export interface UsageInput {
   model: string;
   tokens_in: number;
   tokens_out: number;
-  // cache_read.input_tokens (`vertex-client.ts` の現行 emit で捕捉可能な場合のみ非 undefined)
+  // cache_read.input_tokens (Cloud Logging 側の現行 emit で捕捉されておらず常時 undefined、
+  // llm-cost.sql が SELECT していないため。将来 emit + SQL 拡張で解消予定 = Phase 2 スコープ)
   cache_read?: number;
-  // cache_creation.input_tokens (biblio-claw 現行未捕捉 = 常に undefined)。
+  // cache_creation.input_tokens (biblio-claw 現行未捕捉 = 常に undefined、cache_read と同状態)。
   // 将来 emit が追加されたら optional を required にリファクタする anchor。
   cache_creation?: number;
 }
@@ -27,39 +30,56 @@ export interface CostBreakdown {
 export interface CostResult {
   cost_usd: number;
   breakdown: CostBreakdown;
-  provider: 'anthropic' | 'gemini' | 'unknown';
+  provider: PricingProvider | 'unknown';
   warnings: string[];
 }
 
 const CACHE_CREATION_UNCAPTURED_WARNING = 'cache_creation.input_tokens not captured, cost is underestimated';
+const CACHE_READ_UNCAPTURED_WARNING = 'cache_read.input_tokens not captured, cost is underestimated';
 
 // pure fn: usage → cost。throw しない、未知 model は cost_usd: 0 + warnings で返す (silent failure 撲滅)。
-export function computeCost(usage: UsageInput): CostResult {
+// Vertex premium の適用は `PROVIDER_APPLIES_VERTEX_PREMIUM` map で provider 別に強制
+// (Anthropic のみ ×1.10 の runtime 分岐を型で保証、新 provider 追加時は map エントリを強制)。
+// `regionMode`/`premiumOverride` を optional で受け取ることで、cronjob 側で `CLOUD_ML_REGION` env を
+// 解決した値を注入できる (test での env 依存を最小化)。
+export interface ComputeCostOptions {
+  // 未指定なら `resolveVertexPremium()` で env から解決 (default)
+  premiumOverride?: number;
+}
+
+export function computeCost(usage: UsageInput, opts: ComputeCostOptions = {}): CostResult {
   const warnings: string[] = [];
   const zeroBreakdown: CostBreakdown = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const providerPremium = (provider: PricingProvider): number => {
+    if (!PROVIDER_APPLIES_VERTEX_PREMIUM[provider]) return 1.0;
+    return opts.premiumOverride ?? resolveVertexPremium();
+  };
 
   if (isAnthropicModel(usage.model)) {
     const p = ANTHROPIC_PRICING[usage.model];
     const cacheRead = usage.cache_read ?? 0;
     const cacheCreation = usage.cache_creation ?? 0;
+    if (usage.cache_read === undefined) {
+      warnings.push(CACHE_READ_UNCAPTURED_WARNING);
+    }
     if (usage.cache_creation === undefined) {
       warnings.push(CACHE_CREATION_UNCAPTURED_WARNING);
     }
-    const breakdown: CostBreakdown = {
+    const rawBreakdown: CostBreakdown = {
       input: (usage.tokens_in * p.input) / 1_000_000,
       output: (usage.tokens_out * p.output) / 1_000_000,
       cache_read: (cacheRead * p.cache_read) / 1_000_000,
       cache_write: (cacheCreation * p.cache_write) / 1_000_000,
     };
-    const rawCost = breakdown.input + breakdown.output + breakdown.cache_read + breakdown.cache_write;
-    const cost_usd = rawCost * VERTEX_REGIONAL_PREMIUM;
+    const premium = providerPremium('anthropic');
     return {
-      cost_usd,
+      cost_usd:
+        (rawBreakdown.input + rawBreakdown.output + rawBreakdown.cache_read + rawBreakdown.cache_write) * premium,
       breakdown: {
-        input: breakdown.input * VERTEX_REGIONAL_PREMIUM,
-        output: breakdown.output * VERTEX_REGIONAL_PREMIUM,
-        cache_read: breakdown.cache_read * VERTEX_REGIONAL_PREMIUM,
-        cache_write: breakdown.cache_write * VERTEX_REGIONAL_PREMIUM,
+        input: rawBreakdown.input * premium,
+        output: rawBreakdown.output * premium,
+        cache_read: rawBreakdown.cache_read * premium,
+        cache_write: rawBreakdown.cache_write * premium,
       },
       provider: 'anthropic',
       warnings,
@@ -67,8 +87,10 @@ export function computeCost(usage: UsageInput): CostResult {
   }
 
   if (isGeminiModel(usage.model)) {
-    // Gemini 単価は既に Vertex regional 経路の実効値 (pricing-table.ts の comment 参照)。
-    // VERTEX_REGIONAL_PREMIUM を再乗算しない。
+    // Gemini 単価は pricing-table 側で non-global 想定値 hardcode 済み、premium は map で 1.0 固定
+    // (二重乗算しない不変条件を PROVIDER_APPLIES_VERTEX_PREMIUM で強制)。
+    // Global endpoint 経路 (`CLOUD_ML_REGION=global`) の実効値との差 (gemini-3.1-flash-lite 例:
+    // Global $0.25/$1.50 vs 現行 $0.275/$1.65) は保守側で温存、Phase 2 で GCP 請求書との突合で精密化。
     const p = GEMINI_PRICING[usage.model];
     const breakdown: CostBreakdown = {
       input: (usage.tokens_in * p.input) / 1_000_000,
@@ -76,8 +98,13 @@ export function computeCost(usage: UsageInput): CostResult {
       cache_read: 0,
       cache_write: 0,
     };
-    const cost_usd = breakdown.input + breakdown.output;
-    return { cost_usd, breakdown, provider: 'gemini', warnings };
+    const premium = providerPremium('gemini'); // 常に 1.0、明示化のため呼出は残す
+    return {
+      cost_usd: (breakdown.input + breakdown.output) * premium,
+      breakdown,
+      provider: 'gemini',
+      warnings,
+    };
   }
 
   warnings.push(`unknown_model: ${usage.model}`);
@@ -93,13 +120,15 @@ export interface AggregatedCost {
   warnings: string[];
 }
 
-export function aggregateCosts(rows: UsageInput[]): AggregatedCost {
+export interface AggregateCostsOptions extends ComputeCostOptions {}
+
+export function aggregateCosts(rows: UsageInput[], opts: AggregateCostsOptions = {}): AggregatedCost {
   const warningSet = new Set<string>();
   let anthropic = 0;
   let gemini = 0;
   let unknown = 0;
   for (const row of rows) {
-    const r = computeCost(row);
+    const r = computeCost(row, opts);
     for (const w of r.warnings) warningSet.add(w);
     if (r.provider === 'anthropic') anthropic += r.cost_usd;
     else if (r.provider === 'gemini') gemini += r.cost_usd;

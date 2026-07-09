@@ -31,8 +31,33 @@ export const ANTHROPIC_PRICING = {
   'claude-haiku-4-5': { input: 1, output: 5, cache_read: 0.1, cache_write: 1.25 },
 } as const;
 
-// Vertex regional endpoint premium (Anthropic のみ適用、Gemini は単価に組込済)
+// Vertex regional endpoint premium 定数 (base × 10%)
+// Global endpoint (base 価格) 経路では premium を適用しないため 1.0 を返す。
+// 適用判断は `resolveVertexPremium` を経由し、`CLOUD_ML_REGION` env で切替する。
 export const VERTEX_REGIONAL_PREMIUM = 1.1;
+export const VERTEX_GLOBAL_PREMIUM = 1.0;
+
+// Provider ごとの premium 適用マップ (I2: 不変条件を型で強制、3 つ目の provider 追加時に
+// TS の Record が compile error で強制させる)。Gemini 単価は pricing-table 側で
+// non-global 実効値を hardcode 済のため二重乗算しない = 常に 1.0。
+export type PricingProvider = 'anthropic' | 'gemini';
+export const PROVIDER_APPLIES_VERTEX_PREMIUM: Record<PricingProvider, boolean> = {
+  anthropic: true,
+  gemini: false,
+};
+
+// resolveVertexPremium: `CLOUD_ML_REGION` env に基づき Anthropic 経路への premium 係数を決定。
+// - `global` → 1.0 (Global endpoint、base 価格経路)
+// - それ以外 (未設定 / 明示 regional / multi-region) → 1.10 (regional premium 経路)
+//
+// biblio-claw Prod は `CLOUD_ML_REGION=global` を明示指定
+// (k8s/10-orchestrator-statefulset.yaml:179,375 参照)。
+// M4-C review 前の実装は無条件 ×1.10 適用でコストを ~10% 過大計上していた
+// (2026-07-09 review 反映)。
+export function resolveVertexPremium(): number {
+  const region = (process.env.CLOUD_ML_REGION ?? '').trim().toLowerCase();
+  return region === 'global' ? VERTEX_GLOBAL_PREMIUM : VERTEX_REGIONAL_PREMIUM;
+}
 
 // Gemini pricing (2026-07-01 non-global +10% 発動済み、今日 2026-07-09)
 // biblio-claw の実運用モデル:

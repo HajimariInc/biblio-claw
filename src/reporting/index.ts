@@ -9,8 +9,11 @@ export type { ReportInput, BiblioUsageRow, LlmCostRow } from './formatter.js';
 export {
   ANTHROPIC_PRICING,
   GEMINI_PRICING,
+  PROVIDER_APPLIES_VERTEX_PREMIUM,
+  VERTEX_GLOBAL_PREMIUM,
   VERTEX_REGIONAL_PREMIUM,
   isAnthropicModel,
   isGeminiModel,
+  resolveVertexPremium,
 } from './pricing-table.js';
-export type { ModelId, AnthropicModelId, GeminiModelId } from './pricing-table.js';
+export type { ModelId, AnthropicModelId, GeminiModelId, PricingProvider } from './pricing-table.js';
