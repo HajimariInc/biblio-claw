@@ -27,7 +27,7 @@ const ShokyakuBiblioInput = z.object({
   biblioName: z
     .string()
     .describe(
-      'Biblio name in "<owner>--<repo>" or "<owner>--<repo>--<skill>" format (e.g. "example-org--biblio-min"). Use the biblioName returned by list_biblio or specified explicitly by the patron.',
+      'Biblio name in "<owner>--<repo>" or "<owner>--<repo>--<skill>" format (e.g. "HajimariInc--test-biblio-minimal"). Use the biblioName returned by list_biblio or specified explicitly by the patron.',
     ),
   category: z
     .enum(BIBLIO_CATEGORIES)

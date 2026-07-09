@@ -98,13 +98,13 @@ describe('readShelveEnv (regression)', () => {
       SHELF_REPO_OWNER: 'HajimariInc',
       SHELF_REPO_NAME: 'biblio-shelf',
       SHELF_PR_AUTHOR_NAME: 'biblio-claw bot',
-      SHELF_PR_AUTHOR_EMAIL: 'biblio-claw@wforest.jp',
+      SHELF_PR_AUTHOR_EMAIL: 'test-bot@example.com',
     });
     const env = readShelveEnv();
     expect(env.shelfOwner).toBe('HajimariInc');
     expect(env.shelfRepo).toBe('biblio-shelf');
     expect(env.authorName).toBe('biblio-claw bot');
-    expect(env.authorEmail).toBe('biblio-claw@wforest.jp');
+    expect(env.authorEmail).toBe('test-bot@example.com');
     expect(env.fallbackAuthor).toBeNull();
   });
 
@@ -112,7 +112,7 @@ describe('readShelveEnv (regression)', () => {
     vi.mocked(readEnvFile).mockReturnValueOnce({
       SHELF_REPO_OWNER: 'HajimariInc',
       SHELF_REPO_NAME: 'biblio-shelf',
-      SHELF_PR_AUTHOR_EMAIL: 'biblio-claw@wforest.jp',
+      SHELF_PR_AUTHOR_EMAIL: 'test-bot@example.com',
     });
     expect(() => readShelveEnv()).toThrow(/^shelve: required env missing: SHELF_PR_AUTHOR_NAME$/);
   });
@@ -131,11 +131,11 @@ describe('readShelveEnv (regression)', () => {
       SHELF_REPO_OWNER: 'HajimariInc',
       SHELF_REPO_NAME: 'biblio-shelf',
       SHELF_PR_AUTHOR_NAME: 'biblio-claw bot',
-      SHELF_PR_AUTHOR_EMAIL: 'biblio-claw@wforest.jp',
-      SHELF_PR_AUTHOR_FALLBACK: 'DEN <den@example.com>',
+      SHELF_PR_AUTHOR_EMAIL: 'test-bot@example.com',
+      SHELF_PR_AUTHOR_FALLBACK: 'Test <test@example.com>',
     });
     const env = readShelveEnv();
-    expect(env.fallbackAuthor).toEqual({ name: 'DEN', email: 'den@example.com' });
+    expect(env.fallbackAuthor).toEqual({ name: 'Test', email: 'test@example.com' });
   });
 });
 
@@ -286,7 +286,7 @@ describe('createCommit', () => {
     shelfOwner: 'HajimariInc',
     shelfRepo: 'biblio-shelf',
     authorName: 'biblio-claw bot',
-    authorEmail: 'biblio-claw@wforest.jp',
+    authorEmail: 'test-bot@example.com',
     fallbackAuthor: null,
   };
   const author = { name: shelfEnv.authorName, email: shelfEnv.authorEmail };

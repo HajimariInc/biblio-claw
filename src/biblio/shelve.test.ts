@@ -310,7 +310,7 @@ describe('shelve — PAT fallback', () => {
       SHELF_REPO_NAME: 'biblio-shelf',
       SHELF_PR_AUTHOR_NAME: 'hj-biblio-github-app[bot]',
       SHELF_PR_AUTHOR_EMAIL: '292998322+hj-biblio-github-app[bot]@users.noreply.github.com',
-      SHELF_PR_AUTHOR_FALLBACK: 'MAXiDEN <claude@wforest.jp>',
+      SHELF_PR_AUTHOR_FALLBACK: 'Test Author <test@example.com>',
     });
 
     let commitAttempts = 0;

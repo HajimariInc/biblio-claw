@@ -51,7 +51,7 @@ function makeSpec(overrides: Partial<AgentSpawnSpec> = {}): AgentSpawnSpec {
     agentGroupName: 'Test Group',
     agentGroupFolder: 'test-group',
     sessionId: 'session-1',
-    image: 'asia-northeast1-docker.pkg.dev/proj/repo/nanoclaw-agent:m1-p1',
+    image: 'asia-northeast1-docker.pkg.dev/proj/repo/agent:test-1',
     mounts: [
       {
         hostPath: '/data/v2-sessions/group-1/session-1',
