@@ -73,7 +73,7 @@ done
 #   呼び出し側が「未存在」と誤判定して二重 POST 投入してしまうため明示 fail。
 secret_id() {
   local out id
-  out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
+  out="$(curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
     || fail "GET /v1/secrets への接続に失敗 (secret_id)"
   # jq の失敗 (= OneCLI が HTML エラーページ等の非 JSON 200 を返した場合) は
   # pipefail で非ゼロ伝播するが、`id="$(secret_id)"` 側の set -e 経由で
@@ -111,14 +111,14 @@ ensure_secret() {
           --arg name "$VERTEX_SECRET_NAME" --arg host "$host" \
           '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
             injectionConfig:{headerName:"authorization", valueFormat:"Bearer {value}"}}' \
-        | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
+        | curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 投入 (POST /v1/secrets) に失敗"
   else
     info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value のみ partial update (pathPattern は省略 = OneCLI 側保持、rotation gap なし)"
     ( set -o pipefail
       SECRET_TOKEN="$token" jq -n '{value:env.SECRET_TOKEN}' \
-        | curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
+        | curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
   fi
@@ -132,7 +132,7 @@ main() {
   info "OneCLI REST=${ONECLI_API} / project=${ANTHROPIC_VERTEX_PROJECT_ID} / region=${CLOUD_ML_REGION}"
   # stderr を捨てない — curl の接続エラー (DNS / TLS / 接続拒否のメッセージ) が
   # 「到達できない」だけだと debug 不能になるため、curl 自身のエラーは端末に流す。
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
+  curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
     || fail "OneCLI REST に到達できない (${ONECLI_API}) — 'docker compose up -d --wait' 済みか確認"
   ensure_secret
   set_all_agents_mode_all

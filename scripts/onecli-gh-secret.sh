@@ -103,7 +103,7 @@ mint_token() {
   resp="$(
     printf 'url = "https://%s/app/installations/%s/access_tokens"\nrequest = "POST"\nheader = "Accept: application/vnd.github+json"\nheader = "X-GitHub-Api-Version: 2022-11-28"\nheader = "Authorization: Bearer %s"\n' \
       "$GH_API_HOST" "$GH_INSTALLATION_ID" "$jwt" \
-      | curl -sS --config - -w $'\n%{http_code}'
+      | curl --connect-timeout 5 --max-time 15 -sS --config - -w $'\n%{http_code}'
   )"
   rc=$?
   # JWT は用済み。確実に破棄。
@@ -137,7 +137,7 @@ mint_token() {
 #   呼び出し側が「未存在」と誤判定して二重 POST 投入する Critical なバグになる。
 secret_id() {
   local out
-  out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
+  out="$(curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
     || fail "GET /v1/secrets への接続に失敗 (secret_id)"
   printf '%s' "$out" \
     | jq -r --arg n "$GH_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1
@@ -186,7 +186,7 @@ upsert_gh_secret() {
           --arg header "$GH_SECRET_HEADER" --arg vfmt "$GH_SECRET_VALUE_FORMAT" \
           '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
             injectionConfig:{headerName:$header, valueFormat:$vfmt}}' \
-        | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
+        | curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 投入 (POST /v1/secrets) に失敗"
     SECRET_OP="post"
@@ -195,7 +195,7 @@ upsert_gh_secret() {
     ( set -o pipefail
       SECRET_TOKEN="$SIDECAR_GH_TOKEN" jq -n \
           '{value:env.SECRET_TOKEN}' \
-        | curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
+        | curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
     SECRET_OP="patch"
@@ -219,7 +219,7 @@ main() {
   [ -r "$GH_APP_PEM_PATH" ] || fail "PEM ファイルが読めない: $GH_APP_PEM_PATH"
   # stderr を捨てない — curl の接続エラー (DNS / TLS / 接続拒否のメッセージ) が
   # 「到達できない」だけだと debug 不能になるため、curl 自身のエラーは端末に流す。
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
+  curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
     || fail "OneCLI REST に到達できない (${ONECLI_API}) — 'docker compose up -d --wait' 済みか確認"
   mint_token
   upsert_gh_secret
