@@ -47,6 +47,7 @@ import {
   GEN_AI_PROVIDER_GCP_VERTEX_AI,
   GEN_AI_PROVIDER_NAME,
   GEN_AI_REQUEST_MODEL,
+  GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
   GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
@@ -310,15 +311,22 @@ export class AnthropicVertexLlm extends BaseLlm {
       if (usage.cache_read_input_tokens != null) {
         span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage.cache_read_input_tokens);
       }
+      if (usage.cache_creation_input_tokens != null) {
+        span.setAttribute(GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, usage.cache_creation_input_tokens);
+      }
       // M4-C Phase 1: 成功経路で `vertex.call` event を Cloud Logging に emit
       // (= vertex-client.ts:499-507 の pattern 対称化、llm-cost.sql の集計対象を
       // ADK チャット本体経路 (CLI/Slack/Fugue ask) にも拡張)。
+      // M4-C Phase 2: cache_read/cache_creation を unconditional emit (?? 0) して
+      // llm-cost.sql の SUM 対象を有効化 + cost-calculator の warnings 消失。
       log.info('vertex.call', {
         event: 'vertex.call',
         outcome: 'success',
         model: this.model,
         tokens_in: usage.input_tokens ?? 0,
         tokens_out: usage.output_tokens ?? 0,
+        cache_read: usage.cache_read_input_tokens ?? 0,
+        cache_creation: usage.cache_creation_input_tokens ?? 0,
         latency_ms: Math.round(performance.now() - t0),
       });
 

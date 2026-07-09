@@ -102,8 +102,8 @@ async function main(): Promise<void> {
     ),
   );
 
-  const text = formatBiblioUsageSummary({ windowDays, biblio, inspect, errorTrend, llmCost });
-  const result = await postReport({ channel, text, requestId });
+  const { text, blocks } = formatBiblioUsageSummary({ windowDays, biblio, inspect, errorTrend, llmCost });
+  const result = await postReport({ channel, text, blocks, requestId });
 
   const durationMs = Date.now() - startAt;
   if (result.ok) {

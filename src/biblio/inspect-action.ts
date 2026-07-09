@@ -77,11 +77,16 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
       // verdict 3 値 (ACCEPT/HOLD/REJECT) を outcome 3 値 (success/hold/failure) に対応させる。
       // HOLD は「判定保留」で失敗ではないため、BQ 集計で REJECT (失敗) と区別する。
       const outcome = result.verdict === 'ACCEPT' ? 'success' : result.verdict === 'HOLD' ? 'hold' : 'failure';
+      // M4-C Phase 2: dangerous field を emit (inspect-distribution.sql の verdict × dangerous 2 軸集計用)。
+      // `dangerous_code` reason = LLM で危険コード検出のみ true、それ以外は false (schema_invalid /
+      // inspect_error / ACCEPT / HOLD)。boolean = Cloud Logging BQ export で BOOL 型として保持される。
+      const dangerous = result.verdict === 'REJECT' && result.reason === 'dangerous_code';
       log.info('inspect_biblio done', {
         event: 'biblio.inspect',
         outcome,
         biblioName: rawName,
         verdict: result.verdict,
+        dangerous,
         session_id: session.id,
         request_id: requestId,
       });

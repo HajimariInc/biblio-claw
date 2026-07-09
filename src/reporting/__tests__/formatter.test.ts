@@ -20,8 +20,8 @@ const emptyOk = (): QueryOutcome => ok<unknown>([]);
 const fail = (): QueryOutcome => ({ ok: false });
 
 describe('formatBiblioUsageSummary — 全 4 種 empty (ok:true, rows:[])', () => {
-  it('全 4 種空 → 「活動なし」+「呼出記録なし」+ 雛形メッセージ', () => {
-    const text = formatBiblioUsageSummary({
+  it('全 4 種空 → 「活動なし」+「呼出記録なし」+ 検品/エラー empty 文言 (M4-C Phase 2 で確定)', () => {
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: emptyOk(),
@@ -30,15 +30,15 @@ describe('formatBiblioUsageSummary — 全 4 種 empty (ok:true, rows:[])', () =
     });
     expect(text).toContain('直近 7 日');
     expect(text).toContain('biblio 利用: 活動なし');
-    expect(text).toContain('検品分布: Phase 2 で実装');
-    expect(text).toContain('エラー傾向: Phase 2 で実装');
+    expect(text).toContain('検品分布: 検品実行なし');
+    expect(text).toContain('エラー傾向: ERROR なし (順調)');
     expect(text).toContain('LLM コスト: 呼出記録なし');
   });
 });
 
 describe('formatBiblioUsageSummary — QueryOutcome.ok=false (SQL 失敗)', () => {
   it('biblio 失敗時は「⚠️ 取得失敗」を biblio セクションに表示 (empty と区別)', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: fail(),
       inspect: emptyOk(),
@@ -51,7 +51,7 @@ describe('formatBiblioUsageSummary — QueryOutcome.ok=false (SQL 失敗)', () =
   });
 
   it('llmCost 失敗時は「⚠️ 取得失敗」を LLM セクションに表示', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: emptyOk(),
@@ -63,8 +63,8 @@ describe('formatBiblioUsageSummary — QueryOutcome.ok=false (SQL 失敗)', () =
     expect(text).not.toContain('LLM コスト: 呼出記録なし');
   });
 
-  it('inspect / errorTrend 失敗時は雛形ではなく「⚠️ 取得失敗」を表示', () => {
-    const text = formatBiblioUsageSummary({
+  it('inspect / errorTrend 失敗時は empty 文言ではなく「⚠️ 取得失敗」を表示', () => {
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: fail(),
@@ -73,12 +73,12 @@ describe('formatBiblioUsageSummary — QueryOutcome.ok=false (SQL 失敗)', () =
     });
     expect(text).toContain('検品分布: ⚠️ 取得失敗');
     expect(text).toContain('エラー傾向: ⚠️ 取得失敗');
-    expect(text).not.toContain('検品分布: Phase 2');
-    expect(text).not.toContain('エラー傾向: Phase 2');
+    expect(text).not.toContain('検品分布: 検品実行なし');
+    expect(text).not.toContain('エラー傾向: ERROR なし');
   });
 
   it('全 4 種失敗 → 全セクションが取得失敗', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: fail(),
       inspect: fail(),
@@ -92,7 +92,7 @@ describe('formatBiblioUsageSummary — QueryOutcome.ok=false (SQL 失敗)', () =
 
 describe('formatBiblioUsageSummary — normal case', () => {
   it('biblio rows は action ごとに outcome 別 cnt を集計する', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([
         { action: 'acquire', outcome: 'success', cnt: 5 },
@@ -110,7 +110,7 @@ describe('formatBiblioUsageSummary — normal case', () => {
   });
 
   it('llmCost rows は合算 cost + provider 別 breakdown を表示する (Gemini 経路)', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: emptyOk(),
@@ -133,7 +133,7 @@ describe('formatBiblioUsageSummary — normal case', () => {
   });
 
   it('複数 model の場合 model count は set 集計で正しく数える', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: emptyOk(),
@@ -150,7 +150,7 @@ describe('formatBiblioUsageSummary — normal case', () => {
 
 describe('formatBiblioUsageSummary — BigQueryInt shape の coerce', () => {
   it('cnt が {value: string} 形式で来ても Number 化される (silent、warnings 出さず)', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([{ action: 'acquire', outcome: 'success', cnt: { value: '42' } }]),
       inspect: emptyOk(),
@@ -164,7 +164,7 @@ describe('formatBiblioUsageSummary — BigQueryInt shape の coerce', () => {
   });
 
   it('numeric string ("100" 等) も Number 化される', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([{ action: 'inspect', outcome: 'success', cnt: '100' }]),
       inspect: emptyOk(),
@@ -175,7 +175,7 @@ describe('formatBiblioUsageSummary — BigQueryInt shape の coerce', () => {
   });
 
   it('非数値 string ("abc") は silent 0 + warnings 経由で本文末尾に注記', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([{ action: 'acquire', outcome: 'success', cnt: 'not-a-number' }]),
       inspect: emptyOk(),
@@ -188,7 +188,7 @@ describe('formatBiblioUsageSummary — BigQueryInt shape の coerce', () => {
   });
 
   it('outcome が null なら silent (unknown) + warnings 注記', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([{ action: 'acquire', outcome: null, cnt: 5 }] as unknown[]),
       inspect: emptyOk(),
@@ -200,7 +200,7 @@ describe('formatBiblioUsageSummary — BigQueryInt shape の coerce', () => {
   });
 
   it('cnt が null なら silent 0、warnings は出さず (BQ NULL 正当)', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([{ action: 'acquire', outcome: 'success', cnt: null }] as unknown[]),
       inspect: emptyOk(),
@@ -214,7 +214,7 @@ describe('formatBiblioUsageSummary — BigQueryInt shape の coerce', () => {
 
 describe('formatBiblioUsageSummary — unknown model warning', () => {
   it('unknown model が含まれる場合、Slack 本文に「※ unknown_model」注記される', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: emptyOk(),
@@ -227,7 +227,7 @@ describe('formatBiblioUsageSummary — unknown model warning', () => {
   });
 
   it('Anthropic の場合、cache_read + cache_creation 欠落 warning が本文に注記される', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: emptyOk(),
       inspect: emptyOk(),
@@ -249,7 +249,7 @@ describe('formatBiblioUsageSummary — unknown model warning', () => {
 
 describe('formatBiblioUsageSummary — action sort', () => {
   it('action は alphabetical 順に並ぶ (呼出順に依存しない)', () => {
-    const text = formatBiblioUsageSummary({
+    const { text } = formatBiblioUsageSummary({
       windowDays: 7,
       biblio: ok([
         { action: 'shelve', outcome: 'success', cnt: 1 },
@@ -266,5 +266,123 @@ describe('formatBiblioUsageSummary — action sort', () => {
     expect(acquireIdx).toBeGreaterThan(0);
     expect(acquireIdx).toBeLessThan(listIdx);
     expect(listIdx).toBeLessThan(shelveIdx);
+  });
+});
+
+describe('formatBiblioUsageSummary — {text, blocks} shape (M4-C Phase 2)', () => {
+  it('返り値は text (string) と blocks (SlackBlock[]) の 2 field を持つ', () => {
+    const result = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: emptyOk(),
+      llmCost: emptyOk(),
+    });
+    expect(typeof result.text).toBe('string');
+    expect(Array.isArray(result.blocks)).toBe(true);
+    // header + 4 card 分の少なくとも 1 block ずつ → 空 rows の card でも section text block が出る
+    expect(result.blocks.length).toBeGreaterThanOrEqual(5);
+    // 先頭 block は header type
+    expect(result.blocks[0]).toMatchObject({ type: 'header' });
+  });
+});
+
+describe('formatBiblioUsageSummary — inspect-distribution (rows / empty / fail)', () => {
+  it('rows あり: verdict/dangerous ごとの cnt を text に集約する', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: ok([
+        { verdict: 'ACCEPT', dangerous: 'false', cnt: 4 },
+        { verdict: 'HOLD', dangerous: 'false', cnt: 2 },
+        { verdict: 'REJECT', dangerous: 'true', cnt: 1 },
+      ]),
+      errorTrend: emptyOk(),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('検品分布:');
+    expect(text).toContain('ACCEPT/false 4');
+    expect(text).toContain('HOLD/false 2');
+    expect(text).toContain('REJECT/true 1');
+  });
+
+  it('rows 空: 「検品実行なし」を表示', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: emptyOk(),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('検品分布: 検品実行なし');
+  });
+
+  it('ok=false: 「⚠️ 取得失敗」を表示', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: fail(),
+      errorTrend: emptyOk(),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('検品分布: ⚠️ 取得失敗');
+  });
+});
+
+describe('formatBiblioUsageSummary — error-trend (rows / empty / fail)', () => {
+  it('rows あり: 総 cnt + preview 3 行 + percentile 情報を表示', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: ok([
+        { day: '2026-07-08', event: 'vertex.call.timeout', cnt: 5, p50_ms: 3000, p95_ms: 4500, p99_ms: 5000 },
+        { day: '2026-07-08', event: 'biblio.acquire.threw', cnt: 2 },
+      ]),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('エラー傾向 (総 7 件)');
+    expect(text).toContain('2026-07-08 vertex.call.timeout 5');
+    expect(text).toContain('p50 3000ms');
+    expect(text).toContain('p95 4500ms');
+    expect(text).toContain('2026-07-08 biblio.acquire.threw 2');
+  });
+
+  it('rows 空: 「ERROR なし (順調)」を表示', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: emptyOk(),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('エラー傾向: ERROR なし (順調)');
+  });
+
+  it('rows > 3 の場合、「他 N 行」の suffix を出す', () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({
+      day: `2026-07-0${i}`,
+      event: `evt-${i}`,
+      cnt: 1,
+    }));
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: ok(rows),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('他 3 行');
+  });
+
+  it('ok=false: 「⚠️ 取得失敗」を表示', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: fail(),
+      llmCost: emptyOk(),
+    });
+    expect(text).toContain('エラー傾向: ⚠️ 取得失敗');
   });
 });

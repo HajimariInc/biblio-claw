@@ -1,6 +1,9 @@
+import type { SlackBlock } from '@chat-adapter/slack/blocks';
+
+import { buildReportBlocks } from './blocks-builder.js';
 import { aggregateCosts, type UsageInput } from './cost-calculator.js';
 
-// 4 種レポート結果 → Slack DM plain text (Phase 1 スコープ。Phase 2 で Data Table Block 化)。
+// 4 種レポート結果 → Slack DM plain text + Block Kit blocks (M4-C Phase 2)。
 //
 // QueryOutcome<T>:
 //   BQ query の「成功 (rows)」と「失敗 (error)」を型で区別する discriminated union。
@@ -15,13 +18,27 @@ export interface BiblioUsageRow {
   cnt: number;
 }
 
+export interface InspectDistributionRow {
+  verdict: string;
+  dangerous: string;
+  cnt: number;
+}
+
+export interface ErrorTrendRow {
+  day: string;
+  event: string;
+  cnt: number;
+  p50_ms?: number;
+  p95_ms?: number;
+  p99_ms?: number;
+}
+
 export interface LlmCostRow {
   model: string;
   call_count: number;
   total_tokens_in: number;
   total_tokens_out: number;
-  // cache_read / cache_creation は現行 emit で捕捉されておらず、SQL 側で SUM 対象データなし。
-  // 将来 emit 追加時に SQL 列と共に有効化。
+  // M4-C Phase 2 で emit + SQL 列追加済。旧 log (emit 前) は NULL → normalize で undefined に落ちる。
   total_cache_read?: number;
   total_cache_creation?: number;
 }
@@ -73,7 +90,7 @@ function toStr(v: unknown, warnings?: NormalizeReport['warnings']): string {
   return String(v);
 }
 
-function normalizeBiblioRow(r: unknown, warnings: NormalizeReport['warnings']): BiblioUsageRow {
+export function normalizeBiblioRow(r: unknown, warnings: NormalizeReport['warnings']): BiblioUsageRow {
   const row = (r as Record<string, unknown>) ?? {};
   return {
     action: toStr(row.action, warnings),
@@ -82,7 +99,34 @@ function normalizeBiblioRow(r: unknown, warnings: NormalizeReport['warnings']): 
   };
 }
 
-function normalizeLlmCostRow(r: unknown, warnings: NormalizeReport['warnings']): LlmCostRow {
+export function normalizeInspectDistributionRow(
+  r: unknown,
+  warnings: NormalizeReport['warnings'],
+): InspectDistributionRow {
+  const row = (r as Record<string, unknown>) ?? {};
+  return {
+    verdict: toStr(row.verdict, warnings),
+    dangerous: toStr(row.dangerous, warnings),
+    cnt: toNumber(row.cnt, warnings),
+  };
+}
+
+export function normalizeErrorTrendRow(r: unknown, warnings: NormalizeReport['warnings']): ErrorTrendRow {
+  const row = (r as Record<string, unknown>) ?? {};
+  const p50 = 'p50_ms' in row ? row.p50_ms : undefined;
+  const p95 = 'p95_ms' in row ? row.p95_ms : undefined;
+  const p99 = 'p99_ms' in row ? row.p99_ms : undefined;
+  return {
+    day: toStr(row.day, warnings),
+    event: toStr(row.event, warnings),
+    cnt: toNumber(row.cnt, warnings),
+    p50_ms: p50 == null ? undefined : toNumber(p50, warnings),
+    p95_ms: p95 == null ? undefined : toNumber(p95, warnings),
+    p99_ms: p99 == null ? undefined : toNumber(p99, warnings),
+  };
+}
+
+export function normalizeLlmCostRow(r: unknown, warnings: NormalizeReport['warnings']): LlmCostRow {
   const row = (r as Record<string, unknown>) ?? {};
   return {
     model: toStr(row.model, warnings),
@@ -115,6 +159,33 @@ function formatBiblio(outcome: QueryOutcome, warnings: NormalizeReport['warnings
     parts.push(`${action} ${total} 件 (${outcomeStr})`);
   }
   return `📚 biblio 利用: ${parts.join(' / ')}`;
+}
+
+function formatInspectDistribution(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
+  if (!outcome.ok) return '⚠️ 検品分布: ⚠️ 取得失敗 (BQ query error)';
+  const rows = outcome.rows.map((r) => normalizeInspectDistributionRow(r, warnings));
+  if (rows.length === 0) return '⚠️ 検品分布: 検品実行なし';
+  // verdict × dangerous を "ACCEPT/false 4, HOLD/false 2, REJECT/true 1" の 1 行に集約。
+  const parts = rows.map((r) => `${r.verdict}/${r.dangerous} ${r.cnt}`);
+  return `⚠️ 検品分布: ${parts.join(', ')}`;
+}
+
+function formatErrorTrend(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
+  if (!outcome.ok) return '🚨 エラー傾向: ⚠️ 取得失敗 (BQ query error)';
+  const rows = outcome.rows.map((r) => normalizeErrorTrendRow(r, warnings));
+  if (rows.length === 0) return '🚨 エラー傾向: ERROR なし (順調)';
+  // day + event 別集計。text 経路は「先頭 3 行 + total 件数」だけ表示 (詳細は Data Table Block に委任)。
+  const totalCnt = rows.reduce((s, r) => s + r.cnt, 0);
+  const preview = rows.slice(0, 3).map((r) => {
+    const percentiles: string[] = [];
+    if (r.p50_ms != null) percentiles.push(`p50 ${r.p50_ms}ms`);
+    if (r.p95_ms != null) percentiles.push(`p95 ${r.p95_ms}ms`);
+    if (r.p99_ms != null) percentiles.push(`p99 ${r.p99_ms}ms`);
+    const tail = percentiles.length > 0 ? ` [${percentiles.join(', ')}]` : '';
+    return `${r.day} ${r.event} ${r.cnt}${tail}`;
+  });
+  const suffix = rows.length > 3 ? `\n  ... 他 ${rows.length - 3} 行` : '';
+  return `🚨 エラー傾向 (総 ${totalCnt} 件):\n  ${preview.join('\n  ')}${suffix}`;
 }
 
 function formatLlmCost(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
@@ -150,18 +221,17 @@ function formatLlmCost(outcome: QueryOutcome, warnings: NormalizeReport['warning
   return lines.join('\n');
 }
 
-function sectionPlaceholder(kind: '検品分布' | 'エラー傾向', outcome: QueryOutcome, icon: string): string {
-  // 雛形 (Phase 2 で完成予定) だが、SQL 失敗経路は「Phase 2 実装予定」ではなく実障害として扱う。
-  if (!outcome.ok) return `${icon} ${kind}: ⚠️ 取得失敗 (BQ query error)`;
-  return `${icon} ${kind}: Phase 2 で実装`;
-}
-
-export function formatBiblioUsageSummary(input: ReportInput): string {
+/**
+ * 4 種レポート結果 → Slack DM 用の text (fallback) + Block Kit blocks の 2 shape。
+ * Slack API の contract 上、`blocks` を送っても fallback 表示 / モバイルプッシュ通知 / 検索索引に
+ * `text` が使われるため、text 側は変わらず有意な要約を返す必要がある。
+ */
+export function formatBiblioUsageSummary(input: ReportInput): { text: string; blocks: SlackBlock[] } {
   const warnings: string[] = [];
   const header = `📊 biblio-claw 週次レポート (直近 ${input.windowDays} 日)`;
   const biblio = formatBiblio(input.biblio, warnings);
-  const inspect = sectionPlaceholder('検品分布', input.inspect, '⚠️');
-  const errorTrend = sectionPlaceholder('エラー傾向', input.errorTrend, '🚨');
+  const inspect = formatInspectDistribution(input.inspect, warnings);
+  const errorTrend = formatErrorTrend(input.errorTrend, warnings);
   const llmCost = formatLlmCost(input.llmCost, warnings);
   const sections = [header, biblio, inspect, errorTrend, llmCost];
   if (warnings.length > 0) {
@@ -169,5 +239,7 @@ export function formatBiblioUsageSummary(input: ReportInput): string {
     const unique = Array.from(new Set(warnings));
     sections.push(`⚠️ データ整形 warning: ${unique.join(' / ')}`);
   }
-  return sections.join('\n\n');
+  const text = sections.join('\n\n');
+  const blocks = buildReportBlocks(input, warnings);
+  return { text, blocks };
 }

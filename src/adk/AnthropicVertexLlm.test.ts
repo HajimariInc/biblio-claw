@@ -282,7 +282,7 @@ describe('AnthropicVertexLlm — gen_ai.* span 計装', () => {
   it('span 名 = chat <model> + provider/model/usage 属性が立つ', async () => {
     messagesCreateMock.mockResolvedValue({
       content: [{ type: 'text', text: 'OK' }],
-      usage: { input_tokens: 123, output_tokens: 45, cache_read_input_tokens: 7 },
+      usage: { input_tokens: 123, output_tokens: 45, cache_read_input_tokens: 7, cache_creation_input_tokens: 3 },
     });
     const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
     for await (const _ of llm.generateContentAsync(llmRequest('Hello'))) {
@@ -299,7 +299,21 @@ describe('AnthropicVertexLlm — gen_ai.* span 計装', () => {
     expect(span.attributes['gen_ai.usage.input_tokens']).toBe(123);
     expect(span.attributes['gen_ai.usage.output_tokens']).toBe(45);
     expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(7);
+    expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(3);
     expect(span.attributes['server.address']).toBe('aiplatform.googleapis.com');
+    // M4-C Phase 2: log.info('vertex.call', ...) payload に cache_read / cache_creation が含まれる
+    expect(vi.mocked(log.info)).toHaveBeenCalledWith(
+      'vertex.call',
+      expect.objectContaining({
+        event: 'vertex.call',
+        outcome: 'success',
+        model: 'claude-sonnet-4-6',
+        tokens_in: 123,
+        tokens_out: 45,
+        cache_read: 7,
+        cache_creation: 3,
+      }),
+    );
   });
 
   it('region != global のとき server.address に region prefix が付く', async () => {

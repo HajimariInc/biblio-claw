@@ -37,6 +37,7 @@ import {
   GEN_AI_REQUEST_MODEL,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
   GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   SERVER_ADDRESS,
   GEN_AI_PROVIDER_GCP_VERTEX_AI,
@@ -496,20 +497,28 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
         if (!json.usage) {
           log.warn('vertex.call: usage absent', vertexLogFields(ctx, modelId));
         }
+        const usage = extractVertexUsage(json, 'anthropic');
+        // M4-C Phase 2: cache_read/cache_creation を log payload に unconditional emit
+        // (?? 0) して llm-cost.sql の SUM 対象を有効化 + cost-calculator の warnings 消失。
+        // span 属性は既存の conditional pattern を対称化 (= AnthropicVertexLlm.ts:310-315 と同流儀)。
         log.info(
           'vertex.call',
           vertexLogFields(ctx, modelId, {
             outcome: 'success',
-            tokens_in: json.usage?.input_tokens ?? 0,
-            tokens_out: json.usage?.output_tokens ?? 0,
+            tokens_in: usage.input_tokens ?? 0,
+            tokens_out: usage.output_tokens ?? 0,
+            cache_read: usage.cache_read_input_tokens ?? 0,
+            cache_creation: usage.cache_creation_input_tokens ?? 0,
             latency_ms: Math.round(performance.now() - t0),
           }),
         );
-        const usage = extractVertexUsage(json, 'anthropic');
         if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
         if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
         if (usage.cache_read_input_tokens != null) {
           span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage.cache_read_input_tokens);
+        }
+        if (usage.cache_creation_input_tokens != null) {
+          span.setAttribute(GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, usage.cache_creation_input_tokens);
         }
         return text;
       } catch (err) {

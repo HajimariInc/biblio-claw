@@ -158,15 +158,17 @@ describe('computeCost (Gemini 経路、常に premium 1.0)', () => {
     expect(result.cost_usd).toBeCloseTo(2.8, 6);
   });
 
-  it('gemini-3.1-flash-lite の cost は non-global +10% 反映済単価で計算', () => {
-    vi.stubEnv('CLOUD_ML_REGION', 'asia-northeast1');
-    // 1M in × $0.275 + 1M out × $1.65 = $1.925
+  it('gemini-3.1-flash-lite の cost は Vertex Global 単価で計算 (M4-C Phase 2 修正)', () => {
+    vi.stubEnv('CLOUD_ML_REGION', 'global');
+    // 1M in × $0.25 + 1M out × $1.5 = $1.75
+    // Gemini は PROVIDER_APPLIES_VERTEX_PREMIUM.gemini = false のため region に依らず premium 非適用。
+    // pricing-table 側で Global 単価を hardcode するようになった (2026-07-09)。
     const result = computeCost({
       model: 'gemini-3.1-flash-lite',
       tokens_in: 1_000_000,
       tokens_out: 1_000_000,
     });
-    expect(result.cost_usd).toBeCloseTo(1.925, 6);
+    expect(result.cost_usd).toBeCloseTo(1.75, 6);
   });
 
   it('Gemini の breakdown は cache_read / cache_write が常に 0', () => {

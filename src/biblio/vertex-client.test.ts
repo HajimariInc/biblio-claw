@@ -60,6 +60,7 @@ vi.mock('node:fs', () => ({
 }));
 
 import { callVertexAnthropic, callVertexGemini, callVertexGeminiJson, setupVertexProxy } from './vertex-client.js';
+import { log } from '../log.js';
 
 /** 簡易 Response モック (ok / status / json / text)。 */
 function res(
@@ -384,7 +385,7 @@ describe('callVertexAnthropic / callVertexGemini — gen_ai.* span', () => {
     fetchMock.mockResolvedValue(
       res(200, {
         content: [{ type: 'text', text: 'CATEGORY: biblio-dev\nREASON: x' }],
-        usage: { input_tokens: 123, output_tokens: 45, cache_read_input_tokens: 7 },
+        usage: { input_tokens: 123, output_tokens: 45, cache_read_input_tokens: 7, cache_creation_input_tokens: 3 },
       }),
     );
     await callVertexAnthropic({ prompt: 'x', maxTokens: 32, temperature: 0 }, { requestId: 'req-1' });
@@ -399,8 +400,21 @@ describe('callVertexAnthropic / callVertexGemini — gen_ai.* span', () => {
     expect(span.attributes['gen_ai.usage.input_tokens']).toBe(123);
     expect(span.attributes['gen_ai.usage.output_tokens']).toBe(45);
     expect(span.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(7);
+    expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(3);
     expect(span.attributes['server.address']).toBe('aiplatform.googleapis.com');
     expect(span.attributes['biblio.request_id']).toBe('req-1');
+    // M4-C Phase 2: log.info('vertex.call', ...) payload に cache_read / cache_creation が含まれる
+    expect(vi.mocked(log.info)).toHaveBeenCalledWith(
+      'vertex.call',
+      expect.objectContaining({
+        event: 'vertex.call',
+        outcome: 'success',
+        tokens_in: 123,
+        tokens_out: 45,
+        cache_read: 7,
+        cache_creation: 3,
+      }),
+    );
 
     memoryExporter.reset();
     await provider.shutdown().catch(() => undefined);
