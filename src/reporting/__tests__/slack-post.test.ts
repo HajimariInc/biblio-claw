@@ -170,4 +170,25 @@ describe('postReport — 429 以外の失敗', () => {
       expect(result.status).toBeUndefined();
     }
   });
+
+  it('SlackApiError で status:undefined (HTTP 200 + ok:false = channel_not_found 等) は 1 回で failure', async () => {
+    // 実運用で最も起こりやすい失敗 (OWNER_SLACK_USER_ID の typo、bot が DM/channel 未招待)。
+    // @chat-adapter/slack@4.30.0 の assertSlackOk は HTTP 200 でも body が {ok:false, error:'channel_not_found'} 等
+    // の場合に SlackApiError を投げるが、その場合 status は undefined (HTTP エラーではなく Slack API 内部エラー)。
+    // 429 判定は `err.status === 429` = `undefined === 429` で false になり、無限 retry loop に落ちないこと。
+    postSlackMessageMock.mockRejectedValueOnce(
+      new SlackApiError('Slack chat.postMessage failed: channel_not_found', { method: 'chat.postMessage' }), // status 省略
+    );
+    const result = await postReport({ channel: 'U_TYPO', text: 'hi' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.status).toBeUndefined();
+      expect(result.error).toContain('channel_not_found');
+    }
+    expect(postSlackMessageMock).toHaveBeenCalledTimes(1); // retry していない
+    expect(logErrorMock).toHaveBeenCalledWith(
+      'reporting.slack_post_failed',
+      expect.objectContaining({ outcome: 'error', status: undefined, retried: false }),
+    );
+  });
 });

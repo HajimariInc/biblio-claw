@@ -72,6 +72,16 @@ export async function postReport(opts: PostReportOptions): Promise<PostReportRes
       return { ok: false, error, status };
     }
   }
+  // 到達不能な defensive fallback (for ループ内で全経路 return するため、現状の retry policy では
+  // ここに到達しない)。将来 retry 回数 or 分岐が変更されて到達可能になった際に silent failure
+  // 化しないよう、log.error を必ず出す (S4 修正、silent-failure-hunter 指摘)。
+  log.error('reporting.slack_post_failed', {
+    event: 'reporting.slack_post_failed',
+    outcome: 'error',
+    request_id: opts.requestId,
+    error: 'exhausted retries (unreachable in current retry policy, defensive fallback)',
+    retried,
+  });
   return { ok: false, error: 'exhausted retries' };
 }
 
