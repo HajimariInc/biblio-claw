@@ -90,7 +90,7 @@ VERIFY_JOB_NAME=''
 cleanup() {
   # verify 用 Job のみを削除。Job 名は Section 4 で決まる (`verify-m4c-<epoch>`)、
   # cronjob 本体 (`reporting-cronjob`) には触らない。
-  # review R6 (S6): 削除失敗を silent 化しない。--ignore-not-found=true は「無いから消せない」を
+  # 削除失敗を silent 化しない。--ignore-not-found=true は「無いから消せない」を
   # 正しく許容するが、それ以外の失敗 (RBAC 権限不足・API サーバ疎通断) は warn で運用者に可視化。
   if [ -n "${VERIFY_JOB_NAME:-}" ]; then
     if ! kubectl delete job "$VERIFY_JOB_NAME" -n "$NAMESPACE" --ignore-not-found=true --wait=false \
@@ -226,7 +226,22 @@ if [ "$bq_query_count" -lt 4 ]; then
     対処: (1) BQ query fail — 上の logs の 'reporting.<kind>_failed' 詳細を確認 /
           (2) BQ 権限不足 — biblio-orchestrator@ GSA に roles/bigquery.jobUser / dataViewer あるか"
 fi
-info "  ✓ reporting.bq_query_succeeded event を Job logs で確認 (実 count=$bq_query_count >= 4、Slack post 実発火は verify 対象外)"
+info "  ✓ reporting.bq_query_succeeded event を Job logs で確認 (実 count=$bq_query_count >= 4)"
+
+# Slack 配信の実発火を Job logs で 2 軸判定 (PASS 出力の実態反映用)。verify 対象外は
+# あくまで「Slack 配信失敗を PASS ブロックの理由にしない」の意 = 検証はする、判定は
+# 分離する = final PASS marker が「BQ pipeline + Slack delivery」を包括するのを避け、
+# 誤診断 (「PASS = patron に届いた」) を防ぐ。
+SLACK_DELIVERY_STATUS='unverified'
+if echo "$JOB_LOGS" | grep -q 'reporting.slack_post_succeeded'; then
+  SLACK_DELIVERY_STATUS='succeeded'
+  info "  ✓ Slack post 実発火成功 (reporting.slack_post_succeeded event を Job logs で確認)"
+elif echo "$JOB_LOGS" | grep -q 'reporting.slack_post_failed'; then
+  SLACK_DELIVERY_STATUS='failed'
+  warn "  Slack post 実発火失敗 (reporting.slack_post_failed event を Job logs で確認、Level 6 で目視復旧要)"
+else
+  warn "  Slack post 実発火の成否 event が Job logs に不在 (unverified、通常は BQ query 全滅時等)"
+fi
 
 # =============================================================================
 # Section 5: BQ event 到達確認 (Cloud Logging → sink → BQ export)
@@ -295,4 +310,7 @@ info '  ✓ verify-m4-a.sh chain PASS'
 # PASS marker
 # =============================================================================
 info '  all assertions passed (preflight + keyless + cronjob-spec + manual-trigger + bq-event-arrival + regression)'
-echo 'M4-C PASS'
+# PASS marker を Slack delivery 状態で 2 軸化。core PASS = BQ pipeline 正常、括弧内で
+# Slack 配信の実状態を記録 (unverified / succeeded / failed)。「PASS = patron に届いた」
+# の誤診断を防ぐ (Slack fix 依存の HITL 判定を明示可視化)。
+echo "M4-C PASS (bq-pipeline-verified, slack-delivery=${SLACK_DELIVERY_STATUS})"

@@ -83,6 +83,12 @@ spec:
                 # env を上書きしない前提 (image-sync script との drift 監視は M4-C の scope 外)。
                 - { name: GCP_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
                 - { name: BQ_DATASET_ID, value: 'llm_observability' }
+                # Prod は orchestrator (`k8s/10-orchestrator-statefulset.yaml`) と同一の
+                # `global` 明示指定。未設定だと reporting 側 `resolveVertexPremium()` が
+                # regional premium (×1.10) fallback に倒れ、Anthropic の cost 集計が
+                # ~10% 過大計上される (実 Vertex 呼出は orchestrator 側で global 経路の
+                # base 単価課金のため、集計値と実請求が乖離する silent 障害)。
+                - { name: CLOUD_ML_REGION, value: 'global' }
                 - { name: REPORTING_WINDOW_DAYS, value: '7' }
                 # 2026-07-10 更新: user ID → auto DM channel open が Slack bot scope
                 # (permission or workspace 設定) 依存で `channel_not_found` を verify-m4-c.sh
