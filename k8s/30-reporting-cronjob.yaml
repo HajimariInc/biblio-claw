@@ -84,11 +84,18 @@ spec:
                 - { name: GCP_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
                 - { name: BQ_DATASET_ID, value: 'llm_observability' }
                 - { name: REPORTING_WINDOW_DAYS, value: '7' }
-                # 空 = OWNER_SLACK_USER_ID が fallback として使われる。channel post に切替たい
-                # 場合は kubectl set env で `C...` を指定 or 本 manifest を書き替え。
-                - { name: REPORTING_CHANNEL_ID, value: '' }
+                # 2026-07-10 更新: user ID → auto DM channel open が Slack bot scope
+                # (permission or workspace 設定) 依存で `channel_not_found` を verify-m4-c.sh
+                # で検出したため、DM channel ID (`D...`) を直接指定する経路に切替。
+                # `.env` の既存 key `SLACK_OWNER_DM_CHANNEL_ID` を再利用 (envsubst 対象、
+                # image-sync script の envsubst list に SLACK_OWNER_DM_CHANNEL_ID 追加済)。
+                - { name: REPORTING_CHANNEL_ID, value: '${SLACK_OWNER_DM_CHANNEL_ID}' }
                 # patron (owner) の Slack user ID (`U...`)。deploy 時に envsubst で literal 置換。
-                - { name: OWNER_SLACK_USER_ID, value: '${OWNER_SLACK_USER_ID}' }
+                # NOTE: `.env` 側の既存 key `SLACK_OWNER_USER_ID` を再利用 (2026-07-10、Phase 1
+                # で名前不整合 = OWNER_SLACK_USER_ID placeholder が envsubst 対象外で literal
+                # 残置 → channel_not_found を verify-m4-c.sh で検出)。reporting-cronjob.ts が
+                # 読む env 名は OWNER_SLACK_USER_ID のまま維持、右辺 placeholder のみ書き換え。
+                - { name: OWNER_SLACK_USER_ID, value: '${SLACK_OWNER_USER_ID}' }
                 # structured log emit の component field (Cloud Logging → BQ sink 側で
                 # jsonPayload.component として集約可能に)。
                 - { name: LOG_COMPONENT, value: 'reporting' }

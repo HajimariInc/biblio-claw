@@ -19,18 +19,25 @@
 --   <PROJECT_ID>   sed 置換
 --   <DATASET_ID>   sed 置換 (default "llm_observability")
 --   @window_days   BQ parameterized query (int64)
+-- defensive access (2026-07-10 M4-C Phase 2 verify で判明): `jsonPayload.cache_read` /
+-- `cache_creation` / `cache_captured` は Phase 2 emit 追加 (`AnthropicVertexLlm.ts` /
+-- `vertex-client.ts`) 直後 = BQ export schema に field 未反映な期間 = `Field name cache_read
+-- does not exist in STRUCT<...>` runtime error で query 全滅。`JSON_VALUE(TO_JSON_STRING(
+-- jsonPayload), '$.<field>')` 経由なら field 不在時に NULL を返し query 続行可能 (SUM(NULL)
+-- は 0 集計、schema evolve までの過渡期でも集計成立、field 存在後は同値)。
+-- model / tokens_in / tokens_out は Phase 1 以前から emit されているため defensive 不要。
 SELECT
-  jsonPayload.model                                                              AS model,
-  COUNT(*)                                                                       AS call_count,
-  SUM(CAST(jsonPayload.tokens_in       AS INT64))                                AS total_tokens_in,
-  SUM(CAST(jsonPayload.tokens_out      AS INT64))                                AS total_tokens_out,
-  SUM(CAST(jsonPayload.cache_read      AS INT64))                                AS total_cache_read,
-  SUM(CAST(jsonPayload.cache_creation  AS INT64))                                AS total_cache_creation,
+  jsonPayload.model                                                                              AS model,
+  COUNT(*)                                                                                       AS call_count,
+  SUM(CAST(jsonPayload.tokens_in       AS INT64))                                                AS total_tokens_in,
+  SUM(CAST(jsonPayload.tokens_out      AS INT64))                                                AS total_tokens_out,
+  SUM(CAST(JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_read') AS INT64))                    AS total_cache_read,
+  SUM(CAST(JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_creation') AS INT64))                AS total_cache_creation,
   -- review R6 (I2): usage 欠落 (SDK 差 or 移行週の旧ログ) call 数を独立集計。
   -- cache_captured=false の call 数を SUM = cost 過小推定の可能性を patron に可視化。
   -- 旧ログ (Phase 2 未 deploy) では cache_captured 自体が NULL = false 判定に落ちず 0 に集計される
-  -- (=既存の warning 経路と分離、独立指標として動作)。
-  SUM(CASE WHEN jsonPayload.cache_captured = FALSE THEN 1 ELSE 0 END)             AS uncaptured_cache_calls
+  -- (=既存の warning 経路と分離、独立指標として動作)。JSON_VALUE 経由で field 不在時も NULL 返し。
+  SUM(CASE WHEN JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_captured') = 'false' THEN 1 ELSE 0 END) AS uncaptured_cache_calls
 FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
 WHERE
   DATE(timestamp, 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL @window_days DAY)

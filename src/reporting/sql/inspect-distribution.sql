@@ -33,11 +33,17 @@
 --   <PROJECT_ID>   sed 置換
 --   <DATASET_ID>   sed 置換
 --   @window_days   BQ parameterized query (int64)
+-- defensive access (2026-07-10 M4-C Phase 2 verify で判明): `jsonPayload.dangerous` は
+-- Phase 2 emit 追加 (`inspect-action.ts`) 直後 = BQ export schema に field 未反映な期間が
+-- 存在 = `Field name dangerous does not exist in STRUCT<...>` runtime error で query 全滅。
+-- `JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.<field>')` 経由なら field 不在時に NULL を
+-- 返し query 続行可能 (schema evolve までの過渡期でも集計成立、field 存在後は同値)。
+-- verdict / reason は Phase 1 以前から emit されているため defensive 不要 = 既存経路のまま。
 WITH raw AS (
   SELECT
-    jsonPayload.verdict                            AS verdict,
-    COALESCE(jsonPayload.reason, 'none')           AS reason,
-    CAST(jsonPayload.dangerous AS STRING)          AS dangerous
+    jsonPayload.verdict                                                                AS verdict,
+    COALESCE(jsonPayload.reason, 'none')                                               AS reason,
+    JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.dangerous')                             AS dangerous
   FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
   WHERE
     DATE(timestamp, 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL @window_days DAY)
