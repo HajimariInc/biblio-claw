@@ -4087,6 +4087,72 @@ bash scripts/init-project-gcp-image-sync.sh --tag m4h-p5-N --confirm
 
 ---
 
+## M4-C Phase 1: reporting-mvp (週次 K8s CronJob + BQ + Slack owner DM)
+
+### 概要
+
+Prod GKE 上の週次 K8s CronJob (`0 0 * * 1` schedule + `spec.timeZone: Asia/Tokyo` = 毎週月曜 09:00 JST) が、既存 M4-A BQ sink (`llm_observability.{stdout,stderr}`) から 4 種レポート SQL を並列実行し、Slack owner DM に集計 summary を投稿する。Phase 1 は **1 種 (biblio 利用) が end-to-end 完成 + LLM コスト SQL 完成 + 残 2 種 (検品分布 / エラー傾向) は雛形** の MVP scope。正式節 + 4 種完成版 SQL は M4-C Phase 2 の任務。
+
+### Run (deploy 手順)
+
+1. **Terraform IAM binding apply** (初回のみ、IAM binding 2 件):
+
+   ```bash
+   cd terraform/m4-c-reporting
+   export TF_VAR_project_id='<your-gcp-project>'
+   export TF_VAR_orchestrator_gsa_email="biblio-orchestrator@${TF_VAR_project_id}.iam.gserviceaccount.com"
+   terraform init
+   terraform validate
+   terraform plan   # Plan: 2 to add
+   terraform apply
+   ```
+
+2. **K8s CronJob deploy** (image tag は最新 orchestrator と同 tag を使う = 専用 image を作らない):
+
+   ```bash
+   export GCP_PROJECT_ID='<your-gcp-project>'
+   export IMAGE_TAG='<latest-orchestrator-tag>'    # 例: m4h-p5-1
+   export OWNER_SLACK_USER_ID='<U...>'             # patron の Slack user ID
+   envsubst < k8s/30-reporting-cronjob.yaml | kubectl apply -f -
+   kubectl get cronjob reporting-cronjob -n biblio-claw
+   ```
+
+### Manual trigger (verify)
+
+CronJob の週次スケジュールを待たずに手動で 1 回発火:
+
+```bash
+JOB_NAME="manual-$(date +%s)"
+kubectl create job --from=cronjob/reporting-cronjob "${JOB_NAME}" -n biblio-claw
+kubectl logs -n biblio-claw "job/${JOB_NAME}" -f
+```
+
+Pod は 5 分以内に `Complete` へ遷移する。Slack owner DM に「📚 biblio 利用 ...」を含む summary が届けば成功。Cloud Logging → BQ sink 到達確認 (5 分後):
+
+```bash
+bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
+  "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.llm_observability.stdout\`
+   WHERE JSON_VALUE(jsonPayload.event) LIKE 'reporting.%'
+     AND DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')"
+# 期待: >= 1 (reporting.cronjob.started + reporting.cronjob.completed の 2 件)
+```
+
+### 既知の罠
+
+1. **CronJob silent skip (100 miss 罠)** — `startingDeadlineSeconds: 200` を manifest で明示済。K8s controller が 100 回以上連続 miss すると 以後 Job を作らない仕様、200s 窓で防御 (K8s doc: kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/)
+2. **BQ location 不一致** — `runQuery` が `location: 'asia-northeast1'` を毎回明示 (SDK デフォルト "US" 依存を排除)。`terraform/m4-a-observability/variables.tf` の region default と厳密一致
+3. **`cache_creation.input_tokens` 現行未捕捉** — `src/adk/AnthropicVertexLlm.ts` / `src/biblio/vertex-client.ts` は Anthropic response の `input_tokens` 生値のみ Cloud Logging に emit。cost 計算では `warnings: ['cache_creation ... not captured']` を返し、Slack DM 本文に「※」で注記。修正は将来別 PRD (spec 完全準拠 emit) の任務
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-c-reporting.prd.md`
+- Source Plan: `.claude/PRPs/plans/phase-1-reporting-mvp.plan.md` (完了時 `completed/` へアーカイブ)
+- 実装: `src/reporting/` + `scripts/reporting-cronjob.ts` + `k8s/30-reporting-cronjob.yaml` + `terraform/m4-c-reporting/`
+- 継承元 §M4-A Phase 3: Cloud Logging → BigQuery sink (dataset / sink writer identity)
+- 継承元 §M4-A Phase 4: `verify-m4-a.sh` の bq query pattern (BQ 到達確認)
+
+---
+
 ## 関連
 
 - Slack 環境分離の手順:[slack-environments-setup.md](slack-environments-setup.md)
