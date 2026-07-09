@@ -37,9 +37,9 @@ export const ANTHROPIC_PRICING = {
 export const VERTEX_REGIONAL_PREMIUM = 1.1;
 export const VERTEX_GLOBAL_PREMIUM = 1.0;
 
-// Provider ごとの premium 適用マップ (I2: 不変条件を型で強制、3 つ目の provider 追加時に
+// Provider ごとの premium 適用マップ (不変条件を型で強制、3 つ目の provider 追加時に
 // TS の Record が compile error で強制させる)。Gemini 単価は pricing-table 側で
-// non-global 実効値を hardcode 済のため二重乗算しない = 常に 1.0。
+// Vertex Global 単価を hardcode 済のため二重乗算しない = 常に 1.0。
 export type PricingProvider = 'anthropic' | 'gemini';
 export const PROVIDER_APPLIES_VERTEX_PREMIUM: Record<PricingProvider, boolean> = {
   anthropic: true,
@@ -70,13 +70,13 @@ export function resolveVertexPremium(): number {
 // 将来 non-global 経路に切替える場合は本 table を +10% or PROVIDER_APPLIES_VERTEX_PREMIUM を
 // true に切替 (両建ては禁止、二重乗算になる)。
 export const GEMINI_PRICING = {
-  // review R6 (I5/S7): SOURCE を Vertex 公式 pricing ページと Google Developer API pricing の
+  // SOURCE を Vertex 公式 pricing ページと Google Developer API pricing の
   // 2 出典で交差検証。数値が両方で一致することを Prod 請求書 1-2 週分蓄積後 (Phase 3) に突合予定。
   // SOURCE (primary): https://cloud.google.com/vertex-ai/generative-ai/pricing (Vertex AI Generative AI pricing 公式)
   // SOURCE (secondary): https://ai.google.dev/gemini-api/docs/pricing (Gemini Developer API pricing、Vertex とは別課金体系だが Global 単価は現状一致)
   // Vertex regional (asia-northeast1 等) は +10% 想定、biblio-claw は CLOUD_ML_REGION=global 明示のため base 値
   'gemini-2.5-flash': { input: 0.3, output: 2.5 },
-  // review R6 (I5/S7): URL typo fix (旧: `/gemini-3-1-flash-lite/` 直下、正: `/gemini-models/gemini-3-1-flash-lite/`)
+  // URL typo fix (旧: `/gemini-3-1-flash-lite/` 直下、正: `/gemini-models/gemini-3-1-flash-lite/`)
   // SOURCE (primary): https://cloud.google.com/vertex-ai/generative-ai/pricing (Vertex AI Generative AI pricing 公式)
   // SOURCE (secondary): https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-lite/
   // Global $0.25/$1.50、non-global $0.275/$1.65 (+10%、2026-07-01 発動済)

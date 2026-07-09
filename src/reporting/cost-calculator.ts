@@ -12,7 +12,7 @@ export interface UsageInput {
   model: string;
   tokens_in: number;
   tokens_out: number;
-  // review R6 (I4): M4-C Phase 2 で emit + SQL 列追加済。
+  // M4-C Phase 2 で emit + SQL 列追加済。
   //   emit: AnthropicVertexLlm.ts + vertex-client.ts の log.info('vertex.call', ...) payload に
   //         `cache_read: usage.cache_read_input_tokens ?? 0` / `cache_creation: ... ?? 0` を追加。
   //   SQL:  llm-cost.sql に `SUM(CAST(jsonPayload.cache_read AS INT64)) AS total_cache_read` /
@@ -20,7 +20,7 @@ export interface UsageInput {
   //   両者を経由することで、Anthropic 経路の cache コストが cost 集計に載る。
   //   undefined になるのは (a) 単体テストで row literal が該当キーを持たない case、(b) BQ NULL 経路
   //   (`normalizeLlmCostRow` の null ガード対称化により、旧ログの部分カバレッジ = undefined、
-  //   Phase 2 review R6 C2)。両 case で warnings 経路が発火する。
+  //   normalizeLlmCostRow の null ガード対称化)。両 case で warnings 経路が発火する。
   cache_read?: number;
   cache_creation?: number;
 }
@@ -92,10 +92,9 @@ export function computeCost(usage: UsageInput, opts: ComputeCostOptions = {}): C
   }
 
   if (isGeminiModel(usage.model)) {
-    // Gemini 単価は pricing-table 側で non-global 想定値 hardcode 済み、premium は map で 1.0 固定
-    // (二重乗算しない不変条件を PROVIDER_APPLIES_VERTEX_PREMIUM で強制)。
-    // Global endpoint 経路 (`CLOUD_ML_REGION=global`) の実効値との差 (gemini-3.1-flash-lite 例:
-    // Global $0.25/$1.50 vs 現行 $0.275/$1.65) は保守側で温存、Phase 2 で GCP 請求書との突合で精密化。
+    // Gemini 単価は pricing-table 側で Vertex Global 単価 (base 値) を hardcode 済、
+    // premium は map で 1.0 固定 (二重乗算しない不変条件を PROVIDER_APPLIES_VERTEX_PREMIUM
+    // で強制)。biblio-claw Prod は `CLOUD_ML_REGION=global` 明示指定のため Global 経路と一致。
     const p = GEMINI_PRICING[usage.model];
     const breakdown: CostBreakdown = {
       input: (usage.tokens_in * p.input) / 1_000_000,

@@ -68,7 +68,7 @@ cd terraform/m4-c-reporting
 terraform destroy
 ```
 
-⚠️ destroy 後は CronJob Pod が BQ query 呼出で 403 を返し始める (`reporting.bq_query_failed` event が Cloud Logging に流入)。reporting を停止したい場合は、CronJob 側を先に停止 (`kubectl delete cronjob reporting-cronjob -n biblio-claw`) してから本 module を destroy する。
+⚠️ destroy 後は CronJob Pod が BQ query 呼出で 403 を返し始める (実装は `src/reporting/cronjob-lib.ts:safeRunQuery` 経由で `reporting.<kind>_failed` event を per-kind emit、`<kind>` は `biblio-usage` / `llm-cost` / `inspect-distribution` / `error-trend` の 4 種)。reporting を停止したい場合は、CronJob 側を先に停止 (`kubectl delete cronjob reporting-cronjob -n biblio-claw`) してから本 module を destroy する。
 
 ## state 管理
 

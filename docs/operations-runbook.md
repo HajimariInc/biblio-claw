@@ -4110,8 +4110,12 @@ Prod GKE 上の週次 K8s CronJob (`0 9 * * 1` schedule + `spec.timeZone: Asia/T
 
    ```bash
    export GCP_PROJECT_ID='<your-gcp-project>'
-   export IMAGE_TAG='<latest-orchestrator-tag>'    # 例: m4h-p5-1
-   export OWNER_SLACK_USER_ID='<U...>'             # patron の Slack user ID
+   export IMAGE_TAG='<latest-orchestrator-tag>'    # 例: m4c-p2-2
+   export SLACK_OWNER_USER_ID='<U...>'             # patron の Slack user ID
+   export SLACK_OWNER_DM_CHANNEL_ID='<D...>'       # patron の DM channel ID
+                                                   # (user ID 経由の auto DM open は
+                                                   # Slack bot scope 依存で channel_not_found
+                                                   # を返すため、DM channel ID を直接指定)
    envsubst < k8s/30-reporting-cronjob.yaml | kubectl apply -f -
    kubectl get cronjob reporting-cronjob -n biblio-claw
    ```
@@ -4204,16 +4208,16 @@ export BQ_DATASET_ID='llm_observability'
 bash scripts/verify-m4-c.sh --prod
 ```
 
-**副作用**: verify 用 K8s Job を新規発火する = 本 script 実行ごとに **Prod 経路で実 BQ query 4 種 + Slack owner DM post が 1 通** 走る。2 連続実行冪等の確認をする場合は owner DM に verify 用 post が 2 通届く (plan で既定路線)。cleanup は trap で verify 用 Job のみ削除、CronJob 本体には touch しない。
+**副作用**: verify 用 K8s Job を新規発火する = 本 script 実行ごとに **Prod 経路で実 BQ query 4 種** が走る。Slack owner DM post は「Slack Bot の DM channel post permission が整った Prod でのみ 1 通届く」= 現状の M4-C carryover HITL では `channel_not_found` で失敗しうる (verify script は失敗しても PASS 出力に `slack-delivery=failed` を刻んで区別する)。2 連続実行冪等の確認をする場合は owner DM に verify 用 post が最大 2 通届く可能性 (delivery 成功時)。cleanup は trap で verify 用 Job のみ削除、CronJob 本体には touch しない。
 
 Section 構成 (6 セクション):
 
 1. preflight (.env / 必須 env / 必須 CLI)
 2. keyless 4 面アサート (verify-m4-a.sh と同一)
 3. CronJob 存在 + `schedule='0 9 * * 1'` + `concurrencyPolicy=Forbid` 静的 assert
-4. manual trigger 経路確認 (`kubectl create job --from` + `kubectl wait --for=condition=complete` + logs で `reporting.cronjob.completed` event 確認)
-5. BQ event 到達確認 (過去 1h に `reporting.cronjob.completed >= 1` + `reporting.bq_query_succeeded >= 4`)
-6. regression (`verify-m4-a.sh` chain) + `M4-C PASS` marker
+4. manual trigger 経路確認 (`kubectl create job --from` + Job が Complete/Failed いずれかに到達するまで poll + `-l job-name=...` の全 pod logs で `reporting.bq_query_succeeded` event が 4 件以上を assert。Slack post 失敗による Failed 落ちは許容 = plan spec §Out of Scope に基づき Slack post 実発火は verify 判定対象外だが、成否 event は grep して PASS 出力に反映)
+5. BQ event 到達確認 (過去 1h に `reporting.bq_query_succeeded >= 4`。plan spec §Out of Scope に基づき `reporting.cronjob.completed` は assert 対象外 = Slack post 失敗で cronjob が failed 落ちしても Section 4 の BQ 4 種到達で PASS 判定)
+6. regression (`verify-m4-a.sh` chain) + `M4-C PASS (bq-pipeline-verified, slack-delivery=<state>)` marker
 
 ### 既知の罠
 
@@ -4225,6 +4229,33 @@ Section 構成 (6 セクション):
 6. **Slack post 実発火は verify assertion 対象外** — Section 5 で BQ event 到達までを assert、Slack post 成否は verify で判定しない (rate limit を verify に持ち込まない設計)。手動発火時のみ owner DM で最終目視確認
 7. **Gemini 単価精密化は Global 経路前提** — pricing-table の値は Vertex Global 単価 hardcode。将来 non-global 経路に切替える場合は本 table を +10% or `PROVIDER_APPLIES_VERTEX_PREMIUM.gemini` を true に切替 (両建ては禁止、二重乗算になる)
 
+### Rollback 手順
+
+M4-C は他 workload と独立した新規 CronJob のため rollback は容易。想定パス 2 択:
+
+1. **CronJob 停止のみ (週次 report を止める)** — 実装 rollback ではなく発火停止:
+   ```bash
+   kubectl delete cronjob reporting-cronjob -n biblio-claw
+   ```
+   `terraform/m4-c-reporting/` 側 IAM binding は残置 (再有効化時の再 apply コスト削減)。既存 orchestrator への副作用ゼロ。
+
+2. **image tag 戻し (実装 rollback、Prod で hotfix regression 時)** — 旧 image tag で再 apply:
+   ```bash
+   export GCP_PROJECT_ID='<your-gcp-project>'
+   export IMAGE_TAG='<older-known-good-tag>'   # 例: m4h-p5-1 (Phase 2 前)
+   export SLACK_OWNER_USER_ID='<U...>'
+   export SLACK_OWNER_DM_CHANNEL_ID='<D...>'
+   envsubst < k8s/30-reporting-cronjob.yaml | kubectl apply -f -
+   ```
+   CronJob は次の月曜 09:00 JST で旧 image を pull し発火。orchestrator は別 StatefulSet のため影響なし。
+
+3. **完全 teardown (M4-C 全撤去)** — 上記 1 + IAM binding 撤去:
+   ```bash
+   cd terraform/m4-c-reporting
+   terraform destroy
+   ```
+   BQ dataset 本体 (`terraform/m4-a-observability/`) は残置。
+
 ### 運用 memo (Phase 3 送り事項)
 
 - **Gemini 単価の Prod 請求書実測突合** — 数値書換 (`gemini-3.1-flash-lite` の Global 単価化) + SOURCE URL 追記までは Phase 2 内で完了。Prod 請求書 1-2 週分蓄積後に blog.google 値との差を実測突合予定。差分は本 memo に追記して pricing-table の再 pinning 根拠を残す
@@ -4234,7 +4265,7 @@ Section 構成 (6 セクション):
 
 - Source PRD: `.claude/PRPs/prds/m4/m4-c-reporting.prd.md`
 - Source Plan: `.claude/PRPs/plans/phase-2-reporting-quality.plan.md` (完了時 `completed/` へアーカイブ)
-- 実装: `src/reporting/{formatter,blocks-builder,pricing-table,sql/*}.ts` + `src/adk/AnthropicVertexLlm.ts` + `src/biblio/vertex-client.ts` + `src/biblio/inspect-action.ts` + `scripts/{reporting-cronjob,verify-m4-c}.sh`
+- 実装: `src/reporting/{formatter,blocks-builder,pricing-table}.ts` + `src/reporting/sql/*.sql` + `src/adk/AnthropicVertexLlm.ts` + `src/biblio/vertex-client.ts` + `src/biblio/inspect-action.ts` + `scripts/reporting-cronjob.ts` + `scripts/verify-m4-c.sh`
 - 継承元 §M4-A Phase 3 §Clustering 後追い: `bq update --clustering_fields=severity` の同型 pattern
 - 継承元 §M4-C Phase 1: 週次 CronJob deploy 手順 + IAM binding (`terraform/m4-c-reporting/`)
 
