@@ -137,7 +137,11 @@ if [ -n "$sa_keys" ]; then
 fi
 
 # (2-4) Terraform に google_service_account_key resource が存在しないこと
-if grep -rq 'google_service_account_key' terraform/ 2>/dev/null; then
+# NOTE: `-r terraform/` 全 recursive scan は `.terraform/providers/` 配下の Google provider
+# binary に resource 型名 (`google_service_account_key`) が embed されているのを hit させ
+# false positive を出す (2026-07-10 実測)。verify-m4-a.sh pattern に合わせ全 module の
+# `.tf` file 限定に絞る (SA key resource 定義は必ず `.tf` に書かれる)。
+if grep -q 'google_service_account_key' terraform/*/*.tf 2>/dev/null; then
   fail "terraform 配下に google_service_account_key resource が存在 (keyless 違反)"
 fi
 
@@ -186,28 +190,43 @@ if ! kubectl create job "$VERIFY_JOB_NAME" --from="cronjob/$CRONJOB_NAME" -n "$N
   fail "kubectl create job 失敗 (concurrencyPolicy=Forbid で本体 CronJob 実行中の可能性、または RBAC 不足)"
 fi
 
-# Job 完了待ち (timeout 5min)。BQ query 4 種 + Slack post を通常 30-60s で完了する想定。
-info "  wait for complete (timeout 5min)..."
-if ! kubectl wait --for=condition=complete "job/$VERIFY_JOB_NAME" -n "$NAMESPACE" --timeout=5m \
-    >/dev/null 2>"$STDERR_DIR/kubectl-wait.stderr"; then
-  # 失敗経路: Job が failed condition に落ちた可能性もあるため logs を tail
-  LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-wait.stderr"
-  warn "Job 完了 wait 失敗 — logs を tail:"
-  kubectl logs "job/$VERIFY_JOB_NAME" -n "$NAMESPACE" 2>/dev/null | tail -30 || true
-  fail "Job '$VERIFY_JOB_NAME' が 5min 以内に complete しなかった
-    対処: (1) BQ query timeout の可能性 (SQL syntax / 権限) — 上の logs で確認 /
-          (2) Slack post 失敗の可能性 — biblio-slack-tokens Secret 有効か"
-fi
+# NOTE (2026-07-10 plan spec §Out of Scope に合わせて修正): Slack post 実発火は verify
+# 対象外 (plan.md L44「Slack post 実発火の verify assertion: verify-m4-c.sh は BQ event
+# 到達までを assert、Slack post 実発火は verify-m4-a.sh 慣習に従い verify 対象外」)。
+# 現状 Slack Bot は Owner DM channel への post permission 不足で `channel_not_found` を
+# 返し reporting.cronjob.failed で終わる = Job.status=Failed に落ちる。Job 完了 wait だと
+# verify が Slack 経路の運用課題を先に検出してしまう = plan spec 乖離。代わりに 60s sleep
+# + Job logs で BQ query 4 種全部 succeeded を assert する形に変更 (Slack 実発火の目視は
+# Level 6 で DEN さん が別途確認、docs 内 manual 手順として残す)。
+# Job 完了 (Complete or Failed) を最大 5min 待つ。Slack post 失敗で Failed 落ちしても OK
+# (plan spec の Out of Scope に基づき Slack post 実発火は verify 対象外)。
+# 2 連続実行冪等性: Job 名 unique + 全 pod logs 集計で pod retry (backoffLimit=3) の logs 混在
+# もカバーする (kubectl logs job/... は 1 pod default = retry 中の pod 起動 lag で partial logs
+# 検出 = false fail の温床、`-l job-name=...` で label selector 経由の全 pod logs 集計に切替)。
+info "  wait for job Complete or Failed (max 5min, plan spec: Slack post 実発火は verify 対象外)..."
+job_done=0
+for i in $(seq 1 30); do
+  status="$(kubectl -n "$NAMESPACE" get job "$VERIFY_JOB_NAME" -o jsonpath='{.status.conditions[*].type}' 2>/dev/null || true)"
+  if echo "$status" | grep -qE 'Complete|Failed'; then
+    job_done=1
+    info "  Job 状態=${status} after ~$(( (i-1) * 10 ))s"
+    break
+  fi
+  sleep 10
+done
+[ "$job_done" -eq 1 ] || fail "Job '$VERIFY_JOB_NAME' が 5min 以内に Complete/Failed に到達しなかった"
 
-# logs で reporting.cronjob.completed event 確認
-JOB_LOGS="$(kubectl logs "job/$VERIFY_JOB_NAME" -n "$NAMESPACE" 2>"$STDERR_DIR/kubectl-logs.stderr")"
-if ! echo "$JOB_LOGS" | grep -q 'reporting.cronjob.completed'; then
+JOB_LOGS="$(kubectl logs -n "$NAMESPACE" -l "job-name=$VERIFY_JOB_NAME" --tail=-1 --prefix=false 2>"$STDERR_DIR/kubectl-logs.stderr" || true)"
+bq_query_count="$(echo "$JOB_LOGS" | grep -c 'reporting.bq_query_succeeded' || true)"
+if [ "$bq_query_count" -lt 4 ]; then
   LAST_HARNESS_STDERR="$STDERR_DIR/kubectl-logs.stderr"
-  warn "Job logs (tail 30):"
-  echo "$JOB_LOGS" | tail -30
-  fail "Job logs に 'reporting.cronjob.completed' event が含まれない"
+  warn "全 pod logs (tail 40):"
+  echo "$JOB_LOGS" | tail -40
+  fail "全 pod logs で reporting.bq_query_succeeded event が 4 件未満 (期待 >= 4、実 count=$bq_query_count)
+    対処: (1) BQ query fail — 上の logs の 'reporting.<kind>_failed' 詳細を確認 /
+          (2) BQ 権限不足 — biblio-orchestrator@ GSA に roles/bigquery.jobUser / dataViewer あるか"
 fi
-info '  ✓ reporting.cronjob.completed event を Job logs で確認'
+info "  ✓ reporting.bq_query_succeeded event を Job logs で確認 (実 count=$bq_query_count >= 4、Slack post 実発火は verify 対象外)"
 
 # =============================================================================
 # Section 5: BQ event 到達確認 (Cloud Logging → sink → BQ export)
@@ -215,12 +234,14 @@ info '  ✓ reporting.cronjob.completed event を Job logs で確認'
 info '=== [5/6] BQ event 到達確認 ==='
 
 # BQ export lag を吸収するため sleep 10 × 30 回 = 5 min timeout の poll ループ。
-# 過去 1h に reporting.cronjob.completed >= 1 件 + reporting.bq_query_succeeded >= 4 件
-# (biblio-usage / inspect-distribution / error-trend / llm-cost の 4 種)。
+# 過去 1h に reporting.bq_query_succeeded >= 4 件 (biblio-usage / inspect-distribution /
+# error-trend / llm-cost の 4 種) を assert。
+# NOTE (2026-07-10 修正): 元は reporting.cronjob.completed >= 1 も assert していたが、Slack
+# post 失敗時に cronjob は failed に落ち completed event 未 emit = Section 4 と同経緯で
+# plan spec (Slack post 実発火は verify 対象外) に合わない。bq_query_succeeded のみで OK。
 BQ_TABLE="stdout"
 
 # stdout / stderr のどちらに reporting.* event が入っているか動的判定 (M4-A pattern 踏襲)。
-# reporting.cronjob.* は log.info / log.error 両経路がある = stdout / stderr 両方 candidate。
 ALL_TABLES="$(bq ls --project_id="$GCP_PROJECT_ID" --format=json "$BQ_DATASET_ID" 2>"$STDERR_DIR/bq-ls.stderr" \
   | jq -r '.[].tableReference.tableId' 2>"$STDERR_DIR/bq-ls-jq.stderr" \
   | grep -E '^(stdout|stderr)$' | tr '\n' ' ')"
@@ -228,38 +249,31 @@ ALL_TABLES="$(bq ls --project_id="$GCP_PROJECT_ID" --format=json "$BQ_DATASET_ID
 info "  対象テーブル: $ALL_TABLES"
 
 BQ_POLL_MAX=30
-completed_found=0
+bq_query_reached=0
 bq_query_count=0
 
 for i in $(seq 1 "$BQ_POLL_MAX"); do
-  completed_sum=0
   bq_query_sum=0
   for T in $ALL_TABLES; do
-    C1="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
-      "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` \
-       WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) \
-       AND jsonPayload.event = 'reporting.cronjob.completed'" \
-      2>"$STDERR_DIR/bq-completed-${i}-${T}.stderr" | tail -n1 || echo NA)"
     C2="$(bq query --project_id="$GCP_PROJECT_ID" --use_legacy_sql=false --format=csv --quiet \
       "SELECT COUNT(*) FROM \`${GCP_PROJECT_ID}.${BQ_DATASET_ID}.${T}\` \
        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR) \
        AND jsonPayload.event = 'reporting.bq_query_succeeded'" \
       2>"$STDERR_DIR/bq-sqlexec-${i}-${T}.stderr" | tail -n1 || echo NA)"
-    [[ "$C1" =~ ^[0-9]+$ ]] && completed_sum=$((completed_sum + C1))
     [[ "$C2" =~ ^[0-9]+$ ]] && bq_query_sum=$((bq_query_sum + C2))
   done
-  if [ "$completed_sum" -ge 1 ] && [ "$bq_query_sum" -ge 4 ]; then
-    completed_found=1
+  if [ "$bq_query_sum" -ge 4 ]; then
+    bq_query_reached=1
     bq_query_count=$bq_query_sum
-    info "  [attempt ${i}/${BQ_POLL_MAX}] BQ 到達 OK (completed=${completed_sum}, bq_query_succeeded=${bq_query_sum}) after ~$(( (i-1) * 10 ))s"
+    info "  [attempt ${i}/${BQ_POLL_MAX}] BQ 到達 OK (bq_query_succeeded=${bq_query_sum}) after ~$(( (i-1) * 10 ))s"
     break
   fi
-  info "  [attempt ${i}/${BQ_POLL_MAX}] BQ 未到達 (completed=${completed_sum}, bq_query_succeeded=${bq_query_sum}); sleep 10s"
+  info "  [attempt ${i}/${BQ_POLL_MAX}] BQ 未到達 (bq_query_succeeded=${bq_query_sum}); sleep 10s"
   sleep 10
 done
 
-if [ "$completed_found" -ne 1 ]; then
-  fail "BQ event 到達確認 fail: reporting.cronjob.completed >= 1 + reporting.bq_query_succeeded >= 4 が 5min 以内に届かず
+if [ "$bq_query_reached" -ne 1 ]; then
+  fail "BQ event 到達確認 fail: reporting.bq_query_succeeded >= 4 が 5min 以内に届かず
     対処: (1) sink writer_identity に roles/bigquery.dataEditor 付与済か /
           (2) Cloud Logging → BQ export lag (通常数秒-30s、稀に 1-2min) の可能性、少し待って再実行 /
           (3) Job 内で SQL query が事前 fail した可能性 (Section 4 logs を再確認)"
