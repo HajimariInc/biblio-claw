@@ -1,17 +1,24 @@
--- biblio-claw 週次レポート: 検品分布 (biblio.inspect の verdict × dangerous 2 軸集計)
+-- biblio-claw 週次レポート: 検品分布 (biblio.inspect の verdict × reason × dangerous 3 軸集計)
 --
--- Source event: src/biblio/inspect-action.ts:77-90 の
---   log.info('inspect_biblio done', {event, outcome, verdict, dangerous, ...})
+-- Source event: src/biblio/inspect-action.ts:77-96 の
+--   log.info('inspect_biblio done', {event, outcome, verdict, reason, dangerous, ...})
 --
---   verdict は inspect result (ACCEPT / HOLD / REJECT の 3 値)。
+--   実際の verdict × reason 対応表 (inspect.ts の全 fail() 経路実測):
+--     - ACCEPT + reason=NULL (安全と判定された)
+--     - HOLD + reason=inspect_error (Vertex/Gemini 呼出失敗、応答崩れ、quarantine 不可 = システム障害)
+--     - HOLD + reason=license_denied / license_unknown (ルーティンなポリシー保留)
+--     - REJECT + reason=schema_invalid (plugin metadata 不備)
+--     - REJECT + reason=dangerous_code (LLM で危険コード検出 = dangerous=true 唯一)
+--   注意: REJECT + inspect_error はコード上発生しない (`inspect_error` は常に `HOLD` に倒れる、
+--         M4-C Phase 2 review R6 で修正、旧誤コメントは削除済み)。
+--
 --   dangerous は boolean = `verdict === 'REJECT' && reason === 'dangerous_code'` で判定。
---     - ACCEPT → dangerous=false (安全と判定された)
---     - HOLD → dangerous=false (判定保留、危険性は不明)
---     - REJECT + reason=dangerous_code → dangerous=true (危険コード検出)
---     - REJECT + reason=schema_invalid / inspect_error → dangerous=false (schema 不正 / システム失敗)
+--     - REJECT + dangerous_code → dangerous=true
+--     - それ以外 → dangerous=false (schema_invalid / inspect_error / license_* / ACCEPT / HOLD)
 --
 --   `jsonPayload.dangerous` は BOOL 型で BQ export される (Cloud Logging boolean 保持)。
 --   `CAST(... AS STRING)` で `'true'`/`'false'` に正規化して集計軸として扱う。
+--   `jsonPayload.reason` は STRING (or NULL for ACCEPT)。NULL は 'ACCEPT' として集計軸に載せる。
 --
 -- スキーマ実装知見 (biblio-usage.sql と同型):
 -- - jsonPayload は STRUCT 型、ドット記法で参照。
@@ -29,14 +36,15 @@
 WITH raw AS (
   SELECT
     jsonPayload.verdict                            AS verdict,
+    COALESCE(jsonPayload.reason, 'none')           AS reason,
     CAST(jsonPayload.dangerous AS STRING)          AS dangerous
   FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
   WHERE
     DATE(timestamp, 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL @window_days DAY)
     AND jsonPayload.event = 'biblio.inspect'
 )
-SELECT verdict, dangerous, COUNT(*) AS cnt
+SELECT verdict, reason, dangerous, COUNT(*) AS cnt
 FROM raw
 WHERE verdict IN ('ACCEPT', 'HOLD', 'REJECT')
-GROUP BY verdict, dangerous
-ORDER BY verdict, dangerous;
+GROUP BY verdict, reason, dangerous
+ORDER BY verdict, reason, dangerous;

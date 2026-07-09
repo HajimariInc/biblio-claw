@@ -20,6 +20,11 @@ export interface BiblioUsageRow {
 
 export interface InspectDistributionRow {
   verdict: string;
+  // review R6 (I1): reason を追加集計軸に含める = HOLD + inspect_error (システム障害) と
+  // HOLD + license_denied/license_unknown (ルーティン policy 保留) を区別可能に。
+  // 「HOLD 100 件」の内訳が「システム障害 90 件 + policy 10 件」なのか「policy 100 件」なのかを
+  // patron が識別できるようにする (レポーティング機能の中核目的)。
+  reason: string;
   dangerous: string;
   cnt: number;
 }
@@ -27,6 +32,7 @@ export interface InspectDistributionRow {
 export interface ErrorTrendRow {
   day: string;
   event: string;
+  severity: string;
   cnt: number;
   p50_ms?: number;
   p95_ms?: number;
@@ -38,9 +44,18 @@ export interface LlmCostRow {
   call_count: number;
   total_tokens_in: number;
   total_tokens_out: number;
-  // M4-C Phase 2 で emit + SQL 列追加済。旧 log (emit 前) は NULL → normalize で undefined に落ちる。
+  // M4-C Phase 2 で emit + SQL 列追加済。undefined になるのは SQL 側が該当列を SELECT しない場合のみ
+  // (単体テストの row literal で該当キーを省略した case)。BQ 側 NULL 値は toNumber の null 分岐で 0
+  // になるが、SQL 側で SUM が非 NULL を返す限り実運用では 0 or 正の number になる。
+  // review R6 (C2/S8): 旧誤コメントは「NULL → undefined に落ちる」だったが、BQ Node client は
+  // NULL 値でも key を含む row を返すため実際は 0 になる (`normalizeErrorTrendRow` と対称化した null
+  // ガードで、真に列が空の row (旧 SQL / 手作り fixture) だけを undefined として区別する)。
   total_cache_read?: number;
   total_cache_creation?: number;
+  // M4-C Phase 2 R6 (I2): usage 欠落 (SDK バージョン差 / 部分応答) call 数を独立集計。
+  // vertex.call payload の cache_captured=false 経路を SUM。移行週の Anthropic 旧ログ (未 emit) と
+  // 実際の usage 欠落を区別可能にする。
+  uncaptured_cache_calls?: number;
 }
 
 export interface ReportInput {
@@ -106,6 +121,9 @@ export function normalizeInspectDistributionRow(
   const row = (r as Record<string, unknown>) ?? {};
   return {
     verdict: toStr(row.verdict, warnings),
+    // review R6 (I1): reason 列は SQL 側の COALESCE(jsonPayload.reason, 'none') で常に string、
+    // 旧 SQL 経路 (Phase 2 pre-deploy) では列自体が不在 = 'none' fallback。
+    reason: 'reason' in row ? toStr(row.reason, warnings) : 'none',
     dangerous: toStr(row.dangerous, warnings),
     cnt: toNumber(row.cnt, warnings),
   };
@@ -119,6 +137,9 @@ export function normalizeErrorTrendRow(r: unknown, warnings: NormalizeReport['wa
   return {
     day: toStr(row.day, warnings),
     event: toStr(row.event, warnings),
+    // review R6 (C1): severity は SQL 側で追加された top-level column。旧 SQL では列自体が不在 = "ERROR"
+    // にフォールバックさせて後方互換 (実運用では新 SQL 経路のみ、fallback は defensive)。
+    severity: 'severity' in row ? toStr(row.severity, warnings) : 'ERROR',
     cnt: toNumber(row.cnt, warnings),
     p50_ms: p50 == null ? undefined : toNumber(p50, warnings),
     p95_ms: p95 == null ? undefined : toNumber(p95, warnings),
@@ -128,13 +149,21 @@ export function normalizeErrorTrendRow(r: unknown, warnings: NormalizeReport['wa
 
 export function normalizeLlmCostRow(r: unknown, warnings: NormalizeReport['warnings']): LlmCostRow {
   const row = (r as Record<string, unknown>) ?? {};
+  // review R6 (C2): normalizeErrorTrendRow と対称化した null ガード。
+  // `in` は「SQL 側で該当列を SELECT したか」判定、`== null` は「BQ が NULL 値を返したか」判定。
+  // 両方 undefined と扱うことで、cost-calculator の warning 経路 (`usage.cache_read === undefined`)
+  // が「真に列不在」と「BQ NULL」の両方で発火する = cost 過小推定を patron に可視化。
+  const cacheRead = 'total_cache_read' in row ? row.total_cache_read : undefined;
+  const cacheCreation = 'total_cache_creation' in row ? row.total_cache_creation : undefined;
+  const uncaptured = 'uncaptured_cache_calls' in row ? row.uncaptured_cache_calls : undefined;
   return {
     model: toStr(row.model, warnings),
     call_count: toNumber(row.call_count, warnings),
     total_tokens_in: toNumber(row.total_tokens_in, warnings),
     total_tokens_out: toNumber(row.total_tokens_out, warnings),
-    total_cache_read: 'total_cache_read' in row ? toNumber(row.total_cache_read, warnings) : undefined,
-    total_cache_creation: 'total_cache_creation' in row ? toNumber(row.total_cache_creation, warnings) : undefined,
+    total_cache_read: cacheRead == null ? undefined : toNumber(cacheRead, warnings),
+    total_cache_creation: cacheCreation == null ? undefined : toNumber(cacheCreation, warnings),
+    uncaptured_cache_calls: uncaptured == null ? undefined : toNumber(uncaptured, warnings),
   };
 }
 
@@ -165,27 +194,36 @@ function formatInspectDistribution(outcome: QueryOutcome, warnings: NormalizeRep
   if (!outcome.ok) return '⚠️ 検品分布: ⚠️ 取得失敗 (BQ query error)';
   const rows = outcome.rows.map((r) => normalizeInspectDistributionRow(r, warnings));
   if (rows.length === 0) return '⚠️ 検品分布: 検品実行なし';
-  // verdict × dangerous を "ACCEPT/false 4, HOLD/false 2, REJECT/true 1" の 1 行に集約。
-  const parts = rows.map((r) => `${r.verdict}/${r.dangerous} ${r.cnt}`);
-  return `⚠️ 検品分布: ${parts.join(', ')}`;
+  // review R6 (I1): reason 軸を独立集計に含めることで、システム障害 (HOLD+inspect_error) と
+  // policy 保留 (HOLD+license_*) を text 側でも patron が識別できる形にする。
+  const parts = rows.map((r) => `${r.verdict}/${r.reason} ${r.cnt}`);
+  // HOLD + inspect_error 件数を独立集計 = システム障害の可視化 (silent-failure-hunter #2 対応)。
+  const systemFailureCnt = rows
+    .filter((r) => r.verdict === 'HOLD' && r.reason === 'inspect_error')
+    .reduce((s, r) => s + r.cnt, 0);
+  const note = systemFailureCnt > 0 ? ` (うち検品システム障害 ${systemFailureCnt} 件)` : '';
+  return `⚠️ 検品分布: ${parts.join(', ')}${note}`;
 }
 
 function formatErrorTrend(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
   if (!outcome.ok) return '🚨 エラー傾向: ⚠️ 取得失敗 (BQ query error)';
   const rows = outcome.rows.map((r) => normalizeErrorTrendRow(r, warnings));
-  if (rows.length === 0) return '🚨 エラー傾向: ERROR なし (順調)';
-  // day + event 別集計。text 経路は「先頭 3 行 + total 件数」だけ表示 (詳細は Data Table Block に委任)。
+  if (rows.length === 0) return '🚨 エラー傾向: ERROR / CRITICAL なし (順調)';
+  // review R6 (C1): severity IN (ERROR, CRITICAL) 集計 = host crash-loop (log.fatal → CRITICAL)
+  // を text 側でも明示。CRITICAL 件数を独立に括り出して「順調」誤認を防ぐ。
   const totalCnt = rows.reduce((s, r) => s + r.cnt, 0);
+  const criticalCnt = rows.filter((r) => r.severity === 'CRITICAL').reduce((s, r) => s + r.cnt, 0);
   const preview = rows.slice(0, 3).map((r) => {
     const percentiles: string[] = [];
     if (r.p50_ms != null) percentiles.push(`p50 ${r.p50_ms}ms`);
     if (r.p95_ms != null) percentiles.push(`p95 ${r.p95_ms}ms`);
     if (r.p99_ms != null) percentiles.push(`p99 ${r.p99_ms}ms`);
     const tail = percentiles.length > 0 ? ` [${percentiles.join(', ')}]` : '';
-    return `${r.day} ${r.event} ${r.cnt}${tail}`;
+    return `${r.day} [${r.severity}] ${r.event} ${r.cnt}${tail}`;
   });
   const suffix = rows.length > 3 ? `\n  ... 他 ${rows.length - 3} 行` : '';
-  return `🚨 エラー傾向 (総 ${totalCnt} 件):\n  ${preview.join('\n  ')}${suffix}`;
+  const criticalNote = criticalCnt > 0 ? ` (うち CRITICAL ${criticalCnt} 件)` : '';
+  return `🚨 エラー傾向 (総 ${totalCnt} 件${criticalNote}):\n  ${preview.join('\n  ')}${suffix}`;
 }
 
 function formatLlmCost(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
@@ -204,10 +242,16 @@ function formatLlmCost(outcome: QueryOutcome, warnings: NormalizeReport['warning
   const fmt = (n: number) => `$${n.toFixed(4)}`;
   const callCount = rows.reduce((s, r) => s + r.call_count, 0);
   const modelCount = new Set(rows.map((r) => r.model)).size;
+  // review R6 (I2): 移行週や SDK 差で usage 欠落が発生した call 数を独立集計。
+  // cache_captured=false の call 数を SUM した SQL 列を formatter で拾い、cost 過小推定の可能性を可視化。
+  const uncapturedTotal = rows.reduce((s, r) => s + (r.uncaptured_cache_calls ?? 0), 0);
   const lines = [
     `💰 LLM コスト: ${fmt(agg.total_usd)} (Anthropic ${fmt(agg.anthropic_usd)} / Gemini ${fmt(agg.gemini_usd)})`,
     `  呼出 ${callCount} 回、${modelCount} model`,
   ];
+  if (uncapturedTotal > 0) {
+    lines.push(`  ⚠️ ${uncapturedTotal} 件は usage 未捕捉 (SDK 差 or 移行週の旧ログ = cost は過小推定の可能性)`);
+  }
   // 未知 model は computeCost 経路で cost_usd: 0 に落ちるため unknown_usd 判定では拾えない。
   // warnings に含まれる `unknown_model:` prefix で「単価表未登録の model を検知した」ことを
   // 明示的に patron に伝える (silent 0 コスト計上を可視化)。

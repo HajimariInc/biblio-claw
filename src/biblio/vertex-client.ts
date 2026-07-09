@@ -500,7 +500,10 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
         const usage = extractVertexUsage(json, 'anthropic');
         // M4-C Phase 2: cache_read/cache_creation を log payload に unconditional emit
         // (?? 0) して llm-cost.sql の SUM 対象を有効化 + cost-calculator の warnings 消失。
-        // span 属性は既存の conditional pattern を対称化 (= AnthropicVertexLlm.ts:310-315 と同流儀)。
+        // span 属性は既存の conditional pattern を対称化 (= AnthropicVertexLlm.ts:317-325 と同流儀)。
+        // review R6 (I2): cache_captured を独立 boolean で emit することで「未捕捉 (SDK 差)」と
+        // 「実測 0 (cache 未使用)」を BQ 集計で区別可能に。cost 過小推定の可視化。
+        const cacheCaptured = usage.cache_read_input_tokens != null && usage.cache_creation_input_tokens != null;
         log.info(
           'vertex.call',
           vertexLogFields(ctx, modelId, {
@@ -509,6 +512,7 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
             tokens_out: usage.output_tokens ?? 0,
             cache_read: usage.cache_read_input_tokens ?? 0,
             cache_creation: usage.cache_creation_input_tokens ?? 0,
+            cache_captured: cacheCaptured,
             latency_ms: Math.round(performance.now() - t0),
           }),
         );

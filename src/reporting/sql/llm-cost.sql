@@ -1,6 +1,6 @@
 -- biblio-claw 週次レポート: LLM 呼出 (vertex.call) の tokens 集計 (直近 @window_days 日、JST 基準)
 --
--- Source event: src/biblio/vertex-client.ts:499-513 + src/adk/AnthropicVertexLlm.ts:316-328 の
+-- Source event: src/biblio/vertex-client.ts:508-527 + src/adk/AnthropicVertexLlm.ts:334-346 の
 --   log.info('vertex.call', {...})
 --   Fields: model / tokens_in / tokens_out / cache_read / cache_creation / outcome / latency_ms /
 --     request_id / session_id / ...
@@ -20,12 +20,17 @@
 --   <DATASET_ID>   sed 置換 (default "llm_observability")
 --   @window_days   BQ parameterized query (int64)
 SELECT
-  jsonPayload.model                              AS model,
-  COUNT(*)                                       AS call_count,
-  SUM(CAST(jsonPayload.tokens_in       AS INT64)) AS total_tokens_in,
-  SUM(CAST(jsonPayload.tokens_out      AS INT64)) AS total_tokens_out,
-  SUM(CAST(jsonPayload.cache_read      AS INT64)) AS total_cache_read,
-  SUM(CAST(jsonPayload.cache_creation  AS INT64)) AS total_cache_creation
+  jsonPayload.model                                                              AS model,
+  COUNT(*)                                                                       AS call_count,
+  SUM(CAST(jsonPayload.tokens_in       AS INT64))                                AS total_tokens_in,
+  SUM(CAST(jsonPayload.tokens_out      AS INT64))                                AS total_tokens_out,
+  SUM(CAST(jsonPayload.cache_read      AS INT64))                                AS total_cache_read,
+  SUM(CAST(jsonPayload.cache_creation  AS INT64))                                AS total_cache_creation,
+  -- review R6 (I2): usage 欠落 (SDK 差 or 移行週の旧ログ) call 数を独立集計。
+  -- cache_captured=false の call 数を SUM = cost 過小推定の可能性を patron に可視化。
+  -- 旧ログ (Phase 2 未 deploy) では cache_captured 自体が NULL = false 判定に落ちず 0 に集計される
+  -- (=既存の warning 経路と分離、独立指標として動作)。
+  SUM(CASE WHEN jsonPayload.cache_captured = FALSE THEN 1 ELSE 0 END)             AS uncaptured_cache_calls
 FROM `<PROJECT_ID>.<DATASET_ID>.stdout`
 WHERE
   DATE(timestamp, 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL @window_days DAY)

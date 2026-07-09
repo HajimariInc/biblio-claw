@@ -1,8 +1,10 @@
--- biblio-claw 週次レポート: エラー傾向 (severity=ERROR の日次分布 + latency 分位)
+-- biblio-claw 週次レポート: エラー傾向 (severity IN (ERROR, CRITICAL) の日次分布 + latency 分位)
 --
 -- Source: Cloud Logging BQ export の stderr table + top-level severity column。
 --   severity は BQ export の top-level column (`jsonPayload.severity` は不在、runbook §Cloud
---   Logging BQ 実装知見 参照)。severity='ERROR' の event 別 + 日次 bucket を集計。
+--   Logging BQ 実装知見 参照)。severity IN ('ERROR', 'CRITICAL') の event 別 + 日次 bucket を集計。
+--   `CRITICAL` は host プロセスの uncaughtException (log.ts:114) と Startup failed (index.ts:330)
+--   に対応 = host crash / 起動失敗が週次レポートに現れない silent failure を防ぐ (M4-C Phase 2 R6)。
 --   latency_ms が emit されている log の分位を APPROX_QUANTILES で単一 pass 算出する。
 --
 -- APPROX_QUANTILES 使い方:
@@ -18,19 +20,21 @@ WITH errors AS (
   SELECT
     DATE(timestamp, 'Asia/Tokyo')                                 AS day,
     jsonPayload.event                                             AS event,
+    severity                                                      AS severity,
     SAFE_CAST(jsonPayload.latency_ms AS INT64)                    AS latency_ms
   FROM `<PROJECT_ID>.<DATASET_ID>.stderr`
   WHERE
     DATE(timestamp, 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL @window_days DAY)
-    AND severity = 'ERROR'
+    AND severity IN ('ERROR', 'CRITICAL')
 )
 SELECT
   day,
   event,
+  severity,
   COUNT(*)                                                        AS cnt,
   APPROX_QUANTILES(latency_ms, 100 IGNORE NULLS)[OFFSET(50)]      AS p50_ms,
   APPROX_QUANTILES(latency_ms, 100 IGNORE NULLS)[OFFSET(95)]      AS p95_ms,
   APPROX_QUANTILES(latency_ms, 100 IGNORE NULLS)[OFFSET(99)]      AS p99_ms
 FROM errors
-GROUP BY day, event
-ORDER BY day DESC, cnt DESC;
+GROUP BY day, event, severity
+ORDER BY day DESC, severity DESC, cnt DESC;

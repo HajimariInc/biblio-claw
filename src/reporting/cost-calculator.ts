@@ -12,11 +12,16 @@ export interface UsageInput {
   model: string;
   tokens_in: number;
   tokens_out: number;
-  // cache_read.input_tokens (Cloud Logging 側の現行 emit で捕捉されておらず常時 undefined、
-  // llm-cost.sql が SELECT していないため。将来 emit + SQL 拡張で解消予定 = Phase 2 スコープ)
+  // review R6 (I4): M4-C Phase 2 で emit + SQL 列追加済。
+  //   emit: AnthropicVertexLlm.ts + vertex-client.ts の log.info('vertex.call', ...) payload に
+  //         `cache_read: usage.cache_read_input_tokens ?? 0` / `cache_creation: ... ?? 0` を追加。
+  //   SQL:  llm-cost.sql に `SUM(CAST(jsonPayload.cache_read AS INT64)) AS total_cache_read` /
+  //         同 cache_creation の列を追加。
+  //   両者を経由することで、Anthropic 経路の cache コストが cost 集計に載る。
+  //   undefined になるのは (a) 単体テストで row literal が該当キーを持たない case、(b) BQ NULL 経路
+  //   (`normalizeLlmCostRow` の null ガード対称化により、旧ログの部分カバレッジ = undefined、
+  //   Phase 2 review R6 C2)。両 case で warnings 経路が発火する。
   cache_read?: number;
-  // cache_creation.input_tokens (biblio-claw 現行未捕捉 = 常に undefined、cache_read と同状態)。
-  // 将来 emit が追加されたら optional を required にリファクタする anchor。
   cache_creation?: number;
 }
 

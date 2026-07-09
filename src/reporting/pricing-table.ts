@@ -70,10 +70,15 @@ export function resolveVertexPremium(): number {
 // 将来 non-global 経路に切替える場合は本 table を +10% or PROVIDER_APPLIES_VERTEX_PREMIUM を
 // true に切替 (両建ては禁止、二重乗算になる)。
 export const GEMINI_PRICING = {
-  // SOURCE: https://ai.google.dev/gemini-api/docs/pricing (Vertex Global) — 2026-07-09 pinning
-  // Vertex regional (asia-northeast1 等) は +10% 想定、biblio-claw は global 経路 = base 値そのまま
+  // review R6 (I5/S7): SOURCE を Vertex 公式 pricing ページと Google Developer API pricing の
+  // 2 出典で交差検証。数値が両方で一致することを Prod 請求書 1-2 週分蓄積後 (Phase 3) に突合予定。
+  // SOURCE (primary): https://cloud.google.com/vertex-ai/generative-ai/pricing (Vertex AI Generative AI pricing 公式)
+  // SOURCE (secondary): https://ai.google.dev/gemini-api/docs/pricing (Gemini Developer API pricing、Vertex とは別課金体系だが Global 単価は現状一致)
+  // Vertex regional (asia-northeast1 等) は +10% 想定、biblio-claw は CLOUD_ML_REGION=global 明示のため base 値
   'gemini-2.5-flash': { input: 0.3, output: 2.5 },
-  // SOURCE: https://blog.google/innovation-and-ai/models-and-research/gemini-3-1-flash-lite/
+  // review R6 (I5/S7): URL typo fix (旧: `/gemini-3-1-flash-lite/` 直下、正: `/gemini-models/gemini-3-1-flash-lite/`)
+  // SOURCE (primary): https://cloud.google.com/vertex-ai/generative-ai/pricing (Vertex AI Generative AI pricing 公式)
+  // SOURCE (secondary): https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-lite/
   // Global $0.25/$1.50、non-global $0.275/$1.65 (+10%、2026-07-01 発動済)
   // biblio-claw は CLOUD_ML_REGION=global 明示のため Global 値。Prod 請求書 1-2 週分蓄積後
   // (Phase 3 送り) で実測突合予定、精密化差分は runbook §M4-C Phase 2 運用 memo に記録

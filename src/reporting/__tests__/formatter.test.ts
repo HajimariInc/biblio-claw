@@ -31,7 +31,7 @@ describe('formatBiblioUsageSummary — 全 4 種 empty (ok:true, rows:[])', () =
     expect(text).toContain('直近 7 日');
     expect(text).toContain('biblio 利用: 活動なし');
     expect(text).toContain('検品分布: 検品実行なし');
-    expect(text).toContain('エラー傾向: ERROR なし (順調)');
+    expect(text).toContain('エラー傾向: ERROR / CRITICAL なし (順調)');
     expect(text).toContain('LLM コスト: 呼出記録なし');
   });
 });
@@ -245,6 +245,33 @@ describe('formatBiblioUsageSummary — unknown model warning', () => {
     expect(text).toContain('cache_creation');
     expect(text).toContain('underestimated');
   });
+
+  // review R6 (C2 regression): BQ row が SQL NULL を返す場合 (key present + value null) も
+  // undefined と等価に扱われて cost-calculator の warning 経路が発火することを検証。
+  // 旧実装 (formatter.ts:129-139 の `'x' in row ? toNumber(...) : undefined`) は BQ NULL を
+  // silent 0 化していたため warning が発火せず、cost 過小推定が patron に一切可視化されない silent
+  // failure だった。normalizeErrorTrendRow と対称化した null ガードで解消。
+  it('BQ NULL 経路 (total_cache_read: null / total_cache_creation: null) でも欠落 warning が発火する (C2 regression)', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: emptyOk(),
+      llmCost: ok([
+        {
+          model: 'claude-sonnet-4-6',
+          call_count: 1,
+          total_tokens_in: 100,
+          total_tokens_out: 100,
+          total_cache_read: null,
+          total_cache_creation: null,
+        },
+      ]),
+    });
+    expect(text).toContain('cache_read');
+    expect(text).toContain('cache_creation');
+    expect(text).toContain('underestimated');
+  });
 });
 
 describe('formatBiblioUsageSummary — action sort', () => {
@@ -293,17 +320,21 @@ describe('formatBiblioUsageSummary — inspect-distribution (rows / empty / fail
       windowDays: 7,
       biblio: emptyOk(),
       inspect: ok([
-        { verdict: 'ACCEPT', dangerous: 'false', cnt: 4 },
-        { verdict: 'HOLD', dangerous: 'false', cnt: 2 },
-        { verdict: 'REJECT', dangerous: 'true', cnt: 1 },
+        { verdict: 'ACCEPT', reason: 'none', dangerous: 'false', cnt: 4 },
+        { verdict: 'HOLD', reason: 'license_unknown', dangerous: 'false', cnt: 2 },
+        { verdict: 'HOLD', reason: 'inspect_error', dangerous: 'false', cnt: 3 },
+        { verdict: 'REJECT', reason: 'dangerous_code', dangerous: 'true', cnt: 1 },
       ]),
       errorTrend: emptyOk(),
       llmCost: emptyOk(),
     });
+    // review R6 (I1): verdict/reason 集約表示 + inspect_error 独立集計 note
     expect(text).toContain('検品分布:');
-    expect(text).toContain('ACCEPT/false 4');
-    expect(text).toContain('HOLD/false 2');
-    expect(text).toContain('REJECT/true 1');
+    expect(text).toContain('ACCEPT/none 4');
+    expect(text).toContain('HOLD/license_unknown 2');
+    expect(text).toContain('HOLD/inspect_error 3');
+    expect(text).toContain('REJECT/dangerous_code 1');
+    expect(text).toContain('検品システム障害 3 件');
   });
 
   it('rows 空: 「検品実行なし」を表示', () => {
@@ -336,16 +367,25 @@ describe('formatBiblioUsageSummary — error-trend (rows / empty / fail)', () =>
       biblio: emptyOk(),
       inspect: emptyOk(),
       errorTrend: ok([
-        { day: '2026-07-08', event: 'vertex.call.timeout', cnt: 5, p50_ms: 3000, p95_ms: 4500, p99_ms: 5000 },
-        { day: '2026-07-08', event: 'biblio.acquire.threw', cnt: 2 },
+        {
+          day: '2026-07-08',
+          severity: 'ERROR',
+          event: 'vertex.call.timeout',
+          cnt: 5,
+          p50_ms: 3000,
+          p95_ms: 4500,
+          p99_ms: 5000,
+        },
+        { day: '2026-07-08', severity: 'CRITICAL', event: 'biblio.acquire.threw', cnt: 2 },
       ]),
       llmCost: emptyOk(),
     });
-    expect(text).toContain('エラー傾向 (総 7 件)');
-    expect(text).toContain('2026-07-08 vertex.call.timeout 5');
+    // review R6 (C1): severity 列表示 + CRITICAL 独立集計 note
+    expect(text).toContain('エラー傾向 (総 7 件 (うち CRITICAL 2 件))');
+    expect(text).toContain('2026-07-08 [ERROR] vertex.call.timeout 5');
     expect(text).toContain('p50 3000ms');
     expect(text).toContain('p95 4500ms');
-    expect(text).toContain('2026-07-08 biblio.acquire.threw 2');
+    expect(text).toContain('2026-07-08 [CRITICAL] biblio.acquire.threw 2');
   });
 
   it('rows 空: 「ERROR なし (順調)」を表示', () => {
@@ -356,12 +396,13 @@ describe('formatBiblioUsageSummary — error-trend (rows / empty / fail)', () =>
       errorTrend: emptyOk(),
       llmCost: emptyOk(),
     });
-    expect(text).toContain('エラー傾向: ERROR なし (順調)');
+    expect(text).toContain('エラー傾向: ERROR / CRITICAL なし (順調)');
   });
 
   it('rows > 3 の場合、「他 N 行」の suffix を出す', () => {
     const rows = Array.from({ length: 6 }, (_, i) => ({
       day: `2026-07-0${i}`,
+      severity: 'ERROR',
       event: `evt-${i}`,
       cnt: 1,
     }));

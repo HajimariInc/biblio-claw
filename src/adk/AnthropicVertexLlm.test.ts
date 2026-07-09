@@ -302,6 +302,7 @@ describe('AnthropicVertexLlm — gen_ai.* span 計装', () => {
     expect(span.attributes['gen_ai.usage.cache_creation.input_tokens']).toBe(3);
     expect(span.attributes['server.address']).toBe('aiplatform.googleapis.com');
     // M4-C Phase 2: log.info('vertex.call', ...) payload に cache_read / cache_creation が含まれる
+    // review R6 (I2): cache_captured=true も含まれる (usage に cache_* が両方存在した経路)
     expect(vi.mocked(log.info)).toHaveBeenCalledWith(
       'vertex.call',
       expect.objectContaining({
@@ -312,6 +313,47 @@ describe('AnthropicVertexLlm — gen_ai.* span 計装', () => {
         tokens_out: 45,
         cache_read: 7,
         cache_creation: 3,
+        cache_captured: true,
+      }),
+    );
+  });
+
+  // review R6 (I2/S1): usage に cache_read/cache_creation が欠落した case = cache_captured: false
+  // + log payload では 0 で埋める (SQL 側 SUM 対象を維持)。cost 過小推定の可視化のため。
+  it('usage に cache フィールドが欠落 → cache_captured: false + payload 0 埋め', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'OK' }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    for await (const _ of llm.generateContentAsync(llmRequest('Hi'))) {
+      void _;
+    }
+    expect(vi.mocked(log.info)).toHaveBeenCalledWith(
+      'vertex.call',
+      expect.objectContaining({
+        cache_read: 0,
+        cache_creation: 0,
+        cache_captured: false,
+      }),
+    );
+  });
+
+  // review R6 (I2): usage オブジェクト自体が欠落 → 'usage absent' warn を発火
+  // (vertex-client.ts:497 と対称化、silent-failure-hunter #3)
+  it('response.usage 自体が欠落 → usage_absent warn を発火', async () => {
+    messagesCreateMock.mockResolvedValue({
+      content: [{ type: 'text', text: 'OK' }],
+    });
+    const llm = new AnthropicVertexLlm({ model: 'claude-sonnet-4-6' });
+    for await (const _ of llm.generateContentAsync(llmRequest('Hi'))) {
+      void _;
+    }
+    expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
+      'vertex.call: usage absent',
+      expect.objectContaining({
+        event: 'adk.anthropic_vertex_llm.usage_absent',
+        model: 'claude-sonnet-4-6',
       }),
     );
   });

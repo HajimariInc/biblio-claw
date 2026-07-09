@@ -146,8 +146,8 @@ describe('buildReportBlocks — inspect card children shape', () => {
         windowDays: 7,
         biblio: emptyOk(),
         inspect: ok([
-          { verdict: 'ACCEPT', dangerous: 'false', cnt: 4 },
-          { verdict: 'REJECT', dangerous: 'true', cnt: 1 },
+          { verdict: 'ACCEPT', reason: 'none', dangerous: 'false', cnt: 4 },
+          { verdict: 'REJECT', reason: 'dangerous_code', dangerous: 'true', cnt: 1 },
         ]),
         errorTrend: emptyOk(),
         llmCost: emptyOk(),
@@ -156,10 +156,11 @@ describe('buildReportBlocks — inspect card children shape', () => {
     );
     const inspectCard = cardCalls[1];
     const table = findTable(inspectCard);
-    expect(table?.headers).toEqual(['verdict', 'dangerous', 'cnt']);
+    // review R6 (I1): reason 列追加
+    expect(table?.headers).toEqual(['verdict', 'reason', 'dangerous', 'cnt']);
     expect(table?.rows).toEqual([
-      ['ACCEPT', 'false', '4'],
-      ['REJECT', 'true', '1'],
+      ['ACCEPT', 'none', 'false', '4'],
+      ['REJECT', 'dangerous_code', 'true', '1'],
     ]);
   });
 
@@ -182,8 +183,16 @@ describe('buildReportBlocks — errorTrend card children shape', () => {
         biblio: emptyOk(),
         inspect: emptyOk(),
         errorTrend: ok([
-          { day: '2026-07-08', event: 'vertex.call.timeout', cnt: 5, p50_ms: 3000, p95_ms: 4500, p99_ms: 5000 },
-          { day: '2026-07-08', event: 'biblio.acquire.threw', cnt: 2 },
+          {
+            day: '2026-07-08',
+            severity: 'ERROR',
+            event: 'vertex.call.timeout',
+            cnt: 5,
+            p50_ms: 3000,
+            p95_ms: 4500,
+            p99_ms: 5000,
+          },
+          { day: '2026-07-08', severity: 'CRITICAL', event: 'biblio.acquire.threw', cnt: 2 },
         ]),
         llmCost: emptyOk(),
       },
@@ -191,10 +200,10 @@ describe('buildReportBlocks — errorTrend card children shape', () => {
     );
     const errorTrendCard = cardCalls[2];
     const table = findTable(errorTrendCard);
-    expect(table?.headers).toEqual(['day', 'event', 'cnt', 'p50_ms', 'p95_ms', 'p99_ms']);
+    expect(table?.headers).toEqual(['day', 'severity', 'event', 'cnt', 'p50_ms', 'p95_ms', 'p99_ms']);
     expect(table?.rows).toEqual([
-      ['2026-07-08', 'vertex.call.timeout', '5', '3000', '4500', '5000'],
-      ['2026-07-08', 'biblio.acquire.threw', '2', '', '', ''],
+      ['2026-07-08', 'ERROR', 'vertex.call.timeout', '5', '3000', '4500', '5000'],
+      ['2026-07-08', 'CRITICAL', 'biblio.acquire.threw', '2', '', '', ''],
     ]);
   });
 
@@ -204,7 +213,7 @@ describe('buildReportBlocks — errorTrend card children shape', () => {
       { windowDays: 7, biblio: emptyOk(), inspect: emptyOk(), errorTrend: emptyOk(), llmCost: emptyOk() },
       [],
     );
-    expect(findText(cardCalls[2])?.content).toBe('ERROR なし (順調)');
+    expect(findText(cardCalls[2])?.content).toBe('ERROR / CRITICAL なし (順調)');
   });
 });
 

@@ -69,7 +69,7 @@ afterEach(() => {
 describe('postReport — 200 成功', () => {
   it('postSlackMessage が成功したら ok: true, retried: false を返す', async () => {
     postSlackMessageMock.mockResolvedValueOnce({ id: '1234.5678', raw: {} });
-    const result = await postReport({ channel: 'U123', text: 'hello' });
+    const result = await postReport({ channel: 'U123', text: 'hello', blocks: [] });
     expect(result).toEqual({ ok: true, ts: '1234.5678', retried: false });
     expect(postSlackMessageMock).toHaveBeenCalledTimes(1);
     expect(logInfoMock).toHaveBeenCalledWith(
@@ -80,7 +80,7 @@ describe('postReport — 200 成功', () => {
 
   it('botToken 明示指定は env より優先される (DI)', async () => {
     postSlackMessageMock.mockResolvedValueOnce({ id: '9.0', raw: {} });
-    await postReport({ channel: 'U123', text: 'hi', botToken: 'xoxb-explicit' });
+    await postReport({ channel: 'U123', text: 'hi', botToken: 'xoxb-explicit', blocks: [] });
     expect(postSlackMessageMock).toHaveBeenCalledWith(expect.objectContaining({ token: 'xoxb-explicit' }));
   });
 });
@@ -88,7 +88,7 @@ describe('postReport — 200 成功', () => {
 describe('postReport — SLACK_BOT_TOKEN 未設定', () => {
   it('token 不在なら postSlackMessage を呼ばず ok: false を返す (network 節約)', async () => {
     delete process.env.SLACK_BOT_TOKEN;
-    const result = await postReport({ channel: 'U123', text: 'hello' });
+    const result = await postReport({ channel: 'U123', text: 'hello', blocks: [] });
     expect(result).toEqual({ ok: false, error: 'SLACK_BOT_TOKEN unset' });
     expect(postSlackMessageMock).not.toHaveBeenCalled();
     expect(logErrorMock).toHaveBeenCalledWith(
@@ -105,7 +105,7 @@ describe('postReport — 429 rate limit', () => {
       .mockRejectedValueOnce(new SlackApiError('rate limited', { method: 'chat.postMessage', status: 429 }))
       .mockResolvedValueOnce({ id: '5.6', raw: {} });
 
-    const promise = postReport({ channel: 'U123', text: 'hi' });
+    const promise = postReport({ channel: 'U123', text: 'hi', blocks: [] });
     // sleep 30s を advance
     await vi.advanceTimersByTimeAsync(30_000);
     const result = await promise;
@@ -128,7 +128,7 @@ describe('postReport — 429 rate limit', () => {
       .mockRejectedValueOnce(new SlackApiError('rate limited 1', { method: 'chat.postMessage', status: 429 }))
       .mockRejectedValueOnce(new SlackApiError('rate limited 2', { method: 'chat.postMessage', status: 429 }));
 
-    const promise = postReport({ channel: 'U123', text: 'hi' });
+    const promise = postReport({ channel: 'U123', text: 'hi', blocks: [] });
     await vi.advanceTimersByTimeAsync(30_000);
     const result = await promise;
 
@@ -149,7 +149,7 @@ describe('postReport — 429 以外の失敗', () => {
     postSlackMessageMock.mockRejectedValueOnce(
       new SlackApiError('server error', { method: 'chat.postMessage', status: 500 }),
     );
-    const result = await postReport({ channel: 'U123', text: 'hi' });
+    const result = await postReport({ channel: 'U123', text: 'hi', blocks: [] });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.status).toBe(500);
@@ -163,7 +163,7 @@ describe('postReport — 429 以外の失敗', () => {
 
   it('SlackApiError 以外の Error (network fail 等) も ok: false で返す (throw しない)', async () => {
     postSlackMessageMock.mockRejectedValueOnce(new Error('network unreachable'));
-    const result = await postReport({ channel: 'U123', text: 'hi' });
+    const result = await postReport({ channel: 'U123', text: 'hi', blocks: [] });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toBe('network unreachable');
@@ -179,7 +179,7 @@ describe('postReport — 429 以外の失敗', () => {
     postSlackMessageMock.mockRejectedValueOnce(
       new SlackApiError('Slack chat.postMessage failed: channel_not_found', { method: 'chat.postMessage' }), // status 省略
     );
-    const result = await postReport({ channel: 'U_TYPO', text: 'hi' });
+    const result = await postReport({ channel: 'U_TYPO', text: 'hi', blocks: [] });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.status).toBeUndefined();

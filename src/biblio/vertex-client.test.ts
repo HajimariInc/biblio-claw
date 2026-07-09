@@ -404,6 +404,7 @@ describe('callVertexAnthropic / callVertexGemini — gen_ai.* span', () => {
     expect(span.attributes['server.address']).toBe('aiplatform.googleapis.com');
     expect(span.attributes['biblio.request_id']).toBe('req-1');
     // M4-C Phase 2: log.info('vertex.call', ...) payload に cache_read / cache_creation が含まれる
+    // review R6 (I2): cache_captured=true も含まれる (usage に cache_* が両方存在した経路)
     expect(vi.mocked(log.info)).toHaveBeenCalledWith(
       'vertex.call',
       expect.objectContaining({
@@ -413,6 +414,7 @@ describe('callVertexAnthropic / callVertexGemini — gen_ai.* span', () => {
         tokens_out: 45,
         cache_read: 7,
         cache_creation: 3,
+        cache_captured: true,
       }),
     );
 

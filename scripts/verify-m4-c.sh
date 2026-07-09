@@ -90,8 +90,13 @@ VERIFY_JOB_NAME=''
 cleanup() {
   # verify 用 Job のみを削除。Job 名は Section 4 で決まる (`verify-m4c-<epoch>`)、
   # cronjob 本体 (`reporting-cronjob`) には触らない。
+  # review R6 (S6): 削除失敗を silent 化しない。--ignore-not-found=true は「無いから消せない」を
+  # 正しく許容するが、それ以外の失敗 (RBAC 権限不足・API サーバ疎通断) は warn で運用者に可視化。
   if [ -n "${VERIFY_JOB_NAME:-}" ]; then
-    kubectl delete job "$VERIFY_JOB_NAME" -n "$NAMESPACE" --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+    if ! kubectl delete job "$VERIFY_JOB_NAME" -n "$NAMESPACE" --ignore-not-found=true --wait=false \
+        >/dev/null 2>&1; then
+      warn "verify 用 Job ($VERIFY_JOB_NAME) の削除に失敗 — 手動で確認/削除してください: kubectl delete job $VERIFY_JOB_NAME -n $NAMESPACE"
+    fi
   fi
   rm -rf "$STDERR_DIR"
 }
