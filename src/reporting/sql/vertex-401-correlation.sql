@@ -33,7 +33,7 @@ WITH vertex_401 AS (
     CAST(jsonPayload.onecli_snapshot_updated_at_epoch AS INT64) AS onecli_updated_at_epoch,
     jsonPayload.onecli_snapshot_found AS onecli_snapshot_found,
     CAST(jsonPayload.pod_age_sec AS INT64) AS pod_age_sec
-  FROM `<PROJECT_ID>.<DATASET_ID>.stderr_*`
+  FROM `<PROJECT_ID>.<DATASET_ID>.stderr`
   WHERE jsonPayload.event = 'vertex.401.forensic_dump'
     AND DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
 ),
@@ -43,7 +43,7 @@ recent_rotations AS (
     jsonPayload.token_hash AS rotator_token_hash,
     CAST(jsonPayload.token_exp AS INT64) AS rotator_token_exp,
     CAST(jsonPayload.token_iat AS INT64) AS rotator_token_iat
-  FROM `<PROJECT_ID>.<DATASET_ID>.stderr_*`
+  FROM `<PROJECT_ID>.<DATASET_ID>.stderr`
   WHERE jsonPayload.event = 'vertex.rotator.token_injected'
     AND DATE(timestamp, 'Asia/Tokyo') = CURRENT_DATE('Asia/Tokyo')
 )
