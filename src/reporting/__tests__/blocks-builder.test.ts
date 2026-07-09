@@ -156,7 +156,7 @@ describe('buildReportBlocks — inspect card children shape', () => {
     );
     const inspectCard = cardCalls[1];
     const table = findTable(inspectCard);
-    // review R6 (I1): reason 列追加
+    // reason 列追加
     expect(table?.headers).toEqual(['verdict', 'reason', 'dangerous', 'cnt']);
     expect(table?.rows).toEqual([
       ['ACCEPT', 'none', 'false', '4'],
@@ -289,5 +289,61 @@ describe('buildReportBlocks — llmCost card children shape', () => {
     const llmCard = cardCalls[3];
     const textChildren = llmCard.children.filter((c): c is SlackTextElement => c.type === 'text');
     expect(textChildren.some((c) => c.content.includes('未知 model 検知'))).toBe(true);
+  });
+
+  // `uncaptured_cache_calls > 0` は emit 側の `cache_captured=false` 件数を SQL 集計した独立指標。
+  // blocks-builder が LLM card に「N 件は usage 未捕捉」warning text child を反映するのを pin。
+  it('uncaptured_cache_calls > 0 → 「usage 未捕捉」warning text child が LLM card に入る', () => {
+    reset();
+    buildReportBlocks(
+      {
+        windowDays: 7,
+        biblio: emptyOk(),
+        inspect: emptyOk(),
+        errorTrend: emptyOk(),
+        llmCost: ok([
+          {
+            model: 'claude-sonnet-4-6',
+            call_count: 10,
+            total_tokens_in: 1000,
+            total_tokens_out: 500,
+            total_cache_read: 0,
+            total_cache_creation: 0,
+            uncaptured_cache_calls: 3,
+          },
+        ]),
+      },
+      [],
+    );
+    const llmCard = cardCalls[3];
+    const textChildren = llmCard.children.filter((c): c is SlackTextElement => c.type === 'text');
+    expect(textChildren.some((c) => c.content.includes('3 件は usage 未捕捉'))).toBe(true);
+  });
+
+  it('uncaptured_cache_calls == 0 → warning text child は入らない (silent 0 表示の抑止)', () => {
+    reset();
+    buildReportBlocks(
+      {
+        windowDays: 7,
+        biblio: emptyOk(),
+        inspect: emptyOk(),
+        errorTrend: emptyOk(),
+        llmCost: ok([
+          {
+            model: 'claude-sonnet-4-6',
+            call_count: 10,
+            total_tokens_in: 1000,
+            total_tokens_out: 500,
+            total_cache_read: 100,
+            total_cache_creation: 50,
+            uncaptured_cache_calls: 0,
+          },
+        ]),
+      },
+      [],
+    );
+    const llmCard = cardCalls[3];
+    const textChildren = llmCard.children.filter((c): c is SlackTextElement => c.type === 'text');
+    expect(textChildren.some((c) => c.content.includes('usage 未捕捉'))).toBe(false);
   });
 });

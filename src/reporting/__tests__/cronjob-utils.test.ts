@@ -1,6 +1,6 @@
 /**
  * `scripts/reporting-cronjob.ts` から export された pure fn のユニットテスト
- * (I3 修正、review 対応で新設)。
+ * (env validation 3 段 guard の unit test 化用)。
  *
  * カバレッジ:
  *  - `validateReportingEnv`: 3 段 guard の順序 (project_id → channel → window) が
@@ -33,8 +33,8 @@ vi.mock('../bq-client.js', () => ({
   runQuery: (sql: unknown, params?: unknown, opts?: unknown) => runQueryMock(sql, params, opts),
 }));
 
-// cronjob-lib は pure fn 集約 module (R5 で scripts/reporting-cronjob.ts から抽出)
-const { safeRunQuery, validateReportingEnv, DEFAULT_DATASET_ID, DEFAULT_WINDOW_DAYS } =
+// cronjob-lib は pure fn 集約 module (scripts/reporting-cronjob.ts から抽出)
+const { safeRunQuery, validateReportingEnv, reasonToEventName, DEFAULT_DATASET_ID, DEFAULT_WINDOW_DAYS } =
   await import('../cronjob-lib.js');
 
 beforeEach(() => {
@@ -108,6 +108,20 @@ describe('validateReportingEnv — 3 段 guard 順序', () => {
     });
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.datasetId).toBe('custom_dataset');
+  });
+});
+
+describe('reasonToEventName — exhaustive switch mapping', () => {
+  it('no_project_id → reporting.cronjob.no_project_id', () => {
+    expect(reasonToEventName('no_project_id')).toBe('reporting.cronjob.no_project_id');
+  });
+
+  it('no_channel → reporting.cronjob.no_channel', () => {
+    expect(reasonToEventName('no_channel')).toBe('reporting.cronjob.no_channel');
+  });
+
+  it('invalid_window → reporting.cronjob.invalid_window', () => {
+    expect(reasonToEventName('invalid_window')).toBe('reporting.cronjob.invalid_window');
   });
 });
 

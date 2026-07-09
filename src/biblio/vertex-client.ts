@@ -43,6 +43,7 @@ import {
   GEN_AI_PROVIDER_GCP_VERTEX_AI,
   GEN_AI_OPERATION_CHAT,
   extractVertexUsage,
+  type VertexCallUsageFields,
 } from '../observability/genai.js';
 import { getTracer } from '../observability/index.js';
 import { getProxyState } from './host-proxy.js';
@@ -178,7 +179,7 @@ export interface VertexCallCtx {
 function vertexLogFields(
   ctx: VertexCallCtx | undefined,
   model: string,
-  extras?: Record<string, unknown>,
+  extras?: Record<string, unknown> | VertexCallUsageFields,
 ): Record<string, unknown> {
   return {
     event: 'vertex.call',
@@ -501,21 +502,21 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
         // M4-C Phase 2: cache_read/cache_creation を log payload に unconditional emit
         // (?? 0) して llm-cost.sql の SUM 対象を有効化 + cost-calculator の warnings 消失。
         // span 属性は既存の conditional pattern を対称化 (= AnthropicVertexLlm.ts:317-325 と同流儀)。
-        // review R6 (I2): cache_captured を独立 boolean で emit することで「未捕捉 (SDK 差)」と
+        // cache_captured を独立 boolean で emit することで「未捕捉 (SDK 差)」と
         // 「実測 0 (cache 未使用)」を BQ 集計で区別可能に。cost 過小推定の可視化。
         const cacheCaptured = usage.cache_read_input_tokens != null && usage.cache_creation_input_tokens != null;
-        log.info(
-          'vertex.call',
-          vertexLogFields(ctx, modelId, {
-            outcome: 'success',
-            tokens_in: usage.input_tokens ?? 0,
-            tokens_out: usage.output_tokens ?? 0,
-            cache_read: usage.cache_read_input_tokens ?? 0,
-            cache_creation: usage.cache_creation_input_tokens ?? 0,
-            cache_captured: cacheCaptured,
-            latency_ms: Math.round(performance.now() - t0),
-          }),
-        );
+        // 共有 interface (`VertexCallUsageFields`) 経由で AnthropicVertexLlm.ts と同 shape に強制。
+        // 新 field 追加時に両 emit が compile error で検知される (SQL 側 drift の抑止 anchor)。
+        const usageFields: VertexCallUsageFields = {
+          outcome: 'success',
+          tokens_in: usage.input_tokens ?? 0,
+          tokens_out: usage.output_tokens ?? 0,
+          cache_read: usage.cache_read_input_tokens ?? 0,
+          cache_creation: usage.cache_creation_input_tokens ?? 0,
+          cache_captured: cacheCaptured,
+          latency_ms: Math.round(performance.now() - t0),
+        };
+        log.info('vertex.call', vertexLogFields(ctx, modelId, usageFields));
         if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
         if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
         if (usage.cache_read_input_tokens != null) {

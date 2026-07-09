@@ -3,7 +3,7 @@
  *
  * カバレッジ:
  *  - QueryOutcome.ok=true empty rows → 各セクションが「活動なし」or「呼出記録なし」
- *  - QueryOutcome.ok=false → 各セクションが「⚠️ 取得失敗」を出す (R4 修正、SQL 失敗と empty 区別)
+ *  - QueryOutcome.ok=false → 各セクションが「⚠️ 取得失敗」を出す (SQL 失敗と empty 区別)
  *  - normal case (biblio + llmCost あり)
  *  - BigQueryInt coerce
  *  - unknown model warning が Slack DM 本文に「※」で注記される
@@ -246,7 +246,7 @@ describe('formatBiblioUsageSummary — unknown model warning', () => {
     expect(text).toContain('underestimated');
   });
 
-  // review R6 (C2 regression): BQ row が SQL NULL を返す場合 (key present + value null) も
+  // BQ row が SQL NULL を返す場合 (key present + value null) も
   // undefined と等価に扱われて cost-calculator の warning 経路が発火することを検証。
   // 旧実装 (formatter.ts:129-139 の `'x' in row ? toNumber(...) : undefined`) は BQ NULL を
   // silent 0 化していたため warning が発火せず、cost 過小推定が patron に一切可視化されない silent
@@ -271,6 +271,51 @@ describe('formatBiblioUsageSummary — unknown model warning', () => {
     expect(text).toContain('cache_read');
     expect(text).toContain('cache_creation');
     expect(text).toContain('underestimated');
+  });
+
+  // `uncaptured_cache_calls > 0` は emit 側の `cache_captured=false` 件数を SQL 集計した独立指標。
+  // formatter がこれを本文に「N 件は usage 未捕捉」warning 行として反映するのを pin。
+  // regression 回避 (formatter.ts:245-254 が silent に消えても既存 test は緑になる盲点への対応)。
+  it('uncaptured_cache_calls > 0 → 「usage 未捕捉」warning 行が本文に出る', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: emptyOk(),
+      llmCost: ok([
+        {
+          model: 'claude-sonnet-4-6',
+          call_count: 10,
+          total_tokens_in: 1000,
+          total_tokens_out: 500,
+          total_cache_read: 0,
+          total_cache_creation: 0,
+          uncaptured_cache_calls: 3,
+        },
+      ]),
+    });
+    expect(text).toContain('3 件は usage 未捕捉');
+  });
+
+  it('uncaptured_cache_calls == 0 → warning 行は出ない (silent 0 表示の抑止)', () => {
+    const { text } = formatBiblioUsageSummary({
+      windowDays: 7,
+      biblio: emptyOk(),
+      inspect: emptyOk(),
+      errorTrend: emptyOk(),
+      llmCost: ok([
+        {
+          model: 'claude-sonnet-4-6',
+          call_count: 10,
+          total_tokens_in: 1000,
+          total_tokens_out: 500,
+          total_cache_read: 100,
+          total_cache_creation: 50,
+          uncaptured_cache_calls: 0,
+        },
+      ]),
+    });
+    expect(text).not.toContain('usage 未捕捉');
   });
 });
 
@@ -328,7 +373,7 @@ describe('formatBiblioUsageSummary — inspect-distribution (rows / empty / fail
       errorTrend: emptyOk(),
       llmCost: emptyOk(),
     });
-    // review R6 (I1): verdict/reason 集約表示 + inspect_error 独立集計 note
+    // verdict/reason 集約表示 + inspect_error 独立集計 note
     expect(text).toContain('検品分布:');
     expect(text).toContain('ACCEPT/none 4');
     expect(text).toContain('HOLD/license_unknown 2');
@@ -380,7 +425,7 @@ describe('formatBiblioUsageSummary — error-trend (rows / empty / fail)', () =>
       ]),
       llmCost: emptyOk(),
     });
-    // review R6 (C1): severity 列表示 + CRITICAL 独立集計 note
+    // severity 列表示 + CRITICAL 独立集計 note
     expect(text).toContain('エラー傾向 (総 7 件 (うち CRITICAL 2 件))');
     expect(text).toContain('2026-07-08 [ERROR] vertex.call.timeout 5');
     expect(text).toContain('p50 3000ms');

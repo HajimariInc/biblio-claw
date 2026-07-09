@@ -1,5 +1,5 @@
 /**
- * `bq-client.ts` のユニットテスト (S3 修正、review 対応で新設)。
+ * `bq-client.ts` のユニットテスト。
  *
  * カバレッジ:
  *  - runQuery は location: 'asia-northeast1' を BigQuery.query に必ず渡す
@@ -8,7 +8,7 @@
  *  - 成功時に reporting.bq_query_succeeded event を log.info で emit
  *  - client は singleton (2 回目以降 new BigQuery を呼ばない)
  *
- * bq-client.ts は R4 修正で catch を削除 (呼出側の safeRunQuery が log 集約) しているため、
+ * bq-client.ts は catch を削除 (呼出側の safeRunQuery が log 集約) しているため、
  * ここでは「rethrow のみ、log なし」を assert。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -92,7 +92,7 @@ describe('runQuery — success emit', () => {
   });
 });
 
-describe('runQuery — 失敗時は log なし rethrow (R4 修正、呼出側集約契約)', () => {
+describe('runQuery — 失敗時は log なし rethrow (呼出側集約契約)', () => {
   it('BQ query が reject したら握り潰さず throw (silent failure 撲滅)', async () => {
     queryMock.mockRejectedValueOnce(new Error('quota exceeded'));
     await expect(runQuery('SELECT 1')).rejects.toThrow('quota exceeded');

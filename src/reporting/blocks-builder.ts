@@ -44,7 +44,7 @@ function biblioTable(rows: BiblioUsageRow[]): SlackTableElement {
 }
 
 function inspectTable(rows: InspectDistributionRow[]): SlackTableElement {
-  // review R6 (I1): reason 列追加 = system_failure (HOLD+inspect_error) と policy 保留の区別可能化。
+  // reason 列 = system_failure (HOLD+inspect_error) と policy 保留 (license_*) の区別可能化。
   return {
     type: 'table',
     headers: ['verdict', 'reason', 'dangerous', 'cnt'],
@@ -55,7 +55,7 @@ function inspectTable(rows: InspectDistributionRow[]): SlackTableElement {
 function errorTrendTable(rows: ErrorTrendRow[]): SlackTableElement {
   return {
     type: 'table',
-    // review R6 (C1): severity 列を追加して CRITICAL (host crash / startup failed) を patron が
+    // severity 列を追加して CRITICAL (host crash / startup failed) を patron が
     // 一目で識別可能に。ERROR/CRITICAL の混在を隠さない。
     headers: ['day', 'severity', 'event', 'cnt', 'p50_ms', 'p95_ms', 'p99_ms'],
     rows: rows.map((r) => [
@@ -71,7 +71,7 @@ function errorTrendTable(rows: ErrorTrendRow[]): SlackTableElement {
 }
 
 function llmCostTable(rows: LlmCostRow[]): SlackTableElement {
-  // review R6 (C2/S8): total_cache_read/total_cache_creation は真の undefined (SQL 列不在) と
+  // total_cache_read/total_cache_creation は真の undefined (SQL 列不在) と
   // BQ NULL/0 を区別可能に。undefined は「未捕捉 (未計測)」を意味する `?` 表示。0 は「実測 0」。
   return {
     type: 'table',
@@ -92,7 +92,7 @@ function llmCostTable(rows: LlmCostRow[]): SlackTableElement {
  * 成功 + rows 非空なら supplied table child を、rows 空なら「活動なし」text child を返す。
  * silent failure 撲滅: normalize は呼出側で完了させ、本関数は shape only にする。
  */
-// review R6 (S2): `outcome: QueryOutcome<unknown>` 固定にして「呼出前の rows は unknown」という
+// `outcome: QueryOutcome<unknown>` 固定にして「呼出前の rows は unknown」という
 // 実態を型で正直に示す。domain 型 T は tableBuilder + normalizer の生成型としてのみ束縛する
 // (unsafe cast を排除、buildReportBlocks の 4 箇所 `as QueryOutcome<X>` も削除)。
 function withOutcomeGuard<T>(
@@ -154,7 +154,7 @@ function buildLlmCostCard(outcome: QueryOutcome<unknown>, warnings: NormalizeRep
     cache_creation: r.total_cache_creation,
   }));
   const agg = aggregateCosts(usages);
-  // review R6 (I2): 移行週や SDK 差で usage 欠落が発生した call 数を独立集計。
+  // 移行週や SDK 差で usage 欠落が発生した call 数を独立集計。
   // cache_captured=false の call 数を SUM した SQL 列を formatter で拾い、cost 過小推定の可能性を可視化。
   const uncapturedTotal = rows.reduce((s, r) => s + (r.uncaptured_cache_calls ?? 0), 0);
   const children: SlackCardChild[] = [
@@ -193,7 +193,7 @@ export function buildReportBlocks(input: ReportInput, warnings: NormalizeReport[
       text: { type: 'plain_text', text: `📊 biblio-claw 週次レポート (直近 ${input.windowDays} 日)` },
     },
   ];
-  // review R6 (S2): `ReportInput` の 4 field は `QueryOutcome<unknown>` = build*Card も同型で受けるため
+  // `ReportInput` の 4 field は `QueryOutcome<unknown>` = build*Card も同型で受けるため
   // unsafe cast が不要 (旧版は `as QueryOutcome<X>` 4 箇所で型と実態を偽っていた)。
   const cards: SlackCardElement[] = [
     buildBiblioCard(input.biblio, warnings),

@@ -23,7 +23,7 @@ export interface RunQueryOptions {
 // - SDK が rate limit / backend error に対して指数バックオフで自動 retry (default 最大 3 回)。
 //   CronJob 側で二重 retry ループを書かない (呼出側が silent multiplier を持たない契約)。
 // - **失敗時は log を出さず throw のみ**。呼出側 (`safeRunQuery` in reporting-cronjob.ts) が
-//   1 箇所で severity 判断 + err payload 込みで `log.error` 集約する契約 (R4 修正、二重 severity log 撲滅)。
+//   1 箇所で severity 判断 + err payload 込みで `log.error` 集約する契約 (二重 severity log 撲滅)。
 export async function runQuery<T = Record<string, unknown>>(
   sql: string,
   params?: Record<string, unknown>,

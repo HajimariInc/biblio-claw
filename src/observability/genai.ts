@@ -28,6 +28,24 @@ export interface GenAIUsage {
   cache_creation_input_tokens?: number;
 }
 
+// `log.info('vertex.call', {...})` の usage 部分を型で束ねる共有 shape。
+//
+// 2 経路 (`src/biblio/vertex-client.ts:callVertexAnthropic` + `src/adk/AnthropicVertexLlm.ts:
+// generateContentAsync`) で同一 payload を独立に組み立てているため、field 追加時 (次期 SDK
+// で新 usage 項目、Phase 2 の `cache_captured` 相当) に片側だけ更新すると SQL 側 (`llm-cost.sql`
+// の `jsonPayload.<field>` 参照) は runtime error か silent NULL で drift 化する。本 interface
+// を経由すると、field 追加時に両 emit 呼出が compile error で検知される。
+// SQL 側との対応は型システムの範囲外だが、TS 側 2 箇所の対称性は本 interface で強制する。
+export interface VertexCallUsageFields {
+  outcome: 'success' | 'error';
+  tokens_in: number;
+  tokens_out: number;
+  cache_read: number;
+  cache_creation: number;
+  cache_captured: boolean;
+  latency_ms: number;
+}
+
 /** vertex response から semconv usage を抽出 (Gemini/Anthropic 両対応) */
 export function extractVertexUsage(json: unknown, provider: 'gemini' | 'anthropic'): GenAIUsage {
   // 型署名 `unknown` が「何でも来うる」と約束しているのに型アサーションで直接 property access

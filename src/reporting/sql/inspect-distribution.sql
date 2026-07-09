@@ -10,7 +10,7 @@
 --     - REJECT + reason=schema_invalid (plugin metadata 不備)
 --     - REJECT + reason=dangerous_code (LLM で危険コード検出 = dangerous=true 唯一)
 --   注意: REJECT + inspect_error はコード上発生しない (`inspect_error` は常に `HOLD` に倒れる、
---         M4-C Phase 2 review R6 で修正、旧誤コメントは削除済み)。
+--         M4-C Phase 2 で修正、旧誤コメントは削除済み)。
 --
 --   dangerous は boolean = `verdict === 'REJECT' && reason === 'dangerous_code'` で判定。
 --     - REJECT + dangerous_code → dangerous=true

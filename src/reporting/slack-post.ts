@@ -11,7 +11,7 @@ const RATE_LIMIT_BACKOFF_MS = 30_000;
 export interface PostReportOptions {
   channel: string;
   text: string;
-  // review R6 (S4): `unknown[]` optional → `SlackBlock[]` required に締める。
+  // `unknown[]` optional → `SlackBlock[]` required に締める。
   // vendor 側の `SlackMessageOptions.blocks?: unknown[]` の緩さは biblio-claw 側で
   // 型付き shape 経由でしか渡さないように強制。呼出元 (`scripts/reporting-cronjob.ts`) は
   // `formatBiblioUsageSummary` の `{text, blocks}` を分割代入して常に両方渡す想定。
@@ -79,7 +79,7 @@ export async function postReport(opts: PostReportOptions): Promise<PostReportRes
   }
   // 到達不能な defensive fallback (for ループ内で全経路 return するため、現状の retry policy では
   // ここに到達しない)。将来 retry 回数 or 分岐が変更されて到達可能になった際に silent failure
-  // 化しないよう、log.error を必ず出す (S4 修正、silent-failure-hunter 指摘)。
+  // 化しないよう、log.error を必ず出す。
   log.error('reporting.slack_post_failed', {
     event: 'reporting.slack_post_failed',
     outcome: 'error',

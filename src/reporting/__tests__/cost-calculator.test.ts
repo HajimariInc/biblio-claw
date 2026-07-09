@@ -29,7 +29,7 @@ describe('computeCost (Anthropic 経路 × regional premium)', () => {
     });
     expect(result.provider).toBe('anthropic');
     expect(result.cost_usd).toBeCloseTo(18 * VERTEX_REGIONAL_PREMIUM, 6);
-    // cache_read + cache_creation 両方 undefined = 両方 warning が付く (対称化、R3 修正)
+    // cache_read + cache_creation 両方 undefined = 両方 warning が付く (対称化)
     expect(result.warnings).toContain('cache_read.input_tokens not captured, cost is underestimated');
     expect(result.warnings).toContain('cache_creation.input_tokens not captured, cost is underestimated');
   });

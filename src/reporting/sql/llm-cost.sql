@@ -10,8 +10,9 @@
 -- - Anthropic 経路 (`callVertexAnthropic` + `AnthropicVertexLlm.generateContentAsync`) は
 --   `cache_read` / `cache_creation` を `?? 0` で unconditional emit (旧 log = emit 前は NULL)。
 -- - Gemini 経路には cache 概念がなく、`vertex.call` payload に cache 列は含まれない = NULL 扱い。
--- - `CAST(... AS INT64)` は NULL 入力に対して NULL を返し、SUM は NULL を無視するため、
---   cache 未 emit 期間の row は SUM から silent に除外される (集計に影響しない設計)。
+-- - `SAFE_CAST(... AS INT64)` は NULL 入力に対して NULL、非数値入力にも NULL を返し、
+--   SUM は NULL を無視するため、cache 未 emit 期間 + 想定外文字列混入時の row も silent に
+--   除外される (集計を落とさず継続、非対称性は error-trend.sql の SAFE_CAST と対称)。
 -- - cost-calculator.ts 側で cache_creation の undefined check が消えるのは、SQL 側で
 --   `SUM(...) AS total_cache_creation` が非 undefined 値 (0 含む) を返してから。
 --
@@ -25,15 +26,16 @@
 -- does not exist in STRUCT<...>` runtime error で query 全滅。`JSON_VALUE(TO_JSON_STRING(
 -- jsonPayload), '$.<field>')` 経由なら field 不在時に NULL を返し query 続行可能 (SUM(NULL)
 -- は 0 集計、schema evolve までの過渡期でも集計成立、field 存在後は同値)。
--- model / tokens_in / tokens_out は Phase 1 以前から emit されているため defensive 不要。
+-- model / tokens_in / tokens_out は Phase 1 以前から emit されているため defensive 不要だが、
+-- SAFE_CAST に統一して 1 件の非数値混入でクエリ全滅を防ぐ (error-trend.sql と対称)。
 SELECT
-  jsonPayload.model                                                                              AS model,
-  COUNT(*)                                                                                       AS call_count,
-  SUM(CAST(jsonPayload.tokens_in       AS INT64))                                                AS total_tokens_in,
-  SUM(CAST(jsonPayload.tokens_out      AS INT64))                                                AS total_tokens_out,
-  SUM(CAST(JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_read') AS INT64))                    AS total_cache_read,
-  SUM(CAST(JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_creation') AS INT64))                AS total_cache_creation,
-  -- review R6 (I2): usage 欠落 (SDK 差 or 移行週の旧ログ) call 数を独立集計。
+  jsonPayload.model                                                                                    AS model,
+  COUNT(*)                                                                                             AS call_count,
+  SUM(SAFE_CAST(jsonPayload.tokens_in       AS INT64))                                                 AS total_tokens_in,
+  SUM(SAFE_CAST(jsonPayload.tokens_out      AS INT64))                                                 AS total_tokens_out,
+  SUM(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_read') AS INT64))                     AS total_cache_read,
+  SUM(SAFE_CAST(JSON_VALUE(TO_JSON_STRING(jsonPayload), '$.cache_creation') AS INT64))                 AS total_cache_creation,
+  -- usage 欠落 (SDK 差 or 移行週の旧ログ) call 数を独立集計。
   -- cache_captured=false の call 数を SUM = cost 過小推定の可能性を patron に可視化。
   -- 旧ログ (Phase 2 未 deploy) では cache_captured 自体が NULL = false 判定に落ちず 0 に集計される
   -- (=既存の warning 経路と分離、独立指標として動作)。JSON_VALUE 経由で field 不在時も NULL 返し。

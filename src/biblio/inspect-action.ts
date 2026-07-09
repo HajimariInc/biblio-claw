@@ -77,21 +77,20 @@ registerDeliveryAction('inspect_biblio', async (content, session, inDb) => {
       // verdict 3 値 (ACCEPT/HOLD/REJECT) を outcome 3 値 (success/hold/failure) に対応させる。
       // HOLD は「判定保留」で失敗ではないため、BQ 集計で REJECT (失敗) と区別する。
       const outcome = result.verdict === 'ACCEPT' ? 'success' : result.verdict === 'HOLD' ? 'hold' : 'failure';
-      // review R6 (I1): 実際の verdict × reason 対応表 (inspect.ts の全 fail() 経路実測):
+      // 実際の verdict × reason 対応表 (inspect.ts の全 fail() 経路実測):
       //   ACCEPT → reason なし (undefined)
       //   HOLD + inspect_error (Vertex/Gemini 呼出失敗、応答崩れ、quarantine 不可 = システム障害)
       //   HOLD + license_denied / license_unknown (ルーティンなポリシー保留)
       //   REJECT + schema_invalid (plugin metadata 不備)
       //   REJECT + dangerous_code (LLM で危険コード検出 = dangerous=true 唯一)
-      // 注意: `REJECT + inspect_error` はコード上発生しない (`inspect_error` は常に `HOLD` に倒れる、
-      // 旧誤コメント修正、review comment-analyzer #2 + silent-failure-hunter #2)。
+      // 注意: `REJECT + inspect_error` はコード上発生しない (`inspect_error` は常に `HOLD` に倒れる)。
       const dangerous = result.verdict === 'REJECT' && result.reason === 'dangerous_code';
       log.info('inspect_biblio done', {
         event: 'biblio.inspect',
         outcome,
         biblioName: rawName,
         verdict: result.verdict,
-        // review R6 (I1): reason を独立 emit することで、HOLD + inspect_error (システム障害) と
+        // reason を独立 emit することで、HOLD + inspect_error (システム障害) と
         // HOLD + license_* (ルーティン policy 保留) を BQ 集計で区別可能に。ACCEPT 時は reason
         // 不在なので null で明示 (SQL 側 filter/GROUP BY で扱いやすい形)。
         reason: result.verdict === 'ACCEPT' ? null : (result.reason ?? null),
