@@ -113,13 +113,13 @@ describe('PROVIDER_APPLIES_VERTEX_PREMIUM (不変条件を型で強制)', () => 
   });
 });
 
-describe('GEMINI_PRICING (2026-07-01 non-global +10% 発動済み、今日 2026-07-09)', () => {
-  it('gemini-2.5-flash は $0.30/$2.50 (Vertex regional 実効値)', () => {
+describe('GEMINI_PRICING (M4-C Phase 2: Vertex Global 単価、2026-07-09 pinning)', () => {
+  it('gemini-2.5-flash は $0.30/$2.50 (Vertex Global 単価)', () => {
     expect(GEMINI_PRICING['gemini-2.5-flash']).toEqual({ input: 0.3, output: 2.5 });
   });
 
-  it('gemini-3.1-flash-lite は $0.275/$1.65 (non-global +10% 発動済み)', () => {
-    expect(GEMINI_PRICING['gemini-3.1-flash-lite']).toEqual({ input: 0.275, output: 1.65 });
+  it('gemini-3.1-flash-lite は $0.25/$1.50 (Vertex Global 単価、biblio-claw は CLOUD_ML_REGION=global)', () => {
+    expect(GEMINI_PRICING['gemini-3.1-flash-lite']).toEqual({ input: 0.25, output: 1.5 });
   });
 
   it('preview サフィックス model を含まない (`-preview` は 2026-07-09 廃止)', () => {

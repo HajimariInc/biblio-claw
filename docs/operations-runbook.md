@@ -4143,8 +4143,8 @@ bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
 
 1. **CronJob silent skip の逆罠** — 短周期 cron 向けの `startingDeadlineSeconds` を週次 CronJob に指定しない (`k8s/30-reporting-cronjob.yaml` は指定なし)。指定すると月曜 09:00 JST の GKE 側 control-plane 一時不調が数分でも重なった瞬間、その週の Job が完全 silent skip し、Cloud Logging にも event が一切残らない (patron 検知不能)。100 miss 罠は分単位 cron 用途で意味を持つため週次には適用しない (K8s doc: kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/)
 2. **BQ location 不一致** — `runQuery` が `location: 'asia-northeast1'` を毎回明示 (SDK デフォルト "US" 依存を排除)。`terraform/m4-a-observability/variables.tf` の region default と厳密一致
-3. **LLM コストの捕捉スコープ制約 + cache token 未捕捉** — `event: 'vertex.call'` の Cloud Logging 出力は現状 `src/biblio/vertex-client.ts` の 3 経路 (categorize / inspect / gate) のみ。`src/adk/AnthropicVertexLlm.ts` (CLI / Slack / Fugue ask 経路で使う ADK チャット本体) は span 属性のみ記録 → 実会話が集計対象外だった (M4-C Phase 1 で `AnthropicVertexLlm.ts` にも同 event を追加、Prod 全 Vertex 経由の呼出をカバー)。cache_read / cache_creation は依然として span 属性のみで Cloud Logging には未出力 = SQL からは NULL、`cost-calculator.ts` は `warnings: ['cache_creation ... not captured']` を Slack DM 本文に「※」で注記。cache token 側の完全解消は Phase 2 (SQL 追加 SELECT + emit 拡張) の任務
-4. **CLOUD_ML_REGION と Vertex partner model 課金** — `k8s/10-orchestrator-statefulset.yaml:179,375` は Prod で `CLOUD_ML_REGION=global` を明示指定 = Global endpoint (base 価格経路、regional premium なし)。`src/reporting/pricing-table.ts:resolveVertexPremium()` が runtime で env を読み、`'global' → 1.0` / それ以外 → `1.10` を返して cost 計算に反映する。Gemini 単価は依然 non-global 想定値 hardcode のため、Global 実効値との差 (`gemini-2.5-flash` は SOURCE 記述なし、`gemini-3.1-flash-lite` は Global `$0.25/$1.50` vs 現行 `$0.275/$1.65` の差) は保守側の近似で温存、精密化は Phase 2 で GCP 請求書による裏取り込みで対応
+3. **LLM コストの捕捉スコープ制約 + cache token 未捕捉** — `event: 'vertex.call'` の Cloud Logging 出力は現状 `src/biblio/vertex-client.ts` の 3 経路 (categorize / inspect / gate) のみ。`src/adk/AnthropicVertexLlm.ts` (CLI / Slack / Fugue ask 経路で使う ADK チャット本体) は span 属性のみ記録 → 実会話が集計対象外だった (M4-C Phase 1 で `AnthropicVertexLlm.ts` にも同 event を追加、Prod 全 Vertex 経由の呼出をカバー)。**cache token 側は M4-C Phase 2 で解消済み** (§M4-C Phase 2 参照): emit 側は `vertex.call` payload に `cache_read` / `cache_creation` / `cache_captured` を追加、SQL 側は `llm-cost.sql` に `SUM(cache_*)` 列 + `uncaptured_cache_calls` 列を追加、cost-calculator の warning 経路は `normalizeLlmCostRow` の null ガード対称化 (review R6 C2) で BQ NULL 経路も発火するように補強済
+4. **CLOUD_ML_REGION と Vertex partner model 課金** — `k8s/10-orchestrator-statefulset.yaml:179,375` は Prod で `CLOUD_ML_REGION=global` を明示指定 = Global endpoint (base 価格経路、regional premium なし)。`src/reporting/pricing-table.ts:resolveVertexPremium()` が runtime で env を読み、`'global' → 1.0` / それ以外 → `1.10` を返して cost 計算に反映する。**Gemini 単価は M4-C Phase 2 で Global 単価 hardcode に修正済** (§M4-C Phase 2 参照): `gemini-3.1-flash-lite` は旧 `$0.275/$1.65` (non-global) → 現 `$0.25/$1.50` (Global) に修正、`gemini-2.5-flash` は $0.30/$2.50 (Global) を維持。Prod 請求書 1-2 週分蓄積後の実測突合は Phase 3 送り
 
 ### 関連
 
@@ -4153,6 +4153,90 @@ bq query --project_id="${GCP_PROJECT_ID}" --use_legacy_sql=false --format=csv \
 - 実装: `src/reporting/` + `scripts/reporting-cronjob.ts` + `k8s/30-reporting-cronjob.yaml` + `terraform/m4-c-reporting/`
 - 継承元 §M4-A Phase 3: Cloud Logging → BigQuery sink (dataset / sink writer identity)
 - 継承元 §M4-A Phase 4: `verify-m4-a.sh` の bq query pattern (BQ 到達確認)
+
+---
+
+## M4-C Phase 2: reporting-quality (SQL 完成 + Data Table Block + cache 対称化)
+
+### 概要
+
+Phase 1 で成立した週次 CronJob → BQ query → Slack owner DM pipeline に対し、以下 6 群の質的改善を積んで週次 Prod 運用の目視効率と cost 集計精度を上げる:
+
+1. **SQL 全種完成** — `inspect-distribution.sql` (verdict × dangerous 2 軸) + `error-trend.sql` (severity=ERROR + APPROX_QUANTILES p50/p95/p99) を Phase 1 の雛形 (`SELECT 0 LIMIT 0`) から実 SQL に置換
+2. **LLM コスト cache 対称化** — `AnthropicVertexLlm.ts` / `vertex-client.ts` の `log.info('vertex.call', ...)` payload に `cache_read` / `cache_creation` を `?? 0` で unconditional emit + `llm-cost.sql` に `SUM(cache_*)` 列追加 → Slack DM 本文の「cache 未捕捉」warning が消失、Prod 週次 cost が cache 込みで ~5-15% 精密化される見込
+3. **Slack Data Table Block 化** — 4 セクション全て `@chat-adapter/slack/blocks` の `cardToSlackBlocks(card)` 経由で native table 表示 (100 rows × 20 cols 超は library 側で自動 ASCII fallback)。1 card 1 table 制約のため 4 card 分割
+4. **Gemini 単価 Global 経路への修正** — `gemini-3.1-flash-lite` を `$0.275/$1.65` (non-global) から `$0.25/$1.50` (Global) に修正 (biblio-claw Prod は `CLOUD_ML_REGION=global` 明示 = Global 経路)。SOURCE URL コメント追記済
+5. **`verify-m4-c.sh` 新設** — `M4-C PASS` marker + 2 連続実行冪等 + Prod 副作用 cleanup (verify 用 Job のみ削除、reporting-cronjob 本体は touch しない)
+6. **BQ clustering `severity` 単独適用** — Prod 蓄積後の severity フィルタクエリの scan 量削減
+
+### BQ clustering 適用手順 (`severity` 単独、初回 1 回だけ HITL 手動)
+
+M4-A Phase 3 の pattern (§Clustering 後追い) と同流儀で、`llm_observability.stdout` + `.stderr` の 2 テーブルに個別適用する:
+
+```bash
+export GCP_PROJECT_ID='<your-gcp-project>'
+
+bq update \
+  --clustering_fields=severity \
+  "${GCP_PROJECT_ID}:llm_observability.stdout"
+
+bq update \
+  --clustering_fields=severity \
+  "${GCP_PROJECT_ID}:llm_observability.stderr"
+
+# 適用確認 (`{"fields": ["severity"]}` を返す)
+bq show --format=json "${GCP_PROJECT_ID}:llm_observability.stdout" | jq .clustering
+bq show --format=json "${GCP_PROJECT_ID}:llm_observability.stderr" | jq .clustering
+```
+
+- **絶対使わない** — `CREATE OR REPLACE TABLE ... CLUSTER BY` は全ログ消滅する。`bq update` の in-place 適用のみ使う
+- **nested field 制約** — `bq update --clustering_fields=event,component,severity` は `Fields specified for clustering can only be top-level fields` で reject される。`jsonPayload.event` / `jsonPayload.component` は nested のため clustering 対象外、`severity` は top-level のため単独運用が最大化
+- **idempotent** — 既に適用済のテーブルに再適用しても no-op で成功する
+- **既存 rows は再クラスタなし** — 新規行のみ適用される。biblio-claw の運用量では DML UPDATE 再クラスタは不要
+
+### Manual trigger (verify-m4-c.sh 経由)
+
+Phase 2 では programmatic verify script を新設した:
+
+```bash
+export GCP_PROJECT_ID='<your-gcp-project>'
+export BQ_DATASET_ID='llm_observability'
+bash scripts/verify-m4-c.sh --prod
+```
+
+**副作用**: verify 用 K8s Job を新規発火する = 本 script 実行ごとに **Prod 経路で実 BQ query 4 種 + Slack owner DM post が 1 通** 走る。2 連続実行冪等の確認をする場合は owner DM に verify 用 post が 2 通届く (plan で既定路線)。cleanup は trap で verify 用 Job のみ削除、CronJob 本体には touch しない。
+
+Section 構成 (6 セクション):
+
+1. preflight (.env / 必須 env / 必須 CLI)
+2. keyless 4 面アサート (verify-m4-a.sh と同一)
+3. CronJob 存在 + `schedule='0 9 * * 1'` + `concurrencyPolicy=Forbid` 静的 assert
+4. manual trigger 経路確認 (`kubectl create job --from` + `kubectl wait --for=condition=complete` + logs で `reporting.cronjob.completed` event 確認)
+5. BQ event 到達確認 (過去 1h に `reporting.cronjob.completed >= 1` + `reporting.bq_query_succeeded >= 4`)
+6. regression (`verify-m4-a.sh` chain) + `M4-C PASS` marker
+
+### 既知の罠
+
+1. **Slack Data Table 1 card 1 table 制約** — `@chat-adapter/slack/blocks` の内部 `state.usedTable` により、1 SlackCardElement.children に SlackTableElement を 2 つ入れると 2 表目以降 ASCII fallback (section text block) になる。4 セクション全てを 1 card にまとめない = **必ず 4 card 分割** で `cardToSlackBlocks` を 4 回呼ぶ。blocks-builder.ts の `buildReportBlocks` は本規約を強制済
+2. **`tableToBlocks` は非 export** — library 内部関数のため直接 import 不可。公開 API `cardToSlackBlocks(card)` 経由 + `SlackCardElement.children[SlackTableElement]` で組む
+3. **BQ 100 rows × 20 cols 超で auto ASCII fallback** — library 側で自動なので呼出側 size 判定は不要 (`blocks.js:441-458` 参照)。上限運用外の巨大 rows は事前 SQL 側で `LIMIT` を切る
+4. **CronJob schedule 変更時は verify-m4-c.sh も同時更新** — Section 3 で `schedule='0 9 * * 1'` を静的 assert している。manifest だけ変えると verify が fail する
+5. **BQ event 名 drift 注意** — SQL 実行成功時の Cloud Logging event は `reporting.bq_query_succeeded` (`src/reporting/bq-client.ts:41`)。`reporting.sql.executed` などの別名に rename すると verify Section 5 が fail する
+6. **Slack post 実発火は verify assertion 対象外** — Section 5 で BQ event 到達までを assert、Slack post 成否は verify で判定しない (rate limit を verify に持ち込まない設計)。手動発火時のみ owner DM で最終目視確認
+7. **Gemini 単価精密化は Global 経路前提** — pricing-table の値は Vertex Global 単価 hardcode。将来 non-global 経路に切替える場合は本 table を +10% or `PROVIDER_APPLIES_VERTEX_PREMIUM.gemini` を true に切替 (両建ては禁止、二重乗算になる)
+
+### 運用 memo (Phase 3 送り事項)
+
+- **Gemini 単価の Prod 請求書実測突合** — 数値書換 (`gemini-3.1-flash-lite` の Global 単価化) + SOURCE URL 追記までは Phase 2 内で完了。Prod 請求書 1-2 週分蓄積後に blog.google 値との差を実測突合予定。差分は本 memo に追記して pricing-table の再 pinning 根拠を残す
+- **BQ clustering の multi-field 化** — `event` / `component` を含めた nested field clustering は BQ 制約でテーブル再作成が必要 = 全ログ消滅 = 実質不可。`severity` 単独運用が Prod の限界
+
+### 関連
+
+- Source PRD: `.claude/PRPs/prds/m4/m4-c-reporting.prd.md`
+- Source Plan: `.claude/PRPs/plans/phase-2-reporting-quality.plan.md` (完了時 `completed/` へアーカイブ)
+- 実装: `src/reporting/{formatter,blocks-builder,pricing-table,sql/*}.ts` + `src/adk/AnthropicVertexLlm.ts` + `src/biblio/vertex-client.ts` + `src/biblio/inspect-action.ts` + `scripts/{reporting-cronjob,verify-m4-c}.sh`
+- 継承元 §M4-A Phase 3 §Clustering 後追い: `bq update --clustering_fields=severity` の同型 pattern
+- 継承元 §M4-C Phase 1: 週次 CronJob deploy 手順 + IAM binding (`terraform/m4-c-reporting/`)
 
 ---
 

@@ -59,13 +59,30 @@ export function resolveVertexPremium(): number {
   return region === 'global' ? VERTEX_GLOBAL_PREMIUM : VERTEX_REGIONAL_PREMIUM;
 }
 
-// Gemini pricing (2026-07-01 non-global +10% 発動済み、今日 2026-07-09)
+// Gemini pricing (M4-C Phase 2: 2026-07-09 pinning)
 // biblio-claw の実運用モデル:
 //   - INSPECT_DANGEROUS_MODEL=gemini-2.5-flash (k8s/10-orchestrator-statefulset.yaml:184)
 //   - GATE_MODEL=gemini-3.1-flash-lite (k8s/10-orchestrator-statefulset.yaml:238)
+//
+// Gemini は `PROVIDER_APPLIES_VERTEX_PREMIUM.gemini = false` で cost-calculator の premium
+// 適用対象外。biblio-claw の Prod は `CLOUD_ML_REGION=global` 明示指定のため、
+// 本 table は **Vertex Global 単価** (base 値、+10% 前) を hardcode する。
+// 将来 non-global 経路に切替える場合は本 table を +10% or PROVIDER_APPLIES_VERTEX_PREMIUM を
+// true に切替 (両建ては禁止、二重乗算になる)。
 export const GEMINI_PRICING = {
-  'gemini-2.5-flash': { input: 0.3, output: 2.5 }, // Vertex regional 実効値
-  'gemini-3.1-flash-lite': { input: 0.275, output: 1.65 }, // non-global (2026-07-01〜)
+  // review R6 (I5/S7): SOURCE を Vertex 公式 pricing ページと Google Developer API pricing の
+  // 2 出典で交差検証。数値が両方で一致することを Prod 請求書 1-2 週分蓄積後 (Phase 3) に突合予定。
+  // SOURCE (primary): https://cloud.google.com/vertex-ai/generative-ai/pricing (Vertex AI Generative AI pricing 公式)
+  // SOURCE (secondary): https://ai.google.dev/gemini-api/docs/pricing (Gemini Developer API pricing、Vertex とは別課金体系だが Global 単価は現状一致)
+  // Vertex regional (asia-northeast1 等) は +10% 想定、biblio-claw は CLOUD_ML_REGION=global 明示のため base 値
+  'gemini-2.5-flash': { input: 0.3, output: 2.5 },
+  // review R6 (I5/S7): URL typo fix (旧: `/gemini-3-1-flash-lite/` 直下、正: `/gemini-models/gemini-3-1-flash-lite/`)
+  // SOURCE (primary): https://cloud.google.com/vertex-ai/generative-ai/pricing (Vertex AI Generative AI pricing 公式)
+  // SOURCE (secondary): https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-3-1-flash-lite/
+  // Global $0.25/$1.50、non-global $0.275/$1.65 (+10%、2026-07-01 発動済)
+  // biblio-claw は CLOUD_ML_REGION=global 明示のため Global 値。Prod 請求書 1-2 週分蓄積後
+  // (Phase 3 送り) で実測突合予定、精密化差分は runbook §M4-C Phase 2 運用 memo に記録
+  'gemini-3.1-flash-lite': { input: 0.25, output: 1.5 },
 } as const;
 
 export type AnthropicModelId = keyof typeof ANTHROPIC_PRICING;

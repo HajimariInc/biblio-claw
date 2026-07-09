@@ -1,4 +1,5 @@
 import { postSlackMessage, SlackApiError } from '@chat-adapter/slack/api';
+import type { SlackBlock } from '@chat-adapter/slack/blocks';
 import { log } from '../log.js';
 
 // @chat-adapter/slack@4.30.0 の SlackApiError は HTTP status を持つが、Retry-After header は
@@ -10,7 +11,11 @@ const RATE_LIMIT_BACKOFF_MS = 30_000;
 export interface PostReportOptions {
   channel: string;
   text: string;
-  blocks?: unknown[];
+  // review R6 (S4): `unknown[]` optional → `SlackBlock[]` required に締める。
+  // vendor 側の `SlackMessageOptions.blocks?: unknown[]` の緩さは biblio-claw 側で
+  // 型付き shape 経由でしか渡さないように強制。呼出元 (`scripts/reporting-cronjob.ts`) は
+  // `formatBiblioUsageSummary` の `{text, blocks}` を分割代入して常に両方渡す想定。
+  blocks: SlackBlock[];
   requestId?: string;
   // 明示指定用 (test 経路の DI)、default は process.env.SLACK_BOT_TOKEN
   botToken?: string;
