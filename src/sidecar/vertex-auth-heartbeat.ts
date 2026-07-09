@@ -119,14 +119,47 @@ async function probeAdkRoute(): Promise<void> {
 async function probeOneCliRoute(): Promise<void> {
   const region = process.env.CLOUD_ML_REGION ?? 'global';
   const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
-  const url = `https://${host}/v1/publishers/anthropic/models`;
+  const projectId = process.env.ANTHROPIC_VERTEX_PROJECT_ID ?? '';
+  if (!projectId) {
+    log.warn('vertex-auth-heartbeat (onecli): ANTHROPIC_VERTEX_PROJECT_ID unset, skipping probe', {
+      event: 'vertex.auth.heartbeat_skip',
+      channel: 'onecli',
+      reason: 'project_id_unset',
+    });
+    return;
+  }
+  const probeModel = process.env.HEARTBEAT_PROBE_MODEL ?? DEFAULT_HEARTBEAT_MODEL;
+  // 実 rawPredict endpoint (`vertex-client.ts:vertexUrl` と同 pattern)。
+  // Bearer placeholder = OneCLI MITM が wire で本物の ADC token に置換する経路の疎通確認。
+  // Vertex list 系 endpoint (`/v1/publishers/anthropic/models`) は project/location 不要だが
+  // Google front-end の generic 404 を返し実 Vertex に到達しないため、rawPredict を採る。
+  // 実 model 呼出コスト: max_tokens=1 + content='ping' = ~5 tokens (無視できる)。
+  const url =
+    `https://${host}/v1/projects/${projectId}/locations/${region}` +
+    `/publishers/anthropic/models/${probeModel}:rawPredict`;
+  const body = JSON.stringify({
+    anthropic_version: 'vertex-2023-10-16',
+    messages: [{ role: 'user', content: 'ping' }],
+    max_tokens: 1,
+  });
   try {
     const res = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: 'Bearer placeholder' },
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // OneCLI MITM が wire で本物の ADC Bearer に置き換える。
+        Authorization: 'Bearer placeholder',
+      },
+      body,
       signal: AbortSignal.timeout(HEARTBEAT_TIMEOUT_MS),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      // 429 false-positive ガードのため status を保持する custom Error を throw
+      // (`Error(`HTTP ${res.status}`)` だと catch 側で `.status` を拾えず 429 分岐が dead code 化する)。
+      throw Object.assign(new Error(`HTTP ${res.status} ${res.statusText}`), {
+        status: res.status,
+      });
+    }
     consecutiveFailures.onecli = 0;
     log.info('vertex.auth.heartbeat_ok (onecli)', {
       event: 'vertex.auth.heartbeat_ok',

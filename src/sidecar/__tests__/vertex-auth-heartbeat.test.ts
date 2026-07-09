@@ -140,10 +140,46 @@ describe('vertex-auth-heartbeat', () => {
 
   it('OneCLI 経路 fetch 失敗も consecutive カウントされる (別独立)', async () => {
     vertexClientCreate.mockResolvedValue({ content: [] });
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, status: 500 } as Response);
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 500, statusText: 'Internal Server Error' } as Response);
 
     await mod.heartbeatTick();
     expect(mod.getVertexAuthHeartbeatFailureCounts().adk).toBe(0);
     expect(mod.getVertexAuthHeartbeatFailureCounts().onecli).toBe(1);
+  });
+
+  it('OneCLI 経路 429 は fatal counter に含めない (rate_limited event 発火、review Important 1 対応)', async () => {
+    vertexClientCreate.mockResolvedValue({ content: [] });
+    // Response.status = 429 → Object.assign で status 保持型 Error を throw する経路の
+    // regression 対策 (`new Error()` に status を埋め込まない実装だと 429 分岐が dead code 化する)。
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 429, statusText: 'Too Many Requests' } as Response);
+
+    await mod.heartbeatTick();
+    expect(mod.getVertexAuthHeartbeatFailureCounts().onecli).toBe(0);
+    const rateLimited = warnCalls.some((call) => {
+      const payload = (call as unknown[])[1] as { outcome?: string; channel?: string } | undefined;
+      return payload?.outcome === 'rate_limited' && payload?.channel === 'onecli';
+    });
+    expect(rateLimited).toBe(true);
+  });
+
+  it('OneCLI 経路 project_id 未設定時は skip (fail-open)', async () => {
+    delete process.env.ANTHROPIC_VERTEX_PROJECT_ID;
+    vertexClientCreate.mockResolvedValue({ content: [] });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    globalThis.fetch = fetchMock;
+
+    await mod.heartbeatTick();
+    // OneCLI 経路の fetch が呼ばれない
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mod.getVertexAuthHeartbeatFailureCounts().onecli).toBe(0);
+    const skipWarn = warnCalls.some((call) => {
+      const payload = (call as unknown[])[1] as { event?: string; reason?: string } | undefined;
+      return payload?.event === 'vertex.auth.heartbeat_skip' && payload?.reason === 'project_id_unset';
+    });
+    expect(skipWarn).toBe(true);
   });
 });

@@ -4,9 +4,13 @@ issue #136 E: Vertex 認証 heartbeat 失敗の Slack 通知 (Cloud Monitoring a
 
 ## 概要
 
-`src/sidecar/vertex-auth-heartbeat.ts` が 5min 周期で emit する
-`vertex.auth.heartbeat_failed` event を Cloud Logging → log-based alert で監視する
-Terraform module。5min 内に 3 回以上発火したら Slack 通知に飛ばす。
+`src/sidecar/vertex-auth-heartbeat.ts` が 5min 周期で probe に失敗したときに emit する
+`vertex.401.forensic_dump` (`request_id: 'heartbeat'` が付く) を Cloud Logging → log-based
+alert で監視する Terraform module。5min 内に 3 回以上発火したら Slack 通知に飛ばす。
+
+**注**: heartbeat 経路と実 request 経路の両方が同じ event 名 `vertex.401.forensic_dump` を
+emit するため、alert filter では `request_id="heartbeat"` で heartbeat 発火分だけを絞り込む
+(実 patron request の 401 は #137 の自浄機能で扱う)。
 
 epic 3 段:
 - **#136 (本 module)**: observability の実装 (原因層 4 分類が特定可能な状態まで) + Slack alert
