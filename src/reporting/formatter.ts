@@ -1,6 +1,13 @@
 import { aggregateCosts, type UsageInput } from './cost-calculator.js';
 
 // 4 種レポート結果 → Slack DM plain text (Phase 1 スコープ。Phase 2 で Data Table Block 化)。
+//
+// QueryOutcome<T>:
+//   BQ query の「成功 (rows)」と「失敗 (error)」を型で区別する discriminated union。
+//   `safeRunQuery` (scripts/reporting-cronjob.ts) が空返し正規化を止め、本 union で伝搬する
+//   ように R4 (2026-07-09 review 反映) で導入。formatter は `if (!outcome.ok)` で
+//   失敗セクションを「⚠️ 取得失敗 (BQ query error)」に切替え、活動なしと SQL 失敗を区別する。
+export type QueryOutcome<T = unknown> = { ok: true; rows: T[] } | { ok: false };
 
 export interface BiblioUsageRow {
   action: string;
@@ -21,53 +28,76 @@ export interface LlmCostRow {
 
 export interface ReportInput {
   windowDays: number;
-  biblio: unknown[];
-  inspect: unknown[];
-  errorTrend: unknown[];
-  llmCost: unknown[];
+  biblio: QueryOutcome;
+  inspect: QueryOutcome;
+  errorTrend: QueryOutcome;
+  llmCost: QueryOutcome;
 }
 
-// BigQuery v8 client は SUM(INT64) を number で返すが、BIGNUM や BIGINT の場合は
-// {value: string} 形式の BigQueryInt が返るケースがある。両対応するための coerce。
-function toNumber(v: unknown): number {
+// BigQuery v8 client は default (`wrapIntegers: false`) で SUM(INT64) を plain number として返す。
+// 将来 wrapIntegers を有効化した場合や、SDK 挙動変化 (BIGNUMERIC 導入等) に備えた防御的 coerce。
+// SDK 実装: wrapIntegers=true 時は BigQueryInt (Number 継承 + `.value` / `.type` を持つ shape) が返る。
+// R5 (2026-07-09) で silent 0 丸めを検知する warnings 経路を追加。呼出側は returned tuple を使う。
+export interface NormalizeReport {
+  warnings: string[];
+}
+
+function toNumber(v: unknown, warnings?: NormalizeReport['warnings']): number {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string') {
     const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
+    if (Number.isFinite(n)) return n;
+    warnings?.push(`row: non-numeric string coerced to 0 (raw: "${v}")`);
+    return 0;
   }
   if (v && typeof v === 'object' && 'value' in v) {
     const n = Number((v as { value: unknown }).value);
-    return Number.isFinite(n) ? n : 0;
+    if (Number.isFinite(n)) return n;
+    warnings?.push('row: BigQueryInt shape parse failed, coerced to 0');
+    return 0;
   }
+  if (v === null || v === undefined) {
+    // BQ NULL 返却は正当 (集計対象データが 0 件のケース等)。silent 0 で処理し warning は出さない。
+    return 0;
+  }
+  warnings?.push(`row: unexpected shape (${typeof v}) coerced to 0`);
   return 0;
 }
 
-function toStr(v: unknown): string {
-  return typeof v === 'string' ? v : String(v ?? '');
+function toStr(v: unknown, warnings?: NormalizeReport['warnings']): string {
+  if (typeof v === 'string') return v;
+  if (v === null || v === undefined) {
+    warnings?.push('row: null/undefined string coerced to "(unknown)"');
+    return '(unknown)';
+  }
+  return String(v);
 }
 
-function normalizeBiblioRow(r: unknown): BiblioUsageRow {
+function normalizeBiblioRow(r: unknown, warnings: NormalizeReport['warnings']): BiblioUsageRow {
   const row = (r as Record<string, unknown>) ?? {};
   return {
-    action: toStr(row.action),
-    outcome: toStr(row.outcome),
-    cnt: toNumber(row.cnt),
+    action: toStr(row.action, warnings),
+    outcome: toStr(row.outcome, warnings),
+    cnt: toNumber(row.cnt, warnings),
   };
 }
 
-function normalizeLlmCostRow(r: unknown): LlmCostRow {
+function normalizeLlmCostRow(r: unknown, warnings: NormalizeReport['warnings']): LlmCostRow {
   const row = (r as Record<string, unknown>) ?? {};
   return {
-    model: toStr(row.model),
-    call_count: toNumber(row.call_count),
-    total_tokens_in: toNumber(row.total_tokens_in),
-    total_tokens_out: toNumber(row.total_tokens_out),
-    total_cache_read: 'total_cache_read' in row ? toNumber(row.total_cache_read) : undefined,
-    total_cache_creation: 'total_cache_creation' in row ? toNumber(row.total_cache_creation) : undefined,
+    model: toStr(row.model, warnings),
+    call_count: toNumber(row.call_count, warnings),
+    total_tokens_in: toNumber(row.total_tokens_in, warnings),
+    total_tokens_out: toNumber(row.total_tokens_out, warnings),
+    total_cache_read: 'total_cache_read' in row ? toNumber(row.total_cache_read, warnings) : undefined,
+    total_cache_creation: 'total_cache_creation' in row ? toNumber(row.total_cache_creation, warnings) : undefined,
   };
 }
 
-function formatBiblio(rows: BiblioUsageRow[]): string {
+function formatBiblio(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
+  if (!outcome.ok)
+    return '📚 biblio 利用: ⚠️ 取得失敗 (BQ query error、Cloud Logging の reporting.biblio-usage_failed を確認)';
+  const rows = outcome.rows.map((r) => normalizeBiblioRow(r, warnings));
   if (rows.length === 0) return '📚 biblio 利用: 活動なし';
   const perAction = new Map<string, Map<string, number>>();
   for (const r of rows) {
@@ -87,7 +117,10 @@ function formatBiblio(rows: BiblioUsageRow[]): string {
   return `📚 biblio 利用: ${parts.join(' / ')}`;
 }
 
-function formatLlmCost(rows: LlmCostRow[]): string {
+function formatLlmCost(outcome: QueryOutcome, warnings: NormalizeReport['warnings']): string {
+  if (!outcome.ok)
+    return '💰 LLM コスト: ⚠️ 取得失敗 (BQ query error、Cloud Logging の reporting.llm-cost_failed を確認)';
+  const rows = outcome.rows.map((r) => normalizeLlmCostRow(r, warnings));
   if (rows.length === 0) return '💰 LLM コスト: 呼出記録なし';
   const usages: UsageInput[] = rows.map((r) => ({
     model: r.model,
@@ -117,11 +150,24 @@ function formatLlmCost(rows: LlmCostRow[]): string {
   return lines.join('\n');
 }
 
+function sectionPlaceholder(kind: '検品分布' | 'エラー傾向', outcome: QueryOutcome, icon: string): string {
+  // 雛形 (Phase 2 で完成予定) だが、SQL 失敗経路は「Phase 2 実装予定」ではなく実障害として扱う。
+  if (!outcome.ok) return `${icon} ${kind}: ⚠️ 取得失敗 (BQ query error)`;
+  return `${icon} ${kind}: Phase 2 で実装`;
+}
+
 export function formatBiblioUsageSummary(input: ReportInput): string {
+  const warnings: string[] = [];
   const header = `📊 biblio-claw 週次レポート (直近 ${input.windowDays} 日)`;
-  const biblio = formatBiblio(input.biblio.map(normalizeBiblioRow));
-  const inspect = '⚠️ 検品分布: Phase 2 で実装';
-  const errorTrend = '🚨 エラー傾向: Phase 2 で実装';
-  const llmCost = formatLlmCost(input.llmCost.map(normalizeLlmCostRow));
-  return [header, biblio, inspect, errorTrend, llmCost].join('\n\n');
+  const biblio = formatBiblio(input.biblio, warnings);
+  const inspect = sectionPlaceholder('検品分布', input.inspect, '⚠️');
+  const errorTrend = sectionPlaceholder('エラー傾向', input.errorTrend, '🚨');
+  const llmCost = formatLlmCost(input.llmCost, warnings);
+  const sections = [header, biblio, inspect, errorTrend, llmCost];
+  if (warnings.length > 0) {
+    // formatter 側で検知した row shape 異常は Slack DM 末尾に注記 (silent 0 丸めの可視化)。
+    const unique = Array.from(new Set(warnings));
+    sections.push(`⚠️ データ整形 warning: ${unique.join(' / ')}`);
+  }
+  return sections.join('\n\n');
 }

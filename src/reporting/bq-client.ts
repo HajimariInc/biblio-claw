@@ -22,6 +22,8 @@ export interface RunQueryOptions {
 // - location: 'asia-northeast1' を毎回明示 (SDK デフォルト "US" 依存を排除)
 // - SDK が rate limit / backend error に対して指数バックオフで自動 retry (default 最大 3 回)。
 //   CronJob 側で二重 retry ループを書かない (呼出側が silent multiplier を持たない契約)。
+// - **失敗時は log を出さず throw のみ**。呼出側 (`safeRunQuery` in reporting-cronjob.ts) が
+//   1 箇所で severity 判断 + err payload 込みで `log.error` 集約する契約 (R4 修正、二重 severity log 撲滅)。
 export async function runQuery<T = Record<string, unknown>>(
   sql: string,
   params?: Record<string, unknown>,
@@ -30,28 +32,17 @@ export async function runQuery<T = Record<string, unknown>>(
   const startAt = Date.now();
   const requestId = opts.requestId;
   const bigquery = getClient();
-  try {
-    const [rows] = await bigquery.query({
-      query: sql,
-      location: BQ_LOCATION,
-      params,
-    });
-    log.info('reporting.bq_query_succeeded', {
-      event: 'reporting.bq_query_succeeded',
-      outcome: 'success',
-      request_id: requestId,
-      row_count: rows.length,
-      duration_ms: Date.now() - startAt,
-    });
-    return rows as T[];
-  } catch (err) {
-    log.error('reporting.bq_query_failed', {
-      event: 'reporting.bq_query_failed',
-      outcome: 'error',
-      request_id: requestId,
-      duration_ms: Date.now() - startAt,
-      err,
-    });
-    throw err;
-  }
+  const [rows] = await bigquery.query({
+    query: sql,
+    location: BQ_LOCATION,
+    params,
+  });
+  log.info('reporting.bq_query_succeeded', {
+    event: 'reporting.bq_query_succeeded',
+    outcome: 'success',
+    request_id: requestId,
+    row_count: rows.length,
+    duration_ms: Date.now() - startAt,
+  });
+  return rows as T[];
 }
