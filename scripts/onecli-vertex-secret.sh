@@ -63,6 +63,15 @@ fi
 # shellcheck source=scripts/onecli-lib.sh
 . "${ROOT}/scripts/onecli-lib.sh"
 
+# --- rotator 構造化ログ (issue #136 A1) ---
+# rotate-log.sh は set -u 配下で COMPONENT_NAME を要求 (json build で使う)。
+# vertex-rotate.sh wrapper 経由では COMPONENT_NAME=vertex-token-rotator が set 済、
+# host 直叩き経路 (local 端末から `bash scripts/onecli-vertex-secret.sh`) では
+# 未設定なので fallback を先に決める (source-time の unbound エラー回避)。
+: "${COMPONENT_NAME:=${LOG_COMPONENT:-vertex-rotator-oneshot}}"
+# shellcheck source=scripts/rotate-log.sh
+. "${ROOT}/scripts/rotate-log.sh"
+
 # --- 依存確認 ---
 for c in curl jq gcloud; do
   command -v "$c" >/dev/null 2>&1 || fail "必須コマンドが見つかりません: $c"
@@ -95,7 +104,7 @@ secret_id() {
 # upsert_gh_secret パターンを写経 (= v1.30.0 で PATCH の value 単独更新が動作
 # することは GH 経路で実証済)。
 ensure_secret() {
-  local host token id
+  local host token id token_iat token_exp token_hash prev_id id_after
   host="$(vertex_host)"
   # gcloud の stderr は捨てない。失敗時の理由 (credential 破損 / permission /
   # クォータ等) がユーザーに見えないと debug 不能になる。ADC token 自体は
@@ -103,7 +112,17 @@ ensure_secret() {
   token="$(gcloud auth application-default print-access-token)" \
     || fail "ADC アクセストークン取得に失敗 (上の gcloud エラーを確認。未ログインなら: gcloud auth application-default login --project ${ANTHROPIC_VERTEX_PROJECT_ID})"
   [ -n "$token" ] || fail "ADC アクセストークンが空"
+
+  # issue #136 A1: token lifecycle を JWT iat/exp + hash で追跡可能に。
+  # 失敗時は fail-open (rotation を止めない) で空値 fallback + warn。
+  # GKE Workload Identity 経路の ADC token は opaque `ya29.*` 形式が主流 = JWT decode
+  # は原理不可能 (Cloud docs で明示)。iat/exp は「取れたら儲けもの」= hash が主戦力。
+  token_iat="$(jwt_decode_iat "$token" 2>/dev/null || printf '')"
+  token_exp="$(jwt_decode_exp "$token" 2>/dev/null || printf '')"
+  token_hash="$(token_sha256_12 "$token" 2>/dev/null || printf '')"
+
   id="$(secret_id)"
+  prev_id="$id"
   if [ -z "$id" ] || [ "$id" = "null" ]; then
     info "[secret] 未存在 → POST /v1/secrets で作成 (name=$VERTEX_SECRET_NAME / host=$host / pathPattern=omitted / header=authorization)"
     ( set -o pipefail
@@ -122,7 +141,17 @@ ensure_secret() {
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
   fi
+  id_after="$(secret_id)"
   unset SECRET_TOKEN token
+
+  # issue #136 A1: rotator injection 完了時に構造化ログを emit。
+  # BQ 相関で「401 発生時刻より前の直近 rotator emit」を JOIN する台になる。
+  # secret_id_prev / secret_id_after 一致 = 意図せず削除+再作成された経路の検知。
+  log_event_with_fields INFO vertex.rotator.token_injected success \
+    "Vertex ADC token injected" \
+    "token_iat=${token_iat}" "token_exp=${token_exp}" "token_hash=${token_hash}" \
+    "secret_id_prev=${prev_id}" "secret_id_after=${id_after}"
+
   ok "Vertex secret 投入 OK (name=${VERTEX_SECRET_NAME} / type=generic / host=${host} / headerName=authorization / valueFormat=Bearer {value} / 値はマスク)"
 }
 

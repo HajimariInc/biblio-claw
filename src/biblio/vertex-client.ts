@@ -44,6 +44,7 @@ import {
   extractVertexUsage,
 } from '../observability/genai.js';
 import { getTracer } from '../observability/index.js';
+import { buildVertexForensicPayload } from '../adk/vertex-forensic.js';
 import { getProxyState } from './host-proxy.js';
 
 /** region 既定値 — providers/claude.ts と同値 (CLOUD_ML_REGION 未設定なら global)。 */
@@ -302,6 +303,27 @@ export async function callVertexGemini(args: VertexCallArgs, ctx?: VertexCallCtx
               bodyErr,
             });
           }
+          // issue #136 Step 5-c: 401 forensic dump 発火 (channel='onecli')。
+          // OneCLI MITM 経路のため SDK 層 Authorization capture 不能 = auth_token_* は空値。
+          // rotator log の token_hash を BQ で JOIN する運用 (correlation SQL 参照)。
+          if (res.status === 401) {
+            log.error(
+              'vertex.401 forensic dump (channel=onecli)',
+              buildVertexForensicPayload({
+                channel: 'onecli',
+                requestId: ctx?.requestId ?? '',
+                sessionId: ctx?.sessionId ?? '',
+                channelType: '',
+                authTokenIat: null,
+                authTokenExp: null,
+                authTokenHash: '',
+                authCaptureError: 'not_available_on_onecli_route',
+                httpStatus: 401,
+                err: new Error(bodyText.slice(0, 500)),
+                span,
+              }),
+            );
+          }
           log.warn(
             'vertex.call failed',
             vertexLogFields(ctx, modelId, {
@@ -451,6 +473,13 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
           headers: {
             'Content-Type': 'application/json',
             // OneCLI MITM が wire で本物の ADC Bearer に置き換える (callVertexGemini と同じ流儀)。
+            //
+            // issue #136 A3-b: 本経路 (経路 2 = OneCLI MITM) では SDK 層で「送信された本物の
+            // Authorization」を capture することは原理的に不可能 (wire 上で OneCLI proxy が置換)。
+            // 代わりに rotator layer で emit した `vertex.rotator.token_injected` event の
+            // `token_hash` を BQ で JOIN する運用に倒す (correlation SQL 参照)。
+            // 401 時は orchestrator 側 `getLastVertexSecretSnapshot()` 経由で OneCLI secret 状態
+            // (secret_id / observed_at_epoch / found) を forensic dump に注入して相関を強化。
             Authorization: 'Bearer placeholder',
           },
           body: JSON.stringify(body),
@@ -468,6 +497,26 @@ export async function callVertexAnthropic(args: VertexAnthropicCallArgs, ctx?: V
               status: res.status,
               bodyErr,
             });
+          }
+          // issue #136 Step 5-c: Anthropic rawPredict 経路の 401 forensic dump。
+          // 経路 2 (OneCLI MITM) の主戦力 = 経路 2 で 401 が返る主経路。
+          if (res.status === 401) {
+            log.error(
+              'vertex.401 forensic dump (channel=onecli)',
+              buildVertexForensicPayload({
+                channel: 'onecli',
+                requestId: ctx?.requestId ?? '',
+                sessionId: ctx?.sessionId ?? '',
+                channelType: '',
+                authTokenIat: null,
+                authTokenExp: null,
+                authTokenHash: '',
+                authCaptureError: 'not_available_on_onecli_route',
+                httpStatus: 401,
+                err: new Error(bodyText.slice(0, 500)),
+                span,
+              }),
+            );
           }
           log.warn(
             'vertex.call failed',
@@ -634,6 +683,25 @@ export async function callVertexGeminiJson(args: VertexJsonCallArgs, ctx?: Verte
               status: res.status,
               bodyErr,
             });
+          }
+          // issue #136 Step 5-c: Gemini JSON 経路の 401 forensic dump (経路 2)。
+          if (res.status === 401) {
+            log.error(
+              'vertex.401 forensic dump (channel=onecli)',
+              buildVertexForensicPayload({
+                channel: 'onecli',
+                requestId: ctx?.requestId ?? '',
+                sessionId: ctx?.sessionId ?? '',
+                channelType: '',
+                authTokenIat: null,
+                authTokenExp: null,
+                authTokenHash: '',
+                authCaptureError: 'not_available_on_onecli_route',
+                httpStatus: 401,
+                err: new Error(bodyText.slice(0, 500)),
+                span,
+              }),
+            );
           }
           log.warn(
             'vertex.call failed',

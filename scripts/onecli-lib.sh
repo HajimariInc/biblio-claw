@@ -89,3 +89,56 @@ set_all_agents_mode_all() {
     ok "secret-mode=all を ${n} 件の agent に適用"
   fi
 }
+
+# --- JWT decode / SHA256 helpers (issue #136 A1) ---------------------------
+# rotator layer で ADC token の lifecycle を BQ 相関可能にするための構造化ログ用 helper。
+# 全て fail-open (= decode 失敗しても rotation を止めない) 設計:
+#   - JWT decode 失敗 → 空文字を返す (呼出側は空文字なら「decode 不能」と扱う)
+#   - openssl / base64 が無い環境 → 空文字を返す
+# 生 token を argv に残さないため、呼出側は必ず変数経由 (= "$1" 参照) で渡し、
+# stdin を汚さない設計。
+
+# base64url → base64 変換 + padding 補完で decode。busybox base64 (Alpine) と
+# coreutils base64 (Debian) の両方で `-d` decode を採る。JSON.parse は shell では
+# jq 依存になるため、単純な iat/exp のみ regex で切り出す。iat/exp は数値なので
+# `"iat":<number>` 形式のみ match、負値 / hex は Vertex ADC の仕様外 = 想定外。
+_jwt_decode_payload() {
+  # payload (2 番目の segment) を base64url decode → utf-8 string で stdout 出力。
+  local token="$1" payload out
+  payload="$(printf '%s' "$token" | cut -d. -f2 2>/dev/null)"
+  [ -n "$payload" ] || return 1
+  # base64url → base64 変換 ('-'→'+', '_'→'/'、= padding 補完)
+  out="$(printf '%s' "$payload" \
+    | tr '_-' '/+' \
+    | awk '{ l=length; p=(4-l%4)%4; while(p-->0) $0=$0"="; print }' \
+    | base64 -d 2>/dev/null)" || return 1
+  printf '%s' "$out"
+}
+
+# JWT payload の `iat` claim (unix sec) を stdout に返す。失敗 or opaque token
+# (= `ya29.*` access token = JWT 形式でない) は空文字 (fail-open)。
+jwt_decode_iat() {
+  local token="$1" payload
+  payload="$(_jwt_decode_payload "$token" 2>/dev/null)" || { printf ''; return 0; }
+  # `"iat":<digits>` の <digits> を抽出。sed は BSD / GNU 両対応の basic regex 記法。
+  # awk / grep -oE の方が読みやすいが、BusyBox でも動くこと最優先。
+  printf '%s' "$payload" | grep -oE '"iat"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | head -n1 | grep -oE '[0-9]+' | head -n1
+}
+
+# JWT payload の `exp` claim (unix sec) を stdout に返す。失敗時は空文字。
+jwt_decode_exp() {
+  local token="$1" payload
+  payload="$(_jwt_decode_payload "$token" 2>/dev/null)" || { printf ''; return 0; }
+  printf '%s' "$payload" | grep -oE '"exp"[[:space:]]*:[[:space:]]*[0-9]+' \
+    | head -n1 | grep -oE '[0-9]+' | head -n1
+}
+
+# SHA256 hash 先頭 12 hex chars を stdout に返す (`fugue-rate-limit.ts:tokenDigest`
+# pattern の bash 版)。生 token を argv に残さないよう変数経由 + `printf` で stdin 化。
+# 失敗時は空文字を返す (sha256sum が無い環境等)。
+token_sha256_12() {
+  local token="$1" hash
+  hash="$(printf '%s' "$token" | sha256sum 2>/dev/null | cut -c1-12)" || { printf ''; return 0; }
+  printf '%s' "$hash"
+}

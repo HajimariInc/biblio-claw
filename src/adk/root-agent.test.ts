@@ -58,6 +58,25 @@ vi.mock('@anthropic-ai/vertex-sdk', () => ({
   },
 }));
 
+// issue #136 Step 3-b: AnthropicVertexLlm constructor が `new GoogleAuth()` を呼び、
+// generateContentAsync 内で `googleAuth.getClient().getRequestHeaders()` を叩く。
+// test 環境で metadata server に到達を試みて hang するのを避けるため mock 化する
+// (実 auth 経路の smoke は scripts/verify-phase-1-adk-local.ts が担う)。
+vi.mock('google-auth-library', () => ({
+  GoogleAuth: class {
+    constructor(_opts: unknown) {
+      // no-op
+    }
+    async getClient() {
+      return {
+        async getRequestHeaders(): Promise<Record<string, string>> {
+          return { Authorization: 'Bearer test-mock-token' };
+        },
+      };
+    }
+  },
+}));
+
 vi.mock('../biblio/acquire.js', () => ({
   acquire: (...args: unknown[]) => acquireMock(...args),
 }));
