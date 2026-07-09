@@ -85,7 +85,7 @@ export function formatError(err) {
       + `\`biblio-orchestrator@${gcpProjectId}.iam.gserviceaccount.com\` に `
       + '「閲覧者」権限が付いていないと 403 になる。patron に Drive の共有追加を依頼して。';
   } else if (status === 404) {
-    hint = 'ファイル / フォルダが存在しない (削除済 or 存在しない ID)。';
+    hint = 'ファイル / フォルダが存在しない (削除済 or 存在しない ID)。共有ドライブの場合は Drive フォルダの共有先に SA が含まれているか確認。';
   }
   const base = err instanceof Error ? err.message : String(err);
   // err.cause (Node native fetch の system error) を末尾に追記して patron / 呼出側の
@@ -189,6 +189,13 @@ export async function listFiles(args) {
   const params = new URLSearchParams({
     pageSize: String(pageSize),
     fields: 'files(id,name,mimeType,modifiedTime,size),nextPageToken',
+    // Shared Drive 対応: supportsAllDrives が「app が Shared Drive を扱える」宣言、
+    // includeItemsFromAllDrives が list 応答に Shared Drive item を含める許可。
+    // 両方揃うと corpora=user (default) のまま Shared Drive folder scope 検索が可能
+    // (Google 公式 enable-shareddrives guide の query mode 表)。My Drive 経路は
+    // corpora 不変のため regression なし。
+    supportsAllDrives: 'true',
+    includeItemsFromAllDrives: 'true',
   });
   params.set('q', folderId ? `'${folderId}' in parents and trashed=false` : 'trashed=false');
   const url = `${DRIVE_BASE}/files?${params.toString()}`;
@@ -208,14 +215,14 @@ export async function getFile(args) {
       ? args.export_mime
       : 'text/plain';
 
-  const metaUrl = `${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size`;
+  const metaUrl = `${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?fields=id,name,mimeType,size&supportsAllDrives=true`;
   const metaRes = await driveFetch(metaUrl);
   const meta = await metaRes.json();
 
   const isGoogleDoc
     = typeof meta.mimeType === 'string' && meta.mimeType.startsWith('application/vnd.google-apps.');
   if (isGoogleDoc) {
-    const exportUrl = `${DRIVE_BASE}/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(exportMime)}`;
+    const exportUrl = `${DRIVE_BASE}/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(exportMime)}&supportsAllDrives=true`;
     const exportRes = await driveFetch(exportUrl);
     const content = await exportRes.text();
     return { ...meta, content, encoding: 'text' };
@@ -238,7 +245,7 @@ export async function getFile(args) {
         + `(fileId=${fileId} mimeType=${meta.mimeType})`,
     );
   }
-  const downloadUrl = `${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?alt=media`;
+  const downloadUrl = `${DRIVE_BASE}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`;
   const dlRes = await driveFetch(downloadUrl);
   const buf = Buffer.from(await dlRes.arrayBuffer());
   if (buf.byteLength > MAX_BIN_BYTES) {
