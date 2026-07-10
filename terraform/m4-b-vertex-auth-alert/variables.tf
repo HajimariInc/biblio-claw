@@ -18,7 +18,7 @@ variable "notification_channel_name" {
   description = <<-EOT
     Cloud Console で事前作成した Slack notification channel の resource name。
     形式: `projects/<PROJECT_ID>/notificationChannels/<numeric-id>`
-    (例: `projects/hajimari-ai-hackathon-2026/notificationChannels/10737247742413738863`)
+    (例: `projects/<your-gcp-project>/notificationChannels/10737247742413738863`)
 
     経緯 (issue #136 対応時、DEN さん判断):
       Google Cloud Monitoring 公式 app の Slack Bot User OAuth Token (`xoxb-*`) は Google 側
