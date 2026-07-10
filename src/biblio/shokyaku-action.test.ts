@@ -128,7 +128,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     expect(shokyakuMock).toHaveBeenCalledWith({ biblioName: 'owner--repo', category: 'biblio-ai' }, expect.anything());
@@ -153,7 +153,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -183,7 +183,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -202,7 +202,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -216,7 +216,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: '', category: 'biblio-ai' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     expect(shokyakuMock).not.toHaveBeenCalled();
@@ -231,7 +231,7 @@ describe('shokyaku_confirm approval handler — 承認後の実処理', () => {
     await approvalHandler({
       session: { id: 'sess-x' } as never,
       payload: { biblioName: 'owner--repo', category: 'biblio-ai' },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
     const notifiedText = notifyMock.mock.calls[0][0] as string;
@@ -274,7 +274,7 @@ describe('shokyaku approval handler — HITL 2 span 連結 (originating_request_
         category: 'biblio-ai',
         originating_request_id: 'req-shokyaku-original-uuid',
       },
-      userId: 'slack:U-DEN',
+      userId: 'slack:U-TEST-PATRON',
       notify: notifyMock,
     });
 

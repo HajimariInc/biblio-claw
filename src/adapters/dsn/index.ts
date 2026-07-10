@@ -2,9 +2,8 @@
  * DSN provider factory. Selected by the `DSN_PROVIDER` env var (default
  * `local`). Memoized — the host resolves a single provider for the process.
  *
- * No self-registration registry: with only local (Phase 1) and a future GCP
- * (Phase 2) implementation, an env switch is simpler and the known set stays
- * explicit (ARCHITECT decision, see plan §補足).
+ * No self-registration registry: with only local and GCP implementations, an
+ * env switch is simpler and the known set stays explicit.
  */
 import { GkeDsnProvider } from './gke.js';
 import { LocalDsnProvider } from './local.js';

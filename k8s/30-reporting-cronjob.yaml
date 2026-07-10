@@ -1,0 +1,120 @@
+# biblio-claw M4-C Phase 1: 週次 reporting CronJob
+#
+# 週次で BQ observability から 4 種レポート SQL を並列実行し、Slack owner DM に集計を投稿する。
+# 既存 orchestrator image を再利用 (専用 image は作らない = image 数を増やさない、
+# `.claude/PRPs/plans/phase-1-reporting-mvp.plan.md` §Design 判断メモ 参照)。
+#
+# Deploy (envsubst 経由):
+#   GCP_PROJECT_ID="<...>" IMAGE_TAG="<latest-orchestrator-tag>" OWNER_SLACK_USER_ID="<U...>" \
+#     envsubst < k8s/30-reporting-cronjob.yaml | kubectl apply -f -
+#
+# Manual trigger (verify 用):
+#   kubectl create job --from=cronjob/reporting-cronjob "manual-$(date +%s)" -n biblio-claw
+#
+# 前提となる Secret / IAM:
+#   * `biblio-slack-tokens` Secret に SLACK_BOT_TOKEN + SLACK_APP_TOKEN (既存、statefulset で
+#     envFrom optional: true で参照)。本 CronJob では通知が本体のため `optional: false` に格上げ。
+#   * `biblio-orchestrator-ksa` KSA + `biblio-orchestrator@` GSA の WI binding (既存)。
+#   * `terraform/m4-c-reporting/` apply 済 (`bigquery.jobUser` project-scoped +
+#     `bigquery.dataViewer` on `llm_observability` dataset-scoped)。
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reporting-cronjob
+  namespace: biblio-claw
+  labels:
+    app.kubernetes.io/name: biblio-claw
+    app.kubernetes.io/component: reporting
+spec:
+  # spec.timeZone: Asia/Tokyo で JST 直接解釈 = 実行時刻は毎週月曜 09:00 JST。
+  # K8s 1.27+ GA の timeZone フィールドは schedule 文字列をその TZ で解釈する
+  # (kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#time-zones)。
+  # UTC→JST の +9h 変換は不要 (これを混同すると schedule が 00:00 になる罠)。
+  schedule: "0 9 * * 1"
+  timeZone: "Asia/Tokyo"
+  # startingDeadlineSeconds は明示指定しない (default 挙動 = missed count ベースの寛容な再試行)。
+  # 「100 miss silent skip 罠」は分単位 cron が長期停止するケースで意味を持ち、週次では
+  # 100 回の miss (~ 2 年) は現実的でない。逆に短い値 (例: 200s = 3 分 20 秒) を指定すると、
+  # 月曜 09:00 JST に GKE 側の control-plane 一時不調が数分でも重なった瞬間、その週の Job
+  # が完全に silent skip され、Cloud Logging にも event が一切残らないため patron は永久に
+  # 検知できない (silent-failure-hunter 指摘、PR #202 review)。
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # backoffLimit=2 + activeDeadlineSeconds=300 = 最大 3 実行 x 5 分の hang 保険。
+      # activeDeadlineSeconds は backoffLimit に優先 (K8s doc)、無限 retry を撲滅。
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: biblio-claw
+            app.kubernetes.io/component: reporting
+        spec:
+          restartPolicy: Never
+          # 既存 orchestrator KSA を再利用 (1 workload = 1 GSA 原則、他 CronJob 経路
+          # と同様。Terraform m4-c-reporting module が本 KSA が assume する GSA に
+          # bigquery.jobUser + bigquery.dataViewer を付与済)。
+          serviceAccountName: biblio-orchestrator-ksa
+          containers:
+            - name: reporting
+              # 既存 orchestrator image を再利用。src/reporting/ + scripts/reporting-cronjob.ts +
+              # node_modules/@google-cloud/bigquery は同 image に同梱される。
+              image: asia-northeast1-docker.pkg.dev/${GCP_PROJECT_ID}/biblio-claw/biblio-claw:${IMAGE_TAG}
+              imagePullPolicy: Always
+              # tsx + OTel init + reporting-cronjob.ts。exec bun/tsx でシグナル転送を担保。
+              command:
+                - pnpm
+                - exec
+                - tsx
+                - --import
+                - ./src/instrumentation.ts
+                - scripts/reporting-cronjob.ts
+              envFrom:
+                # SLACK_BOT_TOKEN / SLACK_APP_TOKEN。本 CronJob は Slack 通知が本体のため
+                # optional: false に格上げ (Secret 未投入なら Pod 起動失敗 = fail-fast)。
+                - secretRef:
+                    name: biblio-slack-tokens
+                    optional: false
+              env:
+                # deploy 時 envsubst で literal 置換。CronJob 起動後は kubectl exec で
+                # env を上書きしない前提 (image-sync script との drift 監視は M4-C の scope 外)。
+                - { name: GCP_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
+                - { name: BQ_DATASET_ID, value: 'llm_observability' }
+                # Prod は orchestrator (`k8s/10-orchestrator-statefulset.yaml`) と同一の
+                # `global` 明示指定。未設定だと reporting 側 `resolveVertexPremium()` が
+                # regional premium (×1.10) fallback に倒れ、Anthropic の cost 集計が
+                # ~10% 過大計上される (実 Vertex 呼出は orchestrator 側で global 経路の
+                # base 単価課金のため、集計値と実請求が乖離する silent 障害)。
+                - { name: CLOUD_ML_REGION, value: 'global' }
+                - { name: REPORTING_WINDOW_DAYS, value: '7' }
+                # 2026-07-10 更新: user ID → auto DM channel open が Slack bot scope
+                # (permission or workspace 設定) 依存で `channel_not_found` を verify-m4-c.sh
+                # で検出したため、DM channel ID (`D...`) を直接指定する経路に切替。
+                # `.env` の既存 key `SLACK_OWNER_DM_CHANNEL_ID` を再利用 (envsubst 対象、
+                # image-sync script の envsubst list に SLACK_OWNER_DM_CHANNEL_ID 追加済)。
+                - { name: REPORTING_CHANNEL_ID, value: '${SLACK_OWNER_DM_CHANNEL_ID}' }
+                # patron (owner) の Slack user ID (`U...`)。deploy 時に envsubst で literal 置換。
+                # NOTE: `.env` 側の既存 key `SLACK_OWNER_USER_ID` を再利用 (2026-07-10、Phase 1
+                # で名前不整合 = OWNER_SLACK_USER_ID placeholder が envsubst 対象外で literal
+                # 残置 → channel_not_found を verify-m4-c.sh で検出)。reporting-cronjob.ts が
+                # 読む env 名は OWNER_SLACK_USER_ID のまま維持、右辺 placeholder のみ書き換え。
+                - { name: OWNER_SLACK_USER_ID, value: '${SLACK_OWNER_USER_ID}' }
+                # structured log emit の component field (Cloud Logging → BQ sink 側で
+                # jsonPayload.component として集約可能に)。
+                - { name: LOG_COMPONENT, value: 'reporting' }
+                - { name: LOG_FORMAT, value: 'json' }
+                # OTel service name/attrs は statefulset と対称 (biblio-claw 名前空間統一)。
+                - { name: OTEL_SERVICE_NAME, value: 'biblio-claw' }
+                - { name: OTEL_RESOURCE_ATTRIBUTES, value: 'deployment.environment=gke,component=reporting' }
+              resources:
+                # Autopilot の CPU:memory 比 1:1〜1:6.5 範囲内 (0.25 vCPU : 0.5 GiB = 1:2.0)。
+                # 短命 Pod (5 分以内自己終息) + BQ query の低 CPU 消費で minimal サイズ。
+                requests:
+                  cpu: '250m'
+                  memory: '512Mi'
+                limits:
+                  # Autopilot は cpu limit を自動 = requests、memory limit は明示可。
+                  memory: '512Mi'

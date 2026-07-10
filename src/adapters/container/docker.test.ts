@@ -42,12 +42,12 @@ function makeSpec(overrides: Partial<AgentSpawnSpec> = {}): AgentSpawnSpec {
     agentGroupName: 'Test Group',
     agentGroupFolder: 'test-group',
     sessionId: 's1',
-    image: 'nanoclaw-agent:latest',
+    image: 'test-agent:latest',
     mounts: [],
     env: [{ name: 'TZ', value: 'UTC' }],
     onecliApplyArgs: [],
     command: ['-c', 'exec bun run /app/src/index.ts'],
-    containerName: 'nanoclaw-test-1',
+    containerName: 'test-container-1',
     runAsUser: null,
     agentIdentifier: 'g1',
     ...overrides,
@@ -157,7 +157,7 @@ describe('DockerContainerRuntimeProvider.spawn', () => {
       'run',
       '--rm',
       '--name',
-      'nanoclaw-test-1',
+      'test-container-1',
       '--label',
       'nanoclaw-install=test-slug',
     ]);
@@ -171,7 +171,7 @@ describe('DockerContainerRuntimeProvider.spawn', () => {
     expect(args).toContain('/tmp/ca.pem:/tmp/ca.pem:ro');
     expect(args).toContain('--entrypoint');
     expect(args).toContain('bash');
-    expect(args).toContain('nanoclaw-agent:latest');
+    expect(args).toContain('test-agent:latest');
     expect(args).toContain('-c');
     expect(args).toContain('exec bun run /app/src/index.ts');
   });
@@ -248,7 +248,7 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
     const child = makeChild();
     spawnMock.mockReturnValueOnce(child);
     const p = new DockerContainerRuntimeProvider();
-    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-exit125' }));
+    const handle = await p.spawn(makeSpec({ containerName: 'test-exit125' }));
     const promise = handle.waitForExit();
 
     child.stderr.emit('data', Buffer.from('docker: Error response from daemon: invalid volume name\n'));
@@ -258,7 +258,7 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
       'Container exited with non-zero code — captured stderr:',
       expect.objectContaining({
-        containerName: 'nanoclaw-exit125',
+        containerName: 'test-exit125',
         exitCode: 125,
         stderr: expect.stringContaining('invalid volume name'),
       }),
@@ -269,7 +269,7 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
     const child = makeChild();
     spawnMock.mockReturnValueOnce(child);
     const p = new DockerContainerRuntimeProvider();
-    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-killed' }));
+    const handle = await p.spawn(makeSpec({ containerName: 'test-killed' }));
     const exitPromise = handle.waitForExit();
 
     child.stderr.emit('data', Buffer.from('shutdown\n'));
@@ -294,7 +294,7 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
     const child = makeChild();
     spawnMock.mockReturnValueOnce(child);
     const p = new DockerContainerRuntimeProvider();
-    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-oom' }));
+    const handle = await p.spawn(makeSpec({ containerName: 'test-oom' }));
     const promise = handle.waitForExit();
 
     // stderr buffer 空のまま signal 終了 (code=null)
@@ -304,7 +304,7 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
     expect(vi.mocked(log.warn)).toHaveBeenCalledWith(
       'Container exited unexpectedly (no stderr captured)',
       expect.objectContaining({
-        containerName: 'nanoclaw-oom',
+        containerName: 'test-oom',
         exitCode: null,
       }),
     );
@@ -314,10 +314,10 @@ describe('DockerAgentHandle stderr capture on unexpected exit', () => {
 describe('DockerAgentHandle.kill', () => {
   it('runs `docker stop` for the container name', async () => {
     const p = new DockerContainerRuntimeProvider();
-    const handle = await p.spawn(makeSpec({ containerName: 'nanoclaw-killable' }));
+    const handle = await p.spawn(makeSpec({ containerName: 'test-killable' }));
     execSyncMock.mockReturnValueOnce(''); // docker stop success
     await handle.kill();
-    expect(execSyncMock).toHaveBeenCalledWith('docker stop -t 1 nanoclaw-killable', expect.any(Object));
+    expect(execSyncMock).toHaveBeenCalledWith('docker stop -t 1 test-killable', expect.any(Object));
   });
 
   it('falls back to SIGKILL when `docker stop` throws', async () => {

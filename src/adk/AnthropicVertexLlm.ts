@@ -47,11 +47,13 @@ import {
   GEN_AI_PROVIDER_GCP_VERTEX_AI,
   GEN_AI_PROVIDER_NAME,
   GEN_AI_REQUEST_MODEL,
+  GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
   GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
   SERVER_ADDRESS,
   extractVertexUsage,
+  type VertexCallUsageFields,
 } from '../observability/genai.js';
 import { getTracer } from '../observability/index.js';
 import { toAnthropicTools } from './schema-conversion.js';
@@ -232,6 +234,12 @@ export class AnthropicVertexLlm extends BaseLlm {
     });
     // span を active context に設定 (= SDK 内部の OTel 計装 span が子としてリンクされる前提)。
     const spanCtx = trace.setSpan(context.active(), span);
+    // M4-C Phase 1: `vertex.call` の Cloud Logging emit を成功経路で発火する
+    // (= `src/biblio/vertex-client.ts:508-517` の pattern 写経、latency_ms 計上のため t0 を setup)。
+    // src/reporting/sql/llm-cost.sql が本 event を GROUP BY jsonPayload.model で集計。
+    // ADK チャット本体経路 (CLI/Slack/Fugue ask) の Vertex 呼出は helper axis (categorize/inspect/gate) と
+    // 別で、以前は span 属性のみで Cloud Logging に emit されていなかった (M4-C review で発見)。
+    const t0 = performance.now();
     try {
       const messages = this.convertContentsToAnthropicMessages(llmRequest);
 
@@ -299,11 +307,46 @@ export class AnthropicVertexLlm extends BaseLlm {
       );
 
       const usage = extractVertexUsage(response, 'anthropic');
+      // usage 欠落 (SDK バージョン差 / 部分応答) の warn を vertex-client.ts:498 と
+      // 対称に追加。SDK 応答から usage オブジェクト自体が消えた case を patron に可視化する。
+      if (!(response as { usage?: unknown }).usage) {
+        log.warn('vertex.call: usage absent', {
+          event: 'adk.anthropic_vertex_llm.usage_absent',
+          model: this.model,
+        });
+      }
       if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
       if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
       if (usage.cache_read_input_tokens != null) {
         span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage.cache_read_input_tokens);
       }
+      if (usage.cache_creation_input_tokens != null) {
+        span.setAttribute(GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, usage.cache_creation_input_tokens);
+      }
+      // M4-C Phase 1: 成功経路で `vertex.call` event を Cloud Logging に emit
+      // (= vertex-client.ts:508-527 の pattern 対称化、llm-cost.sql の集計対象を
+      // ADK チャット本体経路 (CLI/Slack/Fugue ask) にも拡張)。
+      // M4-C Phase 2: cache_read/cache_creation を unconditional emit (?? 0) して
+      // llm-cost.sql の SUM 対象を有効化 + cost-calculator の warnings 消失。
+      // cache_captured を独立 boolean で emit することで「未捕捉 (SDK 差)」と
+      // 「実測 0 (cache 未使用)」を BQ 集計で区別可能に。cost 過小推定の可視化。
+      // 共有 interface (`VertexCallUsageFields`) 経由で vertex-client.ts と同 shape に強制。
+      // 新 field 追加時に両 emit が compile error で検知される (SQL 側 drift の抑止 anchor)。
+      const cacheCaptured = usage.cache_read_input_tokens != null && usage.cache_creation_input_tokens != null;
+      const usageFields: VertexCallUsageFields = {
+        outcome: 'success',
+        tokens_in: usage.input_tokens ?? 0,
+        tokens_out: usage.output_tokens ?? 0,
+        cache_read: usage.cache_read_input_tokens ?? 0,
+        cache_creation: usage.cache_creation_input_tokens ?? 0,
+        cache_captured: cacheCaptured,
+        latency_ms: Math.round(performance.now() - t0),
+      };
+      log.info('vertex.call', {
+        event: 'vertex.call',
+        model: this.model,
+        ...usageFields,
+      });
 
       const llmResponse = this.toLlmResponse(response);
       // EMPTY_TEXT 経路で SDK は成功 HTTP 応答を返すが意味的には失敗 = span ERROR を立てて

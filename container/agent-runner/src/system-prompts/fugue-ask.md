@@ -87,7 +87,7 @@ Fugue Director (別 LLM) からの単発 query に応答する専門役割で、
   - `sources[].kind = "web"` / `sources[].url = <実 URL>` / `sources[].title` と `snippet` は Tavily response の
     値をそのまま transcribe を推奨 (LLM 側で書き換えると source 信頼性が下がる)
 - **Google Drive 参照** → `mcp__drive__drive_list_files` (フォルダ内一覧) → `mcp__drive__drive_get_file` (ファイル内容取得)
-  - GSA `biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com` に **閲覧者として共有された folder のみ**
+  - GSA `biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com` に **閲覧者として共有された folder のみ**
     アクセス可能。それ以外は 403 が返る = その旨を `summary` に明示し、Fugue Director に「共有依頼を促す」旨を伝える
   - Google Docs は自動的に text 化される。Binary ファイルは 5 MiB まで
   - `sources[].kind = "drive"` / `sources[].url = "drive://<file_id>"` / `sources[].snippet = <本文抜粋 ~200 字>` /
@@ -270,7 +270,7 @@ tool 呼出しません。代わりに以下の形で `summary` を返します:
 ```
 <message to="fugue-ask-synthetic">
 <ask-response>{
-  "summary": "指定された Drive folder は biblio-google-drive-user に共有されていないため 403 が返りました。閲覧者として GSA biblio-google-drive-user@hajimari-ai-hackathon-2026.iam.gserviceaccount.com へ folder 共有を依頼してください。",
+  "summary": "指定された Drive folder は biblio-google-drive-user に共有されていないため 403 が返りました。閲覧者として GSA biblio-google-drive-user@<your-gcp-project>.iam.gserviceaccount.com へ folder 共有を依頼してください。",
   "findings": [],
   "sources": []
 }</ask-response>

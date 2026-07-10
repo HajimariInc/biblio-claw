@@ -33,7 +33,7 @@ const AcquireBiblioInput = z.object({
   repo: z
     .string()
     .describe(
-      'GitHub repository in "owner/repo" or "owner/repo/skill" format (e.g. "example-org/biblio-min" or "anthropics/claude-plugins-official/my-skill"). Full GitHub URLs are also accepted.',
+      'GitHub repository in "owner/repo" or "owner/repo/skill" format (e.g. "HajimariInc/test-biblio-minimal" or "anthropics/claude-plugins-official/my-skill"). Full GitHub URLs are also accepted.',
     ),
 });
 

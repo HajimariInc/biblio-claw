@@ -3,8 +3,8 @@
  *
  * `container_configs.provider = null` (= claude fallback via
  * `resolveProviderName`) を持つ agent group を central DB に作成し、
- * **patron の Slack DM に限定して wire** する。これにより ADK 経路導入時に
- * DB 行不在で休眠していた agent-container 経路 (spawn / 装備機構 /
+ * **patron の Slack DM + optional で複数 Slack channel** に wire する。これにより
+ * ADK 経路導入時に DB 行不在で休眠していた agent-container 経路 (spawn / 装備機構 /
  * container skill / container 側 MCP 9 tool) が K8s Job spawn 経路で再稼働する。
  *
  * `scripts/init-adk-agent.ts` + `scripts/init-first-agent.ts` の合成写経で、
@@ -12,17 +12,23 @@
  *   - folder: `hybrid-biblio-shisho` (ADK 用 `adk-biblio-shisho` と物理分離)
  *   - `container_configs.provider`: `null` を毎回 assert
  *     (= isNewGroup gate 外 = self-healing、fallback で 'claude' が効く)
- *   - CLI wire なし + Slack DM wire (必須) — CLI/Slack channel 経路の
- *     ADK wire は不変。fan-out 二重発火防止のため、Slack DM の既存 mg が
- *     他 agent group に wire 済なら **fail-fast + 手動対応 prompt**。
+ *   - CLI wire なし + Slack DM wire (必須) + Slack channel wire (0..N、
+ *     `--slack-channel-ids` で指定)。CLI 経路の ADK wire は不変。
+ *     fan-out 二重発火防止のため、Slack DM / channel いずれも既存 mg が
+ *     他 agent group に wire 済なら **fail-fast + 手動対応 prompt**
+ *     (GATE_ENABLED=1 で構造的に fan-out 抑止できる場合のみ並置許容)。
  *
- * Slack channel (bot mention) wire は本 script では扱わない
- * (= ADK 経路がメイン channel を占有継続)。
+ * **issue #144**: 従来 channel wire は事後手動 `ncl wirings create` (= generic
+ * CRUD 経路) に依存しており、`createMessagingGroupAgent` の副作用である
+ * `agent_destinations` 自動生成が抜けて silent 混線 (channel 発話の応答が DM に
+ * 流れる) を起こしていた。本 script で init 時から channel wire を扱うことで、
+ * destinations 自動生成経路に載せ、混線を構造的に閉じる。
  *
  * Usage:
  *   pnpm exec tsx scripts/init-hybrid-agent.ts \
  *     --user-id slack:<SLACK_USER_ID> \
  *     --slack-dm-channel-id <SLACK_DM_CHANNEL_ID> \
+ *     [--slack-channel-ids C1,C2,...]   # optional (0..N channel wire、comma-separated)
  *     [--display-name "Patron"] \
  *     [--agent-name "司書 (hybrid)"] \
  *     [--skip-slack-dm]   # test / dry-run 用 (Slack DM wire を skip)
@@ -56,6 +62,7 @@ const HYBRID_DEFAULT_DISPLAY = 'Patron';
 export interface Args {
   userId: string;
   slackDmChannelId?: string;
+  slackChannelIds?: string[];
   displayName: string;
   agentName: string;
   skipSlackDm: boolean;
@@ -89,6 +96,15 @@ export function parseArgs(argv: string[]): Args {
       case '--skip-slack-dm':
         out.skipSlackDm = true;
         break;
+      case '--slack-channel-ids':
+        // comma-separated: --slack-channel-ids C1,C2,C3
+        // pattern 踏襲: scripts/biblio-equip-set.ts:36-46 の CSV parse。
+        out.slackChannelIds = (val ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        i++;
+        break;
     }
   }
 
@@ -99,6 +115,14 @@ export function parseArgs(argv: string[]): Args {
   // (no-op guard = 「skipSlackDm が既に true なら true を再代入」の冗長を撲滅)。
   const userId = out.userId ?? process.env.HYBRID_USER_ID;
   const slackDmChannelId = out.slackDmChannelId ?? process.env.HYBRID_SLACK_DM_CHANNEL_ID;
+  const slackChannelIds = out.slackChannelIds ?? (
+    process.env.HYBRID_SLACK_CHANNEL_IDS
+      ? process.env.HYBRID_SLACK_CHANNEL_IDS
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : undefined
+  );
   const skipSlackDm =
     out.skipSlackDm === true
     || process.env.HYBRID_SKIP_SLACK_DM === '1'
@@ -120,6 +144,7 @@ export function parseArgs(argv: string[]): Args {
   return {
     userId,
     slackDmChannelId,
+    slackChannelIds,
     displayName: (out.displayName ?? '').trim() || HYBRID_DEFAULT_DISPLAY,
     agentName: (out.agentName ?? '').trim() || HYBRID_DEFAULT_NAME,
     skipSlackDm,
@@ -244,6 +269,109 @@ Resolve either by:
 }
 
 /**
+ * Slack channel messaging group を idempotent に upsert し、hybrid agent group に wire する。
+ *
+ * **destination 自動生成**: `createMessagingGroupAgent` は wiring INSERT の直後に副作用として
+ * `agent_destinations` に `target_type='channel'` の row を書く (`src/db/messaging-groups.ts`)。
+ * これにより agent は `<message to="<mg.name または slack-<8桁>>">` の形で channel 宛応答を書ける。
+ * (詳細は init-fugue-ask-agent.ts の docstring 参照)。
+ *
+ * この副作用が発火しない経路 = `ncl wirings create` の generic CRUD (raw INSERT into
+ * `messaging_group_agents`) を使うと destination が抜ける。issue #144 で実測された silent 混線の
+ * root cause がこの経路 = init script (createMessagingGroupAgent 経由) では自動生成される。
+ *
+ * **fan-out 二重発火防止**: 既存の wire が他 agent_group に対して存在する channel を hybrid に
+ * 追加すると 1 発話 = N agent 起動 (`router.ts:routeInbound` の fan-out 経路)。
+ * `wireSlackDm` と同じ検知ロジックで、既存 wire があれば fail-fast (allowFanout=false
+ * デフォルト、`GATE_ENABLED=1` 時のみ allow)。
+ */
+function wireSlackChannel(
+  ag: AgentGroup,
+  channelIdRaw: string,
+  now: string,
+  allowFanout: boolean = false,
+): void {
+  // Chat SDK bridge の channelIdFromThreadId() は `slack:<channel>` を返すので、
+  // messaging_groups.platform_id もこの encoded 形式で保存する
+  // (fix `4892ee5` の教訓、raw のまま渡すと router.ts の lookup key と mismatch して silent drop)。
+  const encodedPlatformId = `${SLACK_CHANNEL}:${channelIdRaw}`;
+
+  let mg: MessagingGroup | undefined = getMessagingGroupByPlatform(SLACK_CHANNEL, encodedPlatformId);
+  if (!mg) {
+    mg = {
+      id: generateId('mg'),
+      channel_type: SLACK_CHANNEL,
+      platform_id: encodedPlatformId,
+      name: `Slack channel (${channelIdRaw})`, // agent_destinations.local_name の base に使われる
+      is_group: 1, // channel
+      unknown_sender_policy: 'public',
+      denied_at: null,
+      created_at: now,
+    };
+    createMessagingGroup(mg);
+    console.log(`Created Slack channel messaging group: ${mg.id} (${encodedPlatformId})`);
+  } else {
+    console.log(`Reusing Slack channel messaging group: ${mg.id} (${encodedPlatformId})`);
+    // fan-out 検知は wireSlackDm と同じ流儀。
+    const existingWirings = getMessagingGroupAgents(mg.id);
+    const otherWirings = existingWirings.filter((w) => w.agent_group_id !== ag.id);
+    if (otherWirings.length > 0) {
+      if (allowFanout) {
+        console.log(
+          `gate + routing allowFanout=true: proceeding to add hybrid wire alongside ${otherWirings.length} existing wire(s).`,
+        );
+        console.log(
+          `  existing wires: ${otherWirings.map((w) => w.agent_group_id).join(', ')}`,
+        );
+        console.log(
+          '  gate (router.ts:evaluateGate + deliverToAgent mismatch skip) will route on classifier output.',
+        );
+        // ここで return せず後段の createMessagingGroupAgent (追加 wire) へ流す
+      } else {
+        const wiringList = otherWirings
+          .map((w) => `  - agent_group_id=${w.agent_group_id} (mga.id=${w.id}, engage_mode=${w.engage_mode})`)
+          .join('\n');
+        console.error(
+          `
+ERROR: Slack channel ${encodedPlatformId} is already wired to ${otherWirings.length} other agent group(s):
+${wiringList}
+
+router.ts:routeInbound is fan-out (all wired agents engage), so a single channel message
+would double-invoke both the existing agent(s) and the hybrid agent group.
+
+Resolve either by:
+  (a) Removing existing wire(s) with \`ncl wirings remove --id <mga.id>\` before re-running
+  (b) Set GATE_ENABLED=true before running (gate + routing lifts this constraint)
+`.trim(),
+        );
+        process.exit(1);
+      }
+    }
+  }
+
+  const existing = getMessagingGroupAgentByPair(mg.id, ag.id);
+  if (existing) {
+    console.log(`Slack channel wire exists: ${existing.id}`);
+    return;
+  }
+  // channel: engage_mode='mention' + engage_pattern=null = @bot mention のみ engage
+  // (init-adk-agent.ts:wireSlackChannel と同流儀、DM の 'pattern' + '.' とは対照的)。
+  createMessagingGroupAgent({
+    id: generateId('mga'),
+    messaging_group_id: mg.id,
+    agent_group_id: ag.id,
+    engage_mode: 'mention',
+    engage_pattern: null,
+    sender_scope: 'all',
+    ignored_message_policy: 'drop',
+    session_mode: 'shared',
+    priority: 0,
+    created_at: now,
+  });
+  console.log(`Wired Slack channel: ${mg.id} -> ${ag.id}`);
+}
+
+/**
  * hybrid group の container_configs.mcp_servers を desired state に upsert する。
  *
  * 契約 3 点:
@@ -314,6 +442,7 @@ export interface SeedResult {
   is_new_group: boolean;
   slack_dm_wired: boolean;
   slack_dm_platform_id: string | null;
+  slack_channel_wires: string[];
 }
 
 /**
@@ -459,7 +588,22 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
     console.log('(Slack DM wire skipped — pass --slack-dm-channel-id to enable)');
   }
 
-  // 5. 最終 state を SeedResult として返す。
+  // 5. Slack channel wire (0..N) — channel_ids が渡されていれば loop で wire する。
+  //    fan-out 検知は wireSlackChannel 内 (allowFanout=gateEnabled でスイッチ)。
+  //    DM (Step 4) の直後に置くことで、実行順序が「DM → channel」となり fan-out
+  //    検知の失敗が channel 単位で早期 exit しても DM は既に wire 済 =
+  //    段階的な部分成功が読み解きやすい。
+  const wiredChannelIds: string[] = [];
+  if (args.slackChannelIds && args.slackChannelIds.length > 0) {
+    for (const channelId of args.slackChannelIds) {
+      wireSlackChannel(ag, channelId, now, gateEnabled);
+      wiredChannelIds.push(channelId);
+    }
+  } else {
+    console.log('(Slack channel wire skipped — pass --slack-channel-ids C1,C2,... to enable)');
+  }
+
+  // 6. 最終 state を SeedResult として返す。
   //    isNewGroup を含めることで、seed が create 経路 / reuse 経路のどちらを通ったか
   //    後段の観察 script (K8s Job 観察) が判別できる。
   return {
@@ -469,6 +613,7 @@ export function seedHybridAgent(args: Args, now: string): SeedResult {
     slack_dm_wired: !args.skipSlackDm && !!args.slackDmChannelId,
     slack_dm_platform_id:
       args.slackDmChannelId ? `${SLACK_CHANNEL}:${args.slackDmChannelId}` : null,
+    slack_channel_wires: wiredChannelIds,
   };
 }
 
@@ -490,6 +635,11 @@ export async function main(): Promise<void> {
   console.log(
     `  channel:  ${summary.slack_dm_wired ? `slack DM (${summary.slack_dm_platform_id})` : '(none)'}`,
   );
+  if (summary.slack_channel_wires.length > 0) {
+    console.log(
+      `  slack channels: ${summary.slack_channel_wires.map((c) => `slack:${c}`).join(', ')}`,
+    );
+  }
   console.log('');
   console.log('SEED_RESULT=' + JSON.stringify(summary));
 }

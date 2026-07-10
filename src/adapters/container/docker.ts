@@ -48,7 +48,7 @@ class DockerAgentHandle implements AgentHandle {
     // child.stderr を本 handle が所有: (1) 直近 64 KiB を保持して exit !=0 で warn 吐き、
     // (2) line ごとに log.debug でも残す (= LOG_LEVEL=debug 時の live tail を維持)。
     // 旧実装は spawn() 側で .on('data', log.debug) だけしており、docker run の exit 125
-    // 等が完全に隠蔽されていた (= 2026-06-22 M3 verify Manual run で発覚)。
+    // 等が完全に隠蔽されていた (= 実測で発覚)。
     child.stderr?.on('data', (chunk: Buffer | string) => {
       const text = typeof chunk === 'string' ? chunk : chunk.toString();
       this.stderrTail.push(text);
