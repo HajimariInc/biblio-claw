@@ -14,22 +14,25 @@ variable "k8s_namespace" {
   default     = "biblio-claw"
 }
 
-variable "slack_channel_name" {
+variable "notification_channel_name" {
   description = <<-EOT
-    Slack channel 名 (`#biblio-alerts` 等)。alert 通知の宛先。Slack Workspace 側で
-    Cloud Monitoring OAuth app を install 済であること前提。
-  EOT
-  type        = string
-}
+    Cloud Console で事前作成した Slack notification channel の resource name。
+    形式: `projects/<PROJECT_ID>/notificationChannels/<numeric-id>`
+    (例: `projects/hajimari-ai-hackathon-2026/notificationChannels/10737247742413738863`)
 
-variable "slack_webhook_token" {
-  description = <<-EOT
-    Slack OAuth token (`xoxb-*`)。`google_monitoring_notification_channel.sensitive_labels`
-    の `auth_token` に入る。`TF_VAR_slack_webhook_token` env で渡す。
-    Terraform state に平文で入らないよう sensitive marker を付ける。
+    経緯 (issue #136 対応時、DEN さん判断):
+      Google Cloud Monitoring 公式 app の Slack Bot User OAuth Token (`xoxb-*`) は Google 側
+      管理のため DEN さん側から取得不可 = Terraform で `google_monitoring_notification_channel`
+      resource を直接作れない (auth_token label が要求される)。Cloud Console UI 経由で
+      Slack authorize + channel 保存 + Test Connection まで完了させ、その resource name を
+      本 variable で受け取る経路に倒した。
+
+    確認 command (README.md も参照):
+      curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+        "https://monitoring.googleapis.com/v3/projects/PROJECT_ID/notificationChannels" \
+        | jq -r '.notificationChannels[] | select(.type == "slack") | .name'
   EOT
   type        = string
-  sensitive   = true
 }
 
 variable "alert_display_name" {

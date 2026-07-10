@@ -1,6 +1,6 @@
 output "notification_channel_name" {
-  description = "Slack notification channel の resource name。他 module から参照する場合に使用。"
-  value       = google_monitoring_notification_channel.slack.name
+  description = "Slack notification channel の resource name (Cloud Console で事前作成した既存 resource の passthrough)。"
+  value       = var.notification_channel_name
 }
 
 output "alert_policy_name" {

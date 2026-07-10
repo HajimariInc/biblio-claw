@@ -14,17 +14,19 @@
 #     `${log.extracted_label.<name>}` で注入可能 (alert 通知本文に channel /
 #     request_id を含めて Slack 上で即時原因分類できる → 高価値)
 
-resource "google_monitoring_notification_channel" "slack" {
-  project      = var.project_id
-  display_name = "biblio-claw Vertex Auth Alert (Slack)"
-  type         = "slack"
-  labels = {
-    channel_name = var.slack_channel_name
-  }
-  sensitive_labels {
-    auth_token = var.slack_webhook_token
-  }
-}
+# Slack notification channel は Cloud Console UI で事前作成した既存の resource を参照する。
+# Terraform で `google_monitoring_notification_channel` resource を作らない理由:
+#   Google Cloud Monitoring 公式 app の Slack Bot User OAuth Token (`xoxb-*`) は Google 側
+#   管理のため取得不可 = `sensitive_labels.auth_token` を渡せない (DEN さん判断、issue #136 対応時)。
+# Cloud Console UI で以下の流れで事前作成する:
+#   1. Slack workspace に "Google Cloud Monitoring" app を install
+#   2. 通知先 channel を決めて `/invite @Google Cloud Monitoring`
+#   3. Cloud Console → Monitoring → Notification channels → Add new → Slack →
+#      Authorize workspace → channel name 入力 → Test Connection → Save
+#   4. 発行される `projects/.../notificationChannels/<numeric-id>` を
+#      `TF_VAR_notification_channel_name` env で本 module に渡す。
+# 本 module は alert policy のみ作成し、notification channel の lifecycle は Cloud Console
+# 側で管理する (= drift 発生時は Console で対応、Terraform 側は影響なし)。
 
 resource "google_monitoring_alert_policy" "vertex_auth_heartbeat_failed" {
   project      = var.project_id
@@ -66,11 +68,12 @@ resource "google_monitoring_alert_policy" "vertex_auth_heartbeat_failed" {
     }
     # 7 days 経過で incident 自動 close。明示 close 忘れによる incident 滞留を防ぐ。
     auto_close = var.auto_close_duration
-    # 12h 経過しても incident が close されていなければ Slack に再通知 (30min-24h の範囲)。
-    notification_channel_strategy {
-      renotify_interval          = var.renotify_interval
-      notification_channel_names = [google_monitoring_notification_channel.slack.name]
-    }
+    # NOTE: `notification_channel_strategy` (renotify) は log-based alert で API が reject する
+    # (実測 400: "notificationChannelStrategy is not allowed for log-based alerts")。log は
+    # discrete event で "OPEN → renotify" のような continuous state を持たないため、
+    # renotify_interval 経路は使えない仕様。運用は auto_close (7 days) + rate_limit (300s) の
+    # 2 段だけで incident の滞留を防ぐ (renotify_interval variable は future-proofing で残置、
+    # 将来 metric-based alert への拡張時に流用)。
   }
 
   # alert 通知本文に extract した label を注入 (channel/request_id で原因分類が
@@ -88,5 +91,5 @@ resource "google_monitoring_alert_policy" "vertex_auth_heartbeat_failed" {
     mime_type = "text/markdown"
   }
 
-  notification_channels = [google_monitoring_notification_channel.slack.name]
+  notification_channels = [var.notification_channel_name]
 }
