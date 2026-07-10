@@ -19,8 +19,11 @@
  * # implementation detail 依存
  *   - `BaseSessionService.listSessions` は `(appName, userId)` 単位でしか叩けないため、全 session
  *     を走査するには userId 集合が事前必要 = adk-js が公開する API では GC を実装できない
- *   - `InMemorySessionService.sessions` (private field, `in_memory_session_service.d.ts:13-16`) の
- *     `Map<appName, Map<userId, Map<sessionId, Session>>>` 構造に直接触ることで代替する
+ *   - `InMemorySessionService.sessions` (private field) の 3 段 **plain nested object** 構造
+ *     (`this.sessions = {}` + bracket-indexed 追加、`dist/cjs/sessions/in_memory_session_service.js`
+ *     の実装で確認済) に直接触ることで代替する。**型定義 (`.d.ts`) では
+ *     "map from ... to map ..." と記載されているが、実装は Map ではなく plain object であり
+ *     `for (const [k, v] of obj)` は throw する。走査は `Object.entries()` を使う。**
  *   - 本依存は adk-js@1.3.0 の実装契約に基づく (major version bump 時は本 module の動作確認が必要、
  *     `docs/operations-runbook.md` に check を追記)
  */
@@ -40,10 +43,16 @@ let sweepTimer: NodeJS.Timeout | undefined;
 
 /**
  * `InMemorySessionService.sessions` (private field) を module-local に露出させる interface。
- * `Map<appName, Map<userId, Map<sessionId, Session>>>` (`in_memory_session_service.d.ts:13-16`).
+ *
+ * **実装契約 (adk-js@1.3.0 の `dist/cjs/sessions/in_memory_session_service.js` で確認)**:
+ * 3 段 plain nested object。`this.sessions = {}` で初期化 → `this.sessions[appName] = {}` →
+ * `this.sessions[appName][userId] = {}` → `this.sessions[appName][userId][sessionId] = session`
+ * の bracket-indexed 追加。型定義 (`.d.ts`) の "map from ... to map ..." 表現に惑わされて
+ * `Map<...>` として型付けすると `for (const [k, v] of obj)` 経路で TypeError で throw する
+ * (= 走査は `Object.entries()` を使う必要がある)。
  */
 interface InternalInMemorySessionService {
-  sessions: Map<string, Map<string, Map<string, { id: string; lastUpdateTime?: number }>>>;
+  sessions: Record<string, Record<string, Record<string, { id: string; lastUpdateTime?: number }>>>;
 }
 
 interface SessionCandidate {
@@ -99,10 +108,11 @@ export async function sweep(): Promise<void> {
   const now = Date.now();
   const candidates: SessionCandidate[] = [];
 
-  for (const [appName, users] of internal.sessions) {
+  // 3 段 plain nested object を Object.entries() で走査 (Map ではない、interface docstring 参照)。
+  for (const [appName, users] of Object.entries(internal.sessions)) {
     if (appName !== BIBLIO_M4B_APP_NAME) continue;
-    for (const [userId, sessions] of users) {
-      for (const [sessionId, session] of sessions) {
+    for (const [userId, sessions] of Object.entries(users)) {
+      for (const [sessionId, session] of Object.entries(sessions)) {
         candidates.push({
           appName,
           userId,

@@ -29,29 +29,22 @@ import { log } from '../log.js';
 
 const APP = 'biblio_m4b';
 
-/** InMemorySessionService.sessions と同型の 3 段 Map を作る helper。 */
-function makeSessions(): Map<string, Map<string, Map<string, { id: string; lastUpdateTime?: number }>>> {
-  return new Map();
+/**
+ * `InMemorySessionService.sessions` と同型の 3 段 **plain nested object** を作る helper。
+ * (adk-js@1.3.0 の実装は `this.sessions = {}` で bracket-indexed、Map ではない = session-gc.ts
+ * の InternalInMemorySessionService docstring 参照)
+ */
+type SessionsShape = Record<string, Record<string, Record<string, { id: string; lastUpdateTime?: number }>>>;
+
+function makeSessions(): SessionsShape {
+  return {};
 }
 
-/** (userId, sessionId, lastUpdateTime) を 3 段 Map に追加する helper。 */
-function addSession(
-  sessions: Map<string, Map<string, Map<string, { id: string; lastUpdateTime?: number }>>>,
-  userId: string,
-  sessionId: string,
-  lastUpdateTime: number,
-): void {
-  let userMap = sessions.get(APP);
-  if (!userMap) {
-    userMap = new Map();
-    sessions.set(APP, userMap);
-  }
-  let sessionMap = userMap.get(userId);
-  if (!sessionMap) {
-    sessionMap = new Map();
-    userMap.set(userId, sessionMap);
-  }
-  sessionMap.set(sessionId, { id: sessionId, lastUpdateTime });
+/** (userId, sessionId, lastUpdateTime) を 3 段 plain nested object に追加する helper。 */
+function addSession(sessions: SessionsShape, userId: string, sessionId: string, lastUpdateTime: number): void {
+  if (!sessions[APP]) sessions[APP] = {};
+  if (!sessions[APP]![userId]) sessions[APP]![userId] = {};
+  sessions[APP]![userId]![sessionId] = { id: sessionId, lastUpdateTime };
 }
 
 beforeEach(() => {
@@ -90,15 +83,11 @@ describe('sweep — TTL prune', () => {
 
   it('lastUpdateTime が未定義の session は 0 として扱われ TTL prune 対象になる', async () => {
     const sessions = makeSessions();
-    let userMap = sessions.get(APP);
-    if (!userMap) {
-      userMap = new Map();
-      sessions.set(APP, userMap);
-    }
-    const sessionMap = new Map<string, { id: string; lastUpdateTime?: number }>();
+    if (!sessions[APP]) sessions[APP] = {};
     // lastUpdateTime 未定義
-    sessionMap.set('slack:C1:t-orphan', { id: 'slack:C1:t-orphan' });
-    userMap.set('user-orphan', sessionMap);
+    sessions[APP]!['user-orphan'] = {
+      'slack:C1:t-orphan': { id: 'slack:C1:t-orphan' },
+    };
     getSharedRunnerMock.mockReturnValue({
       sessionService: { sessions, deleteSession: deleteSessionMock },
     });
@@ -206,12 +195,12 @@ describe('sweep — 契約と防御', () => {
     const now = Date.now();
     // biblio_m4b: 25h 前
     addSession(sessions, 'user-1', 'slack:C1:t-1', now - 25 * 60 * 60 * 1000);
-    // 別 app: 25h 前 (処理対象外)
-    const otherAppMap = new Map<string, Map<string, { id: string; lastUpdateTime?: number }>>();
-    const otherUserMap = new Map<string, { id: string; lastUpdateTime?: number }>();
-    otherUserMap.set('other-session', { id: 'other-session', lastUpdateTime: now - 25 * 60 * 60 * 1000 });
-    otherAppMap.set('user-1', otherUserMap);
-    sessions.set('some_other_app', otherAppMap);
+    // 別 app: 25h 前 (処理対象外) — plain nested object 版
+    sessions['some_other_app'] = {
+      'user-1': {
+        'other-session': { id: 'other-session', lastUpdateTime: now - 25 * 60 * 60 * 1000 },
+      },
+    };
 
     getSharedRunnerMock.mockReturnValue({
       sessionService: { sessions, deleteSession: deleteSessionMock },
@@ -281,6 +270,38 @@ describe('sweep — 契約と防御', () => {
         total_after: 1,
       }),
     );
+  });
+});
+
+describe('sweep — 実 InMemorySessionService smoke (adk-js implementation contract 回帰検知)', () => {
+  it('実 InMemorySessionService を渡しても throw せず deleteSession を叩ける (Map vs plain object 乖離罠の regression 検知)', async () => {
+    // 過去に本 module の interface を Map<...> で型付けした結果、実 InMemorySessionService
+    // (plain nested object) に対する for-of iteration が TypeError で throw する罠に遭遇した
+    // (issue #150 self-review Critical)。本 test は adk-js の major version bump で内部構造が
+    // 変わった場合の regression 検知として、実 InMemorySessionService を使って sweep の
+    // 契約 (throw しない + deleteSession を叩く) を確認する。
+    const { InMemorySessionService } = await import('@google/adk');
+    const realSvc = new InMemorySessionService();
+    // 25h 前の session を仕込む
+    const oldSession = await realSvc.createSession({ appName: APP, userId: 'u-old' });
+    const internal = realSvc as unknown as {
+      sessions: Record<string, Record<string, Record<string, { id: string; lastUpdateTime: number }>>>;
+    };
+    internal.sessions[APP]!['u-old']![oldSession.id]!.lastUpdateTime = Date.now() - 25 * 60 * 60 * 1000;
+
+    const realDeleteSpy = vi.spyOn(realSvc, 'deleteSession');
+    getSharedRunnerMock.mockReturnValue({ sessionService: realSvc });
+
+    await expect(sweep()).resolves.toBeUndefined();
+
+    expect(realDeleteSpy).toHaveBeenCalledWith({
+      appName: APP,
+      userId: 'u-old',
+      sessionId: oldSession.id,
+    });
+    // session が実際に消えていること
+    const gone = await realSvc.getSession({ appName: APP, userId: 'u-old', sessionId: oldSession.id });
+    expect(gone).toBeUndefined();
   });
 });
 
