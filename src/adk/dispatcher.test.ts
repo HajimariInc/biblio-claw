@@ -1,11 +1,11 @@
 /**
- * dispatcher.ts のユニットテスト (HITL 統合).
+ * dispatcher.ts のユニットテスト (HITL 統合 + issue #150 session 継続).
  *
- * Phase 4 で `runEphemeral` → `sessionService.createSession + runner.runAsync` に切替。
- * mock 対象:
+ * issue #150 で通常経路の `deleteSession` を廃止 + `createSession` → `getOrCreateSession`
+ * (deterministic sessionId) に切替。mock 対象:
  *   - `@google/adk` の `isFinalResponse` / `InMemoryRunner` / `InMemorySessionService`
  *   - `./root-agent.js` の `buildRootAgent`
- *   - `./runner.js` の `buildRunner` (runAsync + sessionService.{createSession, deleteSession} を fake)
+ *   - `./runner.js` の `buildRunner` (runAsync + sessionService.{getOrCreateSession, deleteSession} を fake)
  *   - `../channels/channel-registry.js` の `getChannelAdapter`
  *   - `../modules/approvals/adk-approvals.js` の `requestAdkApproval` (pending 経路検証用)
  *   - `../log.js`
@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const {
   runAsyncMock,
-  createSessionMock,
+  getOrCreateSessionMock,
   deleteSessionMock,
   deliverMock,
   getChannelAdapterMock,
@@ -24,7 +24,7 @@ const {
   requestAdkApprovalMock,
 } = vi.hoisted(() => ({
   runAsyncMock: vi.fn(),
-  createSessionMock: vi.fn(),
+  getOrCreateSessionMock: vi.fn(),
   deleteSessionMock: vi.fn(),
   deliverMock: vi.fn(),
   getChannelAdapterMock: vi.fn(),
@@ -48,7 +48,7 @@ vi.mock('./runner.js', () => ({
       runAsync: (...args: unknown[]) => runAsyncMock(...args),
     },
     sessionService: {
-      createSession: (...args: unknown[]) => createSessionMock(...args),
+      getOrCreateSession: (...args: unknown[]) => getOrCreateSessionMock(...args),
       deleteSession: (...args: unknown[]) => deleteSessionMock(...args),
       getSession: vi.fn(),
     },
@@ -69,7 +69,7 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-import { dispatchToAdk, _resetSharedRunnerForTest, getSharedRunner } from './dispatcher.js';
+import { dispatchToAdk, _resetSharedRunnerForTest, getSharedRunner, resolveAdkSessionId } from './dispatcher.js';
 import { log } from '../log.js';
 
 /** yield 済 event 配列を async iterable に包む helper。 */
@@ -91,8 +91,8 @@ const BASE_PARAMS = {
 beforeEach(async () => {
   _resetSharedRunnerForTest();
   runAsyncMock.mockReset();
-  createSessionMock.mockReset();
-  createSessionMock.mockResolvedValue({ id: 'sess-mock-1' });
+  getOrCreateSessionMock.mockReset();
+  getOrCreateSessionMock.mockResolvedValue({ id: 'cli:local:_' });
   deleteSessionMock.mockReset();
   deleteSessionMock.mockResolvedValue(undefined);
   deliverMock.mockReset();
@@ -106,6 +106,32 @@ beforeEach(async () => {
   vi.mocked(runnerMod.buildRunner).mockClear();
   const rootAgentMod = await import('./root-agent.js');
   vi.mocked(rootAgentMod.buildRootAgent).mockClear();
+});
+
+describe('resolveAdkSessionId — deterministic sessionId 生成 (issue #150)', () => {
+  it('threadId=null は sentinel "_" で組み立てる', () => {
+    expect(resolveAdkSessionId('slack', 'C123', null)).toBe('slack:C123:_');
+  });
+
+  it('threadId 指定時は 3 要素 join', () => {
+    expect(resolveAdkSessionId('slack', 'C123', '1234.5678')).toBe('slack:C123:1234.5678');
+  });
+
+  it('同一 (channelType, platformId, threadId) は同じ ID を返す (deterministic)', () => {
+    const a = resolveAdkSessionId('slack', 'C123', '1234.5678');
+    const b = resolveAdkSessionId('slack', 'C123', '1234.5678');
+    expect(a).toBe(b);
+  });
+
+  it('異なる threadId は異なる ID を返す (thread 分離)', () => {
+    const a = resolveAdkSessionId('slack', 'C123', 't-1');
+    const b = resolveAdkSessionId('slack', 'C123', 't-2');
+    expect(a).not.toBe(b);
+  });
+
+  it('異なる channelType は異なる ID を返す (channel 分離)', () => {
+    expect(resolveAdkSessionId('slack', 'X', null)).not.toBe(resolveAdkSessionId('cli', 'X', null));
+  });
 });
 
 describe('getSharedRunner — module-level singleton', () => {
@@ -125,15 +151,15 @@ describe('getSharedRunner — module-level singleton', () => {
     expect(vi.mocked(runnerMod.buildRunner)).toHaveBeenCalledTimes(2);
   });
 
-  it('戻り値は { runner, sessionService } の形 (Phase 4 拡張)', () => {
+  it('戻り値は { runner, sessionService } の形', () => {
     const ctx = getSharedRunner();
     expect(ctx).toHaveProperty('runner');
     expect(ctx).toHaveProperty('sessionService');
   });
 });
 
-describe('dispatchToAdk — 通常経路 (isFinalResponse + createSession + deleteSession)', () => {
-  it('isFinalResponse 検知 → finalText で adapter.deliver + createSession/deleteSession の両方呼出', async () => {
+describe('dispatchToAdk — 通常経路 (isFinalResponse + getOrCreateSession + session 継続)', () => {
+  it('isFinalResponse 検知 → finalText で adapter.deliver + getOrCreateSession に deterministic sessionId 渡す', async () => {
     const events = [
       { content: { parts: [{ text: 'thinking...' }] } },
       { content: { parts: [{ text: '仕入れ完了です!📦' }] } },
@@ -148,11 +174,15 @@ describe('dispatchToAdk — 通常経路 (isFinalResponse + createSession + dele
 
     await dispatchToAdk({ ...BASE_PARAMS });
 
-    expect(createSessionMock).toHaveBeenCalledWith({ appName: 'biblio_m4b', userId: 'local' });
+    expect(getOrCreateSessionMock).toHaveBeenCalledWith({
+      appName: 'biblio_m4b',
+      userId: 'local',
+      sessionId: 'cli:local:_',
+    });
     expect(runAsyncMock).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'local',
-        sessionId: 'sess-mock-1',
+        sessionId: 'cli:local:_',
         newMessage: { role: 'user', parts: [{ text: '@bot 仕入れて wf/x' }] },
       }),
     );
@@ -161,17 +191,13 @@ describe('dispatchToAdk — 通常経路 (isFinalResponse + createSession + dele
       kind: 'chat',
       content: { text: '仕入れ完了です!📦' },
     });
-    // 通常経路: deleteSession が呼ばれる
-    expect(deleteSessionMock).toHaveBeenCalledWith({
-      appName: 'biblio_m4b',
-      userId: 'local',
-      sessionId: 'sess-mock-1',
-    });
+    // issue #150: 通常経路も deleteSession しない (session 継続)
+    expect(deleteSessionMock).not.toHaveBeenCalled();
     // pending 経路経由は呼ばれない
     expect(requestAdkApprovalMock).not.toHaveBeenCalled();
   });
 
-  it('adapter が undefined 返却時 → not_delivered warn ログ (silent 化防止、C1 対処)', async () => {
+  it('adapter が undefined 返却時 → not_delivered warn ログ (silent 化防止)', async () => {
     runAsyncMock.mockReturnValue(asyncGen([{ content: { parts: [{ text: 'ok' }] } }]));
     isFinalResponseMock.mockReturnValue(true);
     deliverMock.mockResolvedValue(undefined);
@@ -186,24 +212,80 @@ describe('dispatchToAdk — 通常経路 (isFinalResponse + createSession + dele
     expect(vi.mocked(log.info)).not.toHaveBeenCalledWith('ADK dispatcher: delivered', expect.anything());
   });
 
-  it('userId 明示指定時は platformId ではなく userId を採用 (createSession + runAsync 両方に伝搬)', async () => {
+  it('userId 明示指定時は platformId ではなく userId を採用 (getOrCreateSession + runAsync 両方に伝搬)', async () => {
     runAsyncMock.mockReturnValue(asyncGen([{ content: { parts: [{ text: 'ok' }] } }]));
     isFinalResponseMock.mockReturnValue(true);
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
 
     await dispatchToAdk({ ...BASE_PARAMS, userId: 'slack:U0X' });
 
-    expect(createSessionMock).toHaveBeenCalledWith({ appName: 'biblio_m4b', userId: 'slack:U0X' });
+    expect(getOrCreateSessionMock).toHaveBeenCalledWith({
+      appName: 'biblio_m4b',
+      userId: 'slack:U0X',
+      sessionId: 'cli:local:_',
+    });
     expect(runAsyncMock).toHaveBeenCalledWith(expect.objectContaining({ userId: 'slack:U0X' }));
+  });
+});
+
+describe('dispatchToAdk — issue #150 session 継続', () => {
+  it('同 (channelType, platformId, threadId) の 2 回連続 dispatch で 2 回とも同じ sessionId を getOrCreateSession に渡す', async () => {
+    runAsyncMock.mockReturnValue(asyncGen([{ content: { parts: [{ text: 'ok' }] } }]));
+    isFinalResponseMock.mockReturnValue(true);
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'slack' });
+
+    const params = {
+      ...BASE_PARAMS,
+      channelType: 'slack',
+      platformId: 'C-ABC',
+      threadId: 't-999',
+    };
+    await dispatchToAdk({ ...params });
+    await dispatchToAdk({ ...params, requestId: 'req-2' });
+
+    expect(getOrCreateSessionMock).toHaveBeenCalledTimes(2);
+    const call1 = getOrCreateSessionMock.mock.calls[0]![0] as { sessionId: string };
+    const call2 = getOrCreateSessionMock.mock.calls[1]![0] as { sessionId: string };
+    expect(call1.sessionId).toBe('slack:C-ABC:t-999');
+    expect(call2.sessionId).toBe('slack:C-ABC:t-999');
+    expect(call1.sessionId).toBe(call2.sessionId);
+  });
+
+  it('異なる threadId の dispatch では異なる sessionId が使われる (thread 分離)', async () => {
+    runAsyncMock.mockReturnValue(asyncGen([{ content: { parts: [{ text: 'ok' }] } }]));
+    isFinalResponseMock.mockReturnValue(true);
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'slack' });
+
+    await dispatchToAdk({ ...BASE_PARAMS, channelType: 'slack', platformId: 'C-X', threadId: 't-A' });
+    await dispatchToAdk({
+      ...BASE_PARAMS,
+      channelType: 'slack',
+      platformId: 'C-X',
+      threadId: 't-B',
+      requestId: 'req-2',
+    });
+
+    const call1 = getOrCreateSessionMock.mock.calls[0]![0] as { sessionId: string };
+    const call2 = getOrCreateSessionMock.mock.calls[1]![0] as { sessionId: string };
+    expect(call1.sessionId).toBe('slack:C-X:t-A');
+    expect(call2.sessionId).toBe('slack:C-X:t-B');
+  });
+
+  it('通常経路の finally で deleteSession が呼ばれない (regression)', async () => {
+    runAsyncMock.mockReturnValue(asyncGen([{ content: { parts: [{ text: 'ok' }] } }]));
+    isFinalResponseMock.mockReturnValue(true);
+    getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
+
+    await dispatchToAdk({ ...BASE_PARAMS });
+
+    expect(deleteSessionMock).not.toHaveBeenCalled();
   });
 });
 
 describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () => {
   // adk-js@1.3.0 実装 (`agents/functions.js:129-170` `generateRequestConfirmationEvent`) に基づく
-  // 実際の event 形状: `event.content.parts` に `{functionCall: {name: 'adk_request_confirmation',
-  // args: {originalFunctionCall, toolConfirmation}, id: <wrapper_id>}}` が入り、
-  // `event.longRunningToolIds: [<wrapper_id>]` が populate される。
-  // wrapper_id は元 tool call id とは別 namespace の新規 UUID (= Phase 4 review C1)。
+  // 実際の event 形状。issue #150 で pending 経路でも session 保持は変更なし (approval-dispatcher.ts
+  // 側の resume 経路が deleteSession を担当)。
   function makeRequestConfirmationEvent(opts: {
     wrapperId: string;
     hint: string;
@@ -246,7 +328,7 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
     isFinalResponseMock.mockReturnValue(false);
     deliverMock.mockResolvedValue('delivery-pending-notice');
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
-    requestAdkApprovalMock.mockResolvedValue(true); // Phase 4 C3: boolean 契約
+    requestAdkApprovalMock.mockResolvedValue(true);
 
     await dispatchToAdk({ ...BASE_PARAMS });
 
@@ -258,15 +340,14 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
         platformId: 'local',
         threadId: null,
         userId: 'local',
-        adkSessionId: 'sess-mock-1',
-        // Phase 4 C1: functionCallId は wrapper id (元 tool call id ではない)
+        // issue #150: adkSessionId は deterministic
+        adkSessionId: 'cli:local:_',
         functionCallId: 'wrapper-enkin-1',
         hint: expect.stringContaining('禁書'),
         action: 'enkin',
         payload: expect.objectContaining({ biblioName: 'wf--test', category: 'biblio-dev', action: 'enkin' }),
       }),
     );
-    // 中間応答
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
       content: { text: expect.stringContaining('承認を admin にお願いしました') },
@@ -294,10 +375,7 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
     expect(deleteSessionMock).not.toHaveBeenCalled();
   });
 
-  it('Phase 4 C3: requestAdkApproval が false 返却 → 中間応答送らず deleteSession + finalText fallback', async () => {
-    // 内部 fallback (approver 不在 等) で false を返した場合、dispatcher は「承認申請しました」
-    // 中間応答を送らず、通常経路に落として最終応答 (空応答時は "(応答が空でした。)") を deliver、
-    // session も deleteSession する。
+  it('requestAdkApproval が false 返却 → 中間応答送らず finalText fallback (issue #150: deleteSession は呼ばない)', async () => {
     const pendingEvent = makeRequestConfirmationEvent({
       wrapperId: 'wrapper-enkin-fail',
       hint: 'x',
@@ -306,7 +384,7 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
     runAsyncMock.mockReturnValue(asyncGen([pendingEvent]));
     isFinalResponseMock.mockReturnValue(false);
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
-    requestAdkApprovalMock.mockResolvedValue(false); // 内部 fallback で false
+    requestAdkApprovalMock.mockResolvedValue(false);
 
     await dispatchToAdk({ ...BASE_PARAMS });
 
@@ -317,8 +395,8 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
       null,
       expect.objectContaining({ content: { text: expect.stringContaining('承認を admin にお願いしました') } }),
     );
-    // 通常経路: session 削除 + 空応答 fallback
-    expect(deleteSessionMock).toHaveBeenCalled();
+    // issue #150: 通常経路 fallback でも deleteSession は呼ばない
+    expect(deleteSessionMock).not.toHaveBeenCalled();
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
       content: { text: '(応答が空でした。)' },
@@ -326,8 +404,6 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
   });
 
   it('unknown action の payload → skip + log.warn + requestAdkApproval 未呼出 + 通常経路継続', async () => {
-    // pending event が入るが、payload.action が不明 (= enkin/shokyaku 以外) の場合、
-    // pending 経路として cancel されて通常経路に fall-through する契約。
     const unknownEvent = makeRequestConfirmationEvent({
       wrapperId: 'wrapper-unknown',
       hint: 'x',
@@ -337,7 +413,6 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
     runAsyncMock.mockReturnValue(asyncGen(events));
     isFinalResponseMock.mockImplementation((e: unknown) => {
       const ev = e as { content?: { parts?: { text?: string }[] } };
-      // fallback event は parts[0].text 有 (text-only part)、pending event は parts[0].functionCall 有
       return ev.content?.parts?.[0]?.text === 'fallback final';
     });
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
@@ -349,8 +424,8 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
       expect.stringContaining('unknown confirmation action'),
       expect.objectContaining({ event: 'adk.dispatcher.pending_unknown_action' }),
     );
-    // pending 経路は成立せず、通常経路として finalText で deliver + deleteSession
-    expect(deleteSessionMock).toHaveBeenCalled();
+    // pending 経路は成立せず、通常経路で finalText deliver + session 継続 (issue #150)
+    expect(deleteSessionMock).not.toHaveBeenCalled();
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
       content: { text: 'fallback final' },
@@ -358,8 +433,6 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
   });
 
   it('longRunningToolIds 存在するが content.parts に adk_request_confirmation 不在 → skip', async () => {
-    // 万一 longRunningToolIds が populate されているが対応する adk_request_confirmation function
-    // call が parts に不在の場合 (adk-js のバージョン差異等)、skip して通常経路に fall-through。
     const pendingEvent = {
       content: {
         parts: [{ functionCall: { name: 'some_other_call', id: 'other-1', args: {} } }],
@@ -373,12 +446,11 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
     await dispatchToAdk({ ...BASE_PARAMS });
 
     expect(requestAdkApprovalMock).not.toHaveBeenCalled();
-    // dispatched === 0 → pending=false → 通常経路 → deleteSession
-    expect(deleteSessionMock).toHaveBeenCalled();
+    // dispatched === 0 → pending=false → 通常経路 → issue #150 で deleteSession なし
+    expect(deleteSessionMock).not.toHaveBeenCalled();
   });
 
   it('requestAdkApproval が unexpected throw → catch + log.error + created=false 扱いで通常経路', async () => {
-    // requestAdkApproval は throw しない契約だが、防御的 catch (Phase 4 review C2 継承)
     const pendingEvent = makeRequestConfirmationEvent({
       wrapperId: 'wrapper-enkin-throw',
       hint: 'x',
@@ -391,18 +463,17 @@ describe('dispatchToAdk — Phase 4 HITL pending 経路 (実 API 形状)', () =>
 
     await dispatchToAdk({ ...BASE_PARAMS });
 
-    // catch されて log.error + created=false → 通常経路 fall-through
     expect(vi.mocked(log.error)).toHaveBeenCalledWith(
       expect.stringContaining('requestAdkApproval unexpectedly threw'),
       expect.objectContaining({ event: 'adk.dispatcher.request_approval_error' }),
     );
-    // session は削除 (通常経路)
-    expect(deleteSessionMock).toHaveBeenCalled();
+    // issue #150: 通常経路 fallback でも deleteSession は呼ばない
+    expect(deleteSessionMock).not.toHaveBeenCalled();
   });
 });
 
 describe('dispatchToAdk — ADK error event', () => {
-  it('errorCode 付き event → patron 向けエラー text で deliver + error log + deleteSession', async () => {
+  it('errorCode 付き event → patron 向けエラー text で deliver + error log (issue #150: deleteSession なし)', async () => {
     runAsyncMock.mockReturnValue(asyncGen([{ errorCode: 'PROVIDER_ERROR', errorMessage: 'Vertex 401' }]));
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'slack' });
 
@@ -420,7 +491,7 @@ describe('dispatchToAdk — ADK error event', () => {
     expect(call[1]).toBe('t-1');
     expect(call[2].content.text).toContain('PROVIDER_ERROR');
     expect(call[2].content.text).toContain('Vertex 401');
-    expect(deleteSessionMock).toHaveBeenCalled();
+    expect(deleteSessionMock).not.toHaveBeenCalled();
     expect(vi.mocked(log.error)).toHaveBeenCalledWith(
       'ADK dispatcher: error event',
       expect.objectContaining({ event: 'adk.dispatcher.error_event' }),
@@ -445,13 +516,13 @@ describe('dispatchToAdk — no adapter', () => {
 });
 
 describe('dispatchToAdk — 空 patronText', () => {
-  it('空文字列 / whitespace のみ → runAsync + createSession は呼ばず patron に「認識できませんでした」応答', async () => {
+  it('空文字列 / whitespace のみ → runAsync + getOrCreateSession は呼ばず patron に「認識できませんでした」応答', async () => {
     deliverMock.mockResolvedValue('delivery-empty-fallback');
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
 
     await dispatchToAdk({ ...BASE_PARAMS, patronText: '   ' });
 
-    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(getOrCreateSessionMock).not.toHaveBeenCalled();
     expect(runAsyncMock).not.toHaveBeenCalled();
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
@@ -471,7 +542,7 @@ describe('dispatchToAdk — runner init failure', () => {
 
     await expect(dispatchToAdk({ ...BASE_PARAMS })).resolves.toBeUndefined();
 
-    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(getOrCreateSessionMock).not.toHaveBeenCalled();
     expect(runAsyncMock).not.toHaveBeenCalled();
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
@@ -480,9 +551,9 @@ describe('dispatchToAdk — runner init failure', () => {
   });
 });
 
-describe('dispatchToAdk — createSession 失敗', () => {
-  it('sessionService.createSession が throw → fallback text で deliver + runAsync 呼ばず', async () => {
-    createSessionMock.mockRejectedValueOnce(new Error('session service unavailable'));
+describe('dispatchToAdk — getOrCreateSession 失敗 (issue #150)', () => {
+  it('sessionService.getOrCreateSession が throw → fallback text で deliver + runAsync 呼ばず', async () => {
+    getOrCreateSessionMock.mockRejectedValueOnce(new Error('session service unavailable'));
     getChannelAdapterMock.mockReturnValue({ deliver: deliverMock, channelType: 'cli' });
 
     await dispatchToAdk({ ...BASE_PARAMS });
@@ -490,17 +561,17 @@ describe('dispatchToAdk — createSession 失敗', () => {
     expect(runAsyncMock).not.toHaveBeenCalled();
     expect(deliverMock).toHaveBeenCalledWith('local', null, {
       kind: 'chat',
-      content: { text: expect.stringContaining('会話セッションの作成に失敗') },
+      content: { text: expect.stringContaining('会話セッションの取得に失敗') },
     });
     expect(vi.mocked(log.error)).toHaveBeenCalledWith(
-      'ADK dispatcher: createSession failed',
-      expect.objectContaining({ event: 'adk.dispatcher.create_session_failed' }),
+      'ADK dispatcher: getOrCreateSession failed',
+      expect.objectContaining({ event: 'adk.dispatcher.get_or_create_session_failed' }),
     );
   });
 });
 
 describe('dispatchToAdk — runAsync throw', () => {
-  it('event stream 内例外 → 日本語 fallback text で deliver + deleteSession は依然実行', async () => {
+  it('event stream 内例外 → 日本語 fallback text で deliver (issue #150: deleteSession なし)', async () => {
     runAsyncMock.mockImplementation(() => ({
       [Symbol.asyncIterator]() {
         return { next: () => Promise.reject(new Error('vertex timeout')) };
@@ -514,7 +585,8 @@ describe('dispatchToAdk — runAsync throw', () => {
     const call = deliverMock.mock.calls[0]!;
     expect(call[2].content.text).toContain('エラー');
     expect(call[2].content.text).toContain('LLM 呼び出しに失敗');
-    expect(deleteSessionMock).toHaveBeenCalled();
+    // issue #150: catch 経路でも deleteSession は呼ばない (GC 任せ)
+    expect(deleteSessionMock).not.toHaveBeenCalled();
     expect(vi.mocked(log.error)).toHaveBeenCalledWith(
       'ADK dispatcher: unexpected throw',
       expect.objectContaining({ event: 'adk.dispatcher.unexpected_error' }),

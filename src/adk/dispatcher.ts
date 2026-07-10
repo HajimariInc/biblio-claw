@@ -11,8 +11,11 @@
  * # `runEphemeral` → `runAsync` + 明示 session 管理の設計
  *
  * `InMemoryRunner.runEphemeral({userId, newMessage})` は ephemeral session を都度使い捨てだが、
- * HITL 承認機構 (enkin/shokyaku) 統合のため、明示的な
- * `sessionService.createSession → runner.runAsync → 保持 or deleteSession` を採用している。
+ * HITL 承認機構 (enkin/shokyaku) 統合 + 同 thread 内の会話履歴継続 (issue #150) のため、
+ * 明示的な `resolveAdkSessionId → sessionService.getOrCreateSession → runner.runAsync` を採用。
+ * 通常経路の deleteSession は行わない (= 次 turn で同 sessionId の prior events が SessionService
+ * から自動 load され LLM prompt に含まれるため、Slack thread 内 follow-up が LLM に伝わる)。
+ * session 総数管理は src/adk/session-gc.ts の LRU + TTL sweep に一本化。
  *
  * # HITL pending 経路 (event.content.parts 内の adk_request_confirmation を検知)
  *
@@ -36,7 +39,8 @@
  *   2. `requestAdkApproval({...})` で admin に Slack DM ask_question card を配信
  *      (**戻り値 `boolean` で pending row 作成成否を判定** = Phase 4 review C3)
  *   3. patron に「承認申請しました」中間応答を deliver
- *   4. `break` で event stream 消費を打ち切り、`deleteSession` を **skip** して session 保持
+ *   4. `break` で event stream 消費を打ち切って return (通常経路と同じく session は保持、
+ *      resume 時に同 sessionId で prior events が load される)
  *
  * 承認完了 (admin 押下) 時は response-handler.ts が `resolveAdkApproval` を呼び、同 sessionId で
  * runAsync 再呼出 → functionResponse 送り込み → tool.execute 再実行 → 最終応答 deliver。
@@ -46,8 +50,8 @@
  * `throw` しない (= router.ts の catch に頼らない)。runner 初期化失敗 / event stream 例外 /
  * adapter.deliver 失敗までを全て内部で catch し、patron 向けに何らかの日本語 fallback text で
  * `adapter.deliver` を試みる。空 `patronText` は patron に「認識できませんでした」応答。
- * **catch 経路では `pending = false` にリセット**して通常経路 (deleteSession + finalText
- * deliver) に落とし、silent drop + session leak を防ぐ (Phase 4 review C2 対応)。
+ * **catch 経路では `pending = false` にリセット**して通常経路 (finalText の adapter.deliver)
+ * に落とし、silent drop を防ぐ (Phase 4 review C2 対応)。
  */
 import { isFinalResponse } from '@google/adk';
 
@@ -60,6 +64,24 @@ import { clearAdkTargetStatus, emitAdkToolStatus } from '../modules/progress-sta
 import { buildRootAgent } from './root-agent.js';
 import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
 import { isHitlAction, type HitlConfirmationPayload } from './tools/hitl-types.js';
+
+/**
+ * ADK session ID を deterministic に導出する。
+ *
+ * (channelType, platformId, threadId) を key にする理由:
+ *   - 同 channel × 同 patron × 同 thread の連続発話が同じ sessionId に landing する
+ *   - `Runner.runAsync` が同 sessionId の prior events を SessionService から自動 load し
+ *     LLM prompt に含めるため、次 turn の会話に前 turn の tool 結果 / 応答が引き継がれる
+ *   - `threadId === null` (DM top-level 等) は channelType:platformId で 1 session に集約
+ *     (Phase 1 では現状の "DM = 1 session" 挙動を維持、DM 内 sub-thread 分離は別 issue)
+ *
+ * 形式: `<channelType>:<platformId>:<threadId ?? '_'>` (素朴 join)。
+ * 将来 platformId に `:` を含む channel が追加された場合は SHA-256(joined) 化を検討する
+ * (adk-js は sessionId 長制限なしのため hashing は現時点で不要)。
+ */
+export function resolveAdkSessionId(channelType: string, platformId: string, threadId: string | null): string {
+  return `${channelType}:${platformId}:${threadId ?? '_'}`;
+}
 
 /** module-scope singleton。SDK オブジェクト構築コストを起動時 1 回に抑える。 */
 let sharedContext: SharedRunnerContext | undefined;
@@ -167,49 +189,42 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
 
   const userId = params.userId ?? params.platformId;
 
-  // Session 明示作成 (runEphemeral 内部処理を manual で行う、HITL pause 対応のため)。
-  // sessionId は adk-js が UUID を自動生成する。
-  let sessionId: string;
+  // deterministic sessionId: 同 (channelType, platformId, threadId) の連続発話が同じ session に
+  // landing する。`Runner.runAsync` は同 sessionId の prior events を SessionService から自動
+  // load し LLM prompt に含めるため、次 turn で前 turn の会話履歴が LLM に伝わる
+  // (adk.dev / cloud.google.com ADK docs の runtime/event-loop 契約、issue #150 で裏取り済)。
+  //
+  // `getOrCreateSession` (BaseSessionService.getOrCreateSession, base_session_service.d.ts:126)
+  // は canonical idempotent API: 存在時は既存 Session を返し、不在時は明示 sessionId で新規作成。
+  // 「in-memory Map で lookup → miss → createSession」の 2 段は不要になる。
+  //
+  // 通常経路の deleteSession は本 dispatcher 内では呼ばない (= session 継続)。
+  // HITL pending 経路の resume 側 (approval-dispatcher.ts) は resume 完了後に deleteSession
+  // する既存挙動を温存 (破壊操作の 1 命令 1 完結 pattern を保つ、issue #150 §Step 4)。
+  // session 総数管理は src/adk/session-gc.ts の LRU + TTL sweep に一本化。
+  const sessionId = resolveAdkSessionId(channelType, platformId, threadId);
   try {
-    const session = await sessionService.createSession({
+    await sessionService.getOrCreateSession({
       appName: BIBLIO_M4B_APP_NAME,
       userId,
+      sessionId,
     });
-    sessionId = session.id;
   } catch (err) {
-    log.error('ADK dispatcher: createSession failed', {
-      event: 'adk.dispatcher.create_session_failed',
+    log.error('ADK dispatcher: getOrCreateSession failed', {
+      event: 'adk.dispatcher.get_or_create_session_failed',
       request_id: requestId,
+      adk_session_id: sessionId,
       err: err instanceof Error ? err.message : String(err),
     });
     await deliverFallback(
       channelType,
       platformId,
       threadId,
-      'エラー: 会話セッションの作成に失敗しました。しばらくして再度お試しください。',
+      'エラー: 会話セッションの取得に失敗しました。しばらくして再度お試しください。',
       requestId,
     );
     return;
   }
-
-  // 重複 deleteSession 防止 (= 将来 catch/finally/pending 経路が増えた時の防御)。
-  // 現状 (Phase 4 時点) は finally の 1 箇所からしか呼ばれないため実質的に発火しないが、
-  // Phase 90 の routing-cleanup で経路が増える見込みのため予防的に維持 (Phase 4 review CM3)。
-  let sessionDeleted = false;
-  const deleteSessionSafe = async (): Promise<void> => {
-    if (sessionDeleted) return;
-    sessionDeleted = true;
-    try {
-      await sessionService.deleteSession({ appName: BIBLIO_M4B_APP_NAME, userId, sessionId });
-    } catch (err) {
-      log.warn('ADK dispatcher: deleteSession failed (leaking session)', {
-        event: 'adk.dispatcher.delete_session_failed',
-        request_id: requestId,
-        session_id: sessionId,
-        err: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
 
   log.info('ADK dispatcher: invoke', {
     event: 'adk.dispatcher.invoke',
@@ -402,15 +417,16 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
     // finalText が deliver されず + session がリークする silent failure になる。
     pending = false;
   } finally {
-    // 通常経路のみ deleteSession、pending は resume 側 (approval-dispatcher.ts) が cleanup。
+    // 通常経路 / pending 経路 いずれも本 dispatcher 側では deleteSession しない
+    // (issue #150 §Step 2 対応、session 継続で次 turn 発話に prior events を LLM に load)。
+    // pending 経路の session cleanup は resume 側 (approval-dispatcher.ts) が担当。
+    // 通常経路の session 総数管理は session-gc.ts の LRU + TTL sweep に一本化。
+    //
+    // per-target 直近 status Map を明示解放 (emitAdkToolStatus の rate-limit ガード用)。
+    // 次 invocation で同 tool の初回発火が通り、Map の key 累積 (メモリリーク) も防ぐ。
+    // pending 経路は resume 時に continuous な同 invocation として扱うため clear しない
+    // (同一 target 上で別 tool の連続発火が続くだけなので guarantee が要らない)。
     if (!pending) {
-      await deleteSessionSafe();
-      // emitAdkToolStatus の rate-limit ガード用の per-target
-      // 直近 status Map を明示解放。次 invocation で同 tool の初回発火が通り、
-      // Map の key 累積 (メモリリーク) も防ぐ。pending 経路は resume 時に continuous
-      // な同 invocation として扱うため clear しない (resume 側 approval-dispatcher が
-      // deleteSession と同じタイミングで別途 clear する必要はない = 同一 target 上で
-      // 別 tool の連続発火が続くだけなので guarantee が要らない)。
       clearAdkTargetStatus(channelType, platformId, threadId);
     }
   }
