@@ -61,6 +61,7 @@ import { log } from '../log.js';
 import { requestAdkApproval } from '../modules/approvals/adk-approvals.js';
 import { clearAdkTargetStatus, emitAdkToolStatus } from '../modules/progress-status/index.js';
 
+import { runWithAnthropicVertexRequestContext } from './anthropic-vertex-request-context.js';
 import { buildRootAgent } from './root-agent.js';
 import { buildRunner, BIBLIO_M4B_APP_NAME, type SharedRunnerContext } from './runner.js';
 import { isHitlAction, type HitlConfirmationPayload } from './tools/hitl-types.js';
@@ -243,168 +244,176 @@ export async function dispatchToAdk(params: DispatchToAdkParams): Promise<void> 
   let pending = false;
 
   try {
-    for await (const event of runner.runAsync({
-      userId,
-      sessionId,
-      newMessage: { role: 'user', parts: [{ text: patronText }] },
-    })) {
-      // ADK error event 検知 (= Phase 3 pattern と同じ)
-      if (typeof event === 'object' && event !== null && 'errorCode' in event) {
-        const ev = event as { errorCode?: string; errorMessage?: string };
-        if (ev.errorCode) {
-          adkErrorCode = ev.errorCode;
-          adkErrorMessage = ev.errorMessage;
-          log.error('ADK dispatcher: error event', {
-            event: 'adk.dispatcher.error_event',
-            request_id: requestId,
-            error_code: ev.errorCode,
-            error_message: ev.errorMessage,
-          });
-          break;
+    // issue #136 Step 0-c: for-await loop 全体を AsyncLocalStorage で wrap。
+    // 内部から呼ばれる AnthropicVertexLlm.generateContentAsync は
+    // getAnthropicVertexRequestContext() で requestId/sessionId/channelType を回収し、
+    // vertex.call log + 401 forensic dump に相関 field を注入する。副次効果として
+    // HITL 経路 / tool 経路の log にも context が乗る (LLM 呼出以外にも触れる callchain
+    // 全部が同じ store を共有)。
+    await runWithAnthropicVertexRequestContext({ requestId, sessionId: sessionId ?? '', channelType }, async () => {
+      for await (const event of runner.runAsync({
+        userId,
+        sessionId,
+        newMessage: { role: 'user', parts: [{ text: patronText }] },
+      })) {
+        // ADK error event 検知 (= Phase 3 pattern と同じ)
+        if (typeof event === 'object' && event !== null && 'errorCode' in event) {
+          const ev = event as { errorCode?: string; errorMessage?: string };
+          if (ev.errorCode) {
+            adkErrorCode = ev.errorCode;
+            adkErrorMessage = ev.errorMessage;
+            log.error('ADK dispatcher: error event', {
+              event: 'adk.dispatcher.error_event',
+              request_id: requestId,
+              error_code: ev.errorCode,
+              error_message: ev.errorMessage,
+            });
+            break;
+          }
         }
-      }
 
-      // 通常 tool 呼出 (HITL 以外) を event.content.parts から検知し、
-      // Slack assistant status 欄を tool 名の日本語文言に書き換える。ADK は session 概念なし =
-      // adapter 直呼びで一発発射 (event 間隔は数秒 = Slack 2 分自動クリア余裕内、refresh loop 不要)。
-      //
-      // - `adk_request_confirmation` は HITL wrapper で以下の longRunningIds 分岐が処理する = skip
-      // - `fc.name` は adk-js が構築する ADK ネイティブ tool 名 (mcp__ prefix なし、biblio 9 tool)。
-      //   tool-status-map.ts の ADK_BIBLIO_STATUS 分岐で対応、未知 tool は generic fallback。
-      // - `void` fire-and-forget: event stream 消費を数百 ms 遅らせない (best-effort 契約)。
-      const eventParts = event.content?.parts ?? [];
-      for (const part of eventParts) {
-        const fc = part.functionCall;
-        if (!fc?.name || fc.name === 'adk_request_confirmation') continue;
-        // 現状 emitAdkToolStatus は内部 try/catch で保護され reject しない契約だが、
-        // 将来 toolNameToStatus / getChannelAdapter に throw が入った場合の
-        // 保険として明示 `.catch()` を挿入。unhandledRejection に落ちて event 名 / request_id
-        // 欠落のログになる経路を撲滅。
-        const toolName = fc.name;
-        void emitAdkToolStatus(channelType, platformId, threadId, toolName).catch((err) => {
-          log.warn('emitAdkToolStatus unexpected throw', {
-            event: 'adk.dispatcher.emit_tool_status_failed',
-            request_id: requestId,
-            tool_name: toolName,
-            err: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
-
-      // HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)
-      //
-      // **adk-js@1.3.0 実装契約**:
-      // `longRunningToolIds` に入るのは `generateRequestConfirmationEvent` (`agents/functions.js:129`)
-      // が新規採番した wrapper (`adk_request_confirmation` 名) の function call id。一方
-      // `event.actions.requestedToolConfirmations` のキーは元 tool call (`enkin_biblio` 等) の
-      // function call id。両者は別 namespace で一致しないため、`requestedToolConfirmations[id]`
-      // 引き経路は使えない。`event.content.parts` を直接走査して `adk_request_confirmation`
-      // function call を見つける方式に統一する。
-      //
-      // 上の tool status ループが評価した `eventParts` を再利用する (以前は同一 event の
-      // parts を「eventParts」と「parts」で 2 度計算していた = 別名で同じ配列を指していた)。
-      const longRunningIds = event.longRunningToolIds;
-      if (longRunningIds && longRunningIds.length > 0) {
-        pending = true;
-        let dispatched = 0;
-        // longRunningToolIds に対応する wrapper function call を parts から抽出。
-        // 通常 1 event に 1 wrapper だが、複数破壊操作の同時 pause (issue #110) に備えて
-        // for-loop で全件処理する。
+        // 通常 tool 呼出 (HITL 以外) を event.content.parts から検知し、
+        // Slack assistant status 欄を tool 名の日本語文言に書き換える。ADK は session 概念なし =
+        // adapter 直呼びで一発発射 (event 間隔は数秒 = Slack 2 分自動クリア余裕内、refresh loop 不要)。
+        //
+        // - `adk_request_confirmation` は HITL wrapper で以下の longRunningIds 分岐が処理する = skip
+        // - `fc.name` は adk-js が構築する ADK ネイティブ tool 名 (mcp__ prefix なし、biblio 9 tool)。
+        //   tool-status-map.ts の ADK_BIBLIO_STATUS 分岐で対応、未知 tool は generic fallback。
+        // - `void` fire-and-forget: event stream 消費を数百 ms 遅らせない (best-effort 契約)。
+        const eventParts = event.content?.parts ?? [];
         for (const part of eventParts) {
           const fc = part.functionCall;
-          if (!fc || fc.name !== 'adk_request_confirmation' || !fc.id) continue;
-          // longRunningToolIds に含まれる wrapper のみ処理 (= 型上の double check、
-          // adk-js が populate する longRunningToolIds と一致するはず)
-          if (!longRunningIds.includes(fc.id)) continue;
-
-          // args から toolConfirmation を取り出す。args の shape は adk-js の
-          // generateRequestConfirmationEvent が構築する `{originalFunctionCall, toolConfirmation}`。
-          const args = fc.args as { toolConfirmation?: { hint?: unknown; payload?: unknown } } | undefined;
-          const toolConfirmation = args?.toolConfirmation;
-          if (!toolConfirmation) {
-            log.warn('ADK dispatcher: adk_request_confirmation function call without toolConfirmation, skipping', {
-              event: 'adk.dispatcher.pending_no_confirmation',
+          if (!fc?.name || fc.name === 'adk_request_confirmation') continue;
+          // 現状 emitAdkToolStatus は内部 try/catch で保護され reject しない契約だが、
+          // 将来 toolNameToStatus / getChannelAdapter に throw が入った場合の
+          // 保険として明示 `.catch()` を挿入。unhandledRejection に落ちて event 名 / request_id
+          // 欠落のログになる経路を撲滅。
+          const toolName = fc.name;
+          void emitAdkToolStatus(channelType, platformId, threadId, toolName).catch((err) => {
+            log.warn('emitAdkToolStatus unexpected throw', {
+              event: 'adk.dispatcher.emit_tool_status_failed',
               request_id: requestId,
-              function_call_id: fc.id,
+              tool_name: toolName,
+              err: err instanceof Error ? err.message : String(err),
             });
-            continue;
-          }
+          });
+        }
 
-          const toolPayload = toolConfirmation.payload as HitlConfirmationPayload | undefined;
-          if (!toolPayload) {
-            log.warn('ADK dispatcher: confirmation without payload, skipping', {
-              event: 'adk.dispatcher.pending_no_payload',
-              request_id: requestId,
-              function_call_id: fc.id,
-            });
-            continue;
-          }
-          const action = toolPayload.action;
-          if (!isHitlAction(action)) {
-            log.warn('ADK dispatcher: unknown confirmation action, skipping', {
-              event: 'adk.dispatcher.pending_unknown_action',
-              request_id: requestId,
-              function_call_id: fc.id,
-              action: (action as unknown) ?? null,
-            });
-            continue;
-          }
+        // HITL pending 経路検知 (`longRunningToolIds` populate = requestConfirmation 発火済)
+        //
+        // **adk-js@1.3.0 実装契約**:
+        // `longRunningToolIds` に入るのは `generateRequestConfirmationEvent` (`agents/functions.js:129`)
+        // が新規採番した wrapper (`adk_request_confirmation` 名) の function call id。一方
+        // `event.actions.requestedToolConfirmations` のキーは元 tool call (`enkin_biblio` 等) の
+        // function call id。両者は別 namespace で一致しないため、`requestedToolConfirmations[id]`
+        // 引き経路は使えない。`event.content.parts` を直接走査して `adk_request_confirmation`
+        // function call を見つける方式に統一する。
+        //
+        // 上の tool status ループが評価した `eventParts` を再利用する (以前は同一 event の
+        // parts を「eventParts」と「parts」で 2 度計算していた = 別名で同じ配列を指していた)。
+        const longRunningIds = event.longRunningToolIds;
+        if (longRunningIds && longRunningIds.length > 0) {
+          pending = true;
+          let dispatched = 0;
+          // longRunningToolIds に対応する wrapper function call を parts から抽出。
+          // 通常 1 event に 1 wrapper だが、複数破壊操作の同時 pause (issue #110) に備えて
+          // for-loop で全件処理する。
+          for (const part of eventParts) {
+            const fc = part.functionCall;
+            if (!fc || fc.name !== 'adk_request_confirmation' || !fc.id) continue;
+            // longRunningToolIds に含まれる wrapper のみ処理 (= 型上の double check、
+            // adk-js が populate する longRunningToolIds と一致するはず)
+            if (!longRunningIds.includes(fc.id)) continue;
 
-          const hint = typeof toolConfirmation.hint === 'string' ? toolConfirmation.hint : undefined;
+            // args から toolConfirmation を取り出す。args の shape は adk-js の
+            // generateRequestConfirmationEvent が構築する `{originalFunctionCall, toolConfirmation}`。
+            const args = fc.args as { toolConfirmation?: { hint?: unknown; payload?: unknown } } | undefined;
+            const toolConfirmation = args?.toolConfirmation;
+            if (!toolConfirmation) {
+              log.warn('ADK dispatcher: adk_request_confirmation function call without toolConfirmation, skipping', {
+                event: 'adk.dispatcher.pending_no_confirmation',
+                request_id: requestId,
+                function_call_id: fc.id,
+              });
+              continue;
+            }
 
-          // requestAdkApproval は Promise<boolean> を返す。
-          // 内部 fallback 通知 (approver 不在 / DM 不在 / deliver throw) 時は false を返し、
-          // dispatcher は「成功」と誤認しない = 中間応答「承認申請しました」を送らない。
-          let created = false;
-          try {
-            created = await requestAdkApproval({
-              agentGroupId: params.agentGroupId,
+            const toolPayload = toolConfirmation.payload as HitlConfirmationPayload | undefined;
+            if (!toolPayload) {
+              log.warn('ADK dispatcher: confirmation without payload, skipping', {
+                event: 'adk.dispatcher.pending_no_payload',
+                request_id: requestId,
+                function_call_id: fc.id,
+              });
+              continue;
+            }
+            const action = toolPayload.action;
+            if (!isHitlAction(action)) {
+              log.warn('ADK dispatcher: unknown confirmation action, skipping', {
+                event: 'adk.dispatcher.pending_unknown_action',
+                request_id: requestId,
+                function_call_id: fc.id,
+                action: (action as unknown) ?? null,
+              });
+              continue;
+            }
+
+            const hint = typeof toolConfirmation.hint === 'string' ? toolConfirmation.hint : undefined;
+
+            // requestAdkApproval は Promise<boolean> を返す。
+            // 内部 fallback 通知 (approver 不在 / DM 不在 / deliver throw) 時は false を返し、
+            // dispatcher は「成功」と誤認しない = 中間応答「承認申請しました」を送らない。
+            let created = false;
+            try {
+              created = await requestAdkApproval({
+                agentGroupId: params.agentGroupId,
+                channelType,
+                platformId,
+                threadId,
+                userId,
+                adkSessionId: sessionId,
+                functionCallId: fc.id,
+                hint: hint ?? '承認が必要な操作です。',
+                action,
+                payload: toolPayload,
+              });
+            } catch (err) {
+              // requestAdkApproval は throw しない契約だが、防御的に catch (silent failure 撲滅
+              // pattern 継承)。ここで throw が抜けると outer catch に到達して pending リセット +
+              // patron に system error が届く。
+              log.error('ADK dispatcher: requestAdkApproval unexpectedly threw', {
+                event: 'adk.dispatcher.request_approval_error',
+                request_id: requestId,
+                function_call_id: fc.id,
+                action,
+                err: err instanceof Error ? err.message : String(err),
+              });
+              created = false;
+            }
+            if (created) dispatched++;
+          }
+          // 中間応答: patron に「承認申請しました」通知
+          // (dispatched === 0 なら結局承認カードが 1 件も出ていない = 通常経路に落として最終応答を試みる)
+          if (dispatched > 0) {
+            await deliverFallback(
               channelType,
               platformId,
               threadId,
-              userId,
-              adkSessionId: sessionId,
-              functionCallId: fc.id,
-              hint: hint ?? '承認が必要な操作です。',
-              action,
-              payload: toolPayload,
-            });
-          } catch (err) {
-            // requestAdkApproval は throw しない契約だが、防御的に catch (silent failure 撲滅
-            // pattern 継承)。ここで throw が抜けると outer catch に到達して pending リセット +
-            // patron に system error が届く。
-            log.error('ADK dispatcher: requestAdkApproval unexpectedly threw', {
-              event: 'adk.dispatcher.request_approval_error',
-              request_id: requestId,
-              function_call_id: fc.id,
-              action,
-              err: err instanceof Error ? err.message : String(err),
-            });
-            created = false;
+              '承認を admin にお願いしました。承認後に処理を続行します。',
+              requestId,
+            );
+            break; // session を残したまま return (deleteSession しない)
+          } else {
+            // 全 confirmation を skip した = pending 経路の実体なし、通常経路として続行
+            pending = false;
           }
-          if (created) dispatched++;
         }
-        // 中間応答: patron に「承認申請しました」通知
-        // (dispatched === 0 なら結局承認カードが 1 件も出ていない = 通常経路に落として最終応答を試みる)
-        if (dispatched > 0) {
-          await deliverFallback(
-            channelType,
-            platformId,
-            threadId,
-            '承認を admin にお願いしました。承認後に処理を続行します。',
-            requestId,
-          );
-          break; // session を残したまま return (deleteSession しない)
-        } else {
-          // 全 confirmation を skip した = pending 経路の実体なし、通常経路として続行
-          pending = false;
-        }
-      }
 
-      if (isFinalResponse(event)) {
-        finalText = event.content?.parts?.[0]?.text ?? '';
+        if (isFinalResponse(event)) {
+          finalText = event.content?.parts?.[0]?.text ?? '';
+        }
       }
-    }
+    });
   } catch (err) {
     log.error('ADK dispatcher: unexpected throw', {
       event: 'adk.dispatcher.unexpected_error',

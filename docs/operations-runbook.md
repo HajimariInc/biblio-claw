@@ -1836,6 +1836,87 @@ kubectl exec biblio-orchestrator-0 -c vertex-token-rotator -n biblio-claw -- \
 
 ---
 
+## M4-B: Vertex 401 発生時の観察手順 (issue #136 observability + #137 自浄への引き継ぎ)
+
+### 背景
+
+401 発生時に事実ベースで原因を特定するための観察経路。#137 の自浄機能 Layer 1-4 の判断材料として利用する。
+
+epic 3 段の位置付け:
+- **#136 (本節)**: observability の実装 = 「原因層 4 分類を特定可能な状態」までが DoD
+- **#137**: 自浄機能の実装 (Layer 1-4) — 本節の観察結果を根拠に選択
+- **M4-G**: patron に「時間がかかっている理由」を見せる (別スコープ)
+
+### 手順 1: BQ で 4 分類判定を叩く
+
+```bash
+export PROJECT_ID=biblio-prod  # or biblio-dev
+export DATASET_ID=llm_observability
+sed -e "s/<PROJECT_ID>/${PROJECT_ID}/g" -e "s/<DATASET_ID>/${DATASET_ID}/g" \
+  src/reporting/sql/vertex-401-correlation.sql | bq query --nouse_legacy_sql
+```
+
+### 4 分類判定結果の読み方
+
+| category | 意味 | 対処 (= #137 で対応する Layer) |
+|:---|:---|:---|
+| A | SDK/google-auth-library cache 問題 (経路 1) | Layer 1: `AnthropicVertexLlm` 再 instantiate |
+| A2 | SDK Authorization capture 失敗 | Layer 1: probe route の実装確認 |
+| B | Rotator sidecar 死亡 (>45min 経過) | Layer 3: rotator IPC 通知 + 周期短縮 |
+| C | OneCLI secret 消失 (snapshot found=false) | Layer 2: OneCLI cache invalidate |
+| D | Google 側障害 (rotator 直後 5min 以内) | Layer 4: K8s livenessProbe + Cloud Monitoring alert |
+| E | 未分類 | 手動調査、下記手順 2 / 3 と Cloud Trace UI 併用 |
+
+### 手順 2: Cloud Trace UI 検索フィルタ例
+
+```
+# 経路 1 (ADK chat 経路)
+service.name="biblio-claw" AND span.name=~"chat claude-.*" AND status.error=true
+
+# 経路 2 (categorize/inspect/gate)
+service.name="biblio-claw" AND span.name=~"biblio\..*" AND biblio.outcome="error"
+```
+
+### 手順 3: rotator log の直接読取 (BQ 遅延時の fallback)
+
+```bash
+kubectl logs biblio-orchestrator-0 -c vertex-token-rotator -n biblio-claw --tail=200 \
+  | grep -E 'vertex\.rotator\.token_injected|rotation\.(ok|failed)'
+```
+= `token_iat` / `token_exp` / `token_hash` field で観測。opaque `ya29.*` 経路では
+`token_iat`/`token_exp` は空文字、`token_hash` (SHA256 先頭 12 hex) が主戦力。
+
+### 各種 event 参照
+
+| event | 発火経路 | 主フィールド |
+|-------|---------|-----------|
+| `vertex.rotator.token_injected` | rotator sidecar (scripts/onecli-vertex-secret.sh:ensure_secret) | token_iat / token_exp / token_hash / secret_id_prev / secret_id_after |
+| `vertex.onecli.secret_snapshot` | orchestrator sidecar (src/sidecar/vertex-secret-snapshot.ts、30s 周期) | outcome (success/not_found/failure) / secret_id / host_pattern / updated_at_epoch |
+| `vertex.sdk.request_header` | AnthropicVertexLlm.generateContentAsync 内 pre-flight capture | auth_token_iat / auth_token_exp / auth_token_hash / auth_capture_error / age_since_iat_sec |
+| `vertex.401.forensic_dump` | AnthropicVertexLlm catch + vertex-client.ts !res.ok 分岐 (401) | channel (adk/onecli) / pod_age_sec / onecli_snapshot_* / http_status |
+| `vertex.auth.heartbeat_ok` | vertex-auth-heartbeat sidecar (5min 周期) | channel / outcome / model |
+| `vertex.auth.heartbeat_failed` | 同上 (probe 失敗時) | forensic dump 相当 payload + http_status |
+| `vertex.auth.heartbeat_fatal` | 同上 (連続 3 回失敗時、log.fatal) | consecutive_failures / threshold |
+
+### 補足: `pod_age_sec` の意味
+
+Node process 起動秒数 (= `process.uptime()`) を返す。K8s Pod 起動時刻 (StatefulSet 起動時刻)
+とは別。「Pod 内 Node が上がってから何秒か」を測る = process 単位の age proxy。
+
+### 補足: log-based alert の incident close
+
+Cloud Monitoring log-based alert (Step 8 の Terraform) は log が discrete event で
+"CLOSED" 状態を持たないため、Terraform で `notification_prompts` を明示指定しても
+API 側で無視される。運用は Cloud Monitoring incident dashboard で明示 close するか、
+`auto_close = "604800s"` (7d) で自然 close する。「incident が延々残る」誤解を防ぐ。
+
+### #137 への引き継ぎ
+
+上記 category が特定できたら、GitHub issue #137 (Vertex 認証系の自浄機能実装) の
+該当 Layer コメントに category + 観察データ (BQ query 結果 + trace_id) を添付する。
+
+---
+
 ## Pending Pod の対症手順 (GKE 経路、issue #57)
 
 ### 背景

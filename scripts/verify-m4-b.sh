@@ -539,6 +539,58 @@ else
 fi
 
 # =============================================================================
+# Section 6.6: issue #136 observability smoke (rotator log / sidecar loops / BQ / alert)
+# =============================================================================
+info '=== [6.6] issue #136 observability smoke ==='
+
+# (a) rotator log に token_hash field 出現確認 (= JWT decode + hash 経路が生きている)
+if kubectl logs biblio-orchestrator-0 -c vertex-token-rotator -n "${NS}" --tail=200 \
+    2>/dev/null | grep -q 'vertex.rotator.token_injected.*token_hash'; then
+  info "  (a) rotator token_hash field OK"
+else
+  # 初回 rotator loop が 40min 周期のため、Pod 起動直後は grep miss しうる = warn 継続
+  warn "  (a) rotator log に vertex.rotator.token_injected.token_hash が未出現 (初回 rotation 待ち可能性、40min 経過してから再実行推奨)"
+fi
+
+# (b) orchestrator sidecar loop 起動確認 (snapshot + heartbeat の 2 経路)
+if kubectl logs biblio-orchestrator-0 -c orchestrator -n "${NS}" --tail=500 \
+    2>/dev/null | grep -q 'vertex-secret-snapshot started'; then
+  info "  (b1) vertex-secret-snapshot 起動確認 OK"
+else
+  fail 'vertex-secret-snapshot が起動していない (src/index.ts の startVertexSecretSnapshot 経路確認)'
+fi
+
+if kubectl logs biblio-orchestrator-0 -c orchestrator -n "${NS}" --tail=500 \
+    2>/dev/null | grep -q 'vertex-auth-heartbeat started'; then
+  info "  (b2) vertex-auth-heartbeat 起動確認 OK"
+else
+  fail 'vertex-auth-heartbeat が起動していない (src/index.ts の startVertexAuthHeartbeat 経路確認)'
+fi
+
+# (c) BQ correlation SQL の syntax dry_run PASS
+# BQ sink schema drift 対策 = 新 event が BQ に流れて 24h+ 経過している必要がある。
+# dry_run 単独では schema 未反映でも通る (= syntax check のみ) = deploy 直後でも grep 可能。
+if sed -e "s/<PROJECT_ID>/${GCP_PROJECT_ID}/g" -e "s/<DATASET_ID>/${BQ_DATASET_ID}/g" \
+    src/reporting/sql/vertex-401-correlation.sql \
+    | bq query --nouse_legacy_sql --dry_run 2>/dev/null; then
+  info "  (c) vertex-401-correlation.sql dry_run OK"
+else
+  # deploy 直後は BQ schema drift で dry_run が「column not found」で fail する可能性 = warn 継続
+  warn "  (c) vertex-401-correlation.sql dry_run 失敗 (deploy 直後は BQ sink schema drift の可能性、24h+ 稼働で再実行推奨)"
+fi
+
+# (d) Terraform alert policy 存在確認 (apply 済み前提、未 apply 時は warn 継続)
+if gcloud alpha monitoring policies list --project="${GCP_PROJECT_ID}" \
+    --filter='displayName:"Vertex Auth Heartbeat Failed"' --format='value(name)' 2>/dev/null \
+    | grep -q '.'; then
+  info "  (d) Cloud Monitoring alert policy 存在確認 OK"
+else
+  warn "  (d) Cloud Monitoring alert policy 未検出 (terraform/m4-b-vertex-auth-alert が未 apply の可能性、README 参照)"
+fi
+
+info '  Section 6.6 smoke PASS (warn は運用初期の想定内 = deploy 直後 or 未 apply)'
+
+# =============================================================================
 # Section 7: ネガティブ対照 (regression、opt-in)
 # =============================================================================
 info '=== [7/9] regression (verify-slack-e2e-gke.sh、opt-in) ==='

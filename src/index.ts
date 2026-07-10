@@ -20,6 +20,8 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { startCaSecretSync, stopCaSecretSync } from './sidecar/ca-secret-sync.js';
+import { startVertexSecretSnapshot, stopVertexSecretSnapshot } from './sidecar/vertex-secret-snapshot.js';
+import { startVertexAuthHeartbeat, stopVertexAuthHeartbeat } from './sidecar/vertex-auth-heartbeat.js';
 import { log } from './log.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -275,6 +277,20 @@ async function main(): Promise<void> {
     await startCaSecretSync();
   }
 
+  // 6c. Start vertex-secret-snapshot (両環境) — issue #136 A2。
+  // OneCLI 内の Vertex secret メタデータを 30s 周期で snapshot し、401 forensic dump
+  // (経路 1/2 共通) から `getLastVertexSecretSnapshot()` で参照する。fetch throw は
+  // silent 化せず warn で残す、found=false state は Cloud Monitoring alert 対象。
+  // ONECLI_URL が有効なら local / GKE 両方で起動 (= どちらも observability 恩恵あり)。
+  startVertexSecretSnapshot();
+
+  // 6d. Start vertex-auth-heartbeat (両環境) — issue #136 C。
+  // 5min 周期で ADK 経路 + OneCLI 経路の Vertex 認証疎通を patron 発話待たずに probe。
+  // 3 回連続失敗で log.fatal 発火 (Cloud Monitoring alert 経由 Slack 通知の入口)、
+  // 429 は fatal counter に含めない (false positive 回避)。ANTHROPIC_VERTEX_PROJECT_ID
+  // 未設定時は ADK probe を skip (log.warn で可視化)、OneCLI probe は続行。
+  startVertexAuthHeartbeat();
+
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
@@ -311,6 +327,8 @@ async function shutdown(signal: string): Promise<void> {
   stopDeliveryPolls();
   stopHostSweep();
   stopCaSecretSync();
+  stopVertexSecretSnapshot();
+  stopVertexAuthHeartbeat();
   stopAdkSessionGc();
   await stopCliServer();
   try {

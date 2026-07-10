@@ -35,10 +35,13 @@
  *   public surface (= `BaseLlm` 抽象 method signature) から逆算する。上流 adk-js が将来
  *   top-level に re-export したら型 alias を差し替える方針 (= drop-in 互換)。
  */
+import { createHash } from 'node:crypto';
+
 import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
 import { SpanKind, SpanStatusCode, context, trace } from '@opentelemetry/api';
 import { BaseLlm } from '@google/adk';
 import type { BaseLlmConnection } from '@google/adk';
+import { GoogleAuth } from 'google-auth-library';
 
 import { log } from '../log.js';
 import {
@@ -56,7 +59,10 @@ import {
   type VertexCallUsageFields,
 } from '../observability/genai.js';
 import { getTracer } from '../observability/index.js';
+import { getTraceLogFields } from '../observability/trace-fields.js';
+import { getAnthropicVertexRequestContext } from './anthropic-vertex-request-context.js';
 import { toAnthropicTools } from './schema-conversion.js';
+import { buildVertexForensicPayload } from './vertex-forensic.js';
 
 /**
  * ADK が `generateContentAsync` 抽象 method を export している唯一の型抽出経路。
@@ -179,18 +185,42 @@ export class AnthropicVertexLlm extends BaseLlm {
 
   private readonly client: AnthropicVertex;
   private readonly region: string;
+  private readonly googleAuth: GoogleAuth;
 
   constructor({ model }: { model: string }) {
     super({ model });
     this.region = process.env.CLOUD_ML_REGION ?? DEFAULT_REGION;
-    // keyless 4 面アサート PASS の前提: accessToken / googleAuth / authClient は明示渡さず
-    // SDK 内部の `google-auth-library@9.x` の ADC 解決経路に委譲。`projectId` は env 直渡し
-    // (未設定でも SDK 側で `google-auth-library` の `getProjectId()` が走る = local では
-    // `gcloud config get core/project` 等から解決される)。
+
+    // issue #136 A3-a (Step 3-a/3-b): keyless ADC 経路を維持しつつ Authorization capture を
+    // 可能にする。GoogleAuth インスタンスを明示的に構築し、SDK 内部の getRequestHeaders()
+    // cache 経路を共有することで pre-flight capture (generateContentAsync 内) が観察する token
+    // と SDK が実際に送る token を同一にする (= observability 目的達成の前提)。
+    //
+    // 前提: pnpm.overrides で google-auth-library@9.15.1 を単一化済 (`pnpm-workspace.yaml`)。
+    // 2 バージョン共存だと `AnthropicVertex.ClientOptions.googleAuth` の型が別 version の
+    // GoogleAuth を指して TS2322 (`#private` field 不一致) で拒否される罠を回避。
+    //
+    // 公式契約 (context7 `@anthropic-ai/vertex-sdk` README):
+    //   `new AnthropicVertex({ googleAuth: new GoogleAuth({...}) })` は Custom GoogleAuth
+    //   configuration の公式経路。scopes は string 単体が README 例、array も許容。
+    //
+    // cache 動作 (google-auth-library v9.15.1 oauth2client.ts:897-919):
+    //   - `credentials.access_token` を instance field に保持
+    //   - `isTokenExpiring()` = expiry_date <= now + eagerRefreshThresholdMillis
+    //   - `DEFAULT_EAGER_REFRESH_THRESHOLD_MILLIS = 5 * 60 * 1000` (5 分前倒し refresh)
+    //   - 並行呼出は refreshTokenPromises Map dedup で 1 in-flight promise に収束
+    const googleAuth = new GoogleAuth({
+      scopes: 'https://www.googleapis.com/auth/cloud-platform',
+      projectId: process.env.ANTHROPIC_VERTEX_PROJECT_ID ?? undefined,
+    });
+
     this.client = new AnthropicVertex({
       region: this.region,
       projectId: process.env.ANTHROPIC_VERTEX_PROJECT_ID ?? null,
+      googleAuth,
     });
+    this.googleAuth = googleAuth;
+
     log.info('AnthropicVertexLlm initialized', {
       event: 'adk.anthropic_vertex_llm.init',
       model: this.model,
@@ -234,12 +264,25 @@ export class AnthropicVertexLlm extends BaseLlm {
     });
     // span を active context に設定 (= SDK 内部の OTel 計装 span が子としてリンクされる前提)。
     const spanCtx = trace.setSpan(context.active(), span);
+    // issue #136 Step 0-d: AsyncLocalStorage 経由で dispatcher → LLM 呼出の request 相関を回収。
+    // undefined 時は空文字 fallback + `context_missing:true` を emit で「AsyncLocalStorage の
+    // 外から呼ばれた」を可観測にする (silent 化しない、biblio-claw §silent failure 撲滅方針)。
+    const reqCtx = getAnthropicVertexRequestContext();
+    const ctxFields: Record<string, unknown> = reqCtx
+      ? { request_id: reqCtx.requestId, session_id: reqCtx.sessionId, channel_type: reqCtx.channelType }
+      : { request_id: '', session_id: '', channel_type: '', context_missing: true };
     // M4-C Phase 1: `vertex.call` の Cloud Logging emit を成功経路で発火する
     // (= `src/biblio/vertex-client.ts:508-517` の pattern 写経、latency_ms 計上のため t0 を setup)。
     // src/reporting/sql/llm-cost.sql が本 event を GROUP BY jsonPayload.model で集計。
     // ADK チャット本体経路 (CLI/Slack/Fugue ask) の Vertex 呼出は helper axis (categorize/inspect/gate) と
     // 別で、以前は span 属性のみで Cloud Logging に emit されていなかった (M4-C review で発見)。
     const t0 = performance.now();
+    // issue #136 Step 5-b: pre-flight capture 結果を catch (401 forensic dump) から参照するため
+    // try の外側 (関数スコープ) に上げる。try 内で書き込み、catch で読み取る双方向 flow。
+    let authTokenIat: number | null = null;
+    let authTokenExp: number | null = null;
+    let authTokenHash = '';
+    let authCaptureError = '';
     try {
       const messages = this.convertContentsToAnthropicMessages(llmRequest);
 
@@ -285,6 +328,68 @@ export class AnthropicVertexLlm extends BaseLlm {
           model: this.model,
         });
       }
+
+      // issue #136 A3-b (Step 3-b): SDK 呼出直前に Authorization header を capture して
+      // JWT decode (JWT 形式の場合) + hash (opaque でも常に有効)。
+      //   - googleAuth.getClient().getRequestHeaders() は SDK 内部 #adaptRequest と同一の
+      //     AuthClient instance を叩き (constructor で同じ GoogleAuth を渡している)、
+      //     google-auth-library が cache 済 token を返す (期限切れなら metadata server refresh)。
+      //     二重 refresh レースは refreshTokenPromises Map dedup で 1 in-flight 収束
+      //   - fail-open: capture 失敗しても LLM 呼出自体は続行 (biblio-claw silent failure 撲滅
+      //     方針の degraded fallback、observability だけ空値 + capture_error 明示)
+      //   - ADC token は opaque `ya29.*` が主流 (Google Cloud docs 明示、metadata server 発行)。
+      //     parts.length===3 guard で JWT 形式のみ iat/exp を取り出す。opaque では null で、
+      //     auth_token_hash が主戦力 (BQ 相関 SQL の A 分類判定は hash 一致で成立)
+      //   - 変数は関数スコープに宣言済 (catch 節から参照するため、Step 5-b)。
+      try {
+        const authClient = await this.googleAuth.getClient();
+        const authHeaders = await authClient.getRequestHeaders();
+        const bearer =
+          (authHeaders as Record<string, string>)?.Authorization ??
+          (authHeaders as Record<string, string>)?.authorization ??
+          '';
+        const jwtMatch = /^Bearer\s+(.+)$/.exec(bearer);
+        const rawToken = jwtMatch?.[1] ?? '';
+        if (rawToken) {
+          authTokenHash = createHash('sha256').update(rawToken).digest('hex').slice(0, 12);
+          const parts = rawToken.split('.');
+          if (parts.length === 3 && parts[1]) {
+            try {
+              const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf8');
+              const payload = JSON.parse(payloadJson) as { iat?: number; exp?: number };
+              if (typeof payload.iat === 'number') authTokenIat = payload.iat;
+              if (typeof payload.exp === 'number') authTokenExp = payload.exp;
+            } catch {
+              // opaque (ya29.*) or decode 失敗 = iat/exp なし、hash のみ有効
+            }
+          }
+        } else {
+          authCaptureError = 'no_bearer_in_headers';
+        }
+      } catch (err) {
+        authCaptureError = err instanceof Error ? err.message : String(err);
+        log.warn('AnthropicVertexLlm: pre-flight auth capture failed (fail-open)', {
+          event: 'vertex.sdk.request_header.capture_failed',
+          outcome: 'degraded',
+          ...ctxFields,
+          err: authCaptureError,
+        });
+      }
+
+      // pre-flight capture 結果を単独 event として emit (401 発生時の forensic dump 用)。
+      // 直前 capture の state が BQ で参照可能になる = 401 発生 request と直近 capture の
+      // trace_id / request_id で JOIN 可能。
+      log.info('vertex.sdk.request_header captured', {
+        event: 'vertex.sdk.request_header',
+        outcome: authCaptureError ? 'degraded' : 'success',
+        ...ctxFields,
+        ...getTraceLogFields(span),
+        auth_token_iat: authTokenIat,
+        auth_token_exp: authTokenExp,
+        auth_token_hash: authTokenHash,
+        auth_capture_error: authCaptureError || null,
+        age_since_iat_sec: authTokenIat != null ? Math.floor(Date.now() / 1000) - authTokenIat : null,
+      });
 
       // SDK は abortSignal を `fetchOptions` 経由で受ける設計 (`@anthropic-ai/sdk` 流儀)、
       // `messages.create` の第 2 引数で渡す。`maxRetries` は SDK default (2) に任せる
@@ -342,9 +447,20 @@ export class AnthropicVertexLlm extends BaseLlm {
         cache_captured: cacheCaptured,
         latency_ms: Math.round(performance.now() - t0),
       };
+      // issue #136 Step 0-d: 成功パスの構造化 log を trace 相関可能に emit。
+      // `context.with(spanCtx, ...)` の callback 外側で emit するため active span 経由の相関は
+      // 空になる (= WHY 1-a)。`getTraceLogFields(span)` に明示 span 引数を渡し脱出する。
+      // ctxFields は AsyncLocalStorage 経由で dispatcher から流れる request_id / session_id /
+      // channel_type。両者揃うと BQ で `router.dispatch.adk` (patron 発話入口) と本 log を
+      // 横串で結合できる (= WHY 1-b 是正)。
+      // usageFields (M4-C Phase 1/2 経路、`VertexCallUsageFields` interface で強制) は
+      // outcome / tokens_in / tokens_out / cache_read / cache_creation / cache_captured /
+      // latency_ms を集約、llm-cost.sql の GROUP BY jsonPayload.model 集計を成立させる。
       log.info('vertex.call', {
         event: 'vertex.call',
         model: this.model,
+        ...ctxFields,
+        ...getTraceLogFields(span),
         ...usageFields,
       });
 
@@ -361,13 +477,46 @@ export class AnthropicVertexLlm extends BaseLlm {
       const errorRecord = err instanceof Error ? err : new Error(String(err));
       span.recordException(errorRecord);
       span.setStatus({ code: SpanStatusCode.ERROR, message: errorRecord.message });
+
+      // issue #136 Step 5-b: 401 検知 → forensic dump 発火 (channel='adk')。
+      // 判定は @anthropic-ai/sdk の AuthenticationError name / status 401 / message regex の
+      // 3 経路 OR = SDK 版差で shape が微妙に違うため future-proofing (silent fail 時は
+      // is_401=false の通常 error log に落ちる = 観察漏れは runbook §Cloud Trace UI で fallback)。
+      const is401 =
+        (err as { status?: number })?.status === 401 ||
+        (err as { name?: string })?.name === 'AuthenticationError' ||
+        /401|ACCESS_TOKEN_EXPIRED|invalid authentication credentials/i.test(errorRecord.message);
+      if (is401) {
+        log.error(
+          'vertex.401 forensic dump (channel=adk)',
+          buildVertexForensicPayload({
+            channel: 'adk',
+            requestId: reqCtx?.requestId ?? '',
+            sessionId: reqCtx?.sessionId ?? '',
+            channelType: reqCtx?.channelType ?? '',
+            authTokenIat,
+            authTokenExp,
+            authTokenHash,
+            authCaptureError: authCaptureError || null,
+            httpStatus: 401,
+            err: errorRecord,
+            span,
+          }),
+        );
+      }
+
       // OTel が degraded fallback (= `instrumentation.ts` の init failure 経路) のとき
       // `span.recordException` / `setStatus` は全部 no-op になるため、構造化ログにも残す
       // (= biblio-claw §silent failure 撲滅方針: 失敗は必ず log、握り潰さない)。
+      // issue #136 Step 0-d: ctxFields + getTraceLogFields(span) で trace / request 相関を保持。
       log.error('AnthropicVertex SDK call failed', {
         event: 'adk.anthropic_vertex_llm.generate',
         outcome: 'failure',
         model: this.model,
+        ...ctxFields,
+        ...getTraceLogFields(span),
+        latency_ms: Math.round(performance.now() - t0),
+        is_401: is401,
         err: errorRecord.message,
       });
       throw err;

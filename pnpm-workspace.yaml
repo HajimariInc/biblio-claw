@@ -26,3 +26,14 @@ overrides:
   # が close (fixed) になる。exact pin なのは `@opentelemetry/api: '1.9.1'` の
   # 既存 pattern と一貫させるため (issue #113 対応で追加)。
   '@opentelemetry/core': '2.8.0'
+  # issue #136 Step 3-a: `@anthropic-ai/vertex-sdk@0.18.0` が内部で要求する
+  # `google-auth-library@9.15.1` に root 直接依存 (`package.json`) を合わせる。
+  # 2 バージョン共存で `AnthropicVertex({googleAuth: new GoogleAuth(...)})` 明示
+  # 渡しが `TS2322: Property '#private' in type 'GoogleAuth' refers to a different
+  # member` で型崩壊するため (`google-auth-library` の class private field が
+  # nominal typing で別バージョン非互換扱いになる TypeScript 挙動)。
+  # 単一 version 化で SDK 内部 `#adaptRequest` と同一 `AuthClient` instance を共有
+  # 可能となり、pre-flight capture (Step 3-b) が SDK が実際に送る Authorization を
+  # 観察できる。将来 `vertex-sdk` を bump するときは overrides の巻き戻しが必要
+  # (tracking issue 別途)。
+  'google-auth-library': '9.15.1'
