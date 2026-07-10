@@ -52,10 +52,6 @@ pnpm run chat "hello"      # smoke 用 CLI から司書と会話
 ---
 
 <p align="center">
-  <img src="assets/nanoclaw-logo.png" alt="NanoClaw" width="400">
-</p>
-
-<p align="center">
   エージェントを専用コンテナで安全に実行する AI アシスタント。軽量で、理解しやすく、自分のニーズに合わせて完全にカスタマイズできるように作られている。
 </p>
 
