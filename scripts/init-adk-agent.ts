@@ -155,7 +155,21 @@ function wireCliChannel(ag: AgentGroup, now: string): void {
   console.log(`Wired CLI: ${cliMg.id} -> ${ag.id}`);
 }
 
-/** Slack channel wire (env `SLACK_WIRE_CHANNEL_ID` 指定時のみ実行される optional path)。 */
+/**
+ * Slack channel messaging_group を idempotent に upsert し、ADK agent group に wire する。
+ *
+ * **destination 自動生成**: `createMessagingGroupAgent` は `agent_destinations` に
+ * `target_type='channel'` の row を副作用として自動作成する (`src/db/messaging-groups.ts`)。
+ * これにより agent は `<message to="<mg.name または slack-<8桁>>">` の形で channel 宛応答を書ける。
+ * (詳細は init-fugue-ask-agent.ts の docstring 参照)。
+ *
+ * **ADK 経路では destinations 参照は無い**: `src/adk/dispatcher.ts` の `adapter.deliver`
+ * 直叩き経路のため、destinations 自動生成は現状の ADK 経路では使われない。しかし将来の
+ * provider 切替 (ADK → hybrid = agent-container 経路) を想定した対称性のため、副作用は残す。
+ * issue #144 で hybrid 側 (`scripts/init-hybrid-agent.ts:wireSlackChannel`) と対称化された。
+ *
+ * env `SLACK_WIRE_CHANNEL_ID` 指定時のみ実行される optional path。
+ */
 function wireSlackChannel(ag: AgentGroup, channelId: string, now: string): void {
   const SLACK_CHANNEL = 'slack';
   // Chat SDK bridge の channelIdFromThreadId() は `slack:<channel>` を返す

@@ -12,14 +12,16 @@
 #   - k8s Secret biblio-slack-tokens が投入済 (envFrom secretRef、本番 Slack workspace)
 #   - HYBRID_USER_ID (Slack `slack:U...` 形式) と HYBRID_SLACK_DM_CHANNEL_ID (raw `D...` 形式)
 #     が env or .env で投入済
+#   - (optional) HYBRID_SLACK_CHANNEL_IDS (comma-separated `C...` 形式、例: `C1,C2`)
+#     が env or .env で投入済。指定時に channel も併せて wire される (issue #144 対応)。
 #
 # 冪等: init-hybrid-agent.ts が getAgentGroupByFolder / getMessagingGroupByPlatform で
 # reuse 判定するため、2 回目以降の実行は "Reusing ..." 出力で no-op になる。
 #
-# fan-out 二重発火防止 (init-hybrid-agent.ts:wireSlackDm の safety net):
-# HYBRID_SLACK_DM_CHANNEL_ID が指す既存 messaging_group が他 agent_group に wire
-# 済の場合、seed script は fail-fast + 手動対応 prompt を出して exit 1。メンテナが
-# 「既存 wire を先に外す」か「別 platform_id で分離する」を判断する。
+# fan-out 二重発火防止 (init-hybrid-agent.ts:wireSlackDm / wireSlackChannel の safety net):
+# HYBRID_SLACK_DM_CHANNEL_ID / HYBRID_SLACK_CHANNEL_IDS が指す既存 messaging_group が
+# 他 agent_group に wire 済の場合、seed script は fail-fast + 手動対応 prompt を出して exit 1。
+# メンテナが「既存 wire を先に外す」か「別 platform_id で分離する」を判断する。
 #
 # Usage:
 #   # 基本 (env or .env に HYBRID_USER_ID + HYBRID_SLACK_DM_CHANNEL_ID を投入)
@@ -27,6 +29,9 @@
 #
 #   # HYBRID_SLACK_DM_CHANNEL_ID を明示指定
 #   HYBRID_SLACK_DM_CHANNEL_ID=<SLACK_DM_CHANNEL_ID> bash scripts/init-hybrid-agent-gke.sh
+#
+#   # DM + channel wire (issue #144: channel 発話混線の恒久対策)
+#   HYBRID_SLACK_CHANNEL_IDS=C0XXXXXX,C0YYYYYY bash scripts/init-hybrid-agent-gke.sh
 #
 #   # Slack DM wire なし (test / dry-run)
 #   HYBRID_SKIP_SLACK_DM=1 bash scripts/init-hybrid-agent-gke.sh
@@ -97,7 +102,20 @@ if [ "$skip_slack_dm" = true ]; then
 else
   echo "[init-hybrid-agent-gke] SLACK_DM=${HYBRID_SLACK_DM_CHANNEL_ID}"
 fi
+if [ -n "${HYBRID_SLACK_CHANNEL_IDS:-}" ]; then
+  echo "[init-hybrid-agent-gke] SLACK_CHANNELS=${HYBRID_SLACK_CHANNEL_IDS}"
+else
+  echo "[init-hybrid-agent-gke] SLACK_CHANNELS=skipped"
+fi
 echo "[init-hybrid-agent-gke] target=$ORCH_POD -n $NAMESPACE"
+
+# HYBRID_SLACK_CHANNEL_IDS は optional (未設定なら channel wire skip)。
+# comma-separated: "C1,C2,C3"。init-hybrid-agent.ts:parseArgs が
+# `--slack-channel-ids` case で split + trim + filter する。
+extra_args=()
+if [ -n "${HYBRID_SLACK_CHANNEL_IDS:-}" ]; then
+  extra_args+=(--slack-channel-ids "$HYBRID_SLACK_CHANNEL_IDS")
+fi
 
 # kubectl exec 引数 (Slack DM 有無で分岐)。orchestrator Pod 内は working dir /app、
 # `pnpm exec tsx` は image build 済の node_modules/.bin/tsx を使う。
@@ -107,14 +125,16 @@ if [ "$skip_slack_dm" = true ]; then
       --user-id "$HYBRID_USER_ID" \
       --display-name "$DISPLAY_NAME" \
       --agent-name "$AGENT_NAME" \
-      --skip-slack-dm
+      --skip-slack-dm \
+      "${extra_args[@]}"
 else
   kubectl exec -n "$NAMESPACE" "$ORCH_POD" -c orchestrator -- \
     pnpm exec tsx scripts/init-hybrid-agent.ts \
       --user-id "$HYBRID_USER_ID" \
       --slack-dm-channel-id "$HYBRID_SLACK_DM_CHANNEL_ID" \
       --display-name "$DISPLAY_NAME" \
-      --agent-name "$AGENT_NAME"
+      --agent-name "$AGENT_NAME" \
+      "${extra_args[@]}"
 fi
 
 echo "[init-hybrid-agent-gke] seed complete — SEED_RESULT= line above is the machine-readable summary."

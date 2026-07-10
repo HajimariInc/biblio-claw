@@ -50,11 +50,13 @@ import {
   GEN_AI_PROVIDER_GCP_VERTEX_AI,
   GEN_AI_PROVIDER_NAME,
   GEN_AI_REQUEST_MODEL,
+  GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
   GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
   GEN_AI_USAGE_INPUT_TOKENS,
   GEN_AI_USAGE_OUTPUT_TOKENS,
   SERVER_ADDRESS,
   extractVertexUsage,
+  type VertexCallUsageFields,
 } from '../observability/genai.js';
 import { getTracer } from '../observability/index.js';
 import { getTraceLogFields } from '../observability/trace-fields.js';
@@ -269,6 +271,11 @@ export class AnthropicVertexLlm extends BaseLlm {
     const ctxFields: Record<string, unknown> = reqCtx
       ? { request_id: reqCtx.requestId, session_id: reqCtx.sessionId, channel_type: reqCtx.channelType }
       : { request_id: '', session_id: '', channel_type: '', context_missing: true };
+    // M4-C Phase 1: `vertex.call` の Cloud Logging emit を成功経路で発火する
+    // (= `src/biblio/vertex-client.ts:508-517` の pattern 写経、latency_ms 計上のため t0 を setup)。
+    // src/reporting/sql/llm-cost.sql が本 event を GROUP BY jsonPayload.model で集計。
+    // ADK チャット本体経路 (CLI/Slack/Fugue ask) の Vertex 呼出は helper axis (categorize/inspect/gate) と
+    // 別で、以前は span 属性のみで Cloud Logging に emit されていなかった (M4-C review で発見)。
     const t0 = performance.now();
     // issue #136 Step 5-b: pre-flight capture 結果を catch (401 forensic dump) から参照するため
     // try の外側 (関数スコープ) に上げる。try 内で書き込み、catch で読み取る双方向 flow。
@@ -405,28 +412,56 @@ export class AnthropicVertexLlm extends BaseLlm {
       );
 
       const usage = extractVertexUsage(response, 'anthropic');
+      // usage 欠落 (SDK バージョン差 / 部分応答) の warn を vertex-client.ts:498 と
+      // 対称に追加。SDK 応答から usage オブジェクト自体が消えた case を patron に可視化する。
+      if (!(response as { usage?: unknown }).usage) {
+        log.warn('vertex.call: usage absent', {
+          event: 'adk.anthropic_vertex_llm.usage_absent',
+          model: this.model,
+        });
+      }
       if (usage.input_tokens != null) span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, usage.input_tokens);
       if (usage.output_tokens != null) span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage.output_tokens);
       if (usage.cache_read_input_tokens != null) {
         span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, usage.cache_read_input_tokens);
       }
-
+      if (usage.cache_creation_input_tokens != null) {
+        span.setAttribute(GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, usage.cache_creation_input_tokens);
+      }
+      // M4-C Phase 1: 成功経路で `vertex.call` event を Cloud Logging に emit
+      // (= vertex-client.ts:508-527 の pattern 対称化、llm-cost.sql の集計対象を
+      // ADK チャット本体経路 (CLI/Slack/Fugue ask) にも拡張)。
+      // M4-C Phase 2: cache_read/cache_creation を unconditional emit (?? 0) して
+      // llm-cost.sql の SUM 対象を有効化 + cost-calculator の warnings 消失。
+      // cache_captured を独立 boolean で emit することで「未捕捉 (SDK 差)」と
+      // 「実測 0 (cache 未使用)」を BQ 集計で区別可能に。cost 過小推定の可視化。
+      // 共有 interface (`VertexCallUsageFields`) 経由で vertex-client.ts と同 shape に強制。
+      // 新 field 追加時に両 emit が compile error で検知される (SQL 側 drift の抑止 anchor)。
+      const cacheCaptured = usage.cache_read_input_tokens != null && usage.cache_creation_input_tokens != null;
+      const usageFields: VertexCallUsageFields = {
+        outcome: 'success',
+        tokens_in: usage.input_tokens ?? 0,
+        tokens_out: usage.output_tokens ?? 0,
+        cache_read: usage.cache_read_input_tokens ?? 0,
+        cache_creation: usage.cache_creation_input_tokens ?? 0,
+        cache_captured: cacheCaptured,
+        latency_ms: Math.round(performance.now() - t0),
+      };
       // issue #136 Step 0-d: 成功パスの構造化 log を trace 相関可能に emit。
       // `context.with(spanCtx, ...)` の callback 外側で emit するため active span 経由の相関は
       // 空になる (= WHY 1-a)。`getTraceLogFields(span)` に明示 span 引数を渡し脱出する。
       // ctxFields は AsyncLocalStorage 経由で dispatcher から流れる request_id / session_id /
       // channel_type。両者揃うと BQ で `router.dispatch.adk` (patron 発話入口) と本 log を
       // 横串で結合できる (= WHY 1-b 是正)。
+      // usageFields (M4-C Phase 1/2 経路、`VertexCallUsageFields` interface で強制) は
+      // outcome / tokens_in / tokens_out / cache_read / cache_creation / cache_captured /
+      // latency_ms を集約、llm-cost.sql の GROUP BY jsonPayload.model 集計を成立させる。
       log.info('vertex.call', {
         event: 'vertex.call',
-        outcome: 'success',
         model: this.model,
         ...ctxFields,
         ...getTraceLogFields(span),
-        tokens_in: usage.input_tokens ?? 0,
-        tokens_out: usage.output_tokens ?? 0,
-        cache_read: usage.cache_read_input_tokens ?? 0,
-        latency_ms: Math.round(performance.now() - t0),
+        ...usageFields,
       });
 
       const llmResponse = this.toLlmResponse(response);

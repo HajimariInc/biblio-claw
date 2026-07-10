@@ -41,7 +41,7 @@
  * PRD §意思決定ログ「棚リポ PR の commit author 表記」:
  *   GH App identity (`SHELF_PR_AUTHOR_NAME` / `_EMAIL`) を第一希望。`POST /git/commits` が 4xx に
  *   倒れた場合のみ `SHELF_PR_AUTHOR_FALLBACK` (`Name <email>` 形式) で 1 回だけ retry する
- *   (= 不都合判明時に DEN さん名義 PAT に手動切替できる経路を残す)。
+ *   (= 不都合判明時にメンテナ名義 PAT に手動切替できる経路を残す)。
  */
 import fs from 'node:fs';
 import path from 'node:path';

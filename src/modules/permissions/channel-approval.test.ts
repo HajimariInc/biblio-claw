@@ -72,7 +72,7 @@ beforeEach(async () => {
   await import('./index.js'); // register hooks
 
   // Base fixtures: one agent group + owner with a DM on 'telegram'.
-  createAgentGroup({ id: 'ag-1', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
+  createAgentGroup({ id: 'ag-1', name: 'Alice', folder: 'alice', agent_provider: null, created_at: now() });
 
   upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
   grantRole({
@@ -156,7 +156,7 @@ describe('unknown-channel registration flow', () => {
     // Single-agent card offers a direct "Connect to <name>" button.
     const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
     expect(connectOption).toBeDefined();
-    expect(connectOption.label).toContain('Andy');
+    expect(connectOption.label).toContain('Alice');
 
     const { getDb } = await import('../../db/connection.js');
     const rows = getDb().prepare('SELECT * FROM pending_channel_approvals').all() as Array<{

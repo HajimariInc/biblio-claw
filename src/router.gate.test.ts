@@ -112,7 +112,7 @@ function seedBothWires(): void {
     id: 'mg-1',
     channel_type: 'slack',
     platform_id: 'slack:D_TEST',
-    name: 'DEN DM',
+    name: 'Test Patron DM',
     is_group: 0,
     unknown_sender_policy: 'public',
     created_at: now(),
@@ -151,7 +151,7 @@ function baseEvent(text: string, msgId = 'msg-1'): InboundEvent {
     message: {
       id: msgId,
       kind: 'chat',
-      content: JSON.stringify({ sender: 'DEN', text }),
+      content: JSON.stringify({ sender: 'test-patron', text }),
       timestamp: now(),
     },
   };

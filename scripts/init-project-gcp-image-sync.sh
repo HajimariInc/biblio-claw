@@ -365,14 +365,14 @@ else
   substituted_count=0
   for f in "$ROOT/k8s"/*.yaml; do
     base="$(basename "$f")"
-    if grep -qE '\$\{(DOMAIN|GCP_PROJECT_ID|IMAGE_TAG|CLOUD_SQL_INSTANCE|CLOUD_SQL_PEERING_CIDR)\}' "$f" 2>/dev/null; then
-      envsubst '${DOMAIN} ${GCP_PROJECT_ID} ${IMAGE_TAG} ${CLOUD_SQL_INSTANCE} ${CLOUD_SQL_PEERING_CIDR}' < "$f" > "$apply_tmp/$base"
+    if grep -qE '\$\{(DOMAIN|GCP_PROJECT_ID|IMAGE_TAG|CLOUD_SQL_INSTANCE|CLOUD_SQL_PEERING_CIDR|SLACK_OWNER_USER_ID|SLACK_OWNER_DM_CHANNEL_ID)\}' "$f" 2>/dev/null; then
+      envsubst '${DOMAIN} ${GCP_PROJECT_ID} ${IMAGE_TAG} ${CLOUD_SQL_INSTANCE} ${CLOUD_SQL_PEERING_CIDR} ${SLACK_OWNER_USER_ID} ${SLACK_OWNER_DM_CHANNEL_ID}' < "$f" > "$apply_tmp/$base"
       substituted_count=$((substituted_count + 1))
     else
       cp "$f" "$apply_tmp/$base"
     fi
   done
-  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN}, \${GCP_PROJECT_ID}, \${IMAGE_TAG}, \${CLOUD_SQL_INSTANCE}, \${CLOUD_SQL_PEERING_CIDR} を実値に展開"
+  info "[apply] envsubst 展開: $substituted_count 個の manifest で \${DOMAIN}, \${GCP_PROJECT_ID}, \${IMAGE_TAG}, \${CLOUD_SQL_INSTANCE}, \${CLOUD_SQL_PEERING_CIDR}, \${SLACK_OWNER_USER_ID}, \${SLACK_OWNER_DM_CHANNEL_ID} を実値に展開"
   run kubectl apply -f "$apply_tmp/"
   ok '[apply] kubectl apply done'
 
@@ -383,13 +383,36 @@ else
   fi
 
   # rollout status 待ち (= timeout 300s)
+  # 1 回目 timeout 時は Pod spec と StatefulSet spec の drift を確認 (2026-07-09 実測で判明した
+  # native sidecar `restartPolicy: Always` init container spec-not-propagated 罠への恒久対処。
+  # StatefulSet spec は apply 時点で更新済だが、既存 Pod の init sidecar は「running 中」と
+  # 判定されて自動 kill されず旧 spec のまま動き続けるケースがある = `rollout restart` 経路の
+  # annotation 追加だけでは実 kill を起こさないことがある。cloud-sql-proxy.args を代表として
+  # 比較、drift あれば Pod を明示 delete → StatefulSet が新 spec で recreate → 再 rollout status)。
   info '[rollout] kubectl rollout status (timeout=300s)'
   if "$DRY_RUN"; then
     info '[dry-run] kubectl rollout status statefulset/biblio-orchestrator -n biblio-claw --timeout=300s'
   else
-    kubectl rollout status "statefulset/biblio-orchestrator" -n "$NS" --timeout=300s \
-      || fail "[rollout] timeout or failed. kubectl describe pod $ORCH_POD -n $NS で原因確認"
-    ok '[rollout] partitioned roll out complete'
+    if ! kubectl rollout status "statefulset/biblio-orchestrator" -n "$NS" --timeout=300s; then
+      warn "[rollout] 1 回目 timeout。Pod spec と StatefulSet spec の init container drift を確認"
+      pod_args="$(kubectl -n "$NS" get pod "$ORCH_POD" -o jsonpath='{.spec.initContainers[?(@.name=="cloud-sql-proxy")].args}' 2>/dev/null || true)"
+      sts_args="$(kubectl -n "$NS" get statefulset biblio-orchestrator -o jsonpath='{.spec.template.spec.initContainers[?(@.name=="cloud-sql-proxy")].args}' 2>/dev/null || true)"
+      if [ -n "$pod_args" ] && [ "$pod_args" != "$sts_args" ]; then
+        warn "[rollout] Pod init sidecar spec drift 検出 (native sidecar restartPolicy: Always 罠):"
+        warn "[rollout]   Pod cloud-sql-proxy.args: ${pod_args}"
+        warn "[rollout]   STS cloud-sql-proxy.args: ${sts_args}"
+        warn "[rollout] Pod を明示 delete して StatefulSet に新 spec で recreate させる"
+        kubectl -n "$NS" delete pod "$ORCH_POD"
+        info '[rollout] 2 回目 rollout status 待ち (timeout=300s)'
+        kubectl rollout status "statefulset/biblio-orchestrator" -n "$NS" --timeout=300s \
+          || fail "[rollout] Pod delete 後も rollout timeout。kubectl describe pod $ORCH_POD -n $NS で原因確認"
+        ok '[rollout] Pod delete 経由で recreate + rollout 完了'
+      else
+        fail "[rollout] timeout or failed (Pod spec drift なし = 別原因)。kubectl describe pod $ORCH_POD -n $NS で原因確認"
+      fi
+    else
+      ok '[rollout] partitioned roll out complete'
+    fi
   fi
 
   # preserve 済 env を restore (2 回目 rollout が走る = 追加 ~2 分)。

@@ -51,7 +51,7 @@ vertex_host() {
 # 対策: curl -w で http_code を末尾付与し、1 変数で body + code を受ける。
 set_all_agents_mode_all() {
   local resp http_code body ids n=0 failed=0
-  resp="$(curl -sS -w $'\n%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
+  resp="$(curl --connect-timeout 5 --max-time 15 -sS -w $'\n%{http_code}' "${OC_AUTH[@]}" "${ONECLI_API}/agents")" \
     || fail "GET /v1/agents への接続に失敗 — OneCLI が起動しているか確認 (docker compose logs onecli)"
   http_code="${resp##*$'\n'}"
   body="${resp%$'\n'*}"
@@ -74,7 +74,7 @@ set_all_agents_mode_all() {
   fi
   while IFS= read -r id; do
     [ -n "$id" ] || continue
-    if curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/agents/${id}/secret-mode" \
+    if curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/agents/${id}/secret-mode" \
         -H 'Content-Type: application/json' -d '{"mode":"all"}' >/dev/null; then
       n=$((n + 1))
     else

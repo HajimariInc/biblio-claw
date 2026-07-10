@@ -82,7 +82,7 @@ done
 # fetch_caller_token: metadata server から呼び出し元 SA (biblio-orchestrator@) の
 # ADC access token を取得 (cloud-platform scope、この token 自体は Drive API を叩けない)。
 fetch_caller_token() {
-  curl -fsS -H 'Metadata-Flavor: Google' \
+  curl --connect-timeout 5 --max-time 15 -fsS -H 'Metadata-Flavor: Google' \
     "http://${METADATA_HOST}/computeMetadata/v1/instance/service-accounts/default/token" \
     | jq -r .access_token
 }
@@ -103,7 +103,7 @@ fetch_drive_token() {
 
   resp="$(jq -n --arg scope "$DRIVE_SCOPE" --arg lifetime "$DRIVE_TOKEN_LIFETIME" \
     '{scope:[$scope], lifetime:$lifetime}' \
-    | curl -sS -w '\n%{http_code}' -X POST \
+    | curl --connect-timeout 5 --max-time 15 -sS -w '\n%{http_code}' -X POST \
         -H "Authorization: Bearer $caller" \
         -H 'Content-Type: application/json' --data-binary @- \
         "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${DRIVE_USER_SA}:generateAccessToken")" \
@@ -121,7 +121,7 @@ fetch_drive_token() {
 # secret_id: name=$DRIVE_SECRET_NAME の secret id を stdout に返す (無ければ空)。
 secret_id() {
   local out id
-  out="$(curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
+  out="$(curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets")" \
     || fail "GET /v1/secrets への接続に失敗 (secret_id)"
   id="$(printf '%s' "$out" \
     | jq -r --arg n "$DRIVE_SECRET_NAME" '.[] | select(.name==$n) | .id' | head -n1)" \
@@ -144,14 +144,14 @@ ensure_secret() {
           --arg name "$DRIVE_SECRET_NAME" --arg host "$host" \
           '{name:$name, type:"generic", value:env.SECRET_TOKEN, hostPattern:$host,
             injectionConfig:{headerName:"authorization", valueFormat:"Bearer {value}"}}' \
-        | curl -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
+        | curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X POST "${ONECLI_API}/secrets" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 投入 (POST /v1/secrets) に失敗"
   else
     info "[secret] 既存 (id=$id) → PATCH /v1/secrets/$id で value のみ partial update (pathPattern は省略 = OneCLI 側保持、rotation gap なし)"
     ( set -o pipefail
       SECRET_TOKEN="$token" jq -n '{value:env.SECRET_TOKEN}' \
-        | curl -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
+        | curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" -X PATCH "${ONECLI_API}/secrets/$id" \
             -H 'Content-Type: application/json' --data-binary @- >/dev/null
     ) || fail "secret 更新 (PATCH /v1/secrets/$id) に失敗"
   fi
@@ -161,7 +161,7 @@ ensure_secret() {
 
 main() {
   info "OneCLI REST=${ONECLI_API} / Drive host=${DRIVE_API_HOST} / target SA=${DRIVE_USER_SA}"
-  curl -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
+  curl --connect-timeout 5 --max-time 15 -fsS "${OC_AUTH[@]}" "${ONECLI_API}/secrets" >/dev/null \
     || fail "OneCLI REST に到達できない (${ONECLI_API}) — sidecar 経路なら OneCLI Native sidecar startup 完了確認"
   ensure_secret
   set_all_agents_mode_all
