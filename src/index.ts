@@ -8,6 +8,7 @@ import { writeFileSync } from 'node:fs';
 
 import { getDsnProvider, getSecretProvider } from './adapters/index.js';
 import { registerAnthropicVertexLlm } from './adk/llm-registry-setup.js';
+import { startAdkSessionGc, stopAdkSessionGc } from './adk/session-gc.js';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { incrementBootCounter } from './boot-counter.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
@@ -277,6 +278,10 @@ async function main(): Promise<void> {
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
 
+  // 8. Start ADK session GC (issue #150). dispatcher.ts の通常経路 deleteSession 廃止で
+  //    InMemorySessionService に session が蓄積するため、LRU + TTL sweep で管理する。
+  startAdkSessionGc();
+
   log.info('NanoClaw running');
 
   // Phase 5: 全 subsystem (initChannelAdapters + delivery polls + host sweep + ca-secret-sync
@@ -306,6 +311,7 @@ async function shutdown(signal: string): Promise<void> {
   stopDeliveryPolls();
   stopHostSweep();
   stopCaSecretSync();
+  stopAdkSessionGc();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
