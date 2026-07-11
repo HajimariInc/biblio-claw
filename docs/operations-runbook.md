@@ -1,10 +1,54 @@
 # 運用 Runbook — ログ・状態確認・管理コマンド(ローカル / GCP)
 
-最終更新:2026-07-03
+最終更新:2026-07-11
 
 > **語彙メモ**: biblio-claw 独自語彙 (`biblio` / `司書` / `patron` / `装備` / `禁書` / `焼却` 等) の解説は [`glossary.md`](glossary.md) 参照。
 
 orchestrator / agent container / OneCLI それぞれを「どこから・どのコマンドで」操作するかの早見表。ローカルと GCP で**叩く場所が根本的に違う**ので、まず大原則を押さえる。
+
+---
+
+## 目次
+
+本 runbook は 4360+ 行の SPOT (Single Point of Truth)。目的別に下記から降りると迷わない。
+
+### A. 大原則 (どこから叩くか / 何を見るか)
+
+- [大原則:どこから叩くか](#大原則どこから叩くか) — 全 command / observation の入口決め方 (ローカル vs GCP)
+- [コンポーネント別 早見表](#コンポーネント別-早見表) — orchestrator / agent-runner / OneCLI の起動・ログ所在・verify 前提の 3 列表
+- [現在の主要 ID](#現在の主要-idncl-groups-list-で最新確認) — active な agent group / messaging group ID (`ncl groups list` で確認)
+- [補助コンテナ(参考)](#補助コンテナ参考) — orchestrator に併設される sidecar container 一覧
+
+### B. 日常運用 (JSON ログ / DB 管理 / 落とし穴 / GKE リセット / 対症手順)
+
+- [Phase 2 JSON ログの読み方](#phase-2-json-ログの読み方) — orchestrator / rotator / agent-runner の JSON ログを jq で絞る例
+- [DB / 配線の管理(ncl・q.ts)](#db--配線の管理nclqts) — `ncl` と `q.ts` でセッション DB / 中央 DB を照会・変更
+- **よくハマる落とし穴** (init 時 / 運用中):
+  - [OneCLI MITM が `tunnel` mode で素通しになる](#落とし穴-onecli-mitm-が-tunnel-mode-で素通しになる) — mode 判定 + curl 検証 + CA bundle 確認の 3 ステップ
+  - [OneCLI pathPattern を string で明示すると GKE で injection skip (issue #36)](#落とし穴-onecli-pathpattern-を-string-で明示すると-gke-で-injection-skipissue-36) — DELETE + POST 再作成手順
+  - [Vertex 401 ACCESS_TOKEN_EXPIRED retry loop の対症手順](#vertex-401-access_token_expired-retry-loop-の対症手順) — token rotator 経路の詰まり調査
+  - [M4-B Vertex 401 発生時の観察手順 (issue #136 / #137)](#m4-b-vertex-401-発生時の観察手順-issue-136-observability--137-自浄への引き継ぎ) — observability + 自浄経路への引き継ぎ
+  - [Pending Pod の対症手順 (GKE 経路、issue #57)](#pending-pod-の対症手順-gke-経路issue-57) — K8s Job spawn がハングした際の kill 手順
+- [GKE リセット手順](#gke-リセット手順) — 部分 reset / 完全 teardown + 再構築 + Cloud SQL Bootstrap GRANT の詳細
+- [/init-project-gcp サブコマンド利用ガイド](#init-project-gcp-サブコマンド利用ガイド) — reset / image-sync / bootstrap-grant / verify 各サブコマンドの用途 + 実行タイミング
+
+### C. Milestone / Phase 別記録 (完成判定 verify + 実装で判明した挙動 + 罠)
+
+- **M2 (仕入れ→陳列)**: [完成判定 verify](#m2-完成判定-verifyscriptsverify-m2sh)
+- **M3 (装備 + 蔵書リスト)**: [完成判定 verify](#m3-完成判定-verifyscriptsverify-m3sh) / [Slack 経路の運用](#m3-slack-経路の運用-装備--蔵書一覧--仕入れ)
+- **init-project-gcp** (M3 派生の運用基盤): [Phase 4 deploy-verify](#phase-4gke-deploy-verifyverifyscriptsverify-phase-4-deploysh) / [Phase 6 Slack E2E verify](#phase-6slack-e2e-verifyscriptsverify-slack-e2e-gkesh)
+- **M4-A (観測土台)**: [Phase 1 OTel foundation](#m4-a-phase-1-otel-foundation-運用) / [Phase 2 GenAI semconv](#m4-a-phase-2-genai-semconv--boundary-spans--logtrace-連携) / [Phase 3 BQ sink](#m4-a-phase-3-cloud-logging--bigquery-sink) / [Phase 4 verify](#m4-a-phase-4-verify-m4-ash-統合検証)
+- **M4-B (ADK 移行)**: [Phase 2 tool routing](#m4-b-phase-2-adk-orchestrator-deploy--tool-routing-拡張) / [Phase 3 slack-e2e + verify](#m4-b-phase-3-slack-e2e--verify-m4-b-cli-経由-verify--slack-経路温存) / [Phase 4 remaining tools + HITL](#m4-b-phase-4-remaining-host-actions--hitl-統合-9-tool--承認カード)
+- **M4-E (Fugue 連携)**: [Phase 4 observability-ad-honji](#m4-e-phase-4-observability-ad-honji-fugue-channel-の-otel-2-段構造--ad-の本義) / [Phase 5 prod-deploy](#m4-e-phase-5-prod-deploy-fugue-channel-を-gke-ingress-で外部公開--fugue-cloud-run-実結線) / [Phase 6 verify](#m4-e-phase-6-verify-fugue-channelsh-fugue-channel-mvp-完成判定-5-軸-assertion)
+- **M4-F (agent-container hybrid)**: [Phase 1 revival-core](#m4-f-phase-1-revival-core-agent-container-経路の復活) / [Phase 2 gate 4 層](#m4-f-phase-2-gate-and-defense-入力ゲート-4-層--3-分類-routing--in-secure-3-点セット) / [Phase 3 life-capabilities](#m4-f-phase-3-life-capabilities-web-検索--google-drive--agent-container-経路の実行力拡張) / [Phase 4 progress-status](#m4-f-phase-4-progress-status-slack-進行ステート表示) / [Phase 5 verify](#m4-f-phase-5-verify-m4-f-統合-e2e)
+- **M4-H (ask endpoint)**: [Phase 3 Option 1 hotfix](#m4-h-phase-3-option-1-hotfix-fugue-ask-endpoint-実挙動の教訓-4-件2026-07-08) / [Phase 3.5 system-prompt-override](#m4-h-phase-35-system-prompt-override-fugue-ask-meta-response-対処2026-07-08) / [Phase 3 life-capabilities-wiring](#m4-h-phase-3-life-capabilities-wiring-運用手順) / [Phase 4 rate-limit + observability](#m4-h-phase-4-rate-limit-and-observability-運用手順) / [Phase 5 prod-deploy](#m4-h-phase-5-prod-deploy)
+- **M4-C (週次 reporting)**: [Phase 1 reporting-mvp](#m4-c-phase-1-reporting-mvp-週次-k8s-cronjob--bq--slack-owner-dm) / [Phase 2 reporting-quality](#m4-c-phase-2-reporting-quality-sql-完成--data-table-block--cache-対称化)
+
+### D. その他
+
+- [関連](#関連) — 関連 doc へのリンク集
+
+---
 
 ## 大原則:どこから叩くか
 
