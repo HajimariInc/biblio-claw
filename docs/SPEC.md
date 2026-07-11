@@ -1,5 +1,15 @@
 # NanoClaw 仕様書
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳の仕様書。**biblio-claw 独自機能 (仕入れ → 検品 → カテゴライズ → 陳列 / 装備機構 / channel = Slack + Fugue trunk 直コミット / gate 4 層 / Vertex×Claude keyless 認証等) は本 doc に含まれない**、下記の biblio-claw 固有 doc を参照:
+>
+> - **アーキテクチャ全体**: [`architecture.md`](architecture.md)
+> - **セキュリティモデル**: [`SECURITY.md`](SECURITY.md)
+> - **入力ゲート 4 層 (M4-F Phase 2)**: [`gate-4-layer.md`](gate-4-layer.md)
+> - **Vertex×Claude keyless 認証 (WIF + Sidecar rotator)**: [`vertex-claude-keyless.md`](vertex-claude-keyless.md)
+> - **装備機構 (M3)**: [`equip-physical.md`](equip-physical.md)
+> - **運用早見表**: [`operations-runbook.md`](operations-runbook.md)
+> - **biblio 独自語彙 (biblio / 司書 / patron 等)**: [`glossary.md`](glossary.md)
+
 マルチチャネルサポート、会話ごとの永続メモリ、スケジュール済タスク、コンテナ分離された agent 実行を備えたパーソナル Claude アシスタント。
 
 ---

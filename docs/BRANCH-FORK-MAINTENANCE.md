@@ -1,5 +1,7 @@
 # Branch と Fork の維持ガイドライン
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。biblio-claw は上流 v2 を pin して fork した状態で運用しており、**上流の branch fork 運用 (`channels` ブランチ / `providers` ブランチ) は biblio-claw では非採用**。biblio-claw では Slack adapter + Fugue channel adapter を trunk (main) に直接コミット、その他の分割は Milestone / PRD / Phase の 4 階層モデル (Milestone-PRD-Phase-Task) で運用する。本 doc は上流 fork の運用参考として残置。
+
 ## 構造
 
 **`nanocoai/nanoclaw`**(upstream) — skill 定義(`.claude/skills/`)を持つコアエンジン。`main` には channel コードは無い。

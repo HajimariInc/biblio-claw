@@ -1,5 +1,7 @@
 # NanoClaw 要件
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。biblio-claw の追加要件 (Node 24.13+ / Vertex AI + GKE Autopilot + Google Cloud + Slack 2 環境 + Fugue channel 連携) は [`../README.md`](../README.md) のクイックスタート節を参照。本 doc は上流の設計判断の背景として残置。
+
 プロジェクト作成者による原初の要件と設計判断。
 
 ---
