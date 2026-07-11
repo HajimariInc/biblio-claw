@@ -61,7 +61,14 @@ pnpm run chat "hello"      # smoke 用 CLI から司書と会話
 
 ## 日常運用 / GKE 運用
 
-日常運用 / リセット / トラブルシューティングは [`docs/operations-runbook.md`](docs/operations-runbook.md) を参照。Cloud SQL の初回 GRANT は `bash scripts/init-project-gcp-pgsql-grant.sh` で 1 発、空でない DB を新 GSA で引き継ぐケースは runbook の「既存 DB を新 GSA で引き継ぐ場合の role membership 継承 GRANT」節を参照。
+日常運用 / リセット / トラブルシューティングは [`docs/operations-runbook.md`](docs/operations-runbook.md) を参照 (冒頭の目次から 4 象限 = 大原則 / 日常運用 / Milestone 別 / その他 に降りられる)。Cloud SQL の初回 GRANT は `bash scripts/init-project-gcp-pgsql-grant.sh` で 1 発、空でない DB を新 GSA で引き継ぐケースは runbook の「既存 DB を新 GSA で引き継ぐ場合の role membership 継承 GRANT」節を参照。
+
+**よくハマる落とし穴** (詳細は runbook の各 anchor から):
+
+- [OneCLI MITM が tunnel mode で素通しになる](docs/operations-runbook.md#落とし穴-onecli-mitm-が-tunnel-mode-で素通しになる) — 認証注入がスキップされて Vertex 呼び出しが 401 で落ちる
+- [OneCLI pathPattern を string で明示すると GKE で injection skip (issue #36)](docs/operations-runbook.md#落とし穴-onecli-pathpattern-を-string-で明示すると-gke-で-injection-skipissue-36) — DELETE + POST 再作成手順
+- [Vertex 401 ACCESS_TOKEN_EXPIRED retry loop](docs/operations-runbook.md#vertex-401-access_token_expired-retry-loop-の対症手順) — token rotator 経路の詰まり調査
+- [Pending Pod (GKE、issue #57)](docs/operations-runbook.md#pending-pod-の対症手順-gke-経路issue-57) — K8s Job spawn がハングした際の kill 手順
 
 ## アーキテクチャ
 
