@@ -131,6 +131,8 @@ writer は各ファイルにつき厳密 1 プロセス。host は偶数の `seq
 
 ## クレデンシャル分離 (OneCLI Agent Vault)
 
+> **keyless 認証の全体像** (Workload Identity Federation + Sidecar token rotator 3 系統 + GitHub App PEM → installation token フロー) は [`vertex-claude-keyless.md`](vertex-claude-keyless.md) を参照。本節では OneCLI Vault との組み合わせと運用の罠に絞る。
+
 API キー / OAuth token / GH App installation token / Vertex ADC token などの実クレデンシャルは **agent コンテナに入らない**。OneCLI gateway がリクエスト時に host / パスマッチで injection する:
 
 1. クレデンシャルは `onecli secrets create` で登録され、OneCLI が保持・管理する
@@ -291,6 +293,8 @@ Bun 依存を追加 / バンプするときは:
 
 ## 参照
 
+- [`docs/vertex-claude-keyless.md`](vertex-claude-keyless.md) — Vertex×Claude keyless 認証設計 (WIF + Sidecar token rotator 3 系統 + OneCLI 組み合わせ)
+- [`docs/gate-4-layer.md`](gate-4-layer.md) — 入力ゲート 4 層設計 (M4-F Phase 2、pattern / markdown / XML boundaries / LLM evaluator + 3 分類 routing + in-secure 3 点セット)
 - [`docs/isolation-model.md`](isolation-model.md) — 3 レベル channel 分離モデル
 - [`docs/db-session.md`](db-session.md) — セッションごと `inbound.db` + `outbound.db` の詳細
 - [`docs/db-central.md`](db-central.md) — Central DB (`data/v2.db`) の全テーブル

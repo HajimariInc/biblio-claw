@@ -1,5 +1,7 @@
 # セットアップフロー
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。**biblio-claw のセットアップは本 doc の上流フローに準拠**し、加えて biblio-claw 固有の `/init-project` skill (`.claude/commands/init-project.md`) で一気通貫化されている (= `.env` 準備 → docker compose → deps install → host agent 登録 → token 投入 → コンテナ build → smoke verify)。Prod (GCP) 側は `/init-project-gcp` skill で GKE + Cloud SQL + Artifact Registry 初期化を扱う。詳細は [`operations-runbook.md`](operations-runbook.md) の §「/init-project-gcp サブコマンド利用ガイド」参照。
+
 本ドキュメントは NanoClaw の end-to-end スクリプトセットアップ
 (`bash nanoclaw.sh` → `pnpm run setup:auto`)の契約である。新しい
 ステップを追加する前、リグレッションを修正する前、出力レンダリングを
