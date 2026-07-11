@@ -1,7 +1,9 @@
 MIT License
 
-Copyright (c) 2026 Gavriel
-Copyright (c) 2026 HajimariInc / biblio-claw contributors
+Copyright (c) 2026 HajimariInc and biblio-claw contributors
+
+Forked from NanoClaw (https://github.com/nanocoai/nanoclaw @ 2492259, 2026-05-28),
+Copyright (c) 2026 Gavriel.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
