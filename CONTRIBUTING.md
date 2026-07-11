@@ -10,7 +10,7 @@ biblio-claw は [`nanocoai/nanoclaw`](https://github.com/nanocoai/nanoclaw) (Nan
 
 ## biblio-claw への feedback
 
-大会観戦者 / 審査員 / 一般閲覧者からの feedback や質問は [GitHub Discussions](https://github.com/HajimariInc/biblio-claw/discussions) (稼働時) または [GitHub Issue](https://github.com/HajimariInc/biblio-claw/issues) で受け付ける。
+大会観戦者 / 審査員 / 一般閲覧者からの feedback や質問は、maintainer の GitHub プロフィール (https://github.com/wiredforest) を参照し、記載の連絡手段を利用してください。または、大会 / イベント会場等で直接お声かけいただいても構いません。**GitHub Issues / Discussions は運用していません**。
 
 ## Fork 側の設計方針
 

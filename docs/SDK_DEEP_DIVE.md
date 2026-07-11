@@ -1,5 +1,7 @@
 # Claude Agent SDK ディープダイブ
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。biblio-claw も **Claude Agent SDK を agent-container 経路で native に使う**。加えて 2026-06-30 の M4-B で **ADK (`@google/adk` v1.3.0) 経由の in-process 経路** も追加し、`biblio-adk` routing (biblio-shelf 操作 9 tool) は ADK 経由で実行する。両経路の詳細は [`SECURITY.md`](SECURITY.md) の §セキュリティ境界 と [`gate-4-layer.md`](gate-4-layer.md) の §3 分類 routing を参照。
+
 `@anthropic-ai/claude-agent-sdk` v0.2.29–0.2.34 のリバースエンジニアリングから得られた知見。`query()` がどう動くか、なぜ agent team の subagent が kill されていたか、どう直したかを理解するため。公式 SDK リファレンスドキュメントで補強した。
 
 ## アーキテクチャ

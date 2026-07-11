@@ -1,5 +1,7 @@
 # Channel 分離モデル
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。biblio-claw も **3 レベル分離モデル (`agent-shared` / `shared` / 個別 agent)** を継承する。ただし channel adapter は上流の branch モデル (`/add-<channel>` skill) から離脱し、**Slack adapter (`src/channels/slack.ts`) + Fugue channel adapter (`src/channels/fugue.ts`) を trunk に直接コミット**している。分離モデル自体の実装 (`src/router.ts` / `src/session-manager.ts`) は本 doc の記述通り。
+
 NanoClaw はメッセージング channel と agent group を切り離す。Channel(Discord、Telegram、Slack、GitHub 等)を接続するとき、それを既存の agent とどう関係させるかを決められる。分離レベルは 3 つある。
 
 ## 3 つのレベル

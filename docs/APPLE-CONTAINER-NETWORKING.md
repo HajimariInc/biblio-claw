@@ -1,5 +1,7 @@
 # Apple Container ネットワークセットアップ (macOS 26)
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。biblio-claw は Docker (local docker compose) と GKE K8s Job を主軸とし、Apple Container は macOS ネイティブオプトインの選択肢 = biblio-claw で active 利用は無し。fork の完全性のため残置。
+
 Apple Container の vmnet ネットワーキングは、コンテナがインターネットにアクセスするために手動設定が必要である。これがないと、コンテナはホストとは通信できるが、外部サービス(DNS、HTTPS、API)には到達できない。
 
 ## クイックセットアップ

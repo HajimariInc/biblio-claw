@@ -1,5 +1,7 @@
 # Docker Sandbox 内で NanoClaw を動かす (手動セットアップ)
 
+> **biblio-claw fork note**: 本 doc は NanoClaw v2 上流 (commit `2492259`) の日本語訳。biblio-claw では **GKE Autopilot 上の K8s Job を Prod 主軸**とし、Local 開発では Docker (native、Sandbox 無し) を既定で使う。Docker Sandbox はハイパーバイザレベル分離を求める場合の選択肢として保持。GKE Autopilot Warden 制約への対処は [`SECURITY.md`](SECURITY.md) の §セキュリティ境界 §1 参照。
+
 このガイドは、[Docker Sandbox](https://docs.docker.com/ai/sandboxes/) 内で NanoClaw をゼロからセットアップする手順 — install スクリプトなし、ビルド済 fork なし。Upstream の repo を clone し、必要な patch を当て、agent をフルなハイパーバイザレベルの分離で動かす。
 
 ## アーキテクチャ
