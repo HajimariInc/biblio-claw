@@ -1,13 +1,17 @@
 /**
  * gate 全 4 層合成 + `withGateSpan` + `GATE_ENABLED` 判定 helper。
  *
- * `evaluateGate(text)` は Layer 1 → Layer 2 → Layer 3 → Layer 4 の順で cheap-to-expensive
- * に呼び、Layer 1 で pattern matched なら Layer 4 を待たず早期 `in-secure` return。
+ * `evaluateGate(text)` は **Layer 2 → Layer 1 → Layer 3 → Layer 4** の順で cheap-to-expensive
+ * に呼ぶ。Layer 2 (Unicode 正規化) を先頭に置くことで、Layer 1 の ASCII regex が fullwidth /
+ * zero-width / bidi override / Unicode Tag block 経由の invisible bypass も「見える形」で
+ * 捕捉できるようになる (Layer 1 の効き目底上げ)。Layer 1 で pattern matched なら Layer 3/4
+ * を待たず早期 `in-secure` return。
  *
  * `withGateSpan(text, fn)` は Fugue `withFugueEntrySpan` の写経 (INTERNAL kind + catch outcome
  * 上書き + finally end)。router / fugue-http の呼出側で使い、`gate.classify` span 名 + 属性
  * (`gate.classification` / `gate.layer_hit` / `gate.reason` / `gate.latency_ms` / `gate.model` /
- * `gate.text_digest`) を trace 上で可視化する。
+ * `gate.text_digest`) を trace 上で可視化する。span digest / audit-log utterance は **生 text**
+ * を維持 (Layer 2 正規化を経由しない独立経路、運用者可視性を優先)。
  *
  * `isGateEnabled()` は env boolean 判定 (`GATE_ENABLED === '1' | 'true'`)。既定 false =
  * gate 無効化のまま main 合流可能な退路。
@@ -16,7 +20,7 @@ import { SpanKind, SpanStatusCode, type Span } from '@opentelemetry/api';
 
 import { getTracer } from '../observability/otel.js';
 import { detectInjectionPattern } from './layer1-pattern.js';
-import { escapeMarkdown } from './layer2-escape.js';
+import { normalizeInput } from './layer2-normalize.js';
 import { wrapUntrustedInput } from './layer3-xml.js';
 import { evaluateInput } from './layer4-evaluator.js';
 import type { GateResult } from './types.js';
@@ -30,9 +34,10 @@ export function isGateEnabled(): boolean {
 /**
  * gate 全 4 層合成 pure orchestration。
  *
- * 手順:
- *   1. Layer 1 (pattern) — matched なら早期 in-secure return (Layer 4 未呼出)
- *   2. Layer 2 (shell) — identity return、Phase 2 は no-op
+ * 手順 (Layer 2 → Layer 1 → Layer 3 → Layer 4):
+ *   1. Layer 2 (Unicode 正規化) — NFKC + zero-width/bidi/Tag block strip。以降 Layer 1/3/4 は
+ *      正規化済 text を評価する = fullwidth 迂回・invisible 挟み込みが「見える形」になる
+ *   2. Layer 1 (pattern) — matched なら早期 in-secure return (Layer 4 未呼出)
  *   3. Layer 3 (XML boundary) — untrusted-input で囲む
  *   4. Layer 4 (LLM evaluator) — 3 分類応答、fallback = biblio-other
  *
@@ -40,13 +45,15 @@ export function isGateEnabled(): boolean {
  * ただし呼出側 (router.ts / fugue-http.ts) は evaluateGate throw を吸収する外側 try/catch を
  * 持つべき (fail-open で従来経路 fallback)。
  *
- * @param text patron 発話の生 text (Layer 1 は生 text を評価、Layer 3 で囲まれた text を Layer 4 に渡す)
+ * @param text patron 発話の生 text (Layer 2 で正規化してから Layer 1/3/4 に渡す)
  * @returns GateResult (in-secure なら早期 return、それ以外は Layer 4 の結果)
  */
 export async function evaluateGate(text: string): Promise<GateResult> {
   const t0 = performance.now();
-  // Layer 1: pattern detection (pure、synchronous)
-  const layer1 = detectInjectionPattern(text);
+  // Layer 2: Unicode 正規化 (NFKC + zero-width/bidi/Tag block strip)
+  const normalized = normalizeInput(text);
+  // Layer 1: pattern detection (pure、synchronous) — 正規化済 text で評価
+  const layer1 = detectInjectionPattern(normalized);
   if (layer1.matched) {
     return {
       classification: 'in-secure',
@@ -56,10 +63,8 @@ export async function evaluateGate(text: string): Promise<GateResult> {
       // Layer 1 早期 return は model 未使用
     };
   }
-  // Layer 2: escape (Phase 2 は identity)
-  const escaped = escapeMarkdown(text);
-  // Layer 3: XML trust boundary
-  const wrapped = wrapUntrustedInput(escaped);
+  // Layer 3: XML trust boundary — 正規化済 text を untrusted-input で囲む
+  const wrapped = wrapUntrustedInput(normalized);
   // Layer 4: LLM evaluator (throw しない、fallback = biblio-other)
   const layer4 = await evaluateInput(wrapped);
   // layer4 の latencyMs は Layer 4 内部の分だけ = ここで Layer 1-4 全体 latency を再計算
