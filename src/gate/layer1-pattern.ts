@@ -71,7 +71,9 @@ const EXFILTRATION_RE =
  * fake_delimiter → (encoded_payload AND exfiltration)。いずれか matched で
  * short-circuit return する。matched=false は Layer 4 委譲を意味する。
  *
- * @param text patron 発話の生 text (Layer 3 XML 囲みの**前**、生 text で走らせる)
+ * @param text Layer 2 (`normalizeInput`) で正規化済 text (NFKC + zero-width/bidi/Tag block strip
+ *   を経ている前提)。fullwidth 迂回や invisible 挟み込みは Layer 2 で潰されているため、本 pattern
+ *   は正規化後の canonical form に対して ASCII regex を走らせるだけでよい。Layer 3 XML 囲みの**前**。
  * @returns matched=true 時 pattern 名 + reason、matched=false 時は他 field undefined
  */
 export function detectInjectionPattern(text: string): Layer1Result {

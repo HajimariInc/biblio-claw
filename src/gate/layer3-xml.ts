@@ -20,7 +20,8 @@ const CLOSE_TAG_ESCAPED = '&lt;/untrusted-input&gt;';
 /**
  * 外部由来 text を `<untrusted-input>...</untrusted-input>` で囲む。
  *
- * @param text 外部由来の text (patron 発話。Layer 2 の identity return を経ている前提)。
+ * @param text 外部由来の text (patron 発話。Layer 2 で Unicode 正規化 (NFKC +
+ *   zero-width/bidi/Tag block strip) 済である前提)。Layer 4 evaluator に渡される最終形。
  * @returns XML boundary で囲まれた text。既存の close tag は escape 済。
  */
 export function wrapUntrustedInput(text: string): string {
