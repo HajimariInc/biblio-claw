@@ -1,9 +1,12 @@
 /**
  * gate-and-defense の型定義。
  *
- * gate は cheap-to-expensive の 4 層 (`layer1` pattern → `layer2` escape shell →
- * `layer3` XML boundary → `layer4` LLM evaluator) で patron 発話を評価し、
- * `biblio-adk` / `biblio-other` / `in-secure` の 3 分類のいずれかを返す。
+ * gate は cheap-to-expensive の 4 層で patron 発話を評価し、`biblio-adk` /
+ * `biblio-other` / `in-secure` の 3 分類のいずれかを返す。実行順序は
+ * `layer2` Unicode 正規化 → `layer1` pattern → `layer3` XML boundary →
+ * `layer4` LLM evaluator。Layer 2 (`layer2-normalize.ts:normalizeInput`) を先頭に
+ * 置くことで、Layer 1/3/4 全てが正規化済 text を評価する = fullwidth 迂回・
+ * invisible unicode 経由の bypass に対して層全体の効き目が上がる。
  *
  * routing 判定 (biblio 操作 → ADK / 一般会話 → hybrid) と injection 遮断
  * (in-secure) の 2 課題を 1 つの evaluator (Layer 4) で兼ねる。
@@ -24,7 +27,10 @@ export type Classification = (typeof CLASSIFICATIONS)[number];
 
 /**
  * どの層で分類が確定したか。log / span 属性で観測し、誤分類調整時の起点となる。
- * Layer 1 で in-secure 確定なら Layer 4 は未呼出 (早期 return)。
+ * Layer 1 で in-secure 確定なら Layer 3/4 は未呼出 (早期 return)。実運用で発火するのは
+ * `layer1` と `layer4` の 2 値のみで、`layer2` (Unicode 正規化、`layer2-normalize.ts`) と
+ * `layer3` (XML boundary、`layer3-xml.ts`) は「早期確定させず変換だけ行う」層のため
+ * `layerHit` として立つ経路は現状ない (型は shell として保持、将来 Phase 3+ で拡張予定)。
  */
 export type GateLayer = 'layer1' | 'layer2' | 'layer3' | 'layer4';
 
