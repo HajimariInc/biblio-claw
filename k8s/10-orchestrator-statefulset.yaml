@@ -411,6 +411,10 @@ spec:
             # Vertex と同流儀: 40min 周期で ADC TTL ~60min との margin 20min を確保。
             - { name: ROTATE_INTERVAL_SEC, value: '2400' }
             - { name: CLOUDSDK_CORE_PROJECT, value: '${GCP_PROJECT_ID}' }
+            # onecli-drive-secret.sh:60 が DRIVE_USER_SA fallback 経路で ${GCP_PROJECT_ID}
+            # を required 参照する (cleanup #168 で hardcode 化解除)。CLOUDSDK_CORE_PROJECT
+            # は gcloud SDK 用で script の required check には効かないため別途明示。
+            - { name: GCP_PROJECT_ID, value: '${GCP_PROJECT_ID}' }
             - { name: LOG_FORMAT, value: json }
             - { name: LOG_COMPONENT, value: drive-token-rotator }
           resources:
