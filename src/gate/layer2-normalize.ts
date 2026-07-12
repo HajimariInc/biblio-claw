@@ -17,7 +17,8 @@
  *   3. Bidi override strip — U+202A-E (LRE/RLE/PDF/LRO/RLO 5 種) + U+2066-9
  *                          (LRI/RLI/FSI/PDI 4 種) の計 9 種 (CVE-2021-42574 Trojan Source 対策)
  *   4. Unicode Tag block strip — U+E0000-E007F (astral plane、surrogate pair)。
- *                          Reverse CAPTCHA 論文 (arXiv:2603.00164) で Claude 系直撃と実証
+ *                          Claude 系直撃の invisible instruction 経路 (詳細と実測値は
+ *                          docs/gate-4-layer.md §Layer 2 の参考文献参照)
  *
  * 契約: **pure + throw なし + 副作用なし**。呼出元 `evaluateGate` は本関数の戻り値を
  * Layer 1 / Layer 3 に渡す。audit log の `utterance` と span digest の `text_digest` は
@@ -56,8 +57,8 @@ const BIDI_OVERRIDE_RE = /[\u{202A}-\u{202E}\u{2066}-\u{2069}]/gu;
 /**
  * Unicode Tag block (U+E0000-U+E007F、astral plane)。
  * BMP 外のため `u` flag + `\u{...}` syntax で書く (単純 `[]` では文字クラス誤解釈)。
- * Claude 系モデルが tool use 有効時 98-100% compliance の invisible instruction 経路
- * (Reverse CAPTCHA 論文 arXiv:2603.00164 で実証)。
+ * Claude 系モデル tool use 有効時に高い compliance を示す invisible instruction 経路
+ * (実測値・論文出典は docs/gate-4-layer.md §Layer 2 参考文献の single source を参照)。
  */
 const UNICODE_TAG_BLOCK_RE = /[\u{E0000}-\u{E007F}]/gu;
 
