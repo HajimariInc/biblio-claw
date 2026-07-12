@@ -13,7 +13,7 @@
  *   1. NFKC 正規化       — Unicode Standard Annex #15 の compatibility form。
  *                          fullwidth Latin `Ｉｇｎｏｒｅ` → 半角 `Ignore`、ligature 展開等
  *   2. Zero-width strip  — U+200B ZWSP / U+200C ZWNJ / U+200D ZWJ / U+FEFF BOM の 4 種
- *                          (Word Joiner U+2060 は業界標準に合わせて除外)
+ *                          (Word Joiner U+2060 は改行禁止マーカー等の正当用途があるため意図的に対象外)
  *   3. Bidi override strip — U+202A-E (LRE/RLE/PDF/LRO/RLO 5 種) + U+2066-9
  *                          (LRI/RLI/FSI/PDI 4 種) の計 9 種 (CVE-2021-42574 Trojan Source 対策)
  *   4. Unicode Tag block strip — U+E0000-E007F (astral plane、surrogate pair)。
