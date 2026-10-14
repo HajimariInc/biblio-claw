@@ -14,7 +14,7 @@
     "smoke": "node test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.31.0"
   },
   "private": true
 }
